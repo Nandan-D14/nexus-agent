@@ -17,7 +17,7 @@ import { StatusBar } from "@/components/status-bar";
 import { DemoPicker } from "@/components/demo-picker";
 
 type Message = { role: "user" | "agent"; text: string };
-type ActivityEvent = { type: string; timestamp: number; [key: string]: any };
+type ActivityEvent = { type: string; timestamp: number; [key: string]: unknown };
 
 export default function SessionPage() {
   const params = useParams();
@@ -51,7 +51,7 @@ export default function SessionPage() {
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}?ticket=${session?.ws_ticket || ""}`
       : null;
 
-  const { sendBinary, sendJson, lastMessage, isConnected, onBinaryMessage } =
+  const { sendBinary, sendJson, lastMessage, isConnected, onBinaryMessageRef } =
     useWebSocket(session?.ws_ticket ? wsUrl : null);
 
   // Microphone
@@ -59,10 +59,10 @@ export default function SessionPage() {
 
   // Audio playback for incoming binary frames
   useEffect(() => {
-    onBinaryMessage.current = (data: ArrayBuffer) => {
+    onBinaryMessageRef.current = (data: ArrayBuffer) => {
       audioPlayer.current.play(data);
     };
-  }, [onBinaryMessage]);
+  }, [onBinaryMessageRef]);
 
   // Process incoming WS messages
   useEffect(() => {
@@ -70,7 +70,7 @@ export default function SessionPage() {
     const msg = lastMessage;
 
     const addEvent = (m: WsMessage) => {
-      setEvents((prev) => [...prev, { ...m, timestamp: Date.now() }]);
+      queueMicrotask(() => setEvents((prev) => [...prev, { ...m, timestamp: Date.now() }]));
     };
 
     switch (msg.type) {
@@ -78,18 +78,20 @@ export default function SessionPage() {
         addEvent(msg);
         break;
       case "vnc_url":
-        setStreamUrl(msg.url);
+        queueMicrotask(() => setStreamUrl(msg.url));
         break;
       case "transcript":
-        setMessages((prev) => [...prev, { role: msg.role, text: msg.text }]);
-        if (msg.role === "agent") setPhase("done");
+        queueMicrotask(() => {
+          setMessages((prev) => [...prev, { role: msg.role, text: msg.text }]);
+          if (msg.role === "agent") setPhase("done");
+        });
         break;
       case "agent_thinking":
-        setPhase("thinking");
+        queueMicrotask(() => setPhase("thinking"));
         addEvent(msg);
         break;
       case "agent_tool_call":
-        setPhase("acting");
+        queueMicrotask(() => setPhase("acting"));
         addEvent(msg);
         break;
       case "agent_tool_result":
@@ -99,7 +101,7 @@ export default function SessionPage() {
         addEvent(msg);
         break;
       case "agent_complete":
-        setPhase("done");
+        queueMicrotask(() => setPhase("done"));
         addEvent(msg);
         break;
       case "error":

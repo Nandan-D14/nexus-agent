@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 type ActivityEvent = {
   type: string;
@@ -40,9 +41,11 @@ export function ActivityFeed({ events }: Props) {
       ref={scrollRef}
       className="flex flex-col gap-3 p-4 overflow-y-auto h-full text-[11px] font-mono custom-scrollbar"
     >
-      {events.map((event, i) => (
-        <ActivityEntry key={`${event.timestamp}-${i}`} event={event} />
-      ))}
+      <AnimatePresence initial={false} mode="popLayout">
+        {events.map((event, i) => (
+          <ActivityEntry key={`${event.timestamp}-${i}`} event={event} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
@@ -60,7 +63,12 @@ function ActivityEntry({ event }: { event: ActivityEvent }) {
   });
 
   return (
-    <div className="animate-fade-in">
+    <motion.div 
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 10 }}
+      transition={{ duration: 0.3 }}
+    >
       {(() => {
         switch (event.type) {
           case "agent_thinking":
@@ -106,7 +114,7 @@ function ActivityEntry({ event }: { event: ActivityEvent }) {
             );
         }
       })()}
-    </div>
+    </motion.div>
   );
 }
 

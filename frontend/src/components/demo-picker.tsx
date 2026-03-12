@@ -1,5 +1,7 @@
 "use client";
 
+import { motion } from "framer-motion";
+
 type Props = {
   onSelect: (text: string) => void;
   disabled: boolean;
@@ -64,10 +66,32 @@ const DEMOS: DemoScenario[] = [
 ];
 
 export function DemoPicker({ onSelect, disabled }: Props) {
+  const container = {
+    hidden: { opacity: 0 },
+    show: {
+      opacity: 1,
+      transition: {
+        staggerChildren: 0.1
+      }
+    }
+  };
+
+  const item = {
+    hidden: { opacity: 0, y: 20 },
+    show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] } }
+  };
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+    <motion.div 
+      variants={container}
+      initial="hidden"
+      whileInView="show"
+      viewport={{ once: true, margin: "-100px" }}
+      className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"
+    >
       {DEMOS.map((demo) => (
-        <button
+        <motion.button
+          variants={item}
           key={demo.title}
           type="button"
           onClick={() => onSelect(demo.task)}
@@ -130,8 +154,8 @@ export function DemoPicker({ onSelect, disabled }: Props) {
           {!disabled && (
             <div className="absolute bottom-0 left-6 right-6 h-[1px] bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent scale-x-0 group-hover:scale-x-100 transition-transform duration-500" />
           )}
-        </button>
+        </motion.button>
       ))}
-    </div>
+    </motion.div>
   );
 }

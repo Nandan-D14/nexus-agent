@@ -71,7 +71,10 @@ export function useMicrophone(
 
   /** Ref to always read the latest sendBinary without re-creating callbacks. */
   const sendBinaryRef = useRef(sendBinary);
-  sendBinaryRef.current = sendBinary;
+  
+  useEffect(() => {
+    sendBinaryRef.current = sendBinary;
+  }, [sendBinary]);
 
   const start = useCallback(async () => {
     if (streamRef.current) return; // already recording

@@ -27,7 +27,7 @@ export interface UseWebSocketReturn {
   /** Raw WebSocket readyState value. */
   readyState: ReadyStateValue;
   /** Assign a callback to receive binary (audio) frames. */
-  onBinaryMessage: React.MutableRefObject<((data: ArrayBuffer) => void) | null>;
+  onBinaryMessageRef: React.MutableRefObject<((data: ArrayBuffer) => void) | null>;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -35,12 +35,6 @@ const BASE_DELAY_MS = 1000;
 
 /**
  * React hook for WebSocket connection management.
- *
- * Pass `null` as the url to keep the socket disconnected (useful when the
- * session has not been created yet). Once a non-null url is provided the
- * hook connects automatically.
- *
- * Auto-reconnects with exponential back-off (1 s, 2 s, 4 s, max 3 attempts).
  */
 export function useWebSocket(url: string | null): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
@@ -48,15 +42,16 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
-  const onBinaryMessage = useRef<((data: ArrayBuffer) => void) | null>(null);
+  const onBinaryMessageRef = useRef<((data: ArrayBuffer) => void) | null>(null);
 
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Keeps the latest url so the reconnect closure always sees it. */
   const urlRef = useRef(url);
-  urlRef.current = url;
-
-  // ── helpers ──────────────────────────────────────────────────────
+  
+  useEffect(() => {
+    urlRef.current = url;
+  }, [url]);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimer.current !== null) {
@@ -65,83 +60,79 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     }
   }, []);
 
-  const connect = useCallback(
-    (target: string) => {
-      // Tear down any existing socket first.
-      if (wsRef.current) {
-        wsRef.current.onopen = null;
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onmessage = null;
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+  // We use a ref for connect to avoid the "access before declaration" issue in recursive calls
+  const connectRef = useRef<(target: string) => void>(() => {});
 
-      const ws = new WebSocket(target);
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
-      setReadyState(ReadyState.CONNECTING);
+  const connect = useCallback((target: string) => {
+    // Tear down any existing socket first.
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
 
-      ws.onopen = () => {
-        reconnectAttempts.current = 0;
-        setReadyState(ReadyState.OPEN);
-      };
+    const ws = new WebSocket(target);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+    setReadyState(ReadyState.CONNECTING);
 
-      ws.onclose = () => {
-        setReadyState(ReadyState.CLOSED);
+    ws.onopen = () => {
+      reconnectAttempts.current = 0;
+      setReadyState(ReadyState.OPEN);
+    };
 
-        // Attempt reconnect with exponential back-off.
-        if (
-          reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS &&
-          urlRef.current !== null
-        ) {
-          const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
-          reconnectAttempts.current += 1;
-          reconnectTimer.current = setTimeout(() => {
-            if (urlRef.current) {
-              connect(urlRef.current);
-            }
-          }, delay);
-        }
-      };
+    ws.onclose = () => {
+      setReadyState(ReadyState.CLOSED);
 
-      ws.onerror = () => {
-        // The browser fires onclose after onerror, so we handle reconnection there.
-      };
-
-      ws.onmessage = (event: MessageEvent) => {
-        if (event.data instanceof ArrayBuffer) {
-          // Binary frame -- hand off to the consumer's audio callback.
-          onBinaryMessage.current?.(event.data);
-        } else if (typeof event.data === "string") {
-          // Text frame -- parse as JSON.
-          try {
-            const parsed = JSON.parse(event.data) as WsMessage;
-            setLastMessage(parsed);
-          } catch {
-            console.warn("[useWebSocket] Failed to parse text frame:", event.data);
+      if (
+        reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS &&
+        urlRef.current !== null
+      ) {
+        const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
+        reconnectAttempts.current += 1;
+        reconnectTimer.current = setTimeout(() => {
+          if (urlRef.current) {
+            connectRef.current(urlRef.current);
           }
-        }
-      };
-    },
-    [clearReconnectTimer],
-  );
+        }, delay);
+      }
+    };
 
-  // ── open / close when url changes ────────────────────────────────
+    ws.onerror = () => {};
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) {
+        onBinaryMessageRef.current?.(event.data);
+      } else if (typeof event.data === "string") {
+        try {
+          const parsed = JSON.parse(event.data) as WsMessage;
+          setLastMessage(parsed);
+        } catch {
+          console.warn("[useWebSocket] Failed to parse text frame:", event.data);
+        }
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     clearReconnectTimer();
     reconnectAttempts.current = 0;
 
     if (url) {
-      connect(url);
+      queueMicrotask(() => connect(url));
     } else {
-      // url became null -- disconnect.
       if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect loop
+        wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;
-        setReadyState(ReadyState.CLOSED);
+        queueMicrotask(() => setReadyState(ReadyState.CLOSED));
       }
     }
 
@@ -154,8 +145,6 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
       }
     };
   }, [url, connect, clearReconnectTimer]);
-
-  // ── send helpers ─────────────────────────────────────────────────
 
   const send = useCallback((data: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -176,8 +165,6 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     [send],
   );
 
-  // ── derived ──────────────────────────────────────────────────────
-
   const isConnected = readyState === ReadyState.OPEN;
 
   return {
@@ -187,6 +174,6 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     lastMessage,
     isConnected,
     readyState,
-    onBinaryMessage,
+    onBinaryMessageRef,
   };
 }
