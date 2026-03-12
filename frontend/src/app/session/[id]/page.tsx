@@ -4,7 +4,6 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
-  useEffectEvent,
   useRef,
   useState,
 } from "react";
@@ -69,7 +68,7 @@ export default function SessionPage() {
     };
   }, [onBinaryMessageRef]);
 
-  const handleLastMessage = useEffectEvent((msg: WsMessage) => {
+  const handleLastMessage = useCallback((msg: WsMessage) => {
     const addEvent = (message: WsMessage) => {
       setEvents((prev) => [...prev, { ...message, timestamp: Date.now() }]);
     };
@@ -110,12 +109,14 @@ export default function SessionPage() {
       case "pong":
         break;
     }
-  });
+  // State setters from useState are stable references — no deps needed.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!lastMessage) return;
     handleLastMessage(lastMessage);
-  }, [lastMessage]);
+  }, [lastMessage, handleLastMessage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -136,7 +137,9 @@ export default function SessionPage() {
       setSessionInfo(null);
 
       const info = await getSession(sessionId);
-      if (!info || cancelled) {
+      if (cancelled) return;
+      if (!info) {
+        setPageError("Session not found");
         return;
       }
 

@@ -152,5 +152,10 @@ async def websocket_endpoint(
         await ws.close(code=4004, reason="Session not found or not ready")
         return
 
-    await session_manager.activate_session(session_id)
+    try:
+        await session_manager.activate_session(session_id)
+    except Exception as exc:
+        logger.exception("Failed to activate session %s: %s", session_id, exc)
+        await ws.close(code=4000, reason="Session activation failed")
+        return
     await handle_websocket(ws=ws, session=session, session_manager=session_manager)

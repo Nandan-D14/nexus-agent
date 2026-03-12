@@ -42,7 +42,7 @@ export type SessionData = {
   stream_url: string;
   ws_ticket: string;
   status: SessionStatus | string;
-  created_at: string;
+  created_at: string | null;
 };
 
 export type SessionInfo = {
@@ -50,7 +50,7 @@ export type SessionInfo = {
   status: SessionStatus | string;
   is_live: boolean;
   stream_url: string | null;
-  created_at: string;
+  created_at: string | null;
   ended_at?: string | null;
   summary?: string | null;
   message_count: number;

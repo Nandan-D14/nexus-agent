@@ -15,17 +15,22 @@ export interface UseSessionReturn {
 }
 
 export function useSession(): UseSessionReturn {
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isGetting, setIsGetting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isDestroying, setIsDestroying] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [getError, setGetError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [destroyError, setDestroyError] = useState<string | null>(null);
 
   const createSession = useCallback(async (): Promise<SessionData | null> => {
-    setIsLoading(true);
-    setError(null);
+    setIsCreating(true);
+    setCreateError(null);
 
     try {
       const res = await authenticatedFetch("/sessions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
       });
 
       if (!res.ok) {
@@ -36,16 +41,16 @@ export function useSession(): UseSessionReturn {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to create session";
-      setError(msg);
+      setCreateError(msg);
       return null;
     } finally {
-      setIsLoading(false);
+      setIsCreating(false);
     }
   }, []);
 
   const getSession = useCallback(async (sessionId: string) => {
-    setIsLoading(true);
-    setError(null);
+    setIsGetting(true);
+    setGetError(null);
 
     try {
       const res = await authenticatedFetch(
@@ -60,23 +65,22 @@ export function useSession(): UseSessionReturn {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to load session";
-      setError(msg);
+      setGetError(msg);
       return null;
     } finally {
-      setIsLoading(false);
+      setIsGetting(false);
     }
   }, []);
 
   const refreshTicket = useCallback(async (sessionId: string) => {
-    setIsLoading(true);
-    setError(null);
+    setIsRefreshing(true);
+    setRefreshError(null);
 
     try {
       const res = await authenticatedFetch(
         `/sessions/${encodeURIComponent(sessionId)}/ticket`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
         },
       );
 
@@ -89,16 +93,16 @@ export function useSession(): UseSessionReturn {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to refresh session ticket";
-      setError(msg);
+      setRefreshError(msg);
       return null;
     } finally {
-      setIsLoading(false);
+      setIsRefreshing(false);
     }
   }, []);
 
   const destroySession = useCallback(async (sessionId: string) => {
-    setIsLoading(true);
-    setError(null);
+    setIsDestroying(true);
+    setDestroyError(null);
 
     try {
       const res = await authenticatedFetch(
@@ -116,10 +120,10 @@ export function useSession(): UseSessionReturn {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to destroy session";
-      setError(msg);
+      setDestroyError(msg);
       return false;
     } finally {
-      setIsLoading(false);
+      setIsDestroying(false);
     }
   }, []);
 
@@ -128,7 +132,7 @@ export function useSession(): UseSessionReturn {
     getSession,
     refreshTicket,
     destroySession,
-    isLoading,
-    error,
+    isLoading: isCreating || isGetting || isRefreshing || isDestroying,
+    error: createError ?? getError ?? refreshError ?? destroyError,
   };
 }

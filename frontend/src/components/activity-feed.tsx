@@ -257,6 +257,8 @@ function ScreenshotEntry({
         <button
           onClick={() => setExpanded(!expanded)}
           className="mt-1.5 w-full text-left"
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse screenshot" : "Expand screenshot"}
         >
           <img
             src={`data:image/png;base64,${imageB64}`}

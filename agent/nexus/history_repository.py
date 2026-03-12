@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from firebase_admin import firestore
+from google.api_core.exceptions import AlreadyExists
 
 from nexus.auth import AuthenticatedUser
 from nexus.firebase import get_firestore_client
@@ -98,17 +99,19 @@ class FirestoreHistoryRepository:
     def _upsert_user_sync(self, user: AuthenticatedUser) -> None:
         now = utcnow()
         ref = self._db.collection("users").document(user.uid)
-        snapshot = ref.get()
-        payload: dict[str, Any] = {
+        base_payload: dict[str, Any] = {
             "uid": user.uid,
             "email": user.email,
             "displayName": user.display_name,
             "photoURL": user.photo_url,
             "lastLoginAt": now,
         }
-        if not snapshot.exists:
-            payload["createdAt"] = now
-        ref.set(payload, merge=True)
+        try:
+            # Atomic create — sets createdAt only when the document is new.
+            ref.create({**base_payload, "createdAt": now})
+        except AlreadyExists:
+            # Document already exists; update mutable fields only.
+            ref.set(base_payload, merge=True)
 
     def _upsert_session_sync(
         self,

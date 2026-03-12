@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -86,7 +84,16 @@ class NexusOrchestrator:
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
         sandbox = self.session.sandbox
-        img_b64 = sandbox.screenshot_base64()
+        try:
+            loop = asyncio.get_running_loop()
+            img_b64 = await loop.run_in_executor(None, sandbox.screenshot_base64)
+        except Exception as exc:
+            logger.exception("Screenshot capture failed: %s", exc)
+            await self._send_json({
+                "type": "agent_screenshot",
+                "error": "Screenshot capture failed",
+            })
+            return
         await self._send_json({
             "type": "agent_screenshot",
             "image_b64": img_b64,
