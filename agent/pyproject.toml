@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "google-adk>=1.20.0",
     "google-genai>=1.0.0",
+    "firebase-admin>=6.6.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "websockets>=13.0",

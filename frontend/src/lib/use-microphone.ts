@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Desired chunk size: 100 ms of 16 kHz mono audio.
@@ -71,7 +71,10 @@ export function useMicrophone(
 
   /** Ref to always read the latest sendBinary without re-creating callbacks. */
   const sendBinaryRef = useRef(sendBinary);
-  sendBinaryRef.current = sendBinary;
+
+  useEffect(() => {
+    sendBinaryRef.current = sendBinary;
+  }, [sendBinary]);
 
   const start = useCallback(async () => {
     if (streamRef.current) return; // already recording

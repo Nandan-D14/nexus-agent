@@ -10,9 +10,13 @@ type ActivityEvent = {
 
 type Props = {
   events: ActivityEvent[];
+  emptyState?: string;
 };
 
-export function ActivityFeed({ events }: Props) {
+export function ActivityFeed({
+  events,
+  emptyState = "Waiting for agent activity...",
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -25,7 +29,7 @@ export function ActivityFeed({ events }: Props) {
   if (events.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-zinc-500 text-sm">Waiting for agent activity...</p>
+        <p className="text-zinc-500 text-sm">{emptyState}</p>
       </div>
     );
   }

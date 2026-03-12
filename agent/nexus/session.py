@@ -7,12 +7,15 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import jwt
 
 from nexus.config import settings
 from nexus.sandbox import SandboxManager
+
+if TYPE_CHECKING:
+    from nexus.history_repository import FirestoreHistoryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,9 @@ class Session:
     """A single NEXUS session with its own sandbox and agent state."""
 
     id: str
+    owner_id: str
     sandbox: SandboxManager
+    sandbox_id: str
     stream_url: str
     status: str = "creating"  # creating | ready | error | destroyed
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -36,9 +41,10 @@ class Session:
 class SessionManager:
     """Creates, tracks, and cleans up NEXUS sessions."""
 
-    def __init__(self) -> None:
+    def __init__(self, history_repository: Optional["FirestoreHistoryRepository"] = None) -> None:
         self._sessions: dict[str, Session] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        self.history_repository = history_repository
 
     @property
     def active_count(self) -> int:
@@ -46,7 +52,7 @@ class SessionManager:
 
     # ── CRUD ───────────────────────────────────────────────────
 
-    async def create_session(self) -> Session:
+    async def create_session(self, owner_id: str) -> Session:
         """Boot a new E2B sandbox and create a session."""
         session_id = uuid.uuid4().hex[:12]
         sandbox = SandboxManager()
@@ -57,7 +63,9 @@ class SessionManager:
             info = await loop.run_in_executor(None, sandbox.create)
             session = Session(
                 id=session_id,
+                owner_id=owner_id,
                 sandbox=sandbox,
+                sandbox_id=info["sandbox_id"],
                 stream_url=info["stream_url"],
                 status="ready",
             )
@@ -66,44 +74,84 @@ class SessionManager:
             sandbox.destroy()
             session = Session(
                 id=session_id,
+                owner_id=owner_id,
                 sandbox=sandbox,
+                sandbox_id="",
                 stream_url="",
                 status="error",
             )
             raise RuntimeError(f"Sandbox creation failed: {exc}") from exc
 
         self._sessions[session_id] = session
+        await self._sync_session(session)
         logger.info("Session %s created (stream_url=%s)", session_id, session.stream_url)
         return session
 
     def get_session(self, session_id: str) -> Optional[Session]:
         return self._sessions.get(session_id)
 
-    async def destroy_session(self, session_id: str) -> None:
+    async def destroy_if_owned(
+        self, session_id: str, owner_id: str, status: str = "ended"
+    ) -> None:
+        """Atomically check ownership and destroy the session.
+
+        Raises KeyError if the session is not found (already destroyed).
+        Raises PermissionError if the session exists but is owned by someone else.
+        """
+        # No await before the pop, so this is atomic within the asyncio event loop.
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        if session.owner_id != owner_id:
+            raise PermissionError("Not the session owner")
+        self._sessions.pop(session_id, None)
+        if session.sandbox.is_alive:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, session.sandbox.destroy)
+            session.status = "destroyed"
+            logger.info("Session %s destroyed", session_id)
+        await self._sync_session(
+            session,
+            status=status,
+            ended_at=datetime.now(timezone.utc),
+        )
+
+    async def destroy_session(self, session_id: str, status: str = "ended", error_code: str | None = None) -> None:
         session = self._sessions.pop(session_id, None)
         if session and session.sandbox.is_alive:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, session.sandbox.destroy)
             session.status = "destroyed"
             logger.info("Session %s destroyed", session_id)
+        if session:
+            await self._sync_session(session, status=status, ended_at=datetime.now(timezone.utc), error_code=error_code)
+
+    async def activate_session(self, session_id: str) -> None:
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+        session.status = "active"
+        session.touch()
+        await self._sync_session(session, status="active")
 
     # ── Auth ───────────────────────────────────────────────────
 
-    def create_ticket(self, session_id: str) -> str:
+    def create_ticket(self, session_id: str, owner_id: str) -> str:
         """Create a short-lived JWT for WebSocket authentication."""
         payload = {
             "sid": session_id,
+            "uid": owner_id,
             "exp": datetime.now(timezone.utc).timestamp() + 120,  # 2 min
         }
         return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
-    def validate_ticket(self, token: str) -> Optional[str]:
-        """Validate a WS ticket. Returns session_id or None."""
+    def validate_ticket(self, token: str) -> tuple[Optional[str], Optional[str]]:
+        """Validate a WS ticket. Returns (session_id, owner_id) or (None, None)."""
         try:
             payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-            return payload.get("sid")
+            return payload.get("sid"), payload.get("uid")
         except jwt.InvalidTokenError:
-            return None
+            return None, None
 
     # ── Cleanup ────────────────────────────────────────────────
 
@@ -128,9 +176,29 @@ class SessionManager:
             ]
             for sid in stale:
                 logger.info("Cleaning up idle session %s", sid)
-                await self.destroy_session(sid)
+                await self.destroy_session(sid, status="ended")
 
     async def destroy_all(self) -> None:
         """Destroy every active session (used on shutdown)."""
         for sid in list(self._sessions.keys()):
-            await self.destroy_session(sid)
+            await self.destroy_session(sid, status="ended")
+
+    async def _sync_session(
+        self,
+        session: Session,
+        *,
+        status: str | None = None,
+        ended_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if not self.history_repository:
+            return
+        try:
+            await self.history_repository.upsert_session(
+                session=session,
+                status=status or session.status,
+                ended_at=ended_at,
+                error_code=error_code,
+            )
+        except Exception:
+            logger.exception("Failed to mirror session %s into Firestore", session.id)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket
 
 from nexus.agent import create_agent, create_runner, run_agent_turn
+from nexus.history_repository import FirestoreHistoryRepository
 from nexus.tools._context import set_sandbox
 from nexus.voice import GeminiLiveManager
 from nexus.prompts.system import SYSTEM_PROMPT
@@ -24,10 +25,16 @@ logger = logging.getLogger(__name__)
 class NexusOrchestrator:
     """Coordinates the full voice → think → act → see loop for one session."""
 
-    def __init__(self, session: "Session", ws: WebSocket) -> None:
+    def __init__(
+        self,
+        session: "Session",
+        ws: WebSocket,
+        history_repository: FirestoreHistoryRepository | None = None,
+    ) -> None:
         self.session = session
         self.ws = ws
         self.voice = GeminiLiveManager()
+        self.history_repository = history_repository
 
         # ADK agent + runner
         self._agent = create_agent()
@@ -67,11 +74,13 @@ class NexusOrchestrator:
     async def handle_text_input(self, text: str) -> None:
         """Handle direct text input (bypass voice)."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
+        await self._persist_message(role="user", source="typed", text=text)
         await self._run_agent(text)
 
     async def handle_user_utterance(self, text: str) -> None:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
+        await self._persist_message(role="user", source="voice", text=text)
         await self._run_agent(text)
 
     async def handle_analyze_screen(self) -> None:
@@ -131,6 +140,7 @@ class NexusOrchestrator:
                     "role": "agent",
                     "text": response,
                 })
+                await self._persist_message(role="agent", source="agent", text=response)
                 # Feed to Gemini Live for TTS
                 try:
                     await self.voice.send_text(response)
@@ -141,9 +151,11 @@ class NexusOrchestrator:
                     "type": "agent_complete",
                     "summary": response[:200],
                 })
+                await self._mark_summary(response)
 
         except Exception:
             logger.exception("Agent turn failed")
+            await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
             await self._send_json({
                 "type": "error",
                 "code": "AGENT_ERROR",
@@ -200,3 +212,36 @@ class NexusOrchestrator:
             await self.ws.send_json(data)
         except Exception:
             logger.warning("Failed to send WS message: %s", data.get("type"))
+
+    async def _persist_message(self, *, role: str, source: str, text: str) -> None:
+        if not self.history_repository or not text.strip():
+            return
+        try:
+            await self.history_repository.append_message(
+                session_id=self.session.id,
+                owner_id=self.session.owner_id,
+                role=role,
+                source=source,
+                text=text.strip(),
+            )
+        except Exception:
+            logger.exception("Failed to persist %s message for session %s", role, self.session.id)
+
+    async def _mark_summary(
+        self,
+        summary: str,
+        *,
+        status: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if not self.history_repository:
+            return
+        try:
+            await self.history_repository.mark_session_summary(
+                self.session.id,
+                summary=summary,
+                status=status,
+                error_code=error_code,
+            )
+        except Exception:
+            logger.exception("Failed to update Firestore summary for session %s", self.session.id)

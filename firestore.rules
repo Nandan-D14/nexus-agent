@@ -1,0 +1,40 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function sessionDoc(sessionId) {
+      return get(/databases/$(database)/documents/sessions/$(sessionId));
+    }
+
+    function isSessionMember(sessionId) {
+      return signedIn()
+        && sessionDoc(sessionId).data.memberIds is list
+        && request.auth.uid in sessionDoc(sessionId).data.memberIds;
+    }
+
+    match /users/{userId} {
+      allow read, create, update: if isSelf(userId);
+      allow delete: if false;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if signedIn()
+        && resource.data.memberIds is list
+        && request.auth.uid in resource.data.memberIds;
+      allow write: if false;
+
+      match /messages/{messageId} {
+        allow read: if isSessionMember(sessionId);
+        allow write: if false;
+      }
+    }
+  }
+}

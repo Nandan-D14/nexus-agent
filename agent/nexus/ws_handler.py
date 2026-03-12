@@ -30,7 +30,11 @@ async def handle_websocket(
     """
     await ws.accept()
 
-    orchestrator = NexusOrchestrator(session=session, ws=ws)
+    orchestrator = NexusOrchestrator(
+        session=session,
+        ws=ws,
+        history_repository=session_manager.history_repository,
+    )
 
     try:
         # Initialize voice + agent connections

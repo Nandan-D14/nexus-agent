@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { WsMessage, WsCommand } from "./message-types";
 
 /** Ready-state constants mirroring the WebSocket API. */
@@ -27,7 +27,9 @@ export interface UseWebSocketReturn {
   /** Raw WebSocket readyState value. */
   readyState: ReadyStateValue;
   /** Assign a callback to receive binary (audio) frames. */
-  onBinaryMessage: React.MutableRefObject<((data: ArrayBuffer) => void) | null>;
+  onBinaryMessageRef: React.MutableRefObject<
+    ((data: ArrayBuffer) => void) | null
+  >;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -48,13 +50,13 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
-  const onBinaryMessage = useRef<((data: ArrayBuffer) => void) | null>(null);
+  const onBinaryMessageRef = useRef<((data: ArrayBuffer) => void) | null>(null);
 
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectRef = useRef<(target: string) => void>(() => {});
   /** Keeps the latest url so the reconnect closure always sees it. */
   const urlRef = useRef(url);
-  urlRef.current = url;
 
   // ── helpers ──────────────────────────────────────────────────────
 
@@ -65,67 +67,69 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     }
   }, []);
 
-  const connect = useCallback(
-    (target: string) => {
-      // Tear down any existing socket first.
-      if (wsRef.current) {
-        wsRef.current.onopen = null;
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onmessage = null;
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+  const connect = useEffectEvent((target: string) => {
+    // Tear down any existing socket first.
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
 
-      const ws = new WebSocket(target);
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
-      setReadyState(ReadyState.CONNECTING);
+    const ws = new WebSocket(target);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+    setReadyState(ReadyState.CONNECTING);
 
-      ws.onopen = () => {
-        reconnectAttempts.current = 0;
-        setReadyState(ReadyState.OPEN);
-      };
+    ws.onopen = () => {
+      reconnectAttempts.current = 0;
+      setReadyState(ReadyState.OPEN);
+    };
 
-      ws.onclose = () => {
-        setReadyState(ReadyState.CLOSED);
+    ws.onclose = () => {
+      setReadyState(ReadyState.CLOSED);
 
-        // Attempt reconnect with exponential back-off.
-        if (
-          reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS &&
-          urlRef.current !== null
-        ) {
-          const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
-          reconnectAttempts.current += 1;
-          reconnectTimer.current = setTimeout(() => {
-            if (urlRef.current) {
-              connect(urlRef.current);
-            }
-          }, delay);
-        }
-      };
-
-      ws.onerror = () => {
-        // The browser fires onclose after onerror, so we handle reconnection there.
-      };
-
-      ws.onmessage = (event: MessageEvent) => {
-        if (event.data instanceof ArrayBuffer) {
-          // Binary frame -- hand off to the consumer's audio callback.
-          onBinaryMessage.current?.(event.data);
-        } else if (typeof event.data === "string") {
-          // Text frame -- parse as JSON.
-          try {
-            const parsed = JSON.parse(event.data) as WsMessage;
-            setLastMessage(parsed);
-          } catch {
-            console.warn("[useWebSocket] Failed to parse text frame:", event.data);
+      if (
+        reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS &&
+        urlRef.current !== null
+      ) {
+        const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
+        reconnectAttempts.current += 1;
+        reconnectTimer.current = setTimeout(() => {
+          if (urlRef.current) {
+            connectRef.current(urlRef.current);
           }
+        }, delay);
+      }
+    };
+
+    ws.onerror = () => {
+      // The browser fires onclose after onerror, so we handle reconnection there.
+    };
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) {
+        onBinaryMessageRef.current?.(event.data);
+      } else if (typeof event.data === "string") {
+        try {
+          const parsed = JSON.parse(event.data) as WsMessage;
+          setLastMessage(parsed);
+        } catch {
+          console.warn("[useWebSocket] Failed to parse text frame:", event.data);
         }
-      };
-    },
-    [clearReconnectTimer],
-  );
+      }
+    };
+  });
+
+  useEffect(() => {
+    urlRef.current = url;
+  }, [url]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  });
 
   // ── open / close when url changes ────────────────────────────────
 
@@ -138,10 +142,8 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     } else {
       // url became null -- disconnect.
       if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect loop
         wsRef.current.close();
         wsRef.current = null;
-        setReadyState(ReadyState.CLOSED);
       }
     }
 
@@ -153,7 +155,7 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
         wsRef.current = null;
       }
     };
-  }, [url, connect, clearReconnectTimer]);
+  }, [url, clearReconnectTimer]);
 
   // ── send helpers ─────────────────────────────────────────────────
 
@@ -187,6 +189,6 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     lastMessage,
     isConnected,
     readyState,
-    onBinaryMessage,
+    onBinaryMessageRef,
   };
 }

@@ -9,9 +9,13 @@ type Message = {
 
 type Props = {
   messages: Message[];
+  emptyState?: string;
 };
 
-export function ConversationPanel({ messages }: Props) {
+export function ConversationPanel({
+  messages,
+  emptyState = "Start speaking to interact with NEXUS",
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -32,6 +36,8 @@ export function ConversationPanel({ messages }: Props) {
             stroke="currentColor"
             strokeWidth={1.5}
             className="w-10 h-10 mx-auto mb-3 text-zinc-600"
+            aria-hidden="true"
+            focusable="false"
           >
             <path
               strokeLinecap="round"
@@ -39,9 +45,7 @@ export function ConversationPanel({ messages }: Props) {
               d="M12 1v22M8 5v14M4 9v6M16 5v14M20 9v6"
             />
           </svg>
-          <p className="text-zinc-500 text-sm">
-            Start speaking to interact with NEXUS
-          </p>
+          <p className="text-zinc-500 text-sm">{emptyState}</p>
         </div>
       </div>
     );

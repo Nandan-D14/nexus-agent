@@ -29,11 +29,50 @@ export type WsCommand =
 
 // ── Session data returned by the REST API ──────────────────────────
 
+export type SessionStatus =
+  | "creating"
+  | "ready"
+  | "active"
+  | "ended"
+  | "error"
+  | "destroyed";
+
 export type SessionData = {
   session_id: string;
   stream_url: string;
   ws_ticket: string;
+  status: SessionStatus | string;
   created_at: string;
+};
+
+export type SessionInfo = {
+  session_id: string;
+  status: SessionStatus | string;
+  is_live: boolean;
+  stream_url: string | null;
+  created_at: string;
+  ended_at?: string | null;
+  summary?: string | null;
+  message_count: number;
+};
+
+export type RecentSession = {
+  session_id: string;
+  title: string;
+  status: SessionStatus | string;
+  summary: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  message_count: number;
+};
+
+export type ArchivedMessage = {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  source?: string;
+  turn_index: number;
+  created_at: string | null;
 };
 
 // ── Backward-compatible aliases ────────────────────────────────────

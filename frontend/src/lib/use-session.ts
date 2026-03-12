@@ -1,42 +1,20 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import type { SessionData } from "./message-types";
+import { useCallback, useState } from "react";
 
-/**
- * Base path for Next.js API routes that proxy to the Python backend.
- * In production this avoids CORS by keeping the browser talking to the
- * same origin; the Next.js route handler forwards the request.
- */
-const API_BASE = "/api";
+import { authenticatedFetch, parseApiError } from "./api-client";
+import type { SessionData, SessionInfo } from "./message-types";
 
 export interface UseSessionReturn {
-  /** The current session, or null if none is active. */
-  session: SessionData | null;
-  /** Create a new session via POST /api/sessions. */
   createSession: () => Promise<SessionData | null>;
-  /** Destroy the active session via DELETE /api/sessions/{id}. */
-  destroySession: () => Promise<void>;
-  /** Whether a request is currently in flight. */
+  getSession: (sessionId: string) => Promise<SessionInfo | null>;
+  refreshTicket: (sessionId: string) => Promise<string | null>;
+  destroySession: (sessionId: string) => Promise<boolean>;
   isLoading: boolean;
-  /** Human-readable error from the last failed request, or null. */
   error: string | null;
 }
 
-/**
- * React hook for managing the session lifecycle.
- *
- * - `createSession()` -- POST /api/sessions
- *   Returns the new session data and stores it in state.
- *
- * - `destroySession()` -- DELETE /api/sessions/{id}
- *   Best-effort deletion; clears local state regardless.
- *
- * The Next.js `/api/sessions` route is expected to proxy to the Python
- * FastAPI backend.
- */
 export function useSession(): UseSessionReturn {
-  const [session, setSession] = useState<SessionData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,24 +23,16 @@ export function useSession(): UseSessionReturn {
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/sessions`, {
+      const res = await authenticatedFetch("/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
 
       if (!res.ok) {
-        // Try to extract a detail message from the backend.
-        const body = await res.json().catch(() => ({}));
-        const detail =
-          typeof body === "object" && body !== null && "detail" in body
-            ? String((body as Record<string, unknown>).detail)
-            : `HTTP ${res.status}`;
-        throw new Error(detail);
+        throw new Error(await parseApiError(res));
       }
 
-      const data: SessionData = await res.json();
-      setSession(data);
-      return data;
+      return (await res.json()) as SessionData;
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to create session";
@@ -73,24 +43,92 @@ export function useSession(): UseSessionReturn {
     }
   }, []);
 
-  const destroySession = useCallback(async (): Promise<void> => {
-    if (!session) return;
-
-    const id = session.session_id;
-
-    // Optimistically clear local state so the UI reacts immediately.
-    setSession(null);
+  const getSession = useCallback(async (sessionId: string) => {
+    setIsLoading(true);
     setError(null);
 
     try {
-      await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      });
-    } catch {
-      // Best-effort -- the session may have already expired server-side.
-      console.warn("[useSession] DELETE request failed (best-effort).");
-    }
-  }, [session]);
+      const res = await authenticatedFetch(
+        `/sessions/${encodeURIComponent(sessionId)}`,
+      );
 
-  return { session, createSession, destroySession, isLoading, error };
+      if (!res.ok) {
+        throw new Error(await parseApiError(res));
+      }
+
+      return (await res.json()) as SessionInfo;
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to load session";
+      setError(msg);
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const refreshTicket = useCallback(async (sessionId: string) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const res = await authenticatedFetch(
+        `/sessions/${encodeURIComponent(sessionId)}/ticket`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      if (!res.ok) {
+        throw new Error(await parseApiError(res));
+      }
+
+      const body = (await res.json()) as { ws_ticket: string };
+      return body.ws_ticket;
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to refresh session ticket";
+      setError(msg);
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const destroySession = useCallback(async (sessionId: string) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const res = await authenticatedFetch(
+        `/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (!res.ok) {
+        throw new Error(await parseApiError(res));
+      }
+
+      return true;
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to destroy session";
+      setError(msg);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  return {
+    createSession,
+    getSession,
+    refreshTicket,
+    destroySession,
+    isLoading,
+    error,
+  };
 }

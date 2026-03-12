@@ -1,4 +1,4 @@
-# dependencies
+# ── Node / Next.js ────────────────────────────────────────────
 node_modules/
 /.pnp
 .pnp.*
@@ -8,39 +8,34 @@ node_modules/
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
-
-# next.js
+# Next.js build output
 .next/
 /out/
-
-# production
 /build
 
-# misc
-.DS_Store
-*.pem
+# Testing
+/coverage
 
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files
-.env
-.env.*
-!.env.example
-
-# vercel
-.vercel
-
-# typescript
+# TypeScript
 *.tsbuildinfo
 next-env.d.ts
 
-# Python
+# ── Environment / Secrets ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+
+# Firebase service-account keys & emulator data
+*-service-account.json
+*serviceAccount*.json
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+.firebase/
+
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -49,19 +44,42 @@ dist/
 *.egg
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
 
-# E2B test outputs
-test_screenshot.png
+# ── Docker ────────────────────────────────────────────────────
+*.env.docker
 
-# IDE
-.idea/
-.vscode/
+# ── Misc / OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 
-# Plan files (dev only)
-nexus_plan.md
+# ── Debug logs ────────────────────────────────────────────────
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Tool configs
+# ── IDE ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+
+# ── Deployment ────────────────────────────────────────────────
+.vercel
+
+# ── Test artefacts ────────────────────────────────────────────
+test_screenshot.png
+
+# ── Plan / draft files (dev only) ────────────────────────────
+nexus_plan.md
+codex-plan.md
+
+# ── Tool configs ──────────────────────────────────────────────
 .zencoder/
 .zenflow/

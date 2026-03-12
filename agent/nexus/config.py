@@ -1,10 +1,16 @@
 """Application configuration via environment variables."""
 
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # E2B Desktop
     e2b_api_key: str = ""
@@ -23,6 +29,12 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # Firebase
+    firebase_project_id: str = ""
+    google_application_credentials: str = ""
+    firebase_auth_emulator_host: str = ""
+    firestore_emulator_host: str = ""
+
     # Session
     session_timeout_minutes: int = 15
     jwt_secret: str = "dev-secret-change-in-production"
@@ -34,3 +46,19 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def apply_runtime_env_overrides() -> None:
+    """Expose env-file values to SDKs that read directly from process env."""
+    if settings.google_application_credentials and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
+
+    if settings.firebase_auth_emulator_host and not os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        os.environ["FIREBASE_AUTH_EMULATOR_HOST"] = settings.firebase_auth_emulator_host
+
+    if settings.firestore_emulator_host and not os.environ.get("FIRESTORE_EMULATOR_HOST"):
+        os.environ["FIRESTORE_EMULATOR_HOST"] = settings.firestore_emulator_host
+
+    project_id = settings.firebase_project_id or settings.google_project_id
+    if project_id:
+        os.environ.setdefault("GCLOUD_PROJECT", project_id)
