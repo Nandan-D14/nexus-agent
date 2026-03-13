@@ -44,6 +44,13 @@ async def handle_websocket(
         # Start background task: Gemini Live → frontend
         voice_task = asyncio.create_task(orchestrator.run_voice_receive_loop())
 
+        # Keep background tasks alive so they aren't garbage-collected
+        _bg_tasks: set[asyncio.Task] = set()
+
+        def _track(t: asyncio.Task) -> None:
+            _bg_tasks.add(t)
+            t.add_done_callback(_bg_tasks.discard)
+
         # Main loop: frontend → agent/voice
         try:
             while True:
@@ -69,14 +76,14 @@ async def handle_websocket(
                     if msg_type == "text_input":
                         text = data.get("text", "").strip()
                         if text:
-                            await orchestrator.handle_text_input(text)
+                            # Run as background task so stop_agent can interrupt
+                            _track(asyncio.create_task(orchestrator.handle_text_input(text)))
 
                     elif msg_type == "analyze_screen":
-                        await orchestrator.handle_analyze_screen()
+                        _track(asyncio.create_task(orchestrator.handle_analyze_screen()))
 
                     elif msg_type == "stop_agent":
-                        # Future: implement agent cancellation
-                        pass
+                        await orchestrator.stop_agent()
 
                     elif msg_type == "permission_response":
                         task_id = data.get("task_id", "")

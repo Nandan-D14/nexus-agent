@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _AgentStopped(Exception):
+    """Raised inside the event callback to break out of the ADK agent loop."""
+
+
 class NexusOrchestrator:
     """Coordinates the full voice → think → act → see loop for one session."""
 
@@ -56,6 +60,10 @@ class NexusOrchestrator:
 
         # Background task manager
         self.bg_task_manager = BackgroundTaskManager(send_json=self._send_json)
+
+        # Tracks the currently running agent turn so it can be cancelled
+        self._agent_task: asyncio.Task | None = None
+        self._stop_requested: bool = False
 
     async def initialize(self) -> None:
         """Set up voice connection and ADK session."""
@@ -97,7 +105,7 @@ class NexusOrchestrator:
         """Handle direct text input (bypass voice)."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="typed", text=text)
-        await self._run_agent(text)
+        await self._run_agent_tracked(text)
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
         """Route a permission_response from the frontend to the bg task manager."""
@@ -107,7 +115,7 @@ class NexusOrchestrator:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="voice", text=text)
-        await self._run_agent(text)
+        await self._run_agent_tracked(text)
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
@@ -128,7 +136,18 @@ class NexusOrchestrator:
             "analysis": "Screenshot captured. Sending to agent...",
         })
         # Feed screenshot context to agent
-        await self._run_agent("Look at the current screen and describe what you see.")
+        await self._run_agent_tracked("Look at the current screen and describe what you see.")
+
+    async def stop_agent(self) -> None:
+        """Cancel the currently running agent turn."""
+        self._stop_requested = True
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+        # Immediately notify frontend so the UI updates without waiting
+        await self._send_json({
+            "type": "agent_complete",
+            "summary": "Stopped by user.",
+        })
 
     async def run_voice_receive_loop(self) -> None:
         """Background task: read from Gemini Live, forward to frontend.
@@ -209,6 +228,17 @@ class NexusOrchestrator:
 
     # ── Private ────────────────────────────────────────────────
 
+    async def _run_agent_tracked(self, message: str) -> None:
+        """Wrap _run_agent in a cancellable task and await it."""
+        self._stop_requested = False
+        self._agent_task = asyncio.create_task(self._run_agent(message))
+        try:
+            await self._agent_task
+        except asyncio.CancelledError:
+            logger.info("Agent turn cancelled by user for session %s", self.session.id)
+            self._active_agent = "nexus_orchestrator"
+            # agent_complete already sent by stop_agent(), skip here
+
     async def _run_agent(self, message: str) -> None:
         """Run an ADK agent turn and stream events to frontend."""
         self.session.touch()
@@ -250,6 +280,9 @@ class NexusOrchestrator:
                 })
                 await self._mark_summary(response)
 
+        except _AgentStopped:
+            logger.info("Agent stopped via _AgentStopped for session %s", self.session.id)
+
         except Exception:
             logger.exception("Agent turn failed")
             await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
@@ -261,6 +294,10 @@ class NexusOrchestrator:
 
     async def _on_agent_event(self, event: Any) -> None:
         """Callback for each ADK agent event — stream to frontend."""
+        # Bail out early if stop was requested
+        if self._stop_requested:
+            raise _AgentStopped()
+
         try:
             # Detect agent delegation (sub-agent transfer)
             author = getattr(event, "author", None)

@@ -12,6 +12,7 @@ import { DemoPicker } from "@/components/demo-picker";
 import { DesktopPanel } from "@/components/desktop-panel";
 import { DesktopSidebar } from "@/components/desktop-sidebar";
 import { MicButton } from "@/components/mic-button";
+import { SessionNavSidebar } from "@/components/session-nav-sidebar";
 import { StatusBar } from "@/components/status-bar";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
 import { useAuth } from "@/lib/auth-context";
@@ -68,6 +69,7 @@ export default function SessionPage() {
   const [desktopVisible, setDesktopVisible] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
+  const [agentStatus, setAgentStatus] = useState("");
 
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
@@ -133,6 +135,7 @@ export default function SessionPage() {
 
       case "agent_thinking":
         setPhase("thinking");
+        setAgentStatus("Thinking...");
         setChatItems((prev) => [
           ...prev,
           { kind: "event", type: msg.type, content: msg.content, ts },
@@ -141,6 +144,7 @@ export default function SessionPage() {
 
       case "agent_tool_call":
         setPhase("acting");
+        setAgentStatus(`Running ${msg.tool}...`);
         setChatItems((prev) => [
           ...prev,
           { kind: "event", type: msg.type, tool: msg.tool, args: msg.args, ts },
@@ -169,6 +173,7 @@ export default function SessionPage() {
 
       case "agent_complete":
         setPhase("done");
+        setAgentStatus("");
         setChatItems((prev) => [
           ...prev,
           { kind: "event", type: msg.type, summary: msg.summary, ts },
@@ -234,6 +239,7 @@ export default function SessionPage() {
 
       case "error":
         setPageError(msg.message);
+        setAgentStatus("");
         setChatItems((prev) => [
           ...prev,
           { kind: "event", type: msg.type, code: msg.code, message: msg.message, ts },
@@ -394,6 +400,12 @@ export default function SessionPage() {
     [sendJson],
   );
 
+  const handleStopAgent = useCallback(() => {
+    sendJson({ type: "stop_agent" });
+    setPhase("done");
+    setAgentStatus("");
+  }, [sendJson]);
+
   useEffect(() => {
     const demo = searchParams.get("demo");
     if (demo && isConnected && viewMode === "live") {
@@ -417,7 +429,12 @@ export default function SessionPage() {
 
   /* ---- Render ---- */
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[#09090b]">
+    <div className="h-screen flex overflow-hidden bg-[#09090b]">
+      {/* ─── Left nav sidebar ─── */}
+      <SessionNavSidebar />
+
+      {/* ─── Main panel ─── */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
       {/* ─── Header ─── */}
       <header className="relative flex items-center justify-between px-5 py-2.5 border-b border-[#1c1c1e] bg-[#09090b]">
         {/* Gradient accent line under header */}
@@ -511,8 +528,51 @@ export default function SessionPage() {
                 isConnected={isConnected}
                 onAnalyzeScreen={() => sendJson({ type: "analyze_screen" })}
               />
-              <div className="flex-1 overflow-hidden p-2">
+              <div className="flex-1 overflow-hidden p-2 relative">
                 <DesktopPanel streamUrl={streamUrl} />
+
+                {/* ── Overlay: blocks user interaction while agent is working ── */}
+                {(phase === "thinking" || phase === "acting") && (
+                  <>
+                    {/* Transparent click-blocker over the whole desktop */}
+                    <div className="absolute inset-0 z-10 cursor-not-allowed" />
+
+                    {/* Bottom action bar */}
+                    <div className="absolute bottom-2 left-2 right-2 z-20 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-black/85 border border-white/10 backdrop-blur-sm shadow-2xl">
+                      {/* Stop button */}
+                      <button
+                        onClick={handleStopAgent}
+                        title="Stop"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors text-xs font-bold uppercase tracking-wider"
+                      >
+                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                          <rect x="3" y="3" width="10" height="10" rx="1.5" />
+                        </svg>
+                        Stop
+                      </button>
+
+                      {/* Divider */}
+                      <div className="w-px h-5 bg-white/10" />
+
+                      {/* Live status */}
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <span className={`w-2 h-2 rounded-full shrink-0 animate-pulse ${
+                          phase === "thinking" ? "bg-cyan-400" : "bg-amber-400"
+                        }`} />
+                        <span className="text-xs text-zinc-300 truncate">
+                          {agentStatus || (phase === "thinking" ? "Thinking..." : "Acting...")}
+                        </span>
+                      </div>
+
+                      {/* Active agent badge */}
+                      {activeAgent && activeAgent !== "nexus" && (
+                        <span className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest shrink-0">
+                          {activeAgent.replace(/_/g, " ")}
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             </>
           ) : null}
@@ -565,6 +625,19 @@ export default function SessionPage() {
                 </span>
               )}
             </div>
+
+            {/* Stop button — visible while agent is running */}
+            {viewMode === "live" && (phase === "thinking" || phase === "acting") && (
+              <button
+                suppressHydrationWarning
+                onClick={handleStopAgent}
+                title="Stop agent"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors text-[10px] font-bold uppercase tracking-widest"
+              >
+                <span className="w-2 h-2 rounded-sm bg-red-400 shrink-0" />
+                Stop
+              </button>
+            )}
           </div>
 
           {/* Feed container */}
@@ -662,6 +735,7 @@ export default function SessionPage() {
           Loading session...
         </div>
       )}
+      </div>{/* end main panel */}
     </div>
   );
 }
