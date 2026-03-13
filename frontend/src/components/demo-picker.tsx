@@ -102,8 +102,8 @@ export function DemoPicker({ onSelect, disabled }: Props) {
             focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/40
             ${
               disabled
-                ? "bg-zinc-900/50 border-zinc-800/50 opacity-50 cursor-not-allowed"
-                : "bg-zinc-900/40 border-zinc-800 hover:border-cyan-500/50 hover:bg-zinc-900/60 hover:shadow-[0_0_30px_rgba(34,211,238,0.05)] cursor-pointer active:scale-[0.98]"
+                ? "bg-zinc-100/50 dark:bg-zinc-900/50 border-zinc-200/50 dark:border-zinc-800/50 opacity-50 cursor-not-allowed"
+                : "bg-white/40 dark:bg-zinc-900/40 border-card-border dark:border-zinc-800 hover:border-cyan-500/50 hover:bg-zinc-50 dark:hover:bg-zinc-900/60 hover:shadow-[0_0_30px_rgba(34,211,238,0.05)] cursor-pointer active:scale-[0.98]"
             }
           `}
         >
@@ -121,8 +121,8 @@ export function DemoPicker({ onSelect, disabled }: Props) {
               transition-all duration-300
               ${
                 disabled
-                  ? "bg-zinc-800 text-zinc-600"
-                  : "bg-zinc-800 group-hover:bg-cyan-500/20 text-zinc-400 group-hover:text-cyan-400"
+                  ? "bg-zinc-200 dark:bg-zinc-800 text-muted dark:text-zinc-600"
+                  : "bg-zinc-100 dark:bg-zinc-800 group-hover:bg-cyan-500/10 dark:group-hover:bg-cyan-500/20 text-muted dark:text-zinc-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400"
               }
             `}
           >
@@ -134,8 +134,8 @@ export function DemoPicker({ onSelect, disabled }: Props) {
             <h3
               className={`font-bold text-sm tracking-tight transition-colors duration-200 ${
                 disabled
-                  ? "text-zinc-500"
-                  : "text-zinc-100 group-hover:text-white"
+                  ? "text-muted dark:text-zinc-500"
+                  : "text-foreground dark:text-zinc-100 group-hover:text-black dark:group-hover:text-white"
               }`}
             >
               {demo.title}
@@ -143,7 +143,7 @@ export function DemoPicker({ onSelect, disabled }: Props) {
 
             <p
               className={`text-[11px] leading-relaxed font-medium transition-colors duration-200 ${
-                disabled ? "text-zinc-700" : "text-zinc-500 group-hover:text-zinc-400"
+                disabled ? "text-muted dark:text-zinc-700" : "text-zinc-500 dark:text-zinc-500 group-hover:text-foreground dark:group-hover:text-zinc-400"
               }`}
             >
               {demo.description}

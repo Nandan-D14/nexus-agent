@@ -30,11 +30,11 @@ function getStepState(
 
 export function StatusBar({ phase, isConnected }: Props) {
   return (
-    <div className="flex items-center justify-between px-6 py-2 bg-zinc-950 border-t border-zinc-800 text-[10px] font-bold uppercase tracking-[0.15em] glass relative z-30">
+    <div className="flex items-center justify-between px-6 py-2 bg-card dark:bg-zinc-950 border-t border-card-border dark:border-zinc-800 text-[10px] font-bold uppercase tracking-[0.15em] glass relative z-30">
       {/* Phase steps */}
       <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2 text-zinc-500 mr-2">
-          <div className="w-1 h-1 bg-zinc-700" />
+        <div className="flex items-center gap-2 text-muted dark:text-zinc-500 mr-2">
+          <div className="w-1 h-1 bg-zinc-400 dark:bg-zinc-700" />
           <span>Systems</span>
         </div>
         
@@ -50,7 +50,7 @@ export function StatusBar({ phase, isConnected }: Props) {
                       ? "bg-cyan-500 shadow-[0_0_8px_rgba(34,211,238,0.5)] w-5"
                       : state === "past"
                         ? "bg-emerald-500/40"
-                        : "bg-zinc-800"
+                        : "bg-zinc-200 dark:bg-zinc-800"
                   }`}
                 />
                 <span
@@ -59,7 +59,7 @@ export function StatusBar({ phase, isConnected }: Props) {
                       ? "text-cyan-400"
                       : state === "past"
                         ? "text-emerald-500/60"
-                        : "text-zinc-700"
+                        : "text-muted dark:text-zinc-700"
                   }`}
                 >
                   {step.label}
@@ -72,14 +72,14 @@ export function StatusBar({ phase, isConnected }: Props) {
 
       {/* Stats/Connection */}
       <div className="flex items-center gap-6">
-        <div className="hidden md:flex items-center gap-4 text-zinc-600 border-r border-zinc-800 pr-6">
+        <div className="hidden md:flex items-center gap-4 text-muted dark:text-zinc-600 border-r border-card-border dark:border-zinc-800 pr-6">
           <div className="flex items-center gap-1.5">
             <span className="text-[9px]">LATENCY</span>
-            <span className="text-zinc-400">24MS</span>
+            <span className="text-foreground dark:text-zinc-400">24MS</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-[9px]">UPTIME</span>
-            <span className="text-zinc-400">00:12:45</span>
+            <span className="text-foreground dark:text-zinc-400">00:12:45</span>
           </div>
         </div>
 

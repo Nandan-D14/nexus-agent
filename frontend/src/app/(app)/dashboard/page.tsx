@@ -55,7 +55,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="p-8 flex items-center justify-center h-full">
-        <div className="w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-4 border-cyan-600 dark:border-cyan-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -63,7 +63,7 @@ export default function DashboardPage() {
   if (error) {
     return (
       <div className="p-8">
-        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 text-red-400">
+        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 text-red-600 dark:text-red-400">
           <AlertTriangle className="w-5 h-5" />
           <p>{error}</p>
         </div>
@@ -75,11 +75,11 @@ export default function DashboardPage() {
     <motion.div 
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="p-6 rounded-2xl bg-white/5 border border-white/10 flex flex-col gap-4"
+      className="p-6 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 flex flex-col gap-4 text-foreground shadow-sm dark:shadow-none"
     >
-      <div className="flex items-center justify-between text-zinc-400">
+      <div className="flex items-center justify-between text-zinc-500 dark:text-zinc-400">
         <span className="text-sm font-bold tracking-wider uppercase">{title}</span>
-        <Icon className="w-5 h-5 text-cyan-500" />
+        <Icon className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
       </div>
       <div>
         <span className="text-4xl font-black">{value}</span>
@@ -89,17 +89,17 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-20">
+    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-20 text-foreground">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter text-white">
+          <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter text-foreground">
             Dashboard
           </h1>
-          <p className="text-zinc-400 mt-2">Welcome back, {user?.displayName || "Agent"}.</p>
+          <p className="text-zinc-500 dark:text-zinc-400 mt-2">Welcome back, {user?.displayName || "Agent"}.</p>
         </div>
         <Link 
           href="/"
-          className="px-6 py-3 rounded-xl bg-white text-black font-black text-sm uppercase tracking-widest hover:bg-cyan-400 transition-all shadow-lg active:scale-95 inline-block text-center"
+          className="px-6 py-3 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-black font-black text-sm uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all shadow-lg active:scale-95 inline-block text-center"
         >
           Initialize Mission
         </Link>
@@ -133,40 +133,40 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold tracking-widest uppercase text-zinc-400">Activity (30 Days)</h2>
+            <h2 className="text-sm font-bold tracking-widest uppercase text-zinc-500 dark:text-zinc-400">Activity (30 Days)</h2>
           </div>
-          <div className="h-[300px] p-6 rounded-2xl bg-white/5 border border-white/10">
+          <div className="h-[300px] p-6 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 shadow-sm dark:shadow-none">
             <UsageChart data={usage} />
           </div>
         </div>
         
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold tracking-widest uppercase text-zinc-400">Agent Status</h2>
+            <h2 className="text-sm font-bold tracking-widest uppercase text-zinc-500 dark:text-zinc-400">Agent Status</h2>
           </div>
-          <div className="p-6 rounded-2xl bg-white/5 border border-white/10 space-y-6">
+          <div className="p-6 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 space-y-6 shadow-sm dark:shadow-none">
             <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-cyan-500/20 flex items-center justify-center border border-cyan-500/30">
-                <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_10px_rgba(34,211,238,1)] animate-pulse" />
+              <div className="w-12 h-12 rounded-xl bg-cyan-100 dark:bg-cyan-500/20 flex items-center justify-center border border-cyan-200 dark:border-cyan-500/30">
+                <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_10px_rgba(34,211,238,0.5)] dark:shadow-[0_0_10px_rgba(34,211,238,1)] animate-pulse" />
               </div>
               <div>
-                <p className="font-bold text-lg text-white">System Online</p>
-                <p className="text-xs text-emerald-400 uppercase tracking-widest">All services operational</p>
+                <p className="font-bold text-lg text-foreground">System Online</p>
+                <p className="text-xs text-emerald-600 dark:text-emerald-400 uppercase tracking-widest">All services operational</p>
               </div>
             </div>
             
-            <div className="space-y-4 pt-4 border-t border-white/5">
+            <div className="space-y-4 pt-4 border-t border-zinc-200 dark:border-white/5">
               <div className="flex justify-between items-center text-sm">
                 <span className="text-zinc-500">API Latency</span>
-                <span className="text-zinc-300 font-mono">18ms</span>
+                <span className="text-zinc-700 dark:text-zinc-300 font-mono">18ms</span>
               </div>
               <div className="flex justify-between items-center text-sm">
                 <span className="text-zinc-500">Sandbox Backend</span>
-                <span className="text-zinc-300 font-mono">E2B Desktop</span>
+                <span className="text-zinc-700 dark:text-zinc-300 font-mono">E2B Desktop</span>
               </div>
               <div className="flex justify-between items-center text-sm">
                 <span className="text-zinc-500">Language Model</span>
-                <span className="text-zinc-300 font-mono text-xs">MiniMax Kilo / Gemini Flash</span>
+                <span className="text-zinc-700 dark:text-zinc-300 font-mono text-xs">MiniMax Kilo / Gemini Flash</span>
               </div>
             </div>
           </div>

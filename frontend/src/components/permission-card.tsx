@@ -34,7 +34,7 @@ export function PermissionCard({
   return (
     <div
       className={[
-        "relative rounded-lg border bg-[#09090b] p-3 space-y-2.5 max-w-sm",
+        "relative rounded-lg border bg-card dark:bg-[#09090b] p-3 space-y-2.5 max-w-sm",
         "transition-all duration-300",
         resolved
           ? response === "approved"
@@ -76,18 +76,18 @@ export function PermissionCard({
       </div>
 
       {/* Description */}
-      <p className="text-zinc-300 text-sm leading-relaxed">{description}</p>
+      <p className="text-foreground dark:text-zinc-300 text-sm leading-relaxed">{description}</p>
 
       {/* Meta row */}
-      <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+      <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-wider text-muted dark:text-zinc-500">
         <div className="flex items-center gap-1.5">
-          <span className="text-zinc-600">Agent</span>
-          <span className="text-zinc-300">{agent}</span>
+          <span className="text-muted dark:text-zinc-600">Agent</span>
+          <span className="text-foreground dark:text-zinc-300">{agent}</span>
         </div>
-        <div className="w-px h-3 bg-zinc-800" />
+        <div className="w-px h-3 bg-zinc-300 dark:bg-zinc-800" />
         <div className="flex items-center gap-1.5">
-          <span className="text-zinc-600">Est.</span>
-          <span className="text-zinc-300">
+          <span className="text-muted dark:text-zinc-600">Est.</span>
+          <span className="text-foreground dark:text-zinc-300">
             {formatEstimatedTime(estimatedSeconds)}
           </span>
         </div>
@@ -104,7 +104,7 @@ export function PermissionCard({
             resolved
               ? response === "approved"
                 ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default"
-                : "bg-zinc-900 border-zinc-800 text-zinc-600 cursor-default"
+                : "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-muted dark:text-zinc-600 cursor-default"
               : "bg-emerald-500/10 border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:shadow-[0_0_10px_rgba(16,185,129,0.1)] active:scale-[0.98]",
           ].join(" ")}
         >
@@ -119,7 +119,7 @@ export function PermissionCard({
             resolved
               ? response === "denied"
                 ? "bg-red-500/10 border-red-500/20 text-red-400 cursor-default"
-                : "bg-zinc-900 border-zinc-800 text-zinc-600 cursor-default"
+                : "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-muted dark:text-zinc-600 cursor-default"
               : "bg-red-500/5 border-zinc-800 text-red-400 hover:bg-red-500/10 hover:border-red-500/30 hover:shadow-[0_0_10px_rgba(239,68,68,0.08)] active:scale-[0.98]",
           ].join(" ")}
         >

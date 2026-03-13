@@ -71,13 +71,13 @@ export default function HistoryPage() {
   };
 
   return (
-    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-20 h-full flex flex-col">
+    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-20 h-full flex flex-col text-foreground">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 shrink-0">
         <div>
-          <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter text-white">
+          <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter text-foreground">
             Mission History
           </h1>
-          <p className="text-zinc-400 mt-2">Review past operations and transcripts.</p>
+          <p className="text-zinc-500 dark:text-zinc-400 mt-2">Review past operations and transcripts.</p>
         </div>
       </div>
 
@@ -89,7 +89,7 @@ export default function HistoryPage() {
             placeholder="Search transcripts..." 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-white focus:outline-none focus:border-cyan-500/50 transition-colors"
+            className="w-full bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl py-3 pl-12 pr-4 text-foreground placeholder-zinc-400 focus:outline-none focus:border-cyan-500/50 transition-colors shadow-sm dark:shadow-none"
           />
         </div>
         <div className="relative shrink-0">
@@ -97,13 +97,13 @@ export default function HistoryPage() {
           <select 
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="appearance-none bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-10 text-white focus:outline-none focus:border-cyan-500/50 transition-colors"
+            className="appearance-none bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl py-3 pl-10 pr-10 text-foreground focus:outline-none focus:border-cyan-500/50 transition-colors shadow-sm dark:shadow-none"
           >
-            <option value="all" className="bg-zinc-900">All Statuses</option>
-            <option value="ready" className="bg-zinc-900">Ready</option>
-            <option value="active" className="bg-zinc-900">Active</option>
-            <option value="ended" className="bg-zinc-900">Ended</option>
-            <option value="error" className="bg-zinc-900">Error</option>
+            <option value="all" className="bg-white dark:bg-zinc-900">All Statuses</option>
+            <option value="ready" className="bg-white dark:bg-zinc-900">Ready</option>
+            <option value="active" className="bg-white dark:bg-zinc-900">Active</option>
+            <option value="ended" className="bg-white dark:bg-zinc-900">Ended</option>
+            <option value="error" className="bg-white dark:bg-zinc-900">Error</option>
           </select>
         </div>
       </div>
@@ -111,15 +111,15 @@ export default function HistoryPage() {
       <div className="flex-1 overflow-y-auto space-y-3 pr-2 min-h-0">
         {loading ? (
           <div className="flex justify-center p-10">
-             <div className="w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+             <div className="w-8 h-8 border-4 border-cyan-600 dark:border-cyan-500 border-t-transparent rounded-full animate-spin" />
           </div>
         ) : error ? (
-          <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 text-red-400">
+          <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 text-red-600 dark:text-red-400">
             <AlertCircle className="w-5 h-5" />
             <p>{error}</p>
           </div>
         ) : sessions.length === 0 ? (
-          <div className="h-64 rounded-2xl border border-white/10 border-dashed flex items-center justify-center text-zinc-500 font-mono text-sm uppercase">
+          <div className="h-64 rounded-2xl border border-zinc-300 dark:border-white/10 border-dashed flex items-center justify-center text-zinc-500 font-mono text-sm uppercase">
             No sessions found matching criteria
           </div>
         ) : (
@@ -129,13 +129,13 @@ export default function HistoryPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.05 }}
               key={session.session_id}
-              className="group relative flex items-center bg-white/[0.02] border border-white/5 rounded-xl p-4 hover:bg-white/[0.04] transition-colors"
+              className="group relative flex items-center bg-zinc-50 dark:bg-white/[0.02] border border-zinc-200 dark:border-white/5 rounded-xl p-4 hover:bg-zinc-100 dark:hover:bg-white/[0.04] transition-colors shadow-sm dark:shadow-none"
             >
               <Link href={`/history/${session.session_id}`} className="absolute inset-x-0 inset-y-0 z-0" />
               
               <div className="flex-1 min-w-0 pr-14 relative z-10 flex flex-col md:flex-row gap-4 items-start md:items-center">
                 <div className="flex-1 w-full min-w-0">
-                  <h3 className="text-white font-bold truncate text-base mb-1 group-hover:text-cyan-400 transition-colors">
+                  <h3 className="text-foreground font-bold truncate text-base mb-1 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
                     {session.title || "Untitled Session"}
                   </h3>
                   <div className="flex items-center gap-4 text-xs font-mono text-zinc-500">
@@ -152,17 +152,17 @@ export default function HistoryPage() {
 
                 <div className="flex items-center gap-4 shrink-0 justify-between w-full md:w-auto">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest ${
-                    session.status === "active" ? "bg-cyan-500/20 text-cyan-400" :
-                    session.status === "ended" ? "bg-zinc-800 text-zinc-400" :
-                    session.status === "error" ? "bg-red-500/20 text-red-400" :
-                    "bg-emerald-500/20 text-emerald-400"
+                    session.status === "active" ? "bg-cyan-100 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400" :
+                    session.status === "ended" ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400" :
+                    session.status === "error" ? "bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400" :
+                    "bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
                   }`}>
                     {session.status}
                   </span>
                   
                   <button 
                     onClick={(e) => { e.preventDefault(); deleteSession(session.session_id); }}
-                    className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors cursor-pointer"
+                    className="p-2 text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/10 rounded-lg transition-colors cursor-pointer"
                     title="Delete Session"
                   >
                     <Trash2 className="w-4 h-4" />

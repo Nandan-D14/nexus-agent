@@ -70,19 +70,19 @@ export default function HistoryTranscriptPage() {
 
   return (
     <div className="flex flex-col h-full max-h-screen">
-      <div className="p-4 md:p-8 shrink-0 bg-[#030303] border-b border-white/5 z-10 block">
-        <Link href="/history" className="flex items-center gap-2 text-zinc-500 hover:text-white mb-4 w-fit transition-colors group">
+      <div className="p-4 md:p-8 shrink-0 bg-background dark:bg-[#030303] border-b border-card-border dark:border-white/5 z-10 block">
+        <Link href="/history" className="flex items-center gap-2 text-muted dark:text-zinc-500 hover:text-foreground dark:hover:text-white mb-4 w-fit transition-colors group">
           <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
           <span className="text-xs font-bold uppercase tracking-widest">Back to History</span>
         </Link>
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div>
-            <h1 className="text-2xl md:text-3xl font-black italic uppercase tracking-tighter text-white">
+            <h1 className="text-2xl md:text-3xl font-black italic uppercase tracking-tighter text-foreground dark:text-white">
               Session Transcript
             </h1>
-            <p className="text-zinc-500 font-mono text-xs mt-2 uppercase">ID: {params.session_id}</p>
+            <p className="text-muted dark:text-zinc-500 font-mono text-xs mt-2 uppercase">ID: {params.session_id}</p>
           </div>
-          <div className="flex gap-4 text-xs font-mono text-zinc-400">
+          <div className="flex gap-4 text-xs font-mono text-muted dark:text-zinc-400">
             <span className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" /> Ended</span>
             <span className="flex items-center gap-1.5"><MessageSquare className="w-3.5 h-3.5" /> {messages.length}</span>
           </div>
@@ -91,7 +91,7 @@ export default function HistoryTranscriptPage() {
 
       <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
         {messages.length === 0 ? (
-          <div className="h-64 rounded-2xl border border-white/10 border-dashed flex items-center justify-center text-zinc-500 font-mono text-sm uppercase">
+          <div className="h-64 rounded-2xl border border-card-border dark:border-white/10 border-dashed flex items-center justify-center text-muted dark:text-zinc-500 font-mono text-sm uppercase">
             No messages recorded in this session
           </div>
         ) : (
@@ -103,7 +103,7 @@ export default function HistoryTranscriptPage() {
               key={m.id} 
               className={`flex flex-col gap-1 max-w-4xl ${m.role === "user" ? "ml-auto items-end" : "mr-auto items-start"}`}
             >
-              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-600 mb-1 px-1">
+              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-muted dark:text-zinc-600 mb-1 px-1">
                 {m.role === "user" ? (
                   <>You <span className="opacity-50">via</span> {m.source}</>
                 ) : (
@@ -112,13 +112,13 @@ export default function HistoryTranscriptPage() {
               </div>
               <div className={`p-4 rounded-xl text-sm leading-relaxed ${
                 m.role === "user" 
-                  ? "bg-cyan-500/10 border border-cyan-500/20 text-cyan-50 rounded-br-none" 
-                  : "bg-white/5 border border-white/10 text-zinc-300 rounded-bl-none"
+                  ? "bg-cyan-500/10 border border-cyan-500/20 text-cyan-950 dark:text-cyan-50 rounded-br-none" 
+                  : "bg-card dark:bg-white/5 border border-card-border dark:border-white/10 text-foreground dark:text-zinc-300 rounded-bl-none shadow-sm dark:shadow-none"
               }`}>
                 {m.text}
               </div>
               {m.createdAt && (
-                <div className="text-[9px] font-mono text-zinc-600 px-1 mt-1">
+                <div className="text-[9px] font-mono text-muted dark:text-zinc-600 px-1 mt-1">
                   {new Date((m.createdAt as any)._seconds ? (m.createdAt as any)._seconds * 1000 : m.createdAt).toLocaleTimeString()}
                 </div>
               )}

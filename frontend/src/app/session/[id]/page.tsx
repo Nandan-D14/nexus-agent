@@ -429,14 +429,14 @@ export default function SessionPage() {
 
   /* ---- Render ---- */
   return (
-    <div className="h-screen flex overflow-hidden bg-[#09090b]">
+    <div className="h-screen flex overflow-hidden bg-background dark:bg-[#09090b]">
       {/* ─── Left nav sidebar ─── */}
       <SessionNavSidebar />
 
       {/* ─── Main panel ─── */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
       {/* ─── Header ─── */}
-      <header className="relative flex items-center justify-between px-5 py-2.5 border-b border-[#1c1c1e] bg-[#09090b]">
+      <header className="relative flex items-center justify-between px-5 py-2.5 border-b border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b]">
         {/* Gradient accent line under header */}
         <div className="absolute bottom-0 left-0 right-0 h-px bg-linear-to-r from-transparent via-cyan-500/30 to-transparent" />
 
@@ -460,7 +460,7 @@ export default function SessionPage() {
 
           {/* Active agent badge */}
           {viewMode === "live" && activeAgent && activeAgent !== "nexus" && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] uppercase tracking-widest font-bold text-zinc-400">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-[10px] uppercase tracking-widest font-bold text-zinc-600 dark:text-zinc-400">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
               {activeAgent.replace(/_/g, " ")}
             </div>
@@ -473,7 +473,7 @@ export default function SessionPage() {
             <button
               suppressHydrationWarning
               onClick={() => setDesktopVisible((v) => !v)}
-              className="text-xs px-3 py-1.5 rounded-lg border border-[#1c1c1e] text-zinc-400 hover:bg-zinc-800/50 hover:text-white transition-all duration-200 flex items-center gap-1.5"
+              className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200 flex items-center gap-1.5"
               title={desktopVisible ? "Hide desktop" : "Show desktop"}
             >
               <svg
@@ -494,7 +494,7 @@ export default function SessionPage() {
           <button
             suppressHydrationWarning
             onClick={() => router.push("/settings/profile")}
-            className="text-xs px-3 py-1.5 rounded-lg border border-[#1c1c1e] text-zinc-400 hover:bg-zinc-800/50 hover:text-white transition-all duration-200"
+            className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200"
           >
             Settings
           </button>
@@ -538,7 +538,7 @@ export default function SessionPage() {
                     <div className="absolute inset-0 z-10 cursor-not-allowed" />
 
                     {/* Bottom action bar */}
-                    <div className="absolute bottom-2 left-2 right-2 z-20 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-black/85 border border-white/10 backdrop-blur-sm shadow-2xl">
+                    <div className="absolute bottom-2 left-2 right-2 z-20 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-white/85 dark:bg-black/85 border border-black/10 dark:border-white/10 backdrop-blur-sm shadow-2xl">
                       {/* Stop button */}
                       <button
                         onClick={handleStopAgent}
@@ -552,14 +552,14 @@ export default function SessionPage() {
                       </button>
 
                       {/* Divider */}
-                      <div className="w-px h-5 bg-white/10" />
+                      <div className="w-px h-5 bg-black/10 dark:bg-white/10" />
 
                       {/* Live status */}
                       <div className="flex items-center gap-2 flex-1 min-w-0">
                         <span className={`w-2 h-2 rounded-full shrink-0 animate-pulse ${
                           phase === "thinking" ? "bg-cyan-400" : "bg-amber-400"
                         }`} />
-                        <span className="text-xs text-zinc-300 truncate">
+                        <span className="text-xs text-foreground dark:text-zinc-300 truncate">
                           {agentStatus || (phase === "thinking" ? "Thinking..." : "Acting...")}
                         </span>
                       </div>
@@ -582,17 +582,17 @@ export default function SessionPage() {
         {!desktopVisible && viewMode === "live" && (
           <button
             onClick={() => setDesktopVisible(true)}
-            className="flex flex-col items-center justify-center w-10 border-r border-[#1c1c1e] bg-[#09090b] hover:bg-zinc-900 transition-colors group"
+            className="flex flex-col items-center justify-center w-10 border-r border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b] hover:bg-black/5 dark:hover:bg-zinc-900 transition-colors group"
             title="Show Desktop"
           >
             <svg
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="w-4 h-4 text-zinc-600 group-hover:text-cyan-400 transition-colors"
+              className="w-4 h-4 text-muted dark:text-zinc-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors"
             >
               <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 11a1 1 0 011-1h12a1 1 0 010 2H4a1 1 0 01-1-1z" />
             </svg>
-            <span className="mt-1 text-[8px] font-bold text-zinc-700 group-hover:text-zinc-400 uppercase tracking-widest writing-mode-vertical"
+            <span className="mt-1 text-[8px] font-bold text-muted dark:text-zinc-700 group-hover:text-foreground dark:group-hover:text-zinc-400 uppercase tracking-widest writing-mode-vertical"
               style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
             >
               Desktop
@@ -602,16 +602,16 @@ export default function SessionPage() {
 
         {/* Right: Unified Chat Panel */}
         <div
-          className={`flex flex-col border-l border-[#1c1c1e] bg-[#0a0a0c] overflow-hidden transition-all duration-300 ease-in-out ${
+          className={`flex flex-col border-l border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#0a0a0c] overflow-hidden transition-all duration-300 ease-in-out ${
             desktopVisible && viewMode === "live"
               ? "w-105 min-w-95"
               : "flex-1"
           }`}
         >
           {/* Chat header */}
-          <div className="px-4 py-2.5 border-b border-[#1c1c1e] flex items-center justify-between">
+          <div className="px-4 py-2.5 border-b border-card-border dark:border-[#1c1c1e] flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.15em]">
+              <span className="text-[10px] font-black text-muted dark:text-zinc-400 uppercase tracking-[0.15em]">
                 Chat
               </span>
               {phase === "thinking" && (
@@ -644,15 +644,15 @@ export default function SessionPage() {
           <div className="flex-1 overflow-hidden">
             {viewMode === "archived" && chatItems.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-                <p className="text-lg font-semibold text-zinc-100">
+                <p className="text-lg font-semibold text-foreground dark:text-zinc-100">
                   Archived session
                 </p>
-                <p className="mt-2 max-w-md text-sm text-zinc-500">
+                <p className="mt-2 max-w-md text-sm text-muted dark:text-zinc-500">
                   The live desktop is no longer attached. You can review the
                   saved transcript below.
                 </p>
                 {sessionInfo?.summary && (
-                  <p className="mt-4 max-w-lg rounded-xl border border-[#1c1c1e] bg-[#09090b] px-4 py-3 text-sm text-zinc-300">
+                  <p className="mt-4 max-w-lg rounded-xl border border-card-border dark:border-[#1c1c1e] bg-background dark:bg-[#09090b] px-4 py-3 text-sm text-foreground dark:text-zinc-300">
                     {sessionInfo.summary}
                   </p>
                 )}
@@ -677,7 +677,7 @@ export default function SessionPage() {
 
           {/* Input area */}
           {viewMode === "live" ? (
-            <div className="px-4 py-3 border-t border-[#1c1c1e] bg-[#09090b]">
+            <div className="px-4 py-3 border-t border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b]">
               <div className="flex items-center gap-2">
                 <div className="flex-1 relative">
                   <input
@@ -688,7 +688,7 @@ export default function SessionPage() {
                     onChange={(e) => setTextInput(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
                     placeholder="Type a command... ( / to focus)"
-                    className="w-full bg-[#111114] border border-[#1c1c1e] rounded-full px-4 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/40 focus:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all duration-200"
+                    className="w-full bg-background dark:bg-[#111114] border border-card-border dark:border-[#1c1c1e] rounded-full px-4 py-2.5 text-sm text-foreground dark:text-white placeholder:text-muted dark:placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/40 focus:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all duration-200"
                   />
                   {textInput.trim() && (
                     <button
@@ -714,7 +714,7 @@ export default function SessionPage() {
               </div>
             </div>
           ) : (
-            <div className="border-t border-[#1c1c1e] px-4 py-3 text-sm text-zinc-500">
+            <div className="border-t border-card-border dark:border-[#1c1c1e] px-4 py-3 text-sm text-muted dark:text-zinc-500">
               Archived sessions are read-only. Start a new session from the home
               page to launch a fresh live desktop.
             </div>
@@ -731,7 +731,7 @@ export default function SessionPage() {
         </div>
       )}
       {isLoading && (
-        <div className="border-t border-[#1c1c1e] bg-[#09090b] px-4 py-2 text-sm text-zinc-500">
+        <div className="border-t border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b] px-4 py-2 text-sm text-muted dark:text-zinc-500">
           Loading session...
         </div>
       )}

@@ -45,10 +45,10 @@ export function MicButton({ isRecording, onStart, onStop, disabled }: Props) {
         transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/40
         ${
           disabled
-            ? "bg-zinc-800/50 text-zinc-700 cursor-not-allowed"
+            ? "bg-zinc-200/50 dark:bg-zinc-800/50 text-muted dark:text-zinc-700 cursor-not-allowed"
             : isRecording
               ? "bg-red-500/20 text-red-400 border border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.2)]"
-              : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:border-cyan-500/50 hover:text-cyan-400 active:scale-95"
+              : "bg-zinc-100 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-muted dark:text-zinc-400 hover:border-cyan-500/50 hover:text-cyan-600 dark:hover:text-cyan-400 active:scale-95"
         }
       `}
     >
@@ -56,7 +56,7 @@ export function MicButton({ isRecording, onStart, onStop, disabled }: Props) {
       {isRecording && !disabled && (
         <>
           <span className="absolute inset-0 rounded-xl border border-red-500 animate-pulse" />
-          <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-zinc-900" />
+          <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-background dark:border-zinc-900" />
         </>
       )}
 

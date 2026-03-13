@@ -73,7 +73,7 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#030303] text-white selection:bg-cyan-500/30 overflow-x-hidden">
+    <div className="min-h-screen bg-background text-foreground selection:bg-cyan-500/30 overflow-x-hidden">
       {/* Scroll Progress Indicator */}
       <motion.div
         className="fixed top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-cyan-500 to-emerald-500 z-[60] origin-left"
@@ -81,7 +81,7 @@ export default function HomePage() {
       />
 
       {/* Navigation */}
-      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 px-8 py-5 ${scrolled ? "bg-black/60 backdrop-blur-xl border-b border-white/5" : "bg-transparent"}`}>
+      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 px-8 py-5 ${scrolled ? "bg-white/80 dark:bg-black/60 backdrop-blur-xl border-b border-zinc-200 dark:border-white/5" : "bg-transparent"}`}>
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <motion.div 
             initial={{ opacity: 0, x: -20 }}
@@ -94,10 +94,10 @@ export default function HomePage() {
                 <span className="text-black font-black text-2xl italic">N</span>
               </div>
             </div>
-            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-400 transition-colors">Nexus</span>
+            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors text-foreground">Nexus</span>
           </motion.div>
           
-          <div className="hidden lg:flex items-center gap-10 text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-400">
+          <div className="hidden lg:flex items-center gap-10 text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-500 dark:text-zinc-400">
             {["Capabilities", "Operation", "Missions", "API"].map((item) => (
               <a 
                 key={item} 
@@ -117,19 +117,19 @@ export default function HomePage() {
           >
             {user ? (
               <>
-                <span className="hidden md:inline text-[10px] font-bold text-zinc-400 uppercase tracking-widest truncate max-w-[120px]">
+                <span className="hidden md:inline text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest truncate max-w-[120px]">
                   {user.displayName || user.email}
                 </span>
                 <button
                   onClick={() => { void signOutUser().catch(() => {}); }}
-                  className="px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-white hover:border-white/20 transition-all"
+                  className="px-4 py-2 rounded-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:border-zinc-300 dark:hover:border-white/20 transition-all"
                 >
                   Sign out
                 </button>
                 <button
                   onClick={() => handleStart()}
                   disabled={isLoading}
-                  className="px-6 py-2.5 rounded-full bg-white text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-white/5"
+                  className="px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-black/5 dark:shadow-white/5"
                 >
                   {isLoading ? "Booting..." : "Launch Console"}
                 </button>
@@ -138,7 +138,7 @@ export default function HomePage() {
               <button
                 onClick={() => { void signInWithGoogle().catch(() => {}); }}
                 disabled={authLoading}
-                className="px-6 py-2.5 rounded-full bg-white text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-white/5"
+                className="px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-black/5 dark:shadow-white/5"
               >
                 {authLoading ? "Loading..." : "Sign In"}
               </button>
@@ -176,10 +176,10 @@ export default function HomePage() {
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-3 px-5 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-md mb-12"
+            className="inline-flex items-center gap-3 px-5 py-2 rounded-full bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 backdrop-blur-md mb-12 shadow-sm dark:shadow-none"
           >
             <div className="w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_10px_rgba(34,211,238,0.8)] animate-pulse" />
-            <span className="text-[11px] font-bold uppercase tracking-[0.3em] text-zinc-300">v2.5 Hybrid Intelligence Protocol</span>
+            <span className="text-[11px] font-bold uppercase tracking-[0.3em] text-zinc-500 dark:text-zinc-300">v2.5 Hybrid Intelligence Protocol</span>
           </motion.div>
           
           <motion.h1 
@@ -212,7 +212,7 @@ export default function HomePage() {
               <button
                 onClick={() => handleStart()}
                 disabled={isLoading || !user || authLoading}
-                className="group relative px-12 py-6 rounded-2xl bg-white text-black font-black text-xs uppercase tracking-[0.2em] overflow-hidden transition-all hover:scale-105 active:scale-95 shadow-2xl shadow-white/5"
+                className="group relative px-12 py-6 rounded-2xl bg-zinc-900 dark:bg-white text-white dark:text-black font-black text-xs uppercase tracking-[0.2em] overflow-hidden transition-all hover:scale-105 active:scale-95 shadow-2xl shadow-black/5 dark:shadow-white/5"
               >
                 <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                 <span className="relative z-10 flex items-center gap-3">
@@ -222,7 +222,7 @@ export default function HomePage() {
                   </svg>
                 </span>
               </button>
-              <a href="#missions" className="group px-12 py-6 rounded-2xl bg-white/5 border border-white/10 text-white font-bold text-xs uppercase tracking-[0.2em] hover:bg-white/10 transition-all flex items-center gap-2">
+              <a href="#missions" className="group px-12 py-6 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 text-zinc-800 dark:text-white font-bold text-xs uppercase tracking-[0.2em] hover:bg-zinc-100 dark:hover:bg-white/10 transition-all flex items-center gap-2 shadow-sm dark:shadow-none">
                 Mission Profiles
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4 text-zinc-500 group-hover:translate-y-1 transition-transform">
                   <path d="M19 14l-7 7-7-7M12 3v18" />
@@ -247,17 +247,17 @@ export default function HomePage() {
           style={{ y: useTransform(scrollYProgress, [0, 0.2], [0, -100]) }}
           className="absolute bottom-[-10%] left-1/2 -translate-x-1/2 w-full max-w-6xl px-8 pointer-events-none"
         >
-          <div className="relative glass-panel rounded-3xl p-3 shadow-[0_0_100px_rgba(0,0,0,1)] group">
-            <div className="absolute inset-0 bg-gradient-to-t from-[#030303] via-transparent to-transparent z-10" />
-            <div className="flex items-center gap-2 px-6 py-4 border-b border-white/5">
+          <div className="relative glass-panel rounded-3xl p-3 shadow-[0_0_100px_rgba(0,0,0,0.1)] dark:shadow-[0_0_100px_rgba(0,0,0,1)] group bg-white/40 dark:bg-transparent">
+            <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#030303] via-transparent to-transparent z-10 opacity-50 dark:opacity-100" />
+            <div className="flex items-center gap-2 px-6 py-4 border-b border-zinc-200 dark:border-white/5">
               <div className="flex gap-2">
                 <div className="w-3 h-3 rounded-full bg-red-500/20" />
                 <div className="w-3 h-3 rounded-full bg-amber-500/20" />
                 <div className="w-3 h-3 rounded-full bg-emerald-500/20" />
               </div>
-              <div className="mx-auto text-[11px] font-bold text-zinc-600 uppercase tracking-[0.5em]">nexus_control_surface_v2.5</div>
+              <div className="mx-auto text-[11px] font-bold text-zinc-500 dark:text-zinc-600 uppercase tracking-[0.5em]">nexus_control_surface_v2.5</div>
             </div>
-            <div className="aspect-[21/9] bg-black relative flex items-center justify-center overflow-hidden rounded-b-2xl">
+            <div className="aspect-[21/9] bg-zinc-900 border border-t-0 border-zinc-800 dark:border-0 dark:bg-black relative flex items-center justify-center overflow-hidden rounded-b-2xl">
               <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.3),transparent_70%)]" />
               <div className="text-center space-y-6">
                 <motion.div 
@@ -326,13 +326,13 @@ export default function HomePage() {
               <motion.div 
                 key={idx}
                 variants={fadeInUp}
-                className="glass-card group p-10 rounded-[2.5rem] relative overflow-hidden"
+                className="glass-card bg-zinc-50/50 dark:bg-transparent group p-10 rounded-[2.5rem] relative overflow-hidden"
               >
                 <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-20 transition-opacity">
                   <span className="text-8xl font-black italic select-none">0{idx + 1}</span>
                 </div>
                 <div className="relative z-10 space-y-8">
-                  <div className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center text-zinc-400 group-hover:bg-cyan-500/20 group-hover:text-cyan-400 transition-all duration-500 shadow-inner">
+                  <div className="w-14 h-14 rounded-2xl bg-zinc-200 dark:bg-white/5 flex items-center justify-center text-zinc-600 dark:text-zinc-400 group-hover:bg-cyan-100 dark:group-hover:bg-cyan-500/20 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-all duration-500 shadow-inner">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-7 h-7">
                       {feature.icon}
                       {idx === 0 && <><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="22" /></>}
@@ -340,10 +340,10 @@ export default function HomePage() {
                     </svg>
                   </div>
                   <div className="space-y-4">
-                    <h4 className="text-xl font-black italic uppercase tracking-tight text-white group-hover:text-cyan-400 transition-colors">{feature.title}</h4>
-                    <p className="text-zinc-500 text-base leading-relaxed font-medium">{feature.description}</p>
+                    <h4 className="text-xl font-black italic uppercase tracking-tight text-zinc-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{feature.title}</h4>
+                    <p className="text-zinc-600 dark:text-zinc-500 text-base leading-relaxed font-medium">{feature.description}</p>
                   </div>
-                  <div className="pt-4 flex items-center gap-2 text-[10px] font-black text-cyan-500 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-all transform translate-y-4 group-hover:translate-y-0">
+                  <div className="pt-4 flex items-center gap-2 text-[10px] font-black text-cyan-600 dark:text-cyan-500 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-all transform translate-y-4 group-hover:translate-y-0">
                     System Verified <div className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
                   </div>
                 </div>
@@ -377,11 +377,11 @@ export default function HomePage() {
                 { n: "03", t: "Recursive Optimization", d: "Agent performs continuous self-correction using visual and textual telemetry, ensuring mission finality without manual oversight." }
               ].map((step, i) => (
                 <motion.div key={i} variants={fadeInUp} className="flex gap-10 group">
-                  <span className="text-5xl font-black italic text-zinc-900 group-hover:text-cyan-500/40 transition-colors duration-700 select-none">
+                  <span className="text-5xl font-black italic text-zinc-200 dark:text-zinc-900 group-hover:text-cyan-500/40 transition-colors duration-700 select-none">
                     {step.n}
                   </span>
                   <div className="space-y-3">
-                    <h4 className="text-lg font-black uppercase tracking-widest text-zinc-200 group-hover:text-white transition-colors">{step.t}</h4>
+                    <h4 className="text-lg font-black uppercase tracking-widest text-zinc-800 dark:text-zinc-200 group-hover:text-black dark:group-hover:text-white transition-colors">{step.t}</h4>
                     <p className="text-zinc-500 text-sm leading-relaxed font-medium max-w-sm">{step.d}</p>
                   </div>
                 </motion.div>
@@ -397,7 +397,7 @@ export default function HomePage() {
             className="relative h-[600px]"
           >
             <div className="absolute inset-0 bg-cyan-500/10 rounded-full blur-[160px] animate-pulse" />
-            <div className="relative h-full glass-panel rounded-[3rem] p-10 border border-white/10 flex flex-col shadow-2xl">
+            <div className="relative h-full glass-panel bg-white/40 dark:bg-transparent rounded-[3rem] p-10 border border-zinc-200 dark:border-white/10 flex flex-col shadow-[0_0_100px_rgba(0,0,0,0.05)] dark:shadow-2xl">
               <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
@@ -450,8 +450,8 @@ export default function HomePage() {
                     <span className="text-emerald-500 font-mono text-xs">22MS</span>
                   </div>
                 </div>
-                <div className="w-24 h-8 bg-zinc-900/50 rounded-lg flex items-center justify-center border border-white/5">
-                   <div className="w-16 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div className="w-24 h-8 bg-zinc-100 dark:bg-zinc-900/50 rounded-lg flex items-center justify-center border border-zinc-300 dark:border-white/5">
+                   <div className="w-16 h-1.5 bg-zinc-300 dark:bg-zinc-800 rounded-full overflow-hidden">
                       <motion.div animate={{ width: ["10%", "90%", "40%"] }} transition={{ duration: 4, repeat: Infinity }} className="h-full bg-cyan-500" />
                    </div>
                 </div>
@@ -497,7 +497,7 @@ export default function HomePage() {
         <div className="max-w-5xl mx-auto">
           <motion.div 
             whileHover={{ scale: 1.01 }}
-            className="glass-panel rounded-[3rem] p-16 relative overflow-hidden border border-white/10 text-center"
+            className="glass-panel bg-zinc-50/50 dark:bg-transparent rounded-[3rem] p-16 relative overflow-hidden border border-zinc-200 dark:border-white/10 text-center shadow-lg dark:shadow-none"
           >
             <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-emerald-500/10 opacity-40" />
             <div className="relative z-10 space-y-10">
@@ -506,10 +506,10 @@ export default function HomePage() {
                 Nexus is built for scale. Access the full power of the neural orchestrator via our high-bandwidth API, allowing for integrated autonomous agents in your own ecosystem.
               </p>
               <div className="flex justify-center gap-6">
-                <button className="px-10 py-4 rounded-xl bg-white text-black font-black text-[11px] uppercase tracking-widest hover:bg-cyan-400 transition-all shadow-xl shadow-white/5">
+                <button className="px-10 py-4 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-black font-black text-[11px] uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all shadow-xl shadow-black/5 dark:shadow-white/5">
                   Request API Access
                 </button>
-                <button className="px-10 py-4 rounded-xl bg-white/5 border border-white/10 text-white font-black text-[11px] uppercase tracking-widest hover:bg-white/10 transition-all">
+                <button className="px-10 py-4 rounded-xl bg-zinc-100 dark:bg-white/5 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-white font-black text-[11px] uppercase tracking-widest hover:bg-zinc-200 dark:hover:bg-white/10 transition-all">
                   Read Documentation
                 </button>
               </div>
@@ -531,7 +531,7 @@ export default function HomePage() {
                 <Link
                   key={session.session_id}
                   href={`/session/${session.session_id}`}
-                  className="block rounded-xl border border-white/5 bg-white/[0.02] p-4 transition hover:border-cyan-500/30 hover:bg-white/[0.04]"
+                  className="block rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-white/[0.02] p-4 transition hover:border-cyan-500/50 hover:bg-zinc-100 dark:hover:bg-white/[0.04] shadow-sm dark:shadow-none"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
@@ -553,47 +553,47 @@ export default function HomePage() {
       )}
 
       {/* Footer */}
-      <footer className="pt-40 pb-20 px-8 border-t border-white/5 relative bg-[#030303]">
+      <footer className="pt-40 pb-20 px-8 border-t border-card-border dark:border-white/5 relative bg-card dark:bg-[#030303]">
         <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-20">
           <div className="md:col-span-2 space-y-8">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center">
-                <span className="text-black font-black text-2xl italic">N</span>
+              <div className="w-10 h-10 rounded-xl bg-zinc-900 dark:bg-white flex items-center justify-center">
+                <span className="text-white dark:text-black font-black text-2xl italic">N</span>
               </div>
-              <span className="text-2xl font-black tracking-tighter italic uppercase">Nexus</span>
+              <span className="text-2xl font-black tracking-tighter italic uppercase text-foreground">Nexus</span>
             </div>
             <p className="text-zinc-500 text-sm font-medium leading-relaxed max-w-sm uppercase tracking-wider">
               Autonomous Multimodal Neural Architecture. Built for the next era of computational intelligence.
             </p>
             <div className="flex gap-4">
                {["X", "GH", "DC", "LI"].map(s => (
-                 <div key={s} className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center text-[10px] font-black text-zinc-500 hover:text-white hover:border-white/20 transition-all cursor-pointer">{s}</div>
+                 <div key={s} className="w-10 h-10 rounded-lg bg-zinc-200 dark:bg-white/5 border border-zinc-300 dark:border-white/10 flex items-center justify-center text-[10px] font-black text-zinc-600 dark:text-zinc-500 hover:text-black dark:hover:text-white hover:border-zinc-400 dark:hover:border-white/20 transition-all cursor-pointer">{s}</div>
                ))}
             </div>
           </div>
           
           <div className="space-y-8">
-            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-white">Ecosystem</h5>
+            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-zinc-900 dark:text-white">Ecosystem</h5>
             <ul className="space-y-4 text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Gemini 2.5 Flash</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Google ADK Core</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">E2B Desktop V2</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Cloud Run Infra</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Gemini 2.5 Flash</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Google ADK Core</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">E2B Desktop V2</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Cloud Run Infra</a></li>
             </ul>
           </div>
 
           <div className="space-y-8">
-            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-white">Resources</h5>
+            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-zinc-900 dark:text-white">Resources</h5>
             <ul className="space-y-4 text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Documentation</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Github Repo</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">Hackathon Info</a></li>
-              <li className="hover:text-cyan-400 transition-colors"><a href="#">System Status</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Documentation</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Github Repo</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Hackathon Info</a></li>
+              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">System Status</a></li>
             </ul>
           </div>
         </div>
         
-        <div className="max-w-7xl mx-auto mt-40 pt-10 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-6 text-[9px] font-black text-zinc-600 uppercase tracking-[0.4em]">
+        <div className="max-w-7xl mx-auto mt-40 pt-10 border-t border-zinc-200 dark:border-white/5 flex flex-col md:flex-row justify-between items-center gap-6 text-[9px] font-black text-zinc-500 dark:text-zinc-600 uppercase tracking-[0.4em]">
           <p>© 2026 NEXUS SYSTEMS ARCHITECTURE // ALL RIGHTS RESERVED</p>
           <p className="flex items-center gap-4">
             <span>Security Protocol v9.2.0</span>

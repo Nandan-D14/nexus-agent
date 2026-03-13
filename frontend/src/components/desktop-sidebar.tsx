@@ -135,7 +135,7 @@ export function DesktopSidebar({
   return (
     <div
       className={`
-        flex flex-col shrink-0 bg-[#09090b] border-r border-[#1c1c1e]
+        flex flex-col shrink-0 bg-card dark:bg-[#09090b] border-r border-card-border dark:border-[#1c1c1e]
         transition-all duration-300 ease-in-out overflow-hidden
         ${open ? "w-44" : "w-9"}
       `}
@@ -144,7 +144,7 @@ export function DesktopSidebar({
       <button
         suppressHydrationWarning
         onClick={onToggle}
-        className="flex items-center justify-center h-9 w-full border-b border-[#1c1c1e] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-900/50 transition-colors shrink-0"
+        className="flex items-center justify-center h-9 w-full border-b border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-500 hover:text-foreground dark:hover:text-zinc-200 hover:bg-black/5 dark:hover:bg-zinc-900/50 transition-colors shrink-0"
         title={open ? "Collapse sidebar" : "Expand sidebar"}
       >
         <ChevronIcon open={open} className="w-3.5 h-3.5" />
@@ -152,7 +152,7 @@ export function DesktopSidebar({
 
       {/* ── Connection status dot ── */}
       <div
-        className={`flex items-center border-b border-[#1c1c1e] shrink-0 ${
+        className={`flex items-center border-b border-card-border dark:border-[#1c1c1e] shrink-0 ${
           open ? "gap-2.5 px-3 py-2" : "justify-center py-2"
         }`}
         title={isConnected ? "Connected" : "Disconnected"}
@@ -163,7 +163,7 @@ export function DesktopSidebar({
           }`}
         />
         {open && (
-          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 truncate">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-muted dark:text-zinc-400 truncate">
             {isConnected ? "Live" : "Offline"}
           </span>
         )}
@@ -171,7 +171,7 @@ export function DesktopSidebar({
 
       {/* ── Phase indicator ── */}
       <div
-        className={`flex items-center border-b border-[#1c1c1e] shrink-0 ${
+        className={`flex items-center border-b border-card-border dark:border-[#1c1c1e] shrink-0 ${
           open ? "gap-2.5 px-3 py-2" : "justify-center py-2"
         }`}
         title={`Phase: ${phaseInfo.label}`}
@@ -191,14 +191,14 @@ export function DesktopSidebar({
       {/* ── Active agent ── */}
       {activeAgent && activeAgent !== "nexus" && (
         <div
-          className={`flex items-center border-b border-[#1c1c1e] shrink-0 ${
+          className={`flex items-center border-b border-card-border dark:border-[#1c1c1e] shrink-0 ${
             open ? "gap-2 px-3 py-2" : "justify-center py-2"
           }`}
           title={`Agent: ${activeAgent}`}
         >
           <span className="w-2 h-2 rounded-full bg-cyan-500 shrink-0" />
           {open && (
-            <span className="text-[10px] font-medium text-zinc-300 truncate leading-tight">
+            <span className="text-[10px] font-medium text-foreground dark:text-zinc-300 truncate leading-tight">
               {activeAgent.replace(/_/g, " ")}
             </span>
           )}
@@ -209,13 +209,13 @@ export function DesktopSidebar({
       <div className="flex-1" />
 
       {/* ── Action buttons ── */}
-      <div className={`flex flex-col border-t border-[#1c1c1e] py-2 gap-1 ${open ? "px-2" : "px-1"}`}>
+      <div className={`flex flex-col border-t border-card-border dark:border-[#1c1c1e] py-2 gap-1 ${open ? "px-2" : "px-1"}`}>
         {/* Analyze screen */}
         <button
           onClick={onAnalyzeScreen}
           disabled={!isConnected}
           title="Analyze screen"
-          className={`flex items-center rounded-md text-zinc-400 hover:text-cyan-400 hover:bg-zinc-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors ${
+          className={`flex items-center rounded-md text-muted dark:text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-zinc-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors ${
             open ? "gap-2 px-2 py-1.5" : "justify-center p-1.5"
           }`}
         >
@@ -232,7 +232,7 @@ export function DesktopSidebar({
           onClick={onAnalyzeScreen}
           disabled={!isConnected}
           title="Take screenshot"
-          className={`flex items-center rounded-md text-zinc-400 hover:text-cyan-400 hover:bg-zinc-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors ${
+          className={`flex items-center rounded-md text-muted dark:text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-zinc-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors ${
             open ? "gap-2 px-2 py-1.5" : "justify-center p-1.5"
           }`}
         >

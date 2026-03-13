@@ -112,22 +112,24 @@ export function UnifiedChatPanel({
   return (
     <div
       ref={scrollRef}
-      className="flex flex-col gap-1 p-4 overflow-y-auto h-full custom-scrollbar"
+      className="overflow-y-auto h-full custom-scrollbar flex flex-col px-4 py-6"
     >
-      {items.map((item, i) => (
-        <div key={`${item.ts}-${item.kind}-${i}`} className="ucp-fade-in">
-          <ChatItemRouter
-            item={item}
-            onPermissionRespond={onPermissionRespond}
-          />
-        </div>
-      ))}
+      <div className="mx-auto max-w-3xl w-full flex flex-col gap-1.5 pb-4">
+        {items.map((item, i) => (
+          <div key={`${item.ts}-${item.kind}-${i}`} className="ucp-fade-in flex flex-col w-full">
+            <ChatItemRouter
+              item={item}
+              onPermissionRespond={onPermissionRespond}
+            />
+          </div>
+        ))}
 
-      {isThinking && (
-        <div className="ucp-fade-in">
-          <ThinkingIndicator />
-        </div>
-      )}
+        {isThinking && (
+          <div className="ucp-fade-in w-full">
+            <ThinkingIndicator />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -201,7 +203,7 @@ function MessageBubble({
         >
           {isUser ? "You" : "NEXUS"}
         </span>
-        <span className="text-[9px] text-zinc-600 font-mono">
+        <span className="text-[9px] text-muted dark:text-zinc-600 font-mono">
           {formatTime(ts)}
         </span>
       </div>
@@ -211,7 +213,7 @@ function MessageBubble({
         className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed transition-colors duration-200 ${
           isUser
             ? "bg-cyan-500/5 text-cyan-50 border border-cyan-500/20 rounded-tr-none"
-            : "bg-zinc-900 text-zinc-200 border border-zinc-800 rounded-tl-none"
+            : "bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-200 border border-card-border dark:border-zinc-800 rounded-tl-none shadow-sm dark:shadow-none"
         }`}
       >
         {text}
@@ -325,11 +327,11 @@ function ToolCallPill({
     <div className="flex items-start gap-2 py-1 px-3">
       <span className="mt-1.5 block w-2 h-2 rounded-full bg-cyan-500 shrink-0" />
       <div className="min-w-0 font-mono text-[11px] leading-snug">
-        <span className="text-zinc-700 mr-1.5 select-none">
+        <span className="text-muted dark:text-zinc-700 mr-1.5 select-none">
           {formatTime(ts)}
         </span>
         <span className="text-cyan-400">{tool}</span>
-        <span className="text-zinc-500">({argsStr})</span>
+        <span className="text-zinc-400 dark:text-zinc-500">({argsStr})</span>
       </div>
     </div>
   );
@@ -357,12 +359,12 @@ function ToolResultPill({
     <div className="flex items-start gap-2 py-1 px-3">
       <span className="mt-1.5 block w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
       <div className="min-w-0 font-mono text-[11px] leading-snug">
-        <span className="text-zinc-700 mr-1.5 select-none">
+        <span className="text-muted dark:text-zinc-700 mr-1.5 select-none">
           {formatTime(ts)}
         </span>
         <span className="text-emerald-400 font-bold">{tool}</span>
-        <span className="text-zinc-500 mx-1">&rarr;</span>
-        <span className="text-zinc-400 break-all">{display}</span>
+        <span className="text-muted dark:text-zinc-500 mx-1">&rarr;</span>
+        <span className="text-zinc-500 dark:text-zinc-400 break-all">{display}</span>
       </div>
     </div>
   );
@@ -414,7 +416,7 @@ function ScreenshotItem({
               aria-label={
                 expanded ? "Collapse screenshot" : "Expand screenshot"
               }
-              className="relative group w-full overflow-hidden rounded border border-zinc-800 bg-black cursor-pointer transition-[max-height] duration-500 ease-in-out"
+              className="relative group w-full overflow-hidden rounded border border-card-border dark:border-zinc-800 bg-background dark:bg-black cursor-pointer transition-[max-height] duration-500 ease-in-out"
               style={{ maxHeight: expanded ? "400px" : "64px" }}
             >
               <img
@@ -437,7 +439,7 @@ function ScreenshotItem({
             <button
               type="button"
               onClick={() => setExpanded((prev) => !prev)}
-              className="mt-1 text-[9px] font-bold text-zinc-600 hover:text-zinc-400 uppercase tracking-widest transition-colors duration-200"
+              className="mt-1 text-[9px] font-bold text-muted dark:text-zinc-600 hover:text-zinc-500 dark:hover:text-zinc-400 uppercase tracking-widest transition-colors duration-200"
             >
               {expanded ? "Collapse" : "View full"}
             </button>
@@ -461,12 +463,12 @@ function ThinkingLine({
 }) {
   return (
     <div className="flex items-start gap-2 py-1 px-3">
-      <span className="mt-1.5 block w-2 h-2 rounded-full bg-zinc-600 shrink-0" />
+      <span className="mt-1.5 block w-2 h-2 rounded-full bg-zinc-400 dark:bg-zinc-600 shrink-0" />
       <div className="min-w-0 text-[11px]">
-        <span className="text-zinc-700 mr-1.5 select-none font-mono">
+        <span className="text-muted dark:text-zinc-700 mr-1.5 select-none font-mono">
           {formatTime(ts)}
         </span>
-        <span className="text-zinc-500 italic">
+        <span className="text-zinc-400 dark:text-zinc-500 italic">
           {content || "Thinking\u2026"}
         </span>
       </div>
@@ -481,7 +483,7 @@ function ThinkingLine({
 function CompleteBadge({ ts }: { ts: number }) {
   return (
     <div className="flex items-center gap-2 py-1 px-3">
-      <span className="text-zinc-700 text-[11px] select-none font-mono">
+      <span className="text-muted dark:text-zinc-700 text-[11px] select-none font-mono">
         {formatTime(ts)}
       </span>
       <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-3 py-0.5 uppercase tracking-widest">
@@ -509,7 +511,7 @@ function ErrorBadge({
     <div className="py-1 px-3">
       <div className="bg-red-500/5 border border-red-500/15 rounded-lg p-2.5 space-y-1">
         <div className="flex items-center gap-2">
-          <span className="text-zinc-700 text-[11px] select-none font-mono">
+          <span className="text-muted dark:text-zinc-700 text-[11px] select-none font-mono">
             {formatTime(ts)}
           </span>
           <span className="text-red-500 text-[10px] font-black uppercase tracking-widest">
@@ -547,13 +549,13 @@ function BgTaskProgressPill({
       <span className="mt-1.5 block w-2 h-2 rounded-full bg-amber-500 shrink-0 animate-pulse" />
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center gap-2 text-[11px]">
-          <span className="text-zinc-700 select-none font-mono">
+          <span className="text-muted dark:text-zinc-700 select-none font-mono">
             {formatTime(ts)}
           </span>
           <span className="text-amber-400 text-[10px] font-bold uppercase tracking-widest">
             Background Task
           </span>
-          <span className="text-zinc-500 text-[10px]">{progress}%</span>
+          <span className="text-zinc-400 dark:text-zinc-500 text-[10px]">{progress}%</span>
         </div>
         <div className="w-full h-1 rounded-full bg-zinc-800 overflow-hidden">
           <div
@@ -562,7 +564,7 @@ function BgTaskProgressPill({
           />
         </div>
         {message && (
-          <p className="text-zinc-500 text-[10px]">{message}</p>
+          <p className="text-zinc-400 dark:text-zinc-500 text-[10px]">{message}</p>
         )}
       </div>
     </div>
@@ -592,7 +594,7 @@ function BgTaskCompleteBadge({
         }`}
       >
         <div className="flex items-center gap-2">
-          <span className="text-zinc-700 text-[11px] select-none font-mono">
+          <span className="text-muted dark:text-zinc-700 text-[11px] select-none font-mono">
             {formatTime(ts)}
           </span>
           <span
@@ -632,12 +634,12 @@ function DelegationBadge({
 }) {
   return (
     <div className="flex justify-center py-2">
-      <div className="inline-flex items-center gap-2 text-[10px] text-zinc-500 bg-zinc-900/60 border border-zinc-800 rounded-full px-4 py-1">
-        <span className="font-mono text-zinc-700 select-none">
+      <div className="inline-flex items-center gap-2 text-[10px] text-zinc-600 dark:text-zinc-500 bg-zinc-100/60 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 rounded-full px-4 py-1">
+        <span className="font-mono text-zinc-500 dark:text-zinc-700 select-none">
           {formatTime(ts)}
         </span>
-        <span className="text-zinc-500">&rarr;</span>
-        <span className="text-zinc-400 font-bold">Delegated to {to}</span>
+        <span className="text-zinc-400 dark:text-zinc-500">&rarr;</span>
+        <span className="text-zinc-600 dark:text-zinc-400 font-bold">Delegated to {to}</span>
       </div>
     </div>
   );
@@ -655,13 +657,13 @@ function ThinkingIndicator() {
           NEXUS
         </span>
       </div>
-      <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl rounded-tl-none bg-zinc-900 border border-zinc-800">
+      <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl rounded-tl-none bg-white dark:bg-zinc-900 border border-card-border dark:border-zinc-800 shadow-sm dark:shadow-none">
         <div className="flex items-center gap-1">
           <span className="block w-1.5 h-1.5 rounded-full bg-emerald-500 ucp-dot-1" />
           <span className="block w-1.5 h-1.5 rounded-full bg-emerald-500 ucp-dot-2" />
           <span className="block w-1.5 h-1.5 rounded-full bg-emerald-500 ucp-dot-3" />
         </div>
-        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
+        <span className="text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">
           Processing...
         </span>
       </div>
