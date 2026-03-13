@@ -263,7 +263,7 @@ export default function SessionPage() {
         console.error("[handleEnd] Failed to destroy session:", err);
       }
     }
-    router.push("/");
+    router.push("/dashboard");
   };
 
   return (
@@ -285,12 +285,20 @@ export default function SessionPage() {
             </span>
           )}
         </div>
-        <button
-          onClick={handleEnd}
-          className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition"
-        >
-          {viewMode === "live" ? "End Session" : "Back Home"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => router.push("/settings/profile")}
+            className="text-xs px-3 py-1.5 rounded-lg border border-[#27272a] text-zinc-400 hover:bg-[#27272a]/50 hover:text-white transition"
+          >
+            Settings
+          </button>
+          <button
+            onClick={handleEnd}
+            className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition"
+          >
+            {viewMode === "live" ? "End Session" : "Dashboard"}
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">

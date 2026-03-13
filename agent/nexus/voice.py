@@ -27,14 +27,14 @@ class GeminiLiveManager:
     def connected(self) -> bool:
         return self._connected
 
-    async def connect(self, system_instruction: str = "") -> None:
+    async def connect(self, system_instruction: str = "", voice_name: str = "Kore") -> None:
         """Open a Gemini Live bidirectional session."""
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Kore"
+                        voice_name=voice_name
                     )
                 )
             ),

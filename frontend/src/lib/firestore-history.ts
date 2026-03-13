@@ -3,7 +3,6 @@
 import {
   collection,
   getDocs,
-  limit,
   orderBy,
   query,
   where,
@@ -19,24 +18,36 @@ export async function listRecentSessions(
   const sessionsQuery = query(
     collection(db, "sessions"),
     where("ownerId", "==", ownerId),
-    orderBy("updatedAt", "desc"),
-    limit(count),
   );
 
   const snapshot = await getDocs(sessionsQuery);
-  return snapshot.docs.map((docSnapshot) => {
-    const data = docSnapshot.data();
-    return {
-      session_id: docSnapshot.id,
-      title: typeof data.title === "string" ? data.title : "Untitled session",
-      status: typeof data.status === "string" ? data.status : "ended",
-      summary: typeof data.summary === "string" ? data.summary : null,
-      created_at: data.createdAt?.toDate?.().toISOString?.() || null,
-      updated_at: data.updatedAt?.toDate?.().toISOString?.() || null,
-      message_count:
-        typeof data.messageCount === "number" ? data.messageCount : 0,
-    };
-  });
+  return snapshot.docs
+    .map((docSnapshot) => {
+      const data = docSnapshot.data();
+      const createdAt = data.createdAt?.toDate?.() ?? null;
+      const updatedAt = data.updatedAt?.toDate?.() ?? createdAt;
+
+      return {
+        session_id: docSnapshot.id,
+        title:
+          typeof data.title === "string" && data.title.trim()
+            ? data.title
+            : "Untitled session",
+        status: typeof data.status === "string" ? data.status : "ended",
+        summary: typeof data.summary === "string" ? data.summary : null,
+        created_at: createdAt?.toISOString?.() || null,
+        updated_at: updatedAt?.toISOString?.() || null,
+        message_count:
+          typeof data.messageCount === "number" ? data.messageCount : 0,
+      };
+    })
+    .filter((session) => session.status !== "deleted")
+    .sort((a, b) => {
+      const left = Date.parse(b.updated_at || b.created_at || "");
+      const right = Date.parse(a.updated_at || a.created_at || "");
+      return (Number.isNaN(left) ? 0 : left) - (Number.isNaN(right) ? 0 : right);
+    })
+    .slice(0, count);
 }
 
 export async function listArchivedMessages(

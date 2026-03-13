@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +127,62 @@ async def refresh_ticket(session_id: str, user: AuthenticatedUser = Depends(requ
     ticket = session_manager.create_ticket(session_id, user.uid)
     return {"ws_ticket": ticket}
 
+
+@app.get("/api/v1/dashboard/stats")
+async def get_dashboard_stats(user: AuthenticatedUser = Depends(require_current_user)):
+    return await history_repository.get_dashboard_stats(user.uid)
+
+
+@app.get("/api/v1/dashboard/usage")
+async def get_dashboard_usage(
+    days: int = Query(30, ge=1, le=90),
+    user: AuthenticatedUser = Depends(require_current_user)
+):
+    chart = await history_repository.get_dashboard_usage(user.uid, days)
+    return {"chart": chart}
+
+
+@app.get("/api/v1/history")
+async def list_history(
+    limit: int = Query(25, ge=1, le=100),
+    status: str | None = Query(None),
+    q: str | None = Query(None),
+    user: AuthenticatedUser = Depends(require_current_user)
+):
+    sessions = await history_repository.list_sessions(user.uid, limit, status, q)
+    return {
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "title": getattr(s, "title", "Session") + (" - " + getattr(s, "summary", "")[:50] if getattr(s, "summary", "") else ""),
+                "status": s.status,
+                "created_at": s.created_at,
+                "ended_at": s.ended_at,
+                "message_count": s.message_count,
+            }
+            for s in sessions
+        ]
+    }
+
+@app.get("/api/v1/history/{session_id}/messages")
+async def get_history_messages(session_id: str, user: AuthenticatedUser = Depends(require_current_user)):
+    # Verify owner
+    session = await history_repository.get_session(session_id)
+    if not session or session.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    messages = await history_repository.get_session_messages(session_id)
+    return {"messages": messages}
+
+@app.get("/api/v1/user/settings")
+async def get_user_settings(user: AuthenticatedUser = Depends(require_current_user)):
+    settings = await history_repository.get_user_settings(user.uid)
+    return settings
+
+@app.patch("/api/v1/user/settings")
+async def update_user_settings(updates: dict[str, Any], user: AuthenticatedUser = Depends(require_current_user)):
+    await history_repository.update_user_settings(user.uid, updates)
+    return {"status": "ok"}
 
 # ── WebSocket Endpoint ──────────────────────────────────────────
 

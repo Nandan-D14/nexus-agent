@@ -9,6 +9,7 @@ import {
 } from "firebase/app";
 import { connectAuthEmulator, getAuth } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 const requiredEnvVars = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -40,6 +41,7 @@ const app: FirebaseApp =
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const storage = getStorage(app);
 
 const recoverableFirestoreErrorCodes = new Set([
   "unavailable",

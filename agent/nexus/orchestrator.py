@@ -270,9 +270,27 @@ class NexusOrchestrator:
             return
 
         try:
-            await self.voice.connect(system_instruction=SYSTEM_PROMPT)
+            # Fetch user voice preference
+            voice_name = "Kore"
+            if self.history_repository:
+                try:
+                    user_prefs = await self.history_repository.get_user_settings(self.session.owner_id)
+                    voice_setting = user_prefs.get("settings", {}).get("voiceId")
+                    if voice_setting:
+                        # Map UI voice names to Gemini supported voices (Kore, Aoede, Puck, Charon, Fenrir)
+                        vmap = {
+                            "Calm_Woman": "Kore",
+                            "Authoritative_Male": "Charon",
+                            "Neutral_Assist": "Aoede",
+                            "Dynamic_Guide": "Fenrir"
+                        }
+                        voice_name = vmap.get(voice_setting, "Kore")
+                except Exception:
+                    logger.debug("Failed to get user voice preference", exc_info=True)
+
+            await self.voice.connect(system_instruction=SYSTEM_PROMPT, voice_name=voice_name)
             self._voice_connected = True
-            logger.info("Gemini Live voice connected")
+            logger.info("Gemini Live voice connected with voice %s", voice_name)
         except asyncio.CancelledError:
             raise
         except Exception:

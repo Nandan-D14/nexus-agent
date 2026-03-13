@@ -126,6 +126,18 @@ export default function HomePage() {
                 >
                   Sign out
                 </button>
+                <Link
+                  href="/dashboard"
+                  className="hidden md:flex px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-white hover:border-white/20 transition-all items-center"
+                >
+                  Dashboard
+                </Link>
+                <Link
+                  href="/settings/profile"
+                  className="hidden md:flex px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-white hover:border-white/20 transition-all items-center"
+                >
+                  Settings
+                </Link>
                 <button
                   onClick={() => handleStart()}
                   disabled={isLoading}
