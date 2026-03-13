@@ -80,7 +80,9 @@ test_screenshot.png
 # ── Plan / draft files (dev only) ────────────────────────────
 nexus_plan.md
 codex-plan.md
+phase2-plan.md
 
 # ── Tool configs ──────────────────────────────────────────────
 .zencoder/
 .zenflow/
+.playwright-mcp/
