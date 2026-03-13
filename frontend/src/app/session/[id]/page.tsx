@@ -10,6 +10,7 @@ import {
 
 import { DemoPicker } from "@/components/demo-picker";
 import { DesktopPanel } from "@/components/desktop-panel";
+import { DesktopSidebar } from "@/components/desktop-sidebar";
 import { MicButton } from "@/components/mic-button";
 import { StatusBar } from "@/components/status-bar";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
@@ -65,6 +66,7 @@ export default function SessionPage() {
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [textInput, setTextInput] = useState("");
   const [desktopVisible, setDesktopVisible] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
 
   const audioPlayer = useRef(new AudioPlayer());
@@ -452,6 +454,7 @@ export default function SessionPage() {
           {/* Hide/Show Desktop toggle */}
           {viewMode === "live" && (
             <button
+              suppressHydrationWarning
               onClick={() => setDesktopVisible((v) => !v)}
               className="text-xs px-3 py-1.5 rounded-lg border border-[#1c1c1e] text-zinc-400 hover:bg-zinc-800/50 hover:text-white transition-all duration-200 flex items-center gap-1.5"
               title={desktopVisible ? "Hide desktop" : "Show desktop"}
@@ -472,12 +475,14 @@ export default function SessionPage() {
           )}
 
           <button
+            suppressHydrationWarning
             onClick={() => router.push("/settings/profile")}
             className="text-xs px-3 py-1.5 rounded-lg border border-[#1c1c1e] text-zinc-400 hover:bg-zinc-800/50 hover:text-white transition-all duration-200"
           >
             Settings
           </button>
           <button
+            suppressHydrationWarning
             onClick={handleEnd}
             className="text-xs px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 hover:border-red-500/30 transition-all duration-200"
           >
@@ -490,14 +495,26 @@ export default function SessionPage() {
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Desktop panel (collapsible) */}
         <div
-          className={`flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${
+          className={`flex overflow-hidden transition-all duration-300 ease-in-out ${
             desktopVisible && viewMode === "live"
-              ? "flex-1 min-w-0 p-2"
+              ? "flex-1 min-w-0"
               : "w-0 min-w-0 p-0 opacity-0"
           }`}
         >
           {viewMode === "live" ? (
-            <DesktopPanel streamUrl={streamUrl} />
+            <>
+              <DesktopSidebar
+                open={sidebarOpen}
+                onToggle={() => setSidebarOpen((v) => !v)}
+                phase={phase}
+                activeAgent={activeAgent}
+                isConnected={isConnected}
+                onAnalyzeScreen={() => sendJson({ type: "analyze_screen" })}
+              />
+              <div className="flex-1 overflow-hidden p-2">
+                <DesktopPanel streamUrl={streamUrl} />
+              </div>
+            </>
           ) : null}
         </div>
 
@@ -591,6 +608,7 @@ export default function SessionPage() {
               <div className="flex items-center gap-2">
                 <div className="flex-1 relative">
                   <input
+                    suppressHydrationWarning
                     ref={inputRef}
                     type="text"
                     value={textInput}
