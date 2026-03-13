@@ -64,10 +64,59 @@ class SandboxManager:
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
         logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
+        self._set_wallpaper()
         return {
             "sandbox_id": self._sandbox.sandbox_id,
             "stream_url": self._stream_url,
         }
+
+    def _set_wallpaper(self) -> None:
+        """Set a branded NEXUS dark gradient wallpaper via XFCE config. Cosmetic — errors are swallowed."""
+        py_gen = (
+            "import struct,zlib;"
+            "W,H=1024,768;"
+            "rows=bytearray();"
+            "[rows.extend(bytes([0])+bytes([int(8+y/H*8),int(8+y/H*8),int(15+y/H*13)])*W) for y in range(H)];"
+            "idat=zlib.compress(bytes(rows),1);"
+            "c=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff);"
+            r"open('/tmp/nexus_bg.png','wb').write(b'\x89PNG\r\n\x1a\n'"
+            "+c(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))"
+            "+c(b'IDAT',idat)+c(b'IEND',b''))"
+        )
+        cmd = (
+            "sleep 3; "
+            # Step 1: generate the wallpaper image
+            "if command -v convert >/dev/null 2>&1; then "
+            "  convert -size 1024x768 gradient:'#08080f-#0e0e1c' "
+            "  -fill '#22d3ee' -font DejaVu-Sans-Bold -pointsize 72 "
+            "  -gravity Center -annotate +0-15 'NEXUS' "
+            "  -fill '#1a3a4a' -pointsize 14 "
+            "  -gravity Center -annotate +0+48 'AI DESKTOP AGENT' "
+            "  /tmp/nexus_bg.png 2>/dev/null || "
+            f"  python3 -c \"{py_gen}\" 2>/dev/null; "
+            "else "
+            f"  python3 -c \"{py_gen}\" 2>/dev/null; "
+            "fi; "
+            # Step 2: write into ALL existing XFCE last-image properties
+            "for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep 'last-image'); do "
+            "  xfconf-query -c xfce4-desktop -p \"$p\" -s /tmp/nexus_bg.png 2>/dev/null || true; "
+            "done; "
+            "xfconf-query -c xfce4-desktop "
+            "  -p /backdrop/screen0/monitorVirtual-1/workspace0/last-image "
+            "  -s /tmp/nexus_bg.png --create -t string 2>/dev/null || true; "
+            "xfconf-query -c xfce4-desktop "
+            "  -p /backdrop/screen0/monitorVirtual-1/workspace0/image-style "
+            "  -s 4 --create -t int 2>/dev/null || true; "
+            # Step 3: restart xfdesktop to pick up the new config
+            "pkill xfdesktop 2>/dev/null; sleep 0.5; "
+            "DISPLAY=:1 nohup xfdesktop --disable-wm-check >/dev/null 2>&1 & "
+            "true"
+        )
+        try:
+            self._sandbox.commands.run(cmd, timeout=35)
+            logger.debug("Branded wallpaper applied via xfconf-query + xfdesktop restart")
+        except Exception:
+            logger.debug("Wallpaper setup skipped (non-critical)", exc_info=True)
 
     def keep_alive(self, timeout: int = 300) -> None:
         """Extend sandbox timeout."""

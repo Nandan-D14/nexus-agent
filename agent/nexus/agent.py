@@ -1,4 +1,9 @@
-"""ADK agent definition — the NEXUS brain."""
+"""ADK agent definition — the NEXUS brain.
+
+Supports two modes:
+  1. Single agent (default fallback) — one agent with all tools.
+  2. Multi-agent orchestrator — hierarchical: Orchestrator → sub-agents.
+"""
 
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ def _get_model():
 
 
 def create_agent() -> Agent:
-    """Create the NEXUS ADK agent with all desktop control tools."""
+    """Create the single NEXUS ADK agent with all desktop control tools."""
     agent = Agent(
         name="nexus",
         model=_get_model(),
@@ -42,6 +47,36 @@ def create_agent() -> Agent:
         tools=ALL_TOOLS,
     )
     return agent
+
+
+def create_multi_agent() -> Agent:
+    """Create a hierarchical multi-agent system.
+
+    Returns the top-level orchestrator agent which delegates to:
+      - computer_agent (GUI interactions)
+      - browser_agent (web browsing)
+      - code_agent (terminal & code)
+    """
+    from nexus.agents import (
+        create_browser_agent,
+        create_code_agent,
+        create_computer_agent,
+        create_orchestrator_agent,
+    )
+    from nexus.tools.bg_task import request_background_task
+
+    computer = create_computer_agent()
+    browser = create_browser_agent()
+    code = create_code_agent()
+
+    orchestrator = create_orchestrator_agent(
+        computer_agent=computer,
+        browser_agent=browser,
+        code_agent=code,
+        extra_tools=[request_background_task],
+    )
+    logger.info("Multi-agent orchestrator created with sub-agents: computer, browser, code")
+    return orchestrator
 
 
 def create_runner(agent: Agent) -> tuple[Runner, InMemorySessionService]:
@@ -86,7 +121,7 @@ async def run_agent_turn(
 
     final_response = None
     turn_count = 0
-    max_turns = 15  # Prevent runaway tool loops
+    max_turns = settings.max_agent_turns
 
     async for event in runner.run_async(
         user_id=user_id,

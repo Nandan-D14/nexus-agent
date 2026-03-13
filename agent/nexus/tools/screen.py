@@ -66,7 +66,7 @@ def take_screenshot() -> dict:
                         types.Content(
                             role="user",
                             parts=[
-                                types.Part.from_text(vision_prompt),
+                                types.Part(text=vision_prompt),
                                 types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
                             ],
                         )

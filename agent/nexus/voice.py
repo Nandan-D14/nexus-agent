@@ -74,7 +74,7 @@ class GeminiLiveManager:
             return
         await self._live.send_client_content(
             turns=types.Content(
-                role="user", parts=[types.Part.from_text(text)]
+                role="user", parts=[types.Part(text=text)]
             ),
             turn_complete=True,
         )

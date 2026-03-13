@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     sandbox_resolution_h: int = 768
     sandbox_timeout_seconds: int = 600
 
+    # Multi-agent orchestration
+    use_multi_agent: bool = True
+    max_agent_turns: int = 30
+
 
 settings = Settings()
 

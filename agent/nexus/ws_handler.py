@@ -78,6 +78,12 @@ async def handle_websocket(
                         # Future: implement agent cancellation
                         pass
 
+                    elif msg_type == "permission_response":
+                        task_id = data.get("task_id", "")
+                        approved = data.get("approved", False)
+                        if task_id:
+                            orchestrator.handle_permission_response(task_id, approved)
+
                     elif msg_type == "ping":
                         await ws.send_json({"type": "pong"})
                         session.touch()

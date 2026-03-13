@@ -1,19 +1,24 @@
-"""Tool context — provides access to the current sandbox instance.
+"""Tool context — provides access to the current sandbox and BG task manager.
 
-The sandbox is stored per-session via a contextvars token so that
-tool functions can retrieve it without explicit parameter passing.
+Stored per-session via contextvars so that tool functions can retrieve
+them without explicit parameter passing.
 """
 
 from __future__ import annotations
 
 import contextvars
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from nexus.background_tasks import BackgroundTaskManager
     from nexus.sandbox import SandboxManager
 
 _current_sandbox: contextvars.ContextVar["SandboxManager"] = contextvars.ContextVar(
     "_current_sandbox"
+)
+
+_current_bg_task_manager: contextvars.ContextVar[Optional["BackgroundTaskManager"]] = (
+    contextvars.ContextVar("_current_bg_task_manager", default=None)
 )
 
 
@@ -28,3 +33,13 @@ def get_sandbox() -> "SandboxManager":
         return _current_sandbox.get()
     except LookupError:
         raise RuntimeError("No sandbox in current context. Was set_sandbox() called?")
+
+
+def set_bg_task_manager(manager: "BackgroundTaskManager") -> contextvars.Token:
+    """Set the background task manager for the current execution context."""
+    return _current_bg_task_manager.set(manager)
+
+
+def get_bg_task_manager() -> Optional["BackgroundTaskManager"]:
+    """Retrieve the background task manager (may be None)."""
+    return _current_bg_task_manager.get()

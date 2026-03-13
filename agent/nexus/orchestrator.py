@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.websockets import WebSocket
 
-from nexus.agent import create_agent, create_runner, run_agent_turn
+from nexus.agent import create_agent, create_multi_agent, create_runner, run_agent_turn
+from nexus.background_tasks import BackgroundTaskManager
 from nexus.history_repository import FirestoreHistoryRepository
-from nexus.tools._context import set_sandbox
+from nexus.tools._context import set_sandbox, set_bg_task_manager
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 
@@ -41,16 +42,26 @@ class NexusOrchestrator:
             from nexus.voice import GeminiLiveManager
             self.voice = GeminiLiveManager()
 
-        # ADK agent + runner
-        self._agent = create_agent()
+        # ADK agent + runner (multi-agent or single-agent based on config)
+        if settings.use_multi_agent:
+            self._agent = create_multi_agent()
+            logger.info("Using multi-agent orchestrator mode")
+        else:
+            self._agent = create_agent()
+            logger.info("Using single-agent mode")
         self._runner, self._session_service = create_runner(self._agent)
         self._adk_session_id: str | None = None
         self._user_id = f"user-{session.id}"
+        self._active_agent: str = "nexus_orchestrator"
+
+        # Background task manager
+        self.bg_task_manager = BackgroundTaskManager(send_json=self._send_json)
 
     async def initialize(self) -> None:
         """Set up voice connection and ADK session."""
-        # Bind sandbox to tool context
+        # Bind sandbox and bg task manager to tool context
         set_sandbox(self.session.sandbox)
+        set_bg_task_manager(self.bg_task_manager)
 
         # Connect to Gemini Live in the background so text sessions become ready immediately.
         if self.voice:
@@ -88,6 +99,10 @@ class NexusOrchestrator:
         await self._persist_message(role="user", source="typed", text=text)
         await self._run_agent(text)
 
+    def handle_permission_response(self, task_id: str, approved: bool) -> None:
+        """Route a permission_response from the frontend to the bg task manager."""
+        self.bg_task_manager.handle_permission_response(task_id, approved)
+
     async def handle_user_utterance(self, text: str) -> None:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
@@ -116,37 +131,70 @@ class NexusOrchestrator:
         await self._run_agent("Look at the current screen and describe what you see.")
 
     async def run_voice_receive_loop(self) -> None:
-        """Background task: read from Gemini Live, forward to frontend."""
+        """Background task: read from Gemini Live, forward to frontend.
+
+        Includes exponential-backoff reconnection — up to 3 retries on transient
+        errors (e.g. Gemini Live 1011 service unavailable).
+        """
         if self._voice_connect_task:
             await self._voice_connect_task
 
         if not self._voice_connected or not self.voice:
             return
-        try:
-            async for event_type, data in self.voice.receive_events():
-                if event_type == "audio":
-                    await self.ws.send_bytes(data)
-                elif event_type == "user_transcript":
-                    # User speech transcribed — trigger agent
-                    await self.handle_user_utterance(data)
-                elif event_type == "agent_transcript":
-                    await self._send_json({
-                        "type": "transcript",
-                        "role": "agent",
-                        "text": data,
-                    })
-        except Exception:
-            logger.exception("Voice receive loop error")
-            self._voice_connected = False
-            # Notify frontend that voice is no longer available
+
+        MAX_RETRIES = 3
+        attempt = 0
+
+        while attempt <= MAX_RETRIES:
             try:
+                async for event_type, data in self.voice.receive_events():
+                    if event_type == "audio":
+                        await self.ws.send_bytes(data)
+                    elif event_type == "user_transcript":
+                        await self.handle_user_utterance(data)
+                    elif event_type == "agent_transcript":
+                        await self._send_json({
+                            "type": "transcript",
+                            "role": "agent",
+                            "text": data,
+                        })
+                # Clean exit from the generator — no reconnect needed
+                break
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception:
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    logger.error("Voice receive loop failed after %d retries, giving up", MAX_RETRIES)
+                    self._voice_connected = False
+                    await self._send_json({
+                        "type": "voice_status",
+                        "status": "disconnected",
+                        "message": "Voice connection lost. Text input still works.",
+                    })
+                    break
+
+                delay = 2.0 * (2 ** (attempt - 1))  # 2s, 4s, 8s
+                logger.warning(
+                    "Voice loop error (attempt %d/%d), reconnecting in %.0fs",
+                    attempt, MAX_RETRIES, delay,
+                )
                 await self._send_json({
                     "type": "voice_status",
-                    "status": "disconnected",
-                    "message": "Voice connection lost. Text input still works.",
+                    "status": "reconnecting",
+                    "message": f"Voice reconnecting\u2026 (attempt {attempt}/{MAX_RETRIES})",
                 })
-            except Exception:
-                pass
+                await asyncio.sleep(delay)
+
+                try:
+                    await self.voice.close()
+                    await self._connect_voice()
+                    if not self._voice_connected:
+                        logger.warning("Reconnect attempt %d: voice failed to connect", attempt)
+                except Exception:
+                    logger.warning("Reconnect attempt %d raised an exception", attempt, exc_info=True)
 
     async def close(self) -> None:
         """Shut down orchestrator resources."""
@@ -214,6 +262,16 @@ class NexusOrchestrator:
     async def _on_agent_event(self, event: Any) -> None:
         """Callback for each ADK agent event — stream to frontend."""
         try:
+            # Detect agent delegation (sub-agent transfer)
+            author = getattr(event, "author", None)
+            if author and author != self._active_agent:
+                await self._send_json({
+                    "type": "agent_delegation",
+                    "from": self._active_agent,
+                    "to": author,
+                })
+                self._active_agent = author
+
             function_calls = self._extract_function_calls(event)
 
             for fc in function_calls:

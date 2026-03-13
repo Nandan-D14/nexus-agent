@@ -12,6 +12,7 @@ from nexus.tools.computer import (
 from nexus.tools.bash import run_command
 from nexus.tools.screen import take_screenshot
 from nexus.tools.browser import open_browser
+from nexus.tools.bg_task import request_background_task
 
 ALL_TOOLS = [
     take_screenshot,
@@ -24,4 +25,5 @@ ALL_TOOLS = [
     scroll_screen,
     drag,
     open_browser,
+    request_background_task,
 ]
