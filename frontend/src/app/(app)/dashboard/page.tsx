@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
@@ -18,6 +19,7 @@ import {
 import { UsageChart, type UsageChartPoint } from "@/components/usage-chart";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch, parseApiError } from "@/lib/api-client";
+import { useSession } from "@/lib/use-session";
 
 type TokenTotals = {
   input: number;
@@ -169,6 +171,8 @@ function StatCard({
 
 export default function DashboardPage() {
   const { user } = useAuth();
+  const router = useRouter();
+  const { createSession, isLoading: isSessionLoading } = useSession();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [usage, setUsage] = useState<UsageChartPoint[]>([]);
   const [recentSessions, setRecentSessions] = useState<DashboardSessionUsage[]>(
@@ -272,6 +276,16 @@ export default function DashboardPage() {
     [refreshDashboard],
   );
 
+  const handleStartSession = useCallback(async () => {
+    if (!user) {
+      return;
+    }
+    const session = await createSession();
+    if (session) {
+      router.push(`/session/${session.session_id}`);
+    }
+  }, [createSession, router, user]);
+
   const sourceSummary = useMemo(() => {
     const tracked = stats?.tracked_sources || [];
     const untracked = stats?.untracked_sources || [];
@@ -314,12 +328,14 @@ export default function DashboardPage() {
             {user?.displayName || "your workspace"}.
           </p>
         </div>
-        <Link
-          href="/"
-          className="inline-flex items-center justify-center rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-cyan-700 dark:bg-white dark:text-zinc-950 dark:hover:bg-cyan-200"
+        <button
+          type="button"
+          onClick={() => void handleStartSession()}
+          disabled={isSessionLoading || !user}
+          className="inline-flex items-center justify-center rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-cyan-700 dark:bg-white dark:text-zinc-950 dark:hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Start New Session
-        </Link>
+          {isSessionLoading ? "Starting..." : "Start New Session"}
+        </button>
       </div>
 
       {error ? (

@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { useCallback } from "react";
 import { LayoutDashboard, History, Settings, PlusCircle, LogOut } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { useSession } from "@/lib/use-session";
 
 /* ------------------------------------------------------------------ */
 /*  Nav items                                                          */
@@ -23,11 +25,23 @@ export function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  const { createSession, isLoading: isSessionLoading } = useSession();
 
   const handleSignOut = async () => {
     await signOutUser();
     router.push("/");
   };
+
+  const handleNewSession = useCallback(async () => {
+    if (!user) {
+      router.push("/");
+      return;
+    }
+    const session = await createSession();
+    if (session) {
+      router.push(`/session/${session.session_id}`);
+    }
+  }, [createSession, router, user]);
 
   const initial = user?.displayName?.[0] ?? user?.email?.[0] ?? "U";
 
@@ -46,13 +60,15 @@ export function SessionNavSidebar() {
 
       {/* New session */}
       <div className="flex items-center justify-center py-3 border-b border-card-border dark:border-white/5 shrink-0">
-        <Link
-          href="/"
+        <button
+          type="button"
           title="New Session"
-          className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 hover:bg-cyan-500/10 dark:hover:bg-cyan-500/20 hover:text-cyan-600 dark:hover:text-cyan-400 text-muted dark:text-zinc-400 flex items-center justify-center transition-colors"
+          onClick={() => void handleNewSession()}
+          disabled={isSessionLoading}
+          className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 hover:bg-cyan-500/10 dark:hover:bg-cyan-500/20 hover:text-cyan-600 dark:hover:text-cyan-400 text-muted dark:text-zinc-400 flex items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-60"
         >
           <PlusCircle className="w-5 h-5" />
-        </Link>
+        </button>
       </div>
 
       {/* Nav items */}

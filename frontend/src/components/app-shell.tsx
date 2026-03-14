@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
+import { useSession } from "@/lib/use-session";
 import { useRouter, usePathname } from "next/navigation";
 import { motion } from "framer-motion";
 import {
@@ -13,10 +14,11 @@ import {
   X
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { user, signOutUser, isLoading } = useAuth();
+  const { user, signOutUser, isLoading: isAuthLoading } = useAuth();
+  const { createSession, isLoading: isSessionLoading } = useSession();
   const router = useRouter();
   const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -31,6 +33,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     await signOutUser();
     router.push("/");
   };
+
+  const handleNewSession = useCallback(async () => {
+    if (!user) {
+      router.push("/");
+      return;
+    }
+    const session = await createSession();
+    if (session) {
+      router.push(`/session/${session.session_id}`);
+    }
+  }, [createSession, router, user]);
 
   const NavLinks = () => (
     <>
@@ -95,13 +108,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="px-4 py-2">
-          <Link
-            href="/"
-            className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95"
+          <button
+            type="button"
+            onClick={() => void handleNewSession()}
+            disabled={isSessionLoading}
+            className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <PlusCircle className="w-5 h-5" />
-            New Session
-          </Link>
+            {isSessionLoading ? "Starting..." : "New Session"}
+          </button>
         </div>
 
         <nav className="flex-1 px-3 py-6 flex flex-col gap-2 overflow-y-auto">
@@ -133,7 +148,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <button
               onClick={handleSignOut}
-              disabled={isLoading}
+              disabled={isAuthLoading}
               className="p-2 text-muted dark:text-zinc-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/10 dark:hover:bg-red-500/10 rounded-lg transition-colors"
               title="Sign Out"
             >
