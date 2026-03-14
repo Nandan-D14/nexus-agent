@@ -33,6 +33,8 @@ class StoredSession:
     title: str = "Untitled session"
     summary: str | None = None
     message_count: int = 0
+    token_totals: dict[str, Any] | None = None
+    token_tracking_started_at: datetime | None = None
 
 
 class FirestoreHistoryRepository:
@@ -57,6 +59,40 @@ class FirestoreHistoryRepository:
                 return None
         return None
 
+    @staticmethod
+    def _empty_token_totals() -> dict[str, Any]:
+        return {
+            "input": 0,
+            "output": 0,
+            "total": 0,
+            "bySource": {},
+        }
+
+    @classmethod
+    def _coerce_token_totals(cls, value: Any) -> dict[str, Any]:
+        base = cls._empty_token_totals()
+        if not isinstance(value, dict):
+            return base
+
+        by_source = value.get("bySource")
+        normalized_sources: dict[str, Any] = {}
+        if isinstance(by_source, dict):
+            for key, raw in by_source.items():
+                if not isinstance(key, str) or not isinstance(raw, dict):
+                    continue
+                normalized_sources[key] = {
+                    "input": int(raw.get("input", 0) or 0),
+                    "output": int(raw.get("output", 0) or 0),
+                    "total": int(raw.get("total", 0) or 0),
+                    "model": raw.get("model") if isinstance(raw.get("model"), str) else "",
+                }
+
+        base["input"] = int(value.get("input", 0) or 0)
+        base["output"] = int(value.get("output", 0) or 0)
+        base["total"] = int(value.get("total", 0) or 0)
+        base["bySource"] = normalized_sources
+        return base
+
     def _build_stored_session(self, session_id: str, data: dict[str, Any]) -> StoredSession:
         title = data.get("title")
         summary = data.get("summary")
@@ -69,6 +105,8 @@ class FirestoreHistoryRepository:
             title=title.strip() if isinstance(title, str) and title.strip() else "Untitled session",
             summary=summary if isinstance(summary, str) else None,
             message_count=int(data.get("messageCount", 0)),
+            token_totals=self._coerce_token_totals(data.get("tokenTotals")),
+            token_tracking_started_at=self._coerce_datetime(data.get("tokenTrackingStartedAt")),
         )
 
     def _list_owner_sessions_sync(self, owner_id: str) -> list[tuple[str, dict[str, Any]]]:
@@ -116,6 +154,28 @@ class FirestoreHistoryRepository:
             text,
         )
 
+    async def append_token_usage(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        source: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        await asyncio.to_thread(
+            self._append_token_usage_sync,
+            session_id,
+            owner_id,
+            source,
+            model,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        )
+
     async def mark_session_summary(
         self,
         session_id: str,
@@ -143,6 +203,12 @@ class FirestoreHistoryRepository:
 
     async def list_sessions(self, owner_id: str, limit: int = 25, status: str | None = None, search: str | None = None) -> list[StoredSession]:
         return await asyncio.to_thread(self._list_sessions_sync, owner_id, limit, status, search)
+
+    async def list_recent_session_usage(self, owner_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_recent_session_usage_sync, owner_id, limit)
+
+    async def list_active_sessions(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_active_sessions_sync, owner_id, live_sessions)
 
     async def get_session_messages(self, session_id: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._get_session_messages_sync, session_id)
@@ -186,6 +252,7 @@ class FirestoreHistoryRepository:
             "memberIds": [session.owner_id],
             "status": status,
             "updatedAt": now,
+            "lastActiveAt": session.last_active,
             "sandboxId": session.sandbox_id or existing.get("sandboxId"),
             "schemaVersion": 1,
         }
@@ -195,6 +262,7 @@ class FirestoreHistoryRepository:
                     "createdAt": session.created_at,
                     "messageCount": 0,
                     "title": "New session",
+                    "tokenTotals": self._empty_token_totals(),
                 }
             )
         if ended_at:
@@ -252,6 +320,72 @@ class FirestoreHistoryRepository:
 
         transactional_append(transaction)
 
+    def _append_token_usage_sync(
+        self,
+        session_id: str,
+        owner_id: str,
+        source: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        if input_tokens < 0 or output_tokens < 0 or total_tokens < 0:
+            return
+
+        session_ref = self._db.collection("sessions").document(session_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_append(txn):
+            snapshot = session_ref.get(transaction=txn)
+            if not snapshot.exists:
+                raise ValueError(f"Session {session_id} does not exist")
+
+            now = utcnow()
+            data = snapshot.to_dict() or {}
+            totals = self._coerce_token_totals(data.get("tokenTotals"))
+            source_totals = totals["bySource"].get(
+                source,
+                {"input": 0, "output": 0, "total": 0, "model": model},
+            )
+            source_totals = {
+                "input": int(source_totals.get("input", 0)) + input_tokens,
+                "output": int(source_totals.get("output", 0)) + output_tokens,
+                "total": int(source_totals.get("total", 0)) + total_tokens,
+                "model": model or str(source_totals.get("model", "")),
+            }
+            totals["input"] += input_tokens
+            totals["output"] += output_tokens
+            totals["total"] += total_tokens
+            totals["bySource"][source] = source_totals
+
+            usage_ref = session_ref.collection("usage_events").document(
+                f"{now.strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
+            )
+            txn.set(
+                usage_ref,
+                {
+                    "ownerId": owner_id,
+                    "sessionId": session_id,
+                    "source": source,
+                    "model": model,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": total_tokens,
+                    "createdAt": now,
+                },
+            )
+            updates: dict[str, Any] = {
+                "tokenTotals": totals,
+                "updatedAt": now,
+            }
+            if data.get("tokenTrackingStartedAt") is None:
+                updates["tokenTrackingStartedAt"] = now
+            txn.set(session_ref, updates, merge=True)
+
+        transactional_append(transaction)
+
     def _mark_session_summary_sync(
         self,
         session_id: str,
@@ -288,8 +422,12 @@ class FirestoreHistoryRepository:
         sessions_this_week = 0
         total_duration_secs = 0
         ended_sessions_count = 0
+        token_totals = self._empty_token_totals()
+        tracked_sources: set[str] = set()
 
-        for _, data in self._list_owner_sessions_sync(owner_id):
+        owner_sessions = self._list_owner_sessions_sync(owner_id)
+
+        for _, data in owner_sessions:
             if data.get("status") == "deleted":
                 continue
 
@@ -313,6 +451,12 @@ class FirestoreHistoryRepository:
                 except Exception:
                     pass
 
+            session_token_totals = self._coerce_token_totals(data.get("tokenTotals"))
+            token_totals["input"] += session_token_totals["input"]
+            token_totals["output"] += session_token_totals["output"]
+            token_totals["total"] += session_token_totals["total"]
+            tracked_sources.update(session_token_totals["bySource"].keys())
+
         avg_duration_mins = (total_duration_secs / 60) / ended_sessions_count if ended_sessions_count > 0 else 0
 
         return {
@@ -320,7 +464,9 @@ class FirestoreHistoryRepository:
             "total_messages": total_messages,
             "active_sessions": active_sessions,
             "sessions_this_week": sessions_this_week,
-            "avg_session_duration_mins": round(avg_duration_mins, 1)
+            "avg_session_duration_mins": round(avg_duration_mins, 1),
+            "token_totals": token_totals,
+            "tracked_sources": sorted(tracked_sources),
         }
 
     def _get_dashboard_usage_sync(self, owner_id: str, days: int) -> list[dict[str, Any]]:
@@ -334,11 +480,20 @@ class FirestoreHistoryRepository:
             for offset in range(days - 1, -1, -1)
         ]
         chart_data = {
-            day: {"date": day, "sessions": 0, "messages": 0}
+            day: {
+                "date": day,
+                "sessions": 0,
+                "messages": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
             for day in chart_days
         }
 
-        for _, data in self._list_owner_sessions_sync(owner_id):
+        owner_sessions = self._list_owner_sessions_sync(owner_id)
+
+        for _, data in owner_sessions:
             if data.get("status") == "deleted":
                 continue
 
@@ -350,6 +505,33 @@ class FirestoreHistoryRepository:
             if date_str in chart_data:
                 chart_data[date_str]["sessions"] += 1
                 chart_data[date_str]["messages"] += int(data.get("messageCount", 0))
+
+        for session_id, data in owner_sessions:
+            if data.get("status") == "deleted":
+                continue
+
+            created_at = self._coerce_datetime(data.get("createdAt"))
+            last_active_at = self._coerce_datetime(data.get("lastActiveAt"))
+            if created_at and created_at < start_date and (not last_active_at or last_active_at < start_date):
+                continue
+
+            usage_events = (
+                self._db.collection("sessions")
+                .document(session_id)
+                .collection("usage_events")
+                .stream()
+            )
+            for doc in usage_events:
+                data = doc.to_dict() or {}
+                created_at = self._coerce_datetime(data.get("createdAt"))
+                if not created_at or created_at < start_date:
+                    continue
+                date_str = created_at.date().isoformat()
+                if date_str not in chart_data:
+                    continue
+                chart_data[date_str]["input_tokens"] += int(data.get("inputTokens", 0) or 0)
+                chart_data[date_str]["output_tokens"] += int(data.get("outputTokens", 0) or 0)
+                chart_data[date_str]["total_tokens"] += int(data.get("totalTokens", 0) or 0)
 
         # Return sorted list naturally by date key
         return [chart_data[d] for d in sorted(chart_data.keys())]
@@ -385,6 +567,62 @@ class FirestoreHistoryRepository:
 
         sessions.sort(key=lambda item: item[0], reverse=True)
         return [session for _, session in sessions[:limit]]
+
+    def _list_recent_session_usage_sync(self, owner_id: str, limit: int) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for session in self._list_sessions_sync(owner_id, limit, None, None):
+            results.append(
+                {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "status": session.status,
+                    "created_at": session.created_at,
+                    "message_count": session.message_count,
+                    "token_totals": session.token_totals or self._empty_token_totals(),
+                    "token_tracking_started_at": session.token_tracking_started_at,
+                    "token_coverage": "tracked" if session.token_tracking_started_at else "no_data",
+                }
+            )
+        return results
+
+    def _list_active_sessions_sync(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for live in live_sessions:
+            if live.get("owner_id") != owner_id:
+                continue
+            session_id = str(live.get("session_id", ""))
+            stored_session = self._get_session_sync(session_id) if session_id else None
+            token_totals = (
+                stored_session.token_totals
+                if stored_session and stored_session.token_totals
+                else self._empty_token_totals()
+            )
+            results.append(
+                {
+                    "session_id": session_id,
+                    "title": stored_session.title if stored_session else "New session",
+                    "status": live.get("status", "active"),
+                    "created_at": live.get("created_at"),
+                    "last_active_at": live.get("last_active_at"),
+                    "stream_url": live.get("stream_url"),
+                    "message_count": stored_session.message_count if stored_session else 0,
+                    "token_totals": token_totals,
+                    "token_tracking_started_at": (
+                        stored_session.token_tracking_started_at if stored_session else None
+                    ),
+                    "token_coverage": (
+                        "tracked"
+                        if stored_session and stored_session.token_tracking_started_at
+                        else "no_data"
+                    ),
+                }
+            )
+
+        results.sort(
+            key=lambda item: self._coerce_datetime(item.get("last_active_at")) or utcnow(),
+            reverse=True,
+        )
+        return results
 
     def _get_session_messages_sync(self, session_id: str) -> list[dict[str, Any]]:
         messages_docs = self._db.collection("sessions").document(session_id).collection("messages").order_by("turnIndex").stream()

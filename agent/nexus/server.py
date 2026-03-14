@@ -14,6 +14,7 @@ from nexus.config import settings
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.models import ErrorResponse, HealthResponse, SessionInfo, SessionResponse, StatusMessage
 from nexus.session import SessionManager
+from nexus.usage import get_expected_usage_sources
 from nexus.ws_handler import handle_websocket
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -21,6 +22,20 @@ logger = logging.getLogger(__name__)
 
 history_repository = FirestoreHistoryRepository()
 session_manager = SessionManager(history_repository=history_repository)
+
+
+def _live_session_payloads(user_id: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "session_id": session.id,
+            "owner_id": session.owner_id,
+            "status": session.status,
+            "created_at": session.created_at,
+            "last_active_at": session.last_active,
+            "stream_url": session.stream_url,
+        }
+        for session in session_manager.list_sessions_for_owner(user_id)
+    ]
 
 
 @asynccontextmanager
@@ -130,7 +145,12 @@ async def refresh_ticket(session_id: str, user: AuthenticatedUser = Depends(requ
 
 @app.get("/api/v1/dashboard/stats")
 async def get_dashboard_stats(user: AuthenticatedUser = Depends(require_current_user)):
-    return await history_repository.get_dashboard_stats(user.uid)
+    stats = await history_repository.get_dashboard_stats(user.uid)
+    tracked_sources = set(stats.get("tracked_sources", []))
+    configured_sources = set(get_expected_usage_sources())
+    stats["tracked_sources"] = sorted(tracked_sources)
+    stats["untracked_sources"] = sorted(configured_sources - tracked_sources)
+    return stats
 
 
 @app.get("/api/v1/dashboard/usage")
@@ -140,6 +160,24 @@ async def get_dashboard_usage(
 ):
     chart = await history_repository.get_dashboard_usage(user.uid, days)
     return {"chart": chart}
+
+
+@app.get("/api/v1/dashboard/sessions")
+async def get_dashboard_sessions(
+    limit: int = Query(10, ge=1, le=50),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    sessions = await history_repository.list_recent_session_usage(user.uid, limit)
+    return {"sessions": sessions}
+
+
+@app.get("/api/v1/sessions/active")
+async def get_active_sessions(user: AuthenticatedUser = Depends(require_current_user)):
+    sessions = await history_repository.list_active_sessions(
+        user.uid,
+        _live_session_payloads(user.uid),
+    )
+    return {"sessions": sessions}
 
 
 @app.get("/api/v1/history")

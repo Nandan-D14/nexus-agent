@@ -7,6 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING
 
@@ -18,11 +19,18 @@ from google.genai import types
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 from nexus.tools import ALL_TOOLS
+from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
 
 if TYPE_CHECKING:
     from nexus.sandbox import SandboxManager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentTurnResult:
+    response: str | None
+    usage_records: list[TokenUsageRecord]
 
 
 def _get_model():
@@ -97,7 +105,7 @@ async def run_agent_turn(
     user_id: str,
     message: str,
     event_callback=None,
-) -> str | None:
+) -> AgentTurnResult:
     """Execute a single agent turn with a user message.
 
     Calls event_callback(event) for each intermediate event so the caller
@@ -120,14 +128,34 @@ async def run_agent_turn(
     )
 
     final_response = None
+    usage_records: list[TokenUsageRecord] = []
+    usage_seen: set[tuple[str, str, int, int, int]] = set()
     turn_count = 0
     max_turns = settings.max_agent_turns
+    usage_source, usage_model = get_agent_usage_source()
 
     async for event in runner.run_async(
         user_id=user_id,
         session_id=session_id,
         new_message=content,
     ):
+        for record in extract_token_usage_records(
+            event,
+            default_source=usage_source,
+            default_model=usage_model,
+        ):
+            fingerprint = (
+                record.source,
+                record.model,
+                record.input_tokens,
+                record.output_tokens,
+                record.total_tokens,
+            )
+            if fingerprint in usage_seen:
+                continue
+            usage_seen.add(fingerprint)
+            usage_records.append(record)
+
         if event_callback:
             await event_callback(event)
 
@@ -150,4 +178,4 @@ async def run_agent_turn(
                 final_response = "I've taken many steps on this task. Here's what I've done so far — let me know if you'd like me to continue."
             break
 
-    return final_response
+    return AgentTurnResult(response=final_response, usage_records=usage_records)
