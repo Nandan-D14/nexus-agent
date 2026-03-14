@@ -70,6 +70,9 @@ export default function SessionPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
   const [agentStatus, setAgentStatus] = useState("");
+  const [voiceStatus, setVoiceStatus] = useState<
+    "connected" | "reconnecting" | "disconnected"
+  >("connected");
 
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
@@ -244,6 +247,13 @@ export default function SessionPage() {
         break;
 
       case "voice_status":
+        if (
+          msg.status === "connected" ||
+          msg.status === "reconnecting" ||
+          msg.status === "disconnected"
+        ) {
+          setVoiceStatus(msg.status);
+        }
         setChatItems((prev) => [
           ...prev,
           { kind: "event", type: msg.type, status: msg.status, message: msg.message, ts },
@@ -287,6 +297,12 @@ export default function SessionPage() {
     };
   }, [stopMic]);
 
+  useEffect(() => {
+    if (voiceStatus !== "connected" && isRecording) {
+      stopMic();
+    }
+  }, [isRecording, stopMic, voiceStatus]);
+
   /* ---- Session lifecycle ---- */
   useEffect(() => {
     let cancelled = false;
@@ -304,6 +320,7 @@ export default function SessionPage() {
       setStreamUrl(null);
       setSessionData(null);
       setSessionInfo(null);
+      setVoiceStatus("connected");
 
       const info = await getSession(sessionId);
       if (cancelled) return;
@@ -416,6 +433,7 @@ export default function SessionPage() {
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
     if (viewMode !== "live") return;
+    if (voiceStatus !== "connected") return;
     if (isRecording) {
       stopMic();
       setPhase("thinking");
@@ -423,7 +441,7 @@ export default function SessionPage() {
       startMic();
       setPhase("listening");
     }
-  }, [isRecording, startMic, stopMic, viewMode]);
+  }, [isRecording, startMic, stopMic, viewMode, voiceStatus]);
 
   const handleTextSubmit = useCallback(() => {
     if (viewMode !== "live") return;
@@ -754,7 +772,7 @@ export default function SessionPage() {
                   isRecording={isRecording}
                   onStart={toggleMic}
                   onStop={toggleMic}
-                  disabled={!isConnected}
+                  disabled={!isConnected || voiceStatus !== "connected"}
                 />
               </div>
             </div>

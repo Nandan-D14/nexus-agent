@@ -265,6 +265,14 @@ function EventRenderer({
       );
     case "agent_complete":
       return <CompleteBadge ts={item.ts} />;
+    case "voice_status":
+      return (
+        <VoiceStatusBadge
+          ts={item.ts}
+          status={item["status"] as string | undefined}
+          message={item["message"] as string | undefined}
+        />
+      );
     case "bg_task_progress":
       return (
         <BgTaskProgressPill
@@ -495,6 +503,63 @@ function CompleteBadge({ ts }: { ts: number }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  voice_status  -- info badge for reconnect / fallback               */
+/* ------------------------------------------------------------------ */
+
+function VoiceStatusBadge({
+  ts,
+  status,
+  message,
+}: {
+  ts: number;
+  status?: string;
+  message?: string;
+}) {
+  const tone =
+    status === "connected"
+      ? {
+          dot: "bg-emerald-500",
+          label: "text-emerald-400",
+          box: "bg-emerald-500/5 border-emerald-500/20",
+          text: "text-emerald-300/80",
+        }
+      : status === "reconnecting"
+        ? {
+            dot: "bg-amber-500 animate-pulse",
+            label: "text-amber-400",
+            box: "bg-amber-500/5 border-amber-500/20",
+            text: "text-amber-200/80",
+          }
+        : {
+            dot: "bg-zinc-500",
+            label: "text-zinc-300",
+            box: "bg-zinc-500/5 border-zinc-500/20",
+            text: "text-zinc-400",
+          };
+
+  return (
+    <div className="py-1 px-3">
+      <div className={`rounded-lg border p-2.5 space-y-1 ${tone.box}`}>
+        <div className="flex items-center gap-2">
+          <span className="text-muted dark:text-zinc-700 text-[11px] select-none font-mono">
+            {formatTime(ts)}
+          </span>
+          <span className={`block h-2 w-2 rounded-full ${tone.dot}`} />
+          <span className={`text-[10px] font-black uppercase tracking-widest ${tone.label}`}>
+            Voice {status || "status"}
+          </span>
+        </div>
+        {message && (
+          <p className={`text-xs leading-relaxed ${tone.text}`}>
+            {message}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  error  -- red badge with message                                   */
 /* ------------------------------------------------------------------ */
 
@@ -639,7 +704,9 @@ function DelegationBadge({
           {formatTime(ts)}
         </span>
         <span className="text-zinc-400 dark:text-zinc-500">&rarr;</span>
-        <span className="text-zinc-600 dark:text-zinc-400 font-bold">Delegated to {to}</span>
+        <span className="text-zinc-600 dark:text-zinc-400 font-bold">
+          {from} to {to}
+        </span>
       </div>
     </div>
   );

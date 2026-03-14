@@ -40,12 +40,15 @@ class NexusOrchestrator:
         self.voice = None
         self._voice_connected = False
         self._voice_connect_task: asyncio.Task | None = None
+        self._voice_reconnect_task: asyncio.Task | None = None
+        self._voice_connection_error_cls: type[Exception] | None = None
         self.history_repository = history_repository
 
         # Only create voice manager when Google API key is available
         if settings.google_api_key:
-            from nexus.voice import GeminiLiveManager
+            from nexus.voice import GeminiLiveManager, VoiceConnectionError
             self.voice = GeminiLiveManager()
+            self._voice_connection_error_cls = VoiceConnectionError
 
         # ADK agent + runner (multi-agent or single-agent based on config)
         if settings.use_multi_agent:
@@ -97,10 +100,21 @@ class NexusOrchestrator:
 
     async def handle_user_audio(self, pcm_data: bytes) -> None:
         """Forward mic audio to Gemini Live."""
-        if not self._voice_connected:
-            return
-        await self.voice.send_audio(pcm_data)
         self.session.touch()
+        if not self._is_voice_ready():
+            return
+        try:
+            await self.voice.send_audio(pcm_data)
+        except Exception as exc:
+            if self._is_voice_connection_error(exc):
+                self._voice_connected = False
+                logger.warning(
+                    "Gemini Live disconnected while sending user audio for session %s",
+                    self.session.id,
+                )
+                self._schedule_voice_reconnect("sending user audio")
+                return
+            raise
 
     async def handle_text_input(self, text: str) -> None:
         """Handle direct text input (bypass voice)."""
@@ -159,13 +173,15 @@ class NexusOrchestrator:
         if self._voice_connect_task:
             await self._voice_connect_task
 
-        if not self._voice_connected or not self.voice:
+        if not self.voice:
             return
 
-        MAX_RETRIES = 3
-        attempt = 0
+        if not self._is_voice_ready():
+            if not await self._start_or_join_voice_reconnect("starting voice session"):
+                return
 
-        while attempt <= MAX_RETRIES:
+        while True:
+            should_reconnect = False
             try:
                 async for event_type, data in self.voice.receive_events():
                     if event_type == "audio":
@@ -180,43 +196,32 @@ class NexusOrchestrator:
                         })
                     elif event_type == "usage":
                         await self._persist_token_usage(data)
-                # Clean exit from the generator — no reconnect needed
-                break
+                if self._is_voice_ready():
+                    break
+                should_reconnect = True
+                logger.warning(
+                    "Gemini Live receive loop ended after disconnect for session %s",
+                    self.session.id,
+                )
 
             except asyncio.CancelledError:
                 raise
 
-            except Exception:
-                attempt += 1
-                if attempt > MAX_RETRIES:
-                    logger.error("Voice receive loop failed after %d retries, giving up", MAX_RETRIES)
+            except Exception as exc:
+                if self._is_voice_connection_error(exc):
                     self._voice_connected = False
-                    await self._send_json({
-                        "type": "voice_status",
-                        "status": "disconnected",
-                        "message": "Voice connection lost. Text input still works.",
-                    })
+                    should_reconnect = True
+                    logger.warning(
+                        "Gemini Live receive loop lost connection for session %s: %s",
+                        self.session.id,
+                        exc,
+                    )
+                else:
+                    logger.exception("Voice receive loop failed for session %s", self.session.id)
                     break
 
-                delay = 2.0 * (2 ** (attempt - 1))  # 2s, 4s, 8s
-                logger.warning(
-                    "Voice loop error (attempt %d/%d), reconnecting in %.0fs",
-                    attempt, MAX_RETRIES, delay,
-                )
-                await self._send_json({
-                    "type": "voice_status",
-                    "status": "reconnecting",
-                    "message": f"Voice reconnecting\u2026 (attempt {attempt}/{MAX_RETRIES})",
-                })
-                await asyncio.sleep(delay)
-
-                try:
-                    await self.voice.close()
-                    await self._connect_voice()
-                    if not self._voice_connected:
-                        logger.warning("Reconnect attempt %d: voice failed to connect", attempt)
-                except Exception:
-                    logger.warning("Reconnect attempt %d raised an exception", attempt, exc_info=True)
+            if should_reconnect and not await self._start_or_join_voice_reconnect("streaming voice events"):
+                break
 
     async def close(self) -> None:
         """Shut down orchestrator resources."""
@@ -226,7 +231,13 @@ class NexusOrchestrator:
                 await self._voice_connect_task
             except asyncio.CancelledError:
                 pass
-        if self._voice_connected and self.voice:
+        if self._voice_reconnect_task and not self._voice_reconnect_task.done():
+            self._voice_reconnect_task.cancel()
+            try:
+                await self._voice_reconnect_task
+            except asyncio.CancelledError:
+                pass
+        if self.voice:
             await self.voice.close()
 
     # ── Private ────────────────────────────────────────────────
@@ -273,11 +284,19 @@ class NexusOrchestrator:
                 })
                 await self._persist_message(role="agent", source="agent", text=result.response)
                 # Feed to Gemini Live for TTS
-                if self._voice_connected:
+                if self._is_voice_ready():
                     try:
                         await self.voice.send_text(result.response)
-                    except Exception:
-                        logger.warning("Failed to send TTS for response")
+                    except Exception as exc:
+                        if self._is_voice_connection_error(exc):
+                            self._voice_connected = False
+                            logger.warning(
+                                "Gemini Live disconnected while sending TTS for session %s",
+                                self.session.id,
+                            )
+                            self._schedule_voice_reconnect("sending TTS")
+                        else:
+                            logger.warning("Failed to send TTS for response", exc_info=True)
 
                 await self._send_json({
                     "type": "agent_complete",
@@ -389,13 +408,93 @@ class NexusOrchestrator:
                     logger.debug("Failed to get user voice preference", exc_info=True)
 
             await self.voice.connect(system_instruction=SYSTEM_PROMPT, voice_name=voice_name)
-            self._voice_connected = True
+            self._voice_connected = self.voice.connected
             logger.info("Gemini Live voice connected with voice %s", voice_name)
         except asyncio.CancelledError:
             raise
         except Exception:
             self._voice_connected = False
             logger.warning("Gemini Live connection failed — voice disabled, text input still works")
+
+    def _is_voice_ready(self) -> bool:
+        return bool(self.voice and self._voice_connected and self.voice.connected)
+
+    def _is_voice_connection_error(self, exc: BaseException) -> bool:
+        return bool(
+            self._voice_connection_error_cls
+            and isinstance(exc, self._voice_connection_error_cls)
+        )
+
+    def _schedule_voice_reconnect(self, reason: str) -> None:
+        if not self.voice:
+            return
+        if self._voice_reconnect_task and not self._voice_reconnect_task.done():
+            return
+        self._voice_reconnect_task = asyncio.create_task(self._reconnect_voice(reason))
+
+    async def _start_or_join_voice_reconnect(self, reason: str) -> bool:
+        if not self.voice:
+            return False
+        if self._voice_reconnect_task and not self._voice_reconnect_task.done():
+            return await self._voice_reconnect_task
+        self._voice_reconnect_task = asyncio.create_task(self._reconnect_voice(reason))
+        return await self._voice_reconnect_task
+
+    async def _reconnect_voice(self, reason: str) -> bool:
+        if not self.voice:
+            return False
+
+        max_retries = 3
+        self._voice_connected = False
+
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                await asyncio.sleep(2.0 * (2 ** (attempt - 2)))
+
+            await self._send_json({
+                "type": "voice_status",
+                "status": "reconnecting",
+                "message": f"Voice reconnecting... (attempt {attempt}/{max_retries})",
+            })
+
+            try:
+                await self.voice.close()
+                await self._connect_voice()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Voice reconnect attempt %d/%d raised an exception for session %s",
+                    attempt,
+                    max_retries,
+                    self.session.id,
+                    exc_info=True,
+                )
+
+            if self._is_voice_ready():
+                await self._send_json({
+                    "type": "voice_status",
+                    "status": "connected",
+                    "message": "Voice reconnected.",
+                })
+                logger.info(
+                    "Gemini Live voice reconnected for session %s after %s",
+                    self.session.id,
+                    reason,
+                )
+                return True
+
+        await self._send_json({
+            "type": "voice_status",
+            "status": "disconnected",
+            "message": "Voice connection lost. Text input still works.",
+        })
+        logger.warning(
+            "Gemini Live voice could not reconnect for session %s after %s",
+            self.session.id,
+            reason,
+        )
+        return False
 
     def _extract_function_calls(self, event: Any) -> list[Any]:
         """Return tool calls from the different ADK event shapes."""

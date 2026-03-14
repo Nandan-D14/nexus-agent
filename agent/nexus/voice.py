@@ -15,6 +15,10 @@ from nexus.usage import TokenUsageRecord, extract_token_usage_records
 logger = logging.getLogger(__name__)
 
 
+class VoiceConnectionError(RuntimeError):
+    """Raised when the Gemini Live transport is no longer usable."""
+
+
 class GeminiLiveManager:
     """Manages a persistent bidirectional Gemini Live session for voice I/O."""
 
@@ -55,36 +59,72 @@ class GeminiLiveManager:
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         """Forward raw PCM audio (16-bit, 16kHz, mono) from the user's mic."""
-        if not self._live:
-            return
-        await self._live.send_realtime_input(
-            audio=types.Blob(data=pcm_bytes, mime_type="audio/pcm;rate=16000")
-        )
+        if not self._live or not self._connected:
+            raise VoiceConnectionError("Gemini Live is not connected")
+        try:
+            await self._live.send_realtime_input(
+                audio=types.Blob(data=pcm_bytes, mime_type="audio/pcm;rate=16000")
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._connected = False
+            logger.warning("Gemini Live audio send failed: %s", exc)
+            raise VoiceConnectionError(
+                "Gemini Live connection lost while sending audio"
+            ) from exc
 
     async def send_image(self, jpeg_bytes: bytes) -> None:
         """Send a screenshot image into the Live session for multimodal context."""
-        if not self._live:
-            return
-        await self._live.send_realtime_input(
-            media=types.Blob(data=jpeg_bytes, mime_type="image/jpeg")
-        )
+        if not self._live or not self._connected:
+            raise VoiceConnectionError("Gemini Live is not connected")
+        try:
+            await self._live.send_realtime_input(
+                media=types.Blob(data=jpeg_bytes, mime_type="image/jpeg")
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._connected = False
+            logger.warning("Gemini Live image send failed: %s", exc)
+            raise VoiceConnectionError(
+                "Gemini Live connection lost while sending an image"
+            ) from exc
 
     async def send_text(self, text: str) -> None:
         """Send text to Gemini Live (e.g., agent response for TTS)."""
-        if not self._live:
-            return
-        await self._live.send_client_content(
-            turns=types.Content(
-                role="user", parts=[types.Part(text=text)]
-            ),
-            turn_complete=True,
-        )
+        if not self._live or not self._connected:
+            raise VoiceConnectionError("Gemini Live is not connected")
+        try:
+            await self._live.send_client_content(
+                turns=types.Content(
+                    role="user", parts=[types.Part(text=text)]
+                ),
+                turn_complete=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._connected = False
+            logger.warning("Gemini Live text send failed: %s", exc)
+            raise VoiceConnectionError(
+                "Gemini Live connection lost while sending TTS text"
+            ) from exc
 
     async def send_audio_end(self) -> None:
         """Signal end of an audio input stream."""
-        if not self._live:
-            return
-        await self._live.send_realtime_input(audio_stream_end=True)
+        if not self._live or not self._connected:
+            raise VoiceConnectionError("Gemini Live is not connected")
+        try:
+            await self._live.send_realtime_input(audio_stream_end=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._connected = False
+            logger.warning("Gemini Live audio end failed: %s", exc)
+            raise VoiceConnectionError(
+                "Gemini Live connection lost while ending audio input"
+            ) from exc
 
     async def receive_events(self) -> AsyncGenerator[tuple[str, object | TokenUsageRecord], None]:
         """Yield events from the Gemini Live session.
@@ -124,18 +164,24 @@ class GeminiLiveManager:
                 if response.tool_call:
                     yield ("tool_call", response.tool_call.function_calls)
 
-        except Exception:
-            logger.exception("Error in Gemini Live receive loop")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             self._connected = False
+            logger.warning("Gemini Live receive loop failed: %s", exc)
+            raise VoiceConnectionError(
+                "Gemini Live connection lost while receiving events"
+            ) from exc
 
     async def close(self) -> None:
         """Gracefully close the Live session."""
-        if self._session:
-            try:
-                await self._session.__aexit__(None, None, None)
-            except Exception:
-                logger.exception("Error closing Gemini Live session")
-            finally:
-                self._live = None
-                self._session = None
-                self._connected = False
+        try:
+            if self._session:
+                try:
+                    await self._session.__aexit__(None, None, None)
+                except Exception:
+                    logger.exception("Error closing Gemini Live session")
+        finally:
+            self._live = None
+            self._session = None
+            self._connected = False
