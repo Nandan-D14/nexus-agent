@@ -79,7 +79,10 @@ export default function SessionPage() {
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
-  const { registerDesktop, clearDesktop } = useLiveDesktop();
+  const streamUrlRef = useRef<string | null>(null);
+  const viewModeRef = useRef<"live" | "archived">("live");
+  const { registerDesktop, clearDesktop, minimizeDesktop } = useLiveDesktop();
+  const minimizeDesktopRef = useRef(minimizeDesktop);
   const greetingName =
     user?.displayName?.trim() ||
     user?.email?.split("@")[0]?.trim() ||
@@ -92,6 +95,11 @@ export default function SessionPage() {
 
   const shouldConnectWs =
     viewMode === "live" && Boolean(sessionData?.ws_ticket) && hasActivatedSession;
+
+  // Keep refs in sync for unmount cleanup
+  streamUrlRef.current = streamUrl;
+  viewModeRef.current = viewMode;
+  minimizeDesktopRef.current = minimizeDesktop;
 
   const { sendBinary, sendJson, lastMessage, isConnected, onBinaryMessageRef } =
     useWebSocket(shouldConnectWs ? wsUrl : null);
@@ -281,12 +289,12 @@ export default function SessionPage() {
   }, [lastMessage, handleLastMessage]);
 
   useEffect(() => {
-    if (viewMode !== "live" || !streamUrl || !hasActivatedSession) {
+    if (viewMode !== "live" || !streamUrl) {
       return;
     }
 
     registerDesktop({ sessionId, streamUrl });
-  }, [hasActivatedSession, registerDesktop, sessionId, streamUrl, viewMode]);
+  }, [registerDesktop, sessionId, streamUrl, viewMode]);
 
   useEffect(() => {
     const player = audioPlayer.current;
@@ -294,8 +302,14 @@ export default function SessionPage() {
     return () => {
       player.stop();
       stopMic();
+      // Minimize to PiP when navigating away from an active live session
+      const url = streamUrlRef.current;
+      const mode = viewModeRef.current;
+      if (url && mode === "live") {
+        minimizeDesktopRef.current({ sessionId, streamUrl: url });
+      }
     };
-  }, [stopMic]);
+  }, [sessionId, stopMic]);
 
   useEffect(() => {
     if (voiceStatus !== "connected" && isRecording) {
@@ -411,6 +425,13 @@ export default function SessionPage() {
           created_at: info.created_at,
         });
         setStreamUrl(info.stream_url);
+
+        // If the session is already active with a stream URL,
+        // auto-activate so the desktop renders immediately on reconnect
+        if (info.stream_url && (info.status === "active" || info.status === "ready")) {
+          setHasActivatedSession(true);
+          setIsDesktopVisible(true);
+        }
       }
     }
 
