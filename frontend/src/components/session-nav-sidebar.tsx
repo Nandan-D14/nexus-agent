@@ -94,6 +94,7 @@ export function SessionNavSidebar() {
           )}
         </div>
         <button
+          suppressHydrationWarning
           onClick={handleSignOut}
           title="Sign Out"
           className="w-9 h-9 rounded-xl text-muted dark:text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/10 flex items-center justify-center transition-colors"
