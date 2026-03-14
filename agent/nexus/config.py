@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     sandbox_resolution_w: int = 1024
     sandbox_resolution_h: int = 768
     sandbox_timeout_seconds: int = 600
+    sandbox_create_retries: int = 3
+    sandbox_create_retry_backoff_seconds: float = 2.0
+    sandbox_create_retry_max_seconds: float = 10.0
 
     # Multi-agent orchestration
     use_multi_agent: bool = True

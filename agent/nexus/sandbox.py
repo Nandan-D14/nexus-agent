@@ -5,8 +5,12 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import socket
+import time
 from typing import Optional
 
+import httpcore
+import httpx
 from PIL import Image
 
 from nexus.config import settings
@@ -55,20 +59,65 @@ class SandboxManager:
         """Boot a new E2B desktop sandbox. Returns {sandbox_id, stream_url}."""
         from e2b_desktop import Sandbox
 
-        logger.info("Creating E2B desktop sandbox...")
-        self._sandbox = Sandbox.create(
-            api_key=settings.e2b_api_key or None,
-            resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
-            timeout=settings.sandbox_timeout_seconds,
-        )
-        self._sandbox.stream.start(require_auth=False)
-        self._stream_url = self._sandbox.stream.get_url()
-        logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
-        self._set_wallpaper()
-        return {
-            "sandbox_id": self._sandbox.sandbox_id,
-            "stream_url": self._stream_url,
-        }
+        retries = max(settings.sandbox_create_retries, 1)
+        backoff = max(settings.sandbox_create_retry_backoff_seconds, 0.0)
+        max_backoff = max(settings.sandbox_create_retry_max_seconds, backoff)
+
+        def is_transient(exc: Exception) -> bool:
+            return isinstance(
+                exc,
+                (
+                    socket.gaierror,
+                    httpx.ConnectError,
+                    httpx.RemoteProtocolError,
+                    httpx.TimeoutException,
+                    httpcore.ConnectError,
+                    httpcore.RemoteProtocolError,
+                ),
+            )
+
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                suffix = f" (attempt {attempt}/{retries})" if retries > 1 else ""
+                logger.info("Creating E2B desktop sandbox%s...", suffix)
+                self._sandbox = Sandbox.create(
+                    api_key=settings.e2b_api_key or None,
+                    resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
+                    timeout=settings.sandbox_timeout_seconds,
+                )
+                self._sandbox.stream.start(require_auth=False)
+                self._stream_url = self._sandbox.stream.get_url()
+                logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
+                self._set_wallpaper()
+                return {
+                    "sandbox_id": self._sandbox.sandbox_id,
+                    "stream_url": self._stream_url,
+                }
+            except Exception as exc:
+                last_exc = exc
+                if self._sandbox is not None:
+                    try:
+                        self._sandbox.kill()
+                    except Exception:
+                        logger.warning("Failed to cleanup sandbox after create error", exc_info=True)
+                    finally:
+                        self._sandbox = None
+                        self._stream_url = None
+                if is_transient(exc) and attempt < retries:
+                    delay = min(backoff * (2 ** (attempt - 1)), max_backoff)
+                    logger.warning(
+                        "Sandbox create failed (attempt %s/%s): %s. Retrying in %.1fs",
+                        attempt,
+                        retries,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
+        raise RuntimeError("Sandbox creation failed") from last_exc
 
     def _set_wallpaper(self) -> None:
         """Set a branded NEXUS dark gradient wallpaper via XFCE config. Cosmetic — errors are swallowed."""
