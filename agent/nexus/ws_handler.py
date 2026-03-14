@@ -29,6 +29,21 @@ async def handle_websocket(
     5. Clean up on disconnect
     """
     await ws.accept()
+    await ws.send_json({"type": "sandbox_status", "status": "connecting"})
+
+    try:
+        await session_manager.activate_session(session.id)
+    except Exception as exc:
+        logger.exception("Failed to activate session %s", session.id)
+        await ws.send_json(
+            {
+                "type": "error",
+                "code": "SANDBOX_INIT_ERROR",
+                "message": str(exc),
+            }
+        )
+        await ws.close(code=1011, reason="Sandbox activation failed")
+        return
 
     orchestrator = NexusOrchestrator(
         session=session,
@@ -38,7 +53,6 @@ async def handle_websocket(
 
     try:
         # Initialize voice + agent connections
-        await ws.send_json({"type": "sandbox_status", "status": "connecting"})
         await orchestrator.initialize()
 
         # Start background task: Gemini Live → frontend

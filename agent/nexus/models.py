@@ -17,7 +17,7 @@ class HealthResponse(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
-    stream_url: str
+    stream_url: Optional[str] = None
     ws_ticket: str
     status: str
     created_at: datetime

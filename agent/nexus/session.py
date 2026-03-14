@@ -27,11 +27,16 @@ class Session:
     id: str
     owner_id: str
     sandbox: SandboxManager
-    sandbox_id: str
-    stream_url: str
-    status: str = "creating"  # creating | ready | error | destroyed
+    sandbox_id: str = ""
+    stream_url: str = ""
+    status: str = "idle"  # idle | creating | ready | active | error | destroyed
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    activation_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        repr=False,
+        compare=False,
+    )
 
     def touch(self) -> None:
         """Update last_active timestamp."""
@@ -53,39 +58,63 @@ class SessionManager:
     # ── CRUD ───────────────────────────────────────────────────
 
     async def create_session(self, owner_id: str) -> Session:
-        """Boot a new E2B sandbox and create a session."""
+        """Create a session record. Sandbox boot is deferred until activation."""
         session_id = uuid.uuid4().hex[:12]
-        sandbox = SandboxManager()
-
-        try:
-            # E2B SDK is synchronous — run in executor
-            loop = asyncio.get_event_loop()
-            info = await loop.run_in_executor(None, sandbox.create)
-            session = Session(
-                id=session_id,
-                owner_id=owner_id,
-                sandbox=sandbox,
-                sandbox_id=info["sandbox_id"],
-                stream_url=info["stream_url"],
-                status="ready",
-            )
-        except Exception as exc:
-            logger.exception("Failed to create sandbox for session %s", session_id)
-            sandbox.destroy()
-            session = Session(
-                id=session_id,
-                owner_id=owner_id,
-                sandbox=sandbox,
-                sandbox_id="",
-                stream_url="",
-                status="error",
-            )
-            raise RuntimeError(f"Sandbox creation failed: {exc}") from exc
+        session = Session(
+            id=session_id,
+            owner_id=owner_id,
+            sandbox=SandboxManager(),
+        )
 
         self._sessions[session_id] = session
         await self._sync_session(session)
-        logger.info("Session %s created (stream_url=%s)", session_id, session.stream_url)
+        logger.info("Session %s created and waiting for activation", session_id)
         return session
+
+    async def ensure_session_ready(self, session_id: str) -> Session:
+        """Boot the sandbox for a session on first use."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+
+        async with session.activation_lock:
+            if session.sandbox.is_alive and session.stream_url:
+                if session.status not in {"ready", "active"}:
+                    session.status = "ready"
+                    session.touch()
+                    await self._sync_session(session, status="ready")
+                return session
+
+            session.status = "creating"
+            session.touch()
+            await self._sync_session(session, status="creating")
+
+            try:
+                loop = asyncio.get_running_loop()
+                info = await loop.run_in_executor(None, session.sandbox.create)
+            except Exception as exc:
+                logger.exception("Failed to create sandbox for session %s", session_id)
+                session.sandbox_id = ""
+                session.stream_url = ""
+                session.status = "error"
+                await self._sync_session(
+                    session,
+                    status="error",
+                    error_code="SANDBOX_INIT_ERROR",
+                )
+                raise RuntimeError(f"Sandbox creation failed: {exc}") from exc
+
+            session.sandbox_id = info["sandbox_id"]
+            session.stream_url = info["stream_url"]
+            session.status = "ready"
+            session.touch()
+            await self._sync_session(session, status="ready")
+            logger.info(
+                "Session %s sandbox ready (stream_url=%s)",
+                session_id,
+                session.stream_url,
+            )
+            return session
 
     def get_session(self, session_id: str) -> Optional[Session]:
         return self._sessions.get(session_id)
@@ -131,13 +160,12 @@ class SessionManager:
         if session:
             await self._sync_session(session, status=status, ended_at=datetime.now(timezone.utc), error_code=error_code)
 
-    async def activate_session(self, session_id: str) -> None:
-        session = self._sessions.get(session_id)
-        if not session:
-            return
+    async def activate_session(self, session_id: str) -> Session:
+        session = await self.ensure_session_ready(session_id)
         session.status = "active"
         session.touch()
         await self._sync_session(session, status="active")
+        return session
 
     # ── Auth ───────────────────────────────────────────────────
 

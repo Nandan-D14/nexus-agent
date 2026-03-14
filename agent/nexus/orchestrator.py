@@ -93,10 +93,11 @@ class NexusOrchestrator:
             "type": "sandbox_status",
             "status": "ready",
         })
-        await self._send_json({
-            "type": "vnc_url",
-            "url": self.session.stream_url,
-        })
+        if self.session.stream_url:
+            await self._send_json({
+                "type": "vnc_url",
+                "url": self.session.stream_url,
+            })
 
     async def handle_user_audio(self, pcm_data: bytes) -> None:
         """Forward mic audio to Gemini Live."""

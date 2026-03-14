@@ -32,9 +32,10 @@ def _live_session_payloads(user_id: str) -> list[dict[str, Any]]:
             "status": session.status,
             "created_at": session.created_at,
             "last_active_at": session.last_active,
-            "stream_url": session.stream_url,
+            "stream_url": session.stream_url or None,
         }
         for session in session_manager.list_sessions_for_owner(user_id)
+        if session.stream_url
     ]
 
 
@@ -75,7 +76,7 @@ async def health():
 
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(user: AuthenticatedUser = Depends(require_current_user)):
-    """Create a new NEXUS session with an E2B sandbox."""
+    """Create a new NEXUS session. Sandbox boot is deferred until activation."""
     await history_repository.upsert_user(user)
     try:
         session = await session_manager.create_session(owner_id=user.uid)
@@ -85,7 +86,7 @@ async def create_session(user: AuthenticatedUser = Depends(require_current_user)
     ticket = session_manager.create_ticket(session.id, user.uid)
     return SessionResponse(
         session_id=session.id,
-        stream_url=session.stream_url,
+        stream_url=session.stream_url or None,
         ws_ticket=ticket,
         status=session.status,
         created_at=session.created_at,
@@ -102,7 +103,7 @@ async def get_session(session_id: str, user: AuthenticatedUser = Depends(require
             session_id=session.id,
             status=session.status,
             is_live=True,
-            stream_url=session.stream_url,
+            stream_url=session.stream_url or None,
             created_at=session.created_at,
         )
 
@@ -242,15 +243,8 @@ async def websocket_endpoint(
     if (
         not session
         or session.owner_id != valid_uid
-        or session.status not in {"ready", "active"}
+        or session.status in {"destroyed", "ended"}
     ):
-        await ws.close(code=4004, reason="Session not found or not ready")
-        return
-
-    try:
-        await session_manager.activate_session(session_id)
-    except Exception as exc:
-        logger.exception("Failed to activate session %s: %s", session_id, exc)
-        await ws.close(code=4000, reason="Session activation failed")
+        await ws.close(code=4004, reason="Session not found or unavailable")
         return
     await handle_websocket(ws=ws, session=session, session_manager=session_manager)

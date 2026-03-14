@@ -16,7 +16,6 @@ export default function HomePage() {
   const {
     user,
     isLoading: authLoading,
-    error: authError,
     signInWithGoogle,
     signOutUser,
   } = useAuth();
@@ -131,7 +130,7 @@ export default function HomePage() {
                   disabled={isLoading}
                   className="px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-black/5 dark:shadow-white/5"
                 >
-                  {isLoading ? "Booting..." : "Launch Console"}
+                  {isLoading ? "Opening..." : "Launch Console"}
                 </button>
               </>
             ) : (
@@ -216,7 +215,7 @@ export default function HomePage() {
               >
                 <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                 <span className="relative z-10 flex items-center gap-3">
-                  {isLoading ? "Initializing Mission..." : user ? "Start Neural Session" : "Sign in to Start"}
+                  {isLoading ? "Opening Session..." : user ? "Start Neural Session" : "Sign in to Start"}
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-300">
                     <path d="M5 12h14M12 5l7 7-7 7" />
                   </svg>

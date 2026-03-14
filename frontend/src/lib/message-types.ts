@@ -36,6 +36,7 @@ export type WsCommand =
 // ── Session data returned by the REST API ──────────────────────────
 
 export type SessionStatus =
+  | "idle"
   | "creating"
   | "ready"
   | "active"
@@ -45,7 +46,7 @@ export type SessionStatus =
 
 export type SessionData = {
   session_id: string;
-  stream_url: string;
+  stream_url: string | null;
   ws_ticket: string;
   status: SessionStatus | string;
   created_at: string | null;
