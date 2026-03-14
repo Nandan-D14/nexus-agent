@@ -15,6 +15,7 @@ import { MicButton } from "@/components/mic-button";
 import { SessionNavSidebar } from "@/components/session-nav-sidebar";
 import { StatusBar } from "@/components/status-bar";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
+import { useLiveDesktop } from "@/components/live-desktop-provider";
 import { useAuth } from "@/lib/auth-context";
 import { AudioPlayer } from "@/lib/audio-playback";
 import { listArchivedMessages } from "@/lib/firestore-history";
@@ -66,13 +67,24 @@ export default function SessionPage() {
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [textInput, setTextInput] = useState("");
-  const [desktopVisible, setDesktopVisible] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
   const [agentStatus, setAgentStatus] = useState("");
 
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
+  const {
+    activeDesktop,
+    isMinimized,
+    registerDesktop,
+    minimizeDesktop,
+    restoreDesktop,
+    clearDesktop,
+  } = useLiveDesktop();
+
+  const isCurrentSessionMinimized =
+    activeDesktop?.sessionId === sessionId && isMinimized;
+  const desktopVisible = viewMode === "live" && !isCurrentSessionMinimized;
 
   const wsUrl =
     typeof window !== "undefined"
@@ -123,6 +135,7 @@ export default function SessionPage() {
 
       case "vnc_url":
         setStreamUrl(msg.url);
+        registerDesktop({ sessionId, streamUrl: msg.url });
         break;
 
       case "transcript":
@@ -257,6 +270,23 @@ export default function SessionPage() {
     handleLastMessage(lastMessage);
   }, [lastMessage, handleLastMessage]);
 
+  useEffect(() => {
+    if (viewMode !== "live" || !streamUrl) {
+      return;
+    }
+
+    registerDesktop({ sessionId, streamUrl });
+  }, [registerDesktop, sessionId, streamUrl, viewMode]);
+
+  useEffect(() => {
+    const player = audioPlayer.current;
+
+    return () => {
+      player.stop();
+      stopMic();
+    };
+  }, [stopMic]);
+
   /* ---- Session lifecycle ---- */
   useEffect(() => {
     let cancelled = false;
@@ -278,6 +308,7 @@ export default function SessionPage() {
       const info = await getSession(sessionId);
       if (cancelled) return;
       if (!info) {
+        clearDesktop(sessionId);
         setPageError("Session not found");
         return;
       }
@@ -285,6 +316,7 @@ export default function SessionPage() {
       setSessionInfo(info);
 
       if (!info.is_live) {
+        clearDesktop(sessionId);
         try {
           const archivedMessages = await listArchivedMessages(sessionId);
           if (!cancelled) {
@@ -314,7 +346,12 @@ export default function SessionPage() {
       }
 
       const wsTicket = await refreshTicket(sessionId);
-      if (!wsTicket || cancelled) {
+      if (cancelled) {
+        return;
+      }
+
+      if (!wsTicket) {
+        clearDesktop(sessionId);
         try {
           const archivedMessages = await listArchivedMessages(sessionId);
           if (!cancelled) {
@@ -353,6 +390,10 @@ export default function SessionPage() {
           created_at: info.created_at,
         });
         setStreamUrl(info.stream_url);
+        registerDesktop({
+          sessionId: info.session_id,
+          streamUrl: info.stream_url || "",
+        });
       }
     }
 
@@ -361,7 +402,16 @@ export default function SessionPage() {
     return () => {
       cancelled = true;
     };
-  }, [authLoading, getSession, refreshTicket, router, sessionId, user]);
+  }, [
+    authLoading,
+    clearDesktop,
+    getSession,
+    refreshTicket,
+    registerDesktop,
+    router,
+    sessionId,
+    user,
+  ]);
 
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
@@ -420,6 +470,7 @@ export default function SessionPage() {
     if (viewMode === "live") {
       try {
         await destroySession(sessionId);
+        clearDesktop(sessionId);
       } catch (err) {
         console.error("[handleEnd] Failed to destroy session:", err);
       }
@@ -472,22 +523,38 @@ export default function SessionPage() {
           {viewMode === "live" && (
             <button
               suppressHydrationWarning
-              onClick={() => setDesktopVisible((v) => !v)}
+              onClick={() => {
+                if (isCurrentSessionMinimized) {
+                  restoreDesktop();
+                  return;
+                }
+
+                minimizeDesktop({
+                  sessionId,
+                  streamUrl: streamUrl ?? sessionInfo?.stream_url ?? "",
+                });
+              }}
               className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200 flex items-center gap-1.5"
-              title={desktopVisible ? "Hide desktop" : "Show desktop"}
+              title={
+                isCurrentSessionMinimized
+                  ? "Return the desktop to the main view"
+                  : "Minimize the desktop into a floating player"
+              }
             >
               <svg
                 viewBox="0 0 20 20"
                 fill="currentColor"
                 className="w-3.5 h-3.5"
               >
-                {desktopVisible ? (
-                  <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 11a1 1 0 011-1h12a1 1 0 010 2H4a1 1 0 01-1-1z" />
+                {isCurrentSessionMinimized ? (
+                  <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm4.25 12a.75.75 0 010-1.5h3.5a.75.75 0 010 1.5h-3.5z" />
                 ) : (
-                  <path d="M10 12.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75zM10 16a1 1 0 100-2 1 1 0 000 2zM4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm0 1.5h12a.5.5 0 01.5.5v10a.5.5 0 01-.5.5H4a.5.5 0 01-.5-.5V5a.5.5 0 01.5-.5z" />
+                  <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 11a1 1 0 011-1h12a1 1 0 010 2H4a1 1 0 01-1-1z" />
                 )}
               </svg>
-              {desktopVisible ? "Hide Desktop" : "Show Desktop"}
+              {isCurrentSessionMinimized
+                ? "Restore Desktop"
+                : "Minimize Desktop"}
             </button>
           )}
 
@@ -513,7 +580,7 @@ export default function SessionPage() {
         {/* Left: Desktop panel (collapsible) */}
         <div
           className={`flex overflow-hidden transition-all duration-300 ease-in-out ${
-            desktopVisible && viewMode === "live"
+            desktopVisible
               ? "flex-1 min-w-0"
               : "w-0 min-w-0 p-0 opacity-0"
           }`}
@@ -578,32 +645,10 @@ export default function SessionPage() {
           ) : null}
         </div>
 
-        {/* Collapsed icon strip when desktop is hidden */}
-        {!desktopVisible && viewMode === "live" && (
-          <button
-            onClick={() => setDesktopVisible(true)}
-            className="flex flex-col items-center justify-center w-10 border-r border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b] hover:bg-black/5 dark:hover:bg-zinc-900 transition-colors group"
-            title="Show Desktop"
-          >
-            <svg
-              viewBox="0 0 20 20"
-              fill="currentColor"
-              className="w-4 h-4 text-muted dark:text-zinc-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors"
-            >
-              <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 11a1 1 0 011-1h12a1 1 0 010 2H4a1 1 0 01-1-1z" />
-            </svg>
-            <span className="mt-1 text-[8px] font-bold text-muted dark:text-zinc-700 group-hover:text-foreground dark:group-hover:text-zinc-400 uppercase tracking-widest writing-mode-vertical"
-              style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
-            >
-              Desktop
-            </span>
-          </button>
-        )}
-
         {/* Right: Unified Chat Panel */}
         <div
           className={`flex flex-col border-l border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#0a0a0c] overflow-hidden transition-all duration-300 ease-in-out ${
-            desktopVisible && viewMode === "live"
+            desktopVisible
               ? "w-105 min-w-95"
               : "flex-1"
           }`}
