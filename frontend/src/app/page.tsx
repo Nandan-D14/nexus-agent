@@ -49,12 +49,22 @@ export default function HomePage() {
 
   const handleStart = async (demoCommand?: string) => {
     if (!user) return;
+    if (!demoCommand) {
+      router.push("/session/new");
+      return;
+    }
     const session = await createSession();
     if (session) {
-      const params = demoCommand
-        ? `?demo=${encodeURIComponent(demoCommand)}`
-        : "";
-      router.push(`/session/${session.session_id}${params}`);
+      try {
+        const key = `nexus.pendingSessionAction:${session.session_id}`;
+        sessionStorage.setItem(
+          key,
+          JSON.stringify({ type: "demo", text: demoCommand }),
+        );
+      } catch {
+        // Ignore storage failures and just navigate.
+      }
+      router.push(`/session/${session.session_id}`);
     }
   };
 

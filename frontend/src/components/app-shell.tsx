@@ -1,7 +1,6 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
-import { useSession } from "@/lib/use-session";
 import { useRouter, usePathname } from "next/navigation";
 import { motion } from "framer-motion";
 import {
@@ -18,7 +17,6 @@ import { useCallback, useState } from "react";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, signOutUser, isLoading: isAuthLoading } = useAuth();
-  const { createSession, isLoading: isSessionLoading } = useSession();
   const router = useRouter();
   const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -34,16 +32,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     router.push("/");
   };
 
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(() => {
     if (!user) {
       router.push("/");
       return;
     }
-    const session = await createSession();
-    if (session) {
-      router.push(`/session/${session.session_id}`);
-    }
-  }, [createSession, router, user]);
+    router.push("/session/new");
+  }, [router, user]);
 
   const NavLinks = () => (
     <>
@@ -110,12 +105,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="px-4 py-2">
           <button
             type="button"
-            onClick={() => void handleNewSession()}
-            disabled={isSessionLoading}
-            className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={handleNewSession}
+            className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95"
           >
             <PlusCircle className="w-5 h-5" />
-            {isSessionLoading ? "Starting..." : "New Session"}
+            New Session
           </button>
         </div>
 

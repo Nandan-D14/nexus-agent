@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -52,12 +52,18 @@ type ChatItem =
 
 export default function SessionPage() {
   const params = useParams();
-  const searchParams = useSearchParams();
   const router = useRouter();
   const sessionId = params.id as string;
   const { user, isLoading: authLoading } = useAuth();
-  const { getSession, refreshTicket, destroySession, isLoading, error } =
-    useSession();
+  const {
+    createSession,
+    getSession,
+    refreshTicket,
+    destroySession,
+    isLoading,
+    error,
+  } = useSession();
+  const isNewSession = sessionId === "new";
 
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
@@ -82,6 +88,8 @@ export default function SessionPage() {
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
   const streamUrlRef = useRef<string | null>(null);
   const viewModeRef = useRef<"live" | "archived">("live");
+  const autoActionHandledRef = useRef(false);
+  const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
   const { registerDesktop, clearDesktop, minimizeDesktop } = useLiveDesktop();
   const minimizeDesktopRef = useRef(minimizeDesktop);
   const greetingName =
@@ -95,7 +103,10 @@ export default function SessionPage() {
       : null;
 
   const shouldConnectWs =
-    viewMode === "live" && Boolean(sessionData?.ws_ticket) && hasActivatedSession;
+    !isNewSession &&
+    viewMode === "live" &&
+    Boolean(sessionData?.ws_ticket) &&
+    hasActivatedSession;
 
   // Keep refs in sync for unmount cleanup
   streamUrlRef.current = streamUrl;
@@ -140,6 +151,11 @@ export default function SessionPage() {
     const maxHeight = 200;
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
   }, [textInput]);
+
+  useEffect(() => {
+    autoActionHandledRef.current = false;
+    pendingActionKeyRef.current = `nexus.pendingSessionAction:${sessionId}`;
+  }, [sessionId]);
 
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
@@ -298,12 +314,12 @@ export default function SessionPage() {
   }, [lastMessage, handleLastMessage]);
 
   useEffect(() => {
-    if (viewMode !== "live" || !streamUrl) {
+    if (isNewSession || viewMode !== "live" || !streamUrl) {
       return;
     }
 
     registerDesktop({ sessionId, streamUrl });
-  }, [registerDesktop, sessionId, streamUrl, viewMode]);
+  }, [isNewSession, registerDesktop, sessionId, streamUrl, viewMode]);
 
   useEffect(() => {
     const player = audioPlayer.current;
@@ -348,6 +364,11 @@ export default function SessionPage() {
       setIsDesktopVisible(false);
       setPendingText(null);
       setPendingMicStart(false);
+      setViewMode("live");
+
+      if (isNewSession) {
+        return;
+      }
 
       const info = await getSession(sessionId);
       if (cancelled) return;
@@ -453,6 +474,7 @@ export default function SessionPage() {
     authLoading,
     clearDesktop,
     getSession,
+    isNewSession,
     refreshTicket,
     router,
     sessionId,
@@ -476,9 +498,59 @@ export default function SessionPage() {
     }
   }, [isConnected, pendingMicStart, pendingText, sendJson, startMic, viewMode]);
 
+  const startSession = useCallback(
+    async (options?: {
+      prompt?: string;
+      demo?: string;
+      openDesktop?: boolean;
+      startMic?: boolean;
+    }) => {
+      if (authLoading) return;
+      if (!user) {
+        router.push("/");
+        return;
+      }
+
+      setPageError(null);
+      const session = await createSession();
+      if (!session) {
+        setPageError("Failed to create session.");
+        return;
+      }
+
+      try {
+        const key = `nexus.pendingSessionAction:${session.session_id}`;
+        if (options?.demo) {
+          sessionStorage.setItem(
+            key,
+            JSON.stringify({ type: "demo", text: options.demo }),
+          );
+        } else if (options?.prompt) {
+          sessionStorage.setItem(
+            key,
+            JSON.stringify({ type: "prompt", text: options.prompt }),
+          );
+        } else if (options?.openDesktop) {
+          sessionStorage.setItem(key, JSON.stringify({ type: "openDesktop" }));
+        } else if (options?.startMic) {
+          sessionStorage.setItem(key, JSON.stringify({ type: "startMic" }));
+        }
+      } catch {
+        // If storage is unavailable, fall back to plain navigation.
+      }
+
+      router.push(`/session/${session.session_id}`);
+    },
+    [authLoading, createSession, router, user],
+  );
+
   const sendTextOrQueue = useCallback(
     (text: string) => {
       if (viewMode !== "live") return;
+      if (isNewSession) {
+        void startSession({ prompt: text });
+        return;
+      }
 
       setPhase("thinking");
 
@@ -495,12 +567,16 @@ export default function SessionPage() {
 
       sendJson({ type: "text_input", text });
     },
-    [hasActivatedSession, isConnected, sendJson, viewMode],
+    [hasActivatedSession, isConnected, isNewSession, sendJson, startSession, viewMode],
   );
 
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
     if (viewMode !== "live") return;
+    if (isNewSession) {
+      void startSession({ startMic: true });
+      return;
+    }
     if (voiceStatus !== "connected") return;
     if (isRecording) {
       stopMic();
@@ -525,8 +601,10 @@ export default function SessionPage() {
   }, [
     hasActivatedSession,
     isConnected,
+    isNewSession,
     isRecording,
     startMic,
+    startSession,
     stopMic,
     viewMode,
     voiceStatus,
@@ -536,17 +614,26 @@ export default function SessionPage() {
     if (viewMode !== "live") return;
     const text = textInput.trim();
     if (!text) return;
+    if (isNewSession) {
+      void startSession({ prompt: text });
+      setTextInput("");
+      return;
+    }
     sendTextOrQueue(text);
     setTextInput("");
-  }, [sendTextOrQueue, textInput, viewMode]);
+  }, [isNewSession, sendTextOrQueue, startSession, textInput, viewMode]);
 
   const handleShowDesktop = useCallback(() => {
     if (viewMode !== "live") return;
+    if (isNewSession) {
+      void startSession({ openDesktop: true });
+      return;
+    }
     setIsDesktopVisible(true);
     if (!hasActivatedSession) {
       setHasActivatedSession(true);
     }
-  }, [hasActivatedSession, viewMode]);
+  }, [hasActivatedSession, isNewSession, startSession, viewMode]);
 
   const handleHideDesktop = useCallback(() => {
     setIsDesktopVisible(false);
@@ -555,9 +642,13 @@ export default function SessionPage() {
   const handleDemo = useCallback(
     (text: string) => {
       if (viewMode !== "live") return;
+      if (isNewSession) {
+        void startSession({ demo: text });
+        return;
+      }
       sendTextOrQueue(text);
     },
-    [sendTextOrQueue, viewMode],
+    [isNewSession, sendTextOrQueue, startSession, viewMode],
   );
 
   const handlePermissionRespond = useCallback(
@@ -574,21 +665,72 @@ export default function SessionPage() {
   }, [sendJson]);
 
   useEffect(() => {
-    const demo = searchParams.get("demo");
-    if (!demo || viewMode !== "live") {
+    if (isNewSession || viewMode !== "live") {
+      return;
+    }
+    if (autoActionHandledRef.current) {
       return;
     }
 
-    const timer = setTimeout(() => {
-      handleDemo(demo);
-    }, 500);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const key = pendingActionKeyRef.current;
+      const raw = sessionStorage.getItem(key);
+      if (!raw) {
+        return;
+      }
+      sessionStorage.removeItem(key);
 
-    return () => clearTimeout(timer);
-  }, [handleDemo, searchParams, viewMode]);
+      const action = JSON.parse(raw) as
+        | { type: "demo"; text: string }
+        | { type: "prompt"; text: string }
+        | { type: "openDesktop" }
+        | { type: "startMic" };
+
+      autoActionHandledRef.current = true;
+
+      if (action.type === "openDesktop") {
+        handleShowDesktop();
+      } else if (action.type === "startMic") {
+        if (!hasActivatedSession) {
+          setHasActivatedSession(true);
+        }
+        setPendingMicStart(true);
+        setPhase("listening");
+      } else if (action.type === "demo") {
+        timer = setTimeout(() => {
+          handleDemo(action.text);
+        }, 400);
+      } else if (action.type === "prompt") {
+        timer = setTimeout(() => {
+          sendTextOrQueue(action.text);
+        }, 400);
+      }
+    } catch {
+      // Ignore invalid storage payloads.
+    }
+
+    return () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [
+    handleDemo,
+    handleShowDesktop,
+    hasActivatedSession,
+    isNewSession,
+    sendTextOrQueue,
+    viewMode,
+  ]);
 
   const handleEnd = async () => {
     audioPlayer.current.stop();
     stopMic();
+    if (isNewSession) {
+      router.push("/dashboard");
+      return;
+    }
     if (viewMode === "live") {
       try {
         await destroySession(sessionId);
