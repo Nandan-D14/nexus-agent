@@ -14,6 +14,7 @@ from nexus.history_repository import FirestoreHistoryRepository
 from nexus.tools._context import set_sandbox, set_bg_task_manager
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
+from nexus.usage import TokenUsageRecord
 
 if TYPE_CHECKING:
     from nexus.session import Session
@@ -177,6 +178,8 @@ class NexusOrchestrator:
                             "role": "agent",
                             "text": data,
                         })
+                    elif event_type == "usage":
+                        await self._persist_token_usage(data)
                 # Clean exit from the generator — no reconnect needed
                 break
 
@@ -250,7 +253,7 @@ class NexusOrchestrator:
             logger.debug("Could not extend sandbox timeout", exc_info=True)
 
         try:
-            response = await run_agent_turn(
+            result = await run_agent_turn(
                 runner=self._runner,
                 session_service=self._session_service,
                 session_id=self._adk_session_id,
@@ -258,27 +261,29 @@ class NexusOrchestrator:
                 message=message,
                 event_callback=self._on_agent_event,
             )
+            for usage in result.usage_records:
+                await self._persist_token_usage(usage)
 
-            if response:
+            if result.response:
                 # Send agent text response
                 await self._send_json({
                     "type": "transcript",
                     "role": "agent",
-                    "text": response,
+                    "text": result.response,
                 })
-                await self._persist_message(role="agent", source="agent", text=response)
+                await self._persist_message(role="agent", source="agent", text=result.response)
                 # Feed to Gemini Live for TTS
                 if self._voice_connected:
                     try:
-                        await self.voice.send_text(response)
+                        await self.voice.send_text(result.response)
                     except Exception:
                         logger.warning("Failed to send TTS for response")
 
                 await self._send_json({
                     "type": "agent_complete",
-                    "summary": response[:200],
+                    "summary": result.response[:200],
                 })
-                await self._mark_summary(response)
+                await self._mark_summary(result.response)
 
         except _AgentStopped:
             logger.info("Agent stopped via _AgentStopped for session %s", self.session.id)
@@ -479,6 +484,26 @@ class NexusOrchestrator:
             )
         except Exception:
             logger.exception("Failed to persist %s message for session %s", role, self.session.id)
+
+    async def _persist_token_usage(self, usage: TokenUsageRecord) -> None:
+        if not self.history_repository:
+            return
+        try:
+            await self.history_repository.append_token_usage(
+                session_id=self.session.id,
+                owner_id=self.session.owner_id,
+                source=usage.source,
+                model=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist token usage for session %s from %s",
+                self.session.id,
+                usage.source,
+            )
 
     async def _mark_summary(
         self,

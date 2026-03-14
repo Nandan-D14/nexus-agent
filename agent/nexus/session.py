@@ -90,6 +90,11 @@ class SessionManager:
     def get_session(self, session_id: str) -> Optional[Session]:
         return self._sessions.get(session_id)
 
+    def list_sessions_for_owner(self, owner_id: str) -> list[Session]:
+        sessions = [session for session in self._sessions.values() if session.owner_id == owner_id]
+        sessions.sort(key=lambda session: session.last_active, reverse=True)
+        return sessions
+
     async def destroy_if_owned(
         self, session_id: str, owner_id: str, status: str = "ended"
     ) -> None:

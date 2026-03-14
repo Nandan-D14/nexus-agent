@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 
 from nexus.config import settings
+from nexus.usage import TokenUsageRecord, extract_token_usage_records
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class GeminiLiveManager:
             return
         await self._live.send_realtime_input(audio_stream_end=True)
 
-    async def receive_events(self) -> AsyncGenerator[tuple[str, object], None]:
+    async def receive_events(self) -> AsyncGenerator[tuple[str, object | TokenUsageRecord], None]:
         """Yield events from the Gemini Live session.
 
         Yields tuples of:
@@ -99,6 +100,13 @@ class GeminiLiveManager:
 
         try:
             async for response in self._live.receive():
+                for usage in extract_token_usage_records(
+                    response,
+                    default_source="voice.gemini_live",
+                    default_model=settings.gemini_live_model,
+                ):
+                    yield ("usage", usage)
+
                 # Response audio data (PCM 24kHz)
                 if response.data is not None:
                     yield ("audio", response.data)
