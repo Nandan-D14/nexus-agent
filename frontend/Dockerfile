@@ -1,7 +1,7 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 
 # Next.js inlines NEXT_PUBLIC_* at build time — must be declared as ARGs

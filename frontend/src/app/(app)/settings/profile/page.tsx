@@ -3,7 +3,7 @@
 import { useAuth } from "@/lib/auth-context";
 import { useState, useEffect } from "react";
 import { Save, Loader2, Camera, Moon, Sun, Monitor } from "lucide-react";
-import { getAuth } from "firebase/auth";
+import { authenticatedFetch } from "@/lib/api-client";
 import { useToast } from "@/components/toast-provider";
 import { useTheme } from "next-themes";
 
@@ -38,13 +38,9 @@ export default function ProfileSettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const token = await getAuth().currentUser?.getIdToken();
-      await fetch("http://localhost:8000/api/v1/user/settings", {
+      await authenticatedFetch("/api/v1/user/settings", {
         method: "PATCH",
-        headers: { 
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ displayName, bio, avatarUrl })
       });
       toast("Profile updated successfully", "success");

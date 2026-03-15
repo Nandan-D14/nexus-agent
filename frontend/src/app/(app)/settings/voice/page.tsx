@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Save, Loader2, Mic, Volume2 } from "lucide-react";
-import { getAuth } from "firebase/auth";
+import { authenticatedFetch } from "@/lib/api-client";
 
 export default function VoiceSettingsPage() {
   const [saving, setSaving] = useState(false);
@@ -13,13 +13,9 @@ export default function VoiceSettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const token = await getAuth().currentUser?.getIdToken();
-      await fetch("http://localhost:8000/api/v1/user/settings", {
+      await authenticatedFetch("/api/v1/user/settings", {
         method: "PATCH",
-        headers: { 
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ "settings.voiceId": voiceId, "settings.voiceSpeed": speed, "settings.autoMic": autoMic })
       });
       alert("Voice settings updated successfully");
