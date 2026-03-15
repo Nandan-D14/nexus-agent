@@ -30,6 +30,10 @@ export interface UseWebSocketReturn {
   onBinaryMessageRef: React.MutableRefObject<
     ((data: ArrayBuffer) => void) | null
   >;
+  /** Assign a callback to receive every JSON message (no batching loss). */
+  onJsonMessageRef: React.MutableRefObject<
+    ((msg: WsMessage) => void) | null
+  >;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -45,6 +49,8 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
   const onBinaryMessageRef = useRef<((data: ArrayBuffer) => void) | null>(null);
+  /** Mutable ref so consumers can handle every JSON message without React batching loss. */
+  const onJsonMessageRef = useRef<((msg: WsMessage) => void) | null>(null);
 
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,6 +117,7 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
       } else if (typeof event.data === "string") {
         try {
           const parsed = JSON.parse(event.data) as WsMessage;
+          onJsonMessageRef.current?.(parsed);
           setLastMessage(parsed);
         } catch {
           console.warn("[useWebSocket] Failed to parse text frame:", event.data);
@@ -177,5 +184,6 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     isConnected,
     readyState,
     onBinaryMessageRef,
+    onJsonMessageRef,
   };
 }
