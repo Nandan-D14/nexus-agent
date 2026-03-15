@@ -47,8 +47,8 @@ class Settings(BaseSettings):
 
     @property
     def use_vision(self) -> bool:
-        """True when Gemini vision is available (Vertex AI via ADC)."""
-        return bool(self.google_project_id)
+        """True when Gemini vision is available for screenshot analysis."""
+        return bool(self.google_api_key or self.google_project_id)
 
     # Server
     frontend_url: str = "http://localhost:3000"
