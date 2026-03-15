@@ -4,8 +4,12 @@ set -euo pipefail
 # ── Configuration ──────────────────────────────────────────────
 PROJECT_ID="${GOOGLE_PROJECT_ID:?Set GOOGLE_PROJECT_ID}"
 REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
-AGENT_IMAGE="gcr.io/${PROJECT_ID}/nexus-agent"
-FRONTEND_IMAGE="gcr.io/${PROJECT_ID}/nexus-frontend"
+
+# Use Artifact Registry (gcr.io is deprecated)
+AR_HOST="${REGION}-docker.pkg.dev"
+AR_REPO="${AR_HOST}/${PROJECT_ID}/nexus"
+AGENT_IMAGE="${AR_REPO}/nexus-agent"
+FRONTEND_IMAGE="${AR_REPO}/nexus-frontend"
 
 # Resolve paths relative to this script (deploy/gcp/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,11 +30,22 @@ echo "Project: ${PROJECT_ID}"
 echo "Region:  ${REGION}"
 echo ""
 
+# ── 0. Create Artifact Registry repo (idempotent) ─────────────
+echo "Ensuring Artifact Registry repository exists..."
+gcloud artifacts repositories create nexus \
+  --project="${PROJECT_ID}" \
+  --repository-format=docker \
+  --location="${REGION}" \
+  --description="NEXUS container images" 2>/dev/null || true
+
 # ── 1. Build & Push Agent Image ───────────────────────────────
 echo "Building agent image..."
-gcloud builds submit --project="${PROJECT_ID}" --tag="${AGENT_IMAGE}" "${AGENT_DIR}"
+gcloud builds submit \
+  --project="${PROJECT_ID}" \
+  --tag="${AGENT_IMAGE}" \
+  "${AGENT_DIR}"
 
-# ── 2. Deploy Agent Service (must go first so we get its URL) ─
+# ── 2. Deploy Agent Service (first — need its URL for frontend) ─
 echo "Deploying agent service..."
 gcloud run deploy nexus-agent \
   --project="${PROJECT_ID}" \
@@ -53,17 +68,13 @@ AGENT_URL=$(gcloud run services describe nexus-agent \
 echo "Agent URL: ${AGENT_URL}"
 AGENT_WS_URL="${AGENT_URL/https:/wss:}"
 
-# ── 3. Build Frontend Image (with NEXT_PUBLIC_* build args) ───
+# ── 3. Build Frontend Image (NEXT_PUBLIC_* baked in at build time) ─
+# gcloud builds submit does not support --build-arg; substitutions via cloudbuild.yaml instead
 echo "Building frontend image..."
-gcloud builds submit --project="${PROJECT_ID}" --tag="${FRONTEND_IMAGE}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_API_KEY=${FB_API_KEY}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${FB_AUTH_DOMAIN}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_PROJECT_ID=${FB_PROJECT_ID}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${FB_STORAGE_BUCKET}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${FB_MESSAGING_SENDER_ID}" \
-  --build-arg="NEXT_PUBLIC_FIREBASE_APP_ID=${FB_APP_ID}" \
-  --build-arg="NEXT_PUBLIC_USE_FIREBASE_EMULATORS=false" \
-  --build-arg="NEXT_PUBLIC_AGENT_WS_URL=${AGENT_WS_URL}" \
+gcloud builds submit \
+  --project="${PROJECT_ID}" \
+  --config="${FRONTEND_DIR}/cloudbuild.yaml" \
+  --substitutions="_IMAGE=${FRONTEND_IMAGE},_NEXT_PUBLIC_FIREBASE_API_KEY=${FB_API_KEY},_NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${FB_AUTH_DOMAIN},_NEXT_PUBLIC_FIREBASE_PROJECT_ID=${FB_PROJECT_ID},_NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${FB_STORAGE_BUCKET},_NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${FB_MESSAGING_SENDER_ID},_NEXT_PUBLIC_FIREBASE_APP_ID=${FB_APP_ID},_NEXT_PUBLIC_USE_FIREBASE_EMULATORS=false,_NEXT_PUBLIC_AGENT_WS_URL=${AGENT_WS_URL}" \
   "${FRONTEND_DIR}"
 
 # ── 4. Deploy Frontend Service ────────────────────────────────
@@ -85,7 +96,7 @@ FRONTEND_URL=$(gcloud run services describe nexus-frontend \
   --region="${REGION}" \
   --format='value(status.url)')
 
-# ── 5. Update Agent with correct FRONTEND_URL for CORS ───────
+# ── 5. Update Agent CORS with actual frontend URL ─────────────
 echo "Updating agent CORS origin..."
 gcloud run services update nexus-agent \
   --project="${PROJECT_ID}" \
