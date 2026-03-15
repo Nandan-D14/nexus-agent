@@ -18,7 +18,11 @@ class VisionAnalyzer:
     """Sends E2B screenshots to Gemini for visual understanding."""
 
     def __init__(self) -> None:
-        self._client = genai.Client(api_key=settings.google_api_key)
+        self._client = genai.Client(
+            vertexai=True,
+            project=settings.google_project_id,
+            location=settings.google_cloud_region,
+        )
 
     async def analyze_screen(
         self,

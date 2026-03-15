@@ -47,8 +47,8 @@ class Settings(BaseSettings):
 
     @property
     def use_vision(self) -> bool:
-        """True when Gemini vision is available for screenshot analysis."""
-        return bool(self.google_api_key)
+        """True when Gemini vision is available (Vertex AI via ADC)."""
+        return bool(self.google_project_id)
 
     # Server
     frontend_url: str = "http://localhost:3000"
@@ -95,3 +95,9 @@ def apply_runtime_env_overrides() -> None:
     project_id = settings.firebase_project_id or settings.google_project_id
     if project_id:
         os.environ.setdefault("GCLOUD_PROJECT", project_id)
+
+    # Vertex AI SDK reads these from env
+    if settings.google_project_id:
+        os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.google_project_id)
+    if settings.google_cloud_region:
+        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)

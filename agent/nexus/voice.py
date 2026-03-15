@@ -23,7 +23,11 @@ class GeminiLiveManager:
     """Manages a persistent bidirectional Gemini Live session for voice I/O."""
 
     def __init__(self) -> None:
-        self._client = genai.Client(api_key=settings.google_api_key)
+        self._client = genai.Client(
+            vertexai=True,
+            project=settings.google_project_id,
+            location=settings.google_cloud_region,
+        )
         self._session = None
         self._live = None
         self._connected = False

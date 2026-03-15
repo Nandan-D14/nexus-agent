@@ -44,8 +44,8 @@ class NexusOrchestrator:
         self._voice_connection_error_cls: type[Exception] | None = None
         self.history_repository = history_repository
 
-        # Only create voice manager when Google API key is available
-        if settings.google_api_key:
+        # Create voice manager when Google project is configured (uses Vertex AI ADC)
+        if settings.google_project_id:
             from nexus.voice import GeminiLiveManager, VoiceConnectionError
             self.voice = GeminiLiveManager()
             self._voice_connection_error_cls = VoiceConnectionError
