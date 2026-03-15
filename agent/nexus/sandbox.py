@@ -172,6 +172,47 @@ class SandboxManager:
         if self._sandbox:
             self._sandbox.set_timeout(timeout)
 
+    def pause(self) -> str | None:
+        """Snapshot the sandbox state. Returns the sandbox_id so it can be resumed later.
+
+        Clears internal references so ``is_alive`` returns False after this call.
+        Returns None if no sandbox is running or if the E2B API call fails.
+        """
+        if self._sandbox is None:
+            return None
+        try:
+            sandbox_id: str = self._sandbox.sandbox_id
+            self._sandbox.pause()
+            logger.info("Sandbox paused (id=%s)", sandbox_id)
+            return sandbox_id
+        except Exception as exc:
+            logger.warning("Failed to pause sandbox: %s", exc)
+            return None
+        finally:
+            self._sandbox = None
+            self._stream_url = None
+
+    def resume(self, sandbox_id: str) -> dict:
+        """Resume a previously paused sandbox. Returns {sandbox_id, stream_url}.
+
+        Raises if the E2B API call fails (e.g. snapshot expired after 24 hours).
+        """
+        from e2b_desktop import Sandbox
+
+        logger.info("Resuming sandbox %s ...", sandbox_id)
+        self._sandbox = Sandbox.resume(
+            sandbox_id,
+            api_key=settings.e2b_api_key or None,
+            timeout=settings.sandbox_timeout_seconds,
+        )
+        self._sandbox.stream.start(require_auth=False)
+        self._stream_url = self._sandbox.stream.get_url()
+        logger.info("Sandbox resumed -- stream URL: %s", self._stream_url)
+        return {
+            "sandbox_id": self._sandbox.sandbox_id,
+            "stream_url": self._stream_url,
+        }
+
     def destroy(self) -> None:
         """Kill the sandbox."""
         if self._sandbox:

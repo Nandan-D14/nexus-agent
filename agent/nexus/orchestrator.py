@@ -77,6 +77,9 @@ class NexusOrchestrator:
         # Voice is lazy — only connects when user explicitly starts mic
         self._voice_started = asyncio.Event()
 
+        # Prior-conversation context injected into the first agent turn on reconnect
+        self._prior_context: str | None = None
+
     async def initialize(self) -> None:
         """Set up ADK session. Voice connection is deferred until user starts mic."""
         # Bind sandbox and bg task manager to tool context
@@ -94,6 +97,20 @@ class NexusOrchestrator:
             app_name="nexus", user_id=self._user_id
         )
         self._adk_session_id = adk_session.id
+
+        # Replay prior conversation context so the agent remembers past turns
+        if self.history_repository:
+            try:
+                messages = await self.history_repository.get_session_messages(self.session.id)
+                if messages:
+                    self._prior_context = self._format_history_context(messages)
+                    logger.info(
+                        "History replay: injecting %d messages into session %s",
+                        len(messages),
+                        self.session.id,
+                    )
+            except Exception:
+                logger.warning("Failed to load history for replay", exc_info=True)
 
         # Notify frontend
         await self._send_json({
@@ -175,7 +192,7 @@ class NexusOrchestrator:
         """Handle direct text input (bypass voice)."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="typed", text=text)
-        await self._run_agent_tracked(text)
+        await self._run_agent_tracked(self._with_prior_context(text))
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
         """Route a permission_response from the frontend to the bg task manager."""
@@ -185,7 +202,7 @@ class NexusOrchestrator:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="voice", text=text)
-        await self._run_agent_tracked(text)
+        await self._run_agent_tracked(self._with_prior_context(text))
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
@@ -362,6 +379,38 @@ class NexusOrchestrator:
                 await asyncio.sleep(wait)
 
         raise RuntimeError(f"Rate limit exceeded after {self._RATE_LIMIT_MAX_RETRIES} retries: {last_exc}")
+
+    def _with_prior_context(self, text: str) -> str:
+        """Prepend prior-conversation context to the first user message after reconnect.
+
+        On second and subsequent calls ``_prior_context`` is already None, so the
+        method is a no-op and returns the original text as-is.
+        """
+        if self._prior_context:
+            full_text = f"{self._prior_context}\n\nUser: {text}"
+            self._prior_context = None
+            return full_text
+        return text
+
+    @staticmethod
+    def _format_history_context(messages: list[dict]) -> str:
+        """Format the last 20 stored messages as a plain-text prior-context block."""
+        recent = messages[-20:]
+        lines = []
+        for msg in recent:
+            role = (msg.get("role") or "user").upper()
+            text = str(msg.get("text") or "").strip()
+            if text:
+                lines.append(f"{role}: {text[:300]}")
+        if not lines:
+            return ""
+        history = "\n".join(lines)
+        return (
+            "[PRIOR CONVERSATION — you have already spoken with this user]\n"
+            f"{history}\n"
+            "[END PRIOR CONVERSATION]\n\n"
+            "Continue naturally from where you left off."
+        )
 
     async def _reconnect_sandbox(self) -> bool:
         """Attempt to create a new sandbox when the current one has died.

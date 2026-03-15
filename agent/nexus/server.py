@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket
@@ -239,6 +240,111 @@ async def get_user_quota(user: AuthenticatedUser = Depends(require_current_user)
     """Get the user's token quota (limit, used, remaining)."""
     quota = await history_repository.get_user_quota(user.uid)
     return quota
+
+
+# ── Google Drive OAuth ──────────────────────────────────────────
+
+_GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+
+def _gdrive_redirect_uri() -> str:
+    return f"{settings.frontend_url}/auth/google-drive/callback"
+
+
+def _gdrive_flow():
+    """Build a google-auth-oauthlib Flow. Returns None if OAuth is not configured."""
+    if not (settings.google_oauth_client_id and settings.google_oauth_client_secret):
+        return None
+    try:
+        from google_auth_oauthlib.flow import Flow
+
+        client_config = {
+            "web": {
+                "client_id": settings.google_oauth_client_id,
+                "client_secret": settings.google_oauth_client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        }
+        return Flow.from_client_config(
+            client_config,
+            scopes=_GDRIVE_SCOPES,
+            redirect_uri=_gdrive_redirect_uri(),
+        )
+    except Exception:
+        return None
+
+
+@app.get("/api/v1/auth/google-drive/url")
+async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
+    """Return a Google OAuth URL the frontend should open in a popup."""
+    flow = _gdrive_flow()
+    if flow is None:
+        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+
+    import jwt as pyjwt
+    from datetime import timedelta
+
+    state_payload = {
+        "uid": user.uid,
+        "purpose": "gdrive_oauth",
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+    }
+    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+        state=state,
+    )
+    return {"auth_url": auth_url}
+
+
+@app.post("/api/v1/auth/google-drive/exchange")
+async def exchange_google_drive_code(
+    body: dict[str, Any],
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    """Exchange an authorization code for a Drive refresh token and store it."""
+    flow = _gdrive_flow()
+    if flow is None:
+        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+
+    code = body.get("code", "")
+    state = body.get("state", "")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code")
+
+    # Validate state JWT to confirm the OAuth round-trip matches the current user
+    import jwt as pyjwt
+
+    try:
+        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        if state_data.get("uid") != user.uid or state_data.get("purpose") != "gdrive_oauth":
+            raise ValueError("state mismatch")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    try:
+        flow.fetch_token(code=code)
+        refresh_token = flow.credentials.refresh_token
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
+
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="No refresh token returned. Ensure prompt=consent was set.")
+
+    await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": refresh_token})
+    return {"status": "connected"}
+
+
+@app.delete("/api/v1/auth/google-drive")
+async def disconnect_google_drive(user: AuthenticatedUser = Depends(require_current_user)):
+    """Remove the user's stored Google Drive refresh token."""
+    await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})
+    return {"status": "disconnected"}
+
 
 # ── WebSocket Endpoint ──────────────────────────────────────────
 

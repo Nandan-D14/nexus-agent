@@ -88,6 +88,17 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
     ws.onopen = () => {
       reconnectAttempts.current = 0;
       setReadyState(ReadyState.OPEN);
+
+      // Send a ping every 30 s to keep Cloud Run alive and the WS from timing out
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "ping" }));
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 30_000);
+
+      ws.addEventListener("close", () => clearInterval(pingInterval), { once: true });
     };
 
     ws.onclose = () => {

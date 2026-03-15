@@ -227,6 +227,14 @@ class FirestoreHistoryRepository:
         """Atomically increment user-level token usage. Returns updated quota."""
         return await asyncio.to_thread(self._increment_user_token_usage_sync, uid, tokens)
 
+    async def get_persistent_sandbox(self, owner_id: str) -> str | None:
+        """Return the paused sandbox ID for the user, or None if none exists."""
+        return await asyncio.to_thread(self._get_persistent_sandbox_sync, owner_id)
+
+    async def save_paused_sandbox(self, owner_id: str, sandbox_id: str | None) -> None:
+        """Write (or clear) the user's paused sandbox ID in Firestore."""
+        await asyncio.to_thread(self._save_paused_sandbox_sync, owner_id, sandbox_id)
+
     def _upsert_user_sync(self, user: AuthenticatedUser) -> None:
         now = utcnow()
         ref = self._db.collection("users").document(user.uid)
@@ -706,3 +714,15 @@ class FirestoreHistoryRepository:
         ref.update({"tokenUsage": firestore.Increment(tokens)})
         return self._get_user_quota_sync(uid)
 
+    def _get_persistent_sandbox_sync(self, owner_id: str) -> str | None:
+        doc = self._db.collection("users").document(owner_id).get()
+        if not doc.exists:
+            return None
+        return (doc.to_dict() or {}).get("pausedSandboxId") or None
+
+    def _save_paused_sandbox_sync(self, owner_id: str, sandbox_id: str | None) -> None:
+        ref = self._db.collection("users").document(owner_id)
+        if sandbox_id:
+            ref.set({"pausedSandboxId": sandbox_id}, merge=True)
+        else:
+            ref.set({"pausedSandboxId": None}, merge=True)

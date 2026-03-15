@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # Token quota (per-user lifetime allowance for free tier)
     default_token_limit: int = 100_000
 
+    # Google OAuth 2.0 (for Google Drive integration)
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+
 
 settings = Settings()
 
