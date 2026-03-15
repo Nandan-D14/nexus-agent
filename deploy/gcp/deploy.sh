@@ -58,7 +58,7 @@ gcloud run deploy nexus-agent \
   --concurrency=10 \
   --allow-unauthenticated \
   --set-secrets="E2B_API_KEY=e2b-api-key:latest" \
-  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION}"
+  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=true"
 
 AGENT_URL=$(gcloud run services describe nexus-agent \
   --project="${PROJECT_ID}" \

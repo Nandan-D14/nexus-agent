@@ -99,5 +99,6 @@ def apply_runtime_env_overrides() -> None:
     # Vertex AI SDK reads these from env
     if settings.google_project_id:
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.google_project_id)
+        os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
     if settings.google_cloud_region:
         os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)
