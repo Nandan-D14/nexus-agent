@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { getAuth } from "firebase/auth";
+import { authenticatedFetch } from "@/lib/api-client";
 import Link from "next/link";
 import { Search, Filter, Trash2, Clock, MessageSquare, AlertCircle } from "lucide-react";
 import { motion } from "framer-motion";
@@ -28,14 +28,11 @@ export default function HistoryPage() {
     if (!user) return;
     setLoading(true);
     try {
-      const token = await getAuth().currentUser?.getIdToken();
-      let url = "http://localhost:8000/api/v1/history?limit=50";
-      if (searchQuery) url += `&q=${encodeURIComponent(searchQuery)}`;
-      if (statusFilter !== "all") url += `&status=${statusFilter}`;
-      
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      let path = "/api/v1/history?limit=50";
+      if (searchQuery) path += `&q=${encodeURIComponent(searchQuery)}`;
+      if (statusFilter !== "all") path += `&status=${statusFilter}`;
+
+      const res = await authenticatedFetch(path);
       if (!res.ok) throw new Error("Failed to fetch history");
       const data = await res.json();
       setSessions(data.sessions || []);
@@ -56,10 +53,8 @@ export default function HistoryPage() {
   const deleteSession = async (sessionId: string) => {
     if (!confirm("Are you sure you want to delete this session?")) return;
     try {
-      const token = await getAuth().currentUser?.getIdToken();
-      const res = await fetch(`http://localhost:8000/sessions/${sessionId}`, {
+      const res = await authenticatedFetch(`/sessions/${sessionId}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
         setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));

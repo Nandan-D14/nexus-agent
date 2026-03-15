@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { getAuth } from "firebase/auth";
+import { authenticatedFetch } from "@/lib/api-client";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, Clock, MessageSquare, AlertCircle, RefreshCw } from "lucide-react";
@@ -30,10 +30,7 @@ export default function HistoryTranscriptPage() {
     async function fetchSessionMessages() {
       if (!user) return;
       try {
-        const token = await getAuth().currentUser?.getIdToken();
-        const res = await fetch(`http://localhost:8000/api/v1/history/${params.session_id}/messages`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        const res = await authenticatedFetch(`/api/v1/history/${params.session_id}/messages`);
         if (!res.ok) throw new Error("Failed to load session transcript");
         const data = await res.json();
         setMessages(data.messages || []);
