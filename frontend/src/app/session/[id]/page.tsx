@@ -113,7 +113,7 @@ export default function SessionPage() {
   viewModeRef.current = viewMode;
   minimizeDesktopRef.current = minimizeDesktop;
 
-  const { sendBinary, sendJson, lastMessage, isConnected, onBinaryMessageRef } =
+  const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
     useWebSocket(shouldConnectWs ? wsUrl : null);
 
   const { start: startMic, stop: stopMic, isRecording } =
@@ -308,10 +308,10 @@ export default function SessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* ---- Wire up JSON message handler via ref (avoids React batching loss) ---- */
   useEffect(() => {
-    if (!lastMessage) return;
-    handleLastMessage(lastMessage);
-  }, [lastMessage, handleLastMessage]);
+    onJsonMessageRef.current = handleLastMessage;
+  }, [handleLastMessage, onJsonMessageRef]);
 
   useEffect(() => {
     if (isNewSession || viewMode !== "live" || !streamUrl) {
