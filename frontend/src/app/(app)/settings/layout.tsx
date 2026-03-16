@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { User, Mic, Bell } from "lucide-react";
+import { Bell, KeyRound, Mic, User } from "lucide-react";
 import { motion } from "framer-motion";
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
   const tabs = [
+    { name: "API & Keys", href: "/settings/api", icon: KeyRound },
     { name: "Profile", href: "/settings/profile", icon: User },
     { name: "Voice & AI", href: "/settings/voice", icon: Mic },
     { name: "Notifications", href: "/settings/notifications", icon: Bell },

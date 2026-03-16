@@ -37,7 +37,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "History", href: "/history", icon: History },
     { name: "Connectors", href: "/connectors", icon: Cable },
-    { name: "Settings", href: "/settings/profile", icon: Settings },
+    { name: "Settings", href: "/settings/api", icon: Settings },
   ];
 
   const handleSignOut = async () => {

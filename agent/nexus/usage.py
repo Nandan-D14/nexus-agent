@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from nexus.config import settings
+from nexus.runtime_config import SessionRuntimeConfig
 
 INPUT_TOKEN_KEYS = (
     "prompt_token_count",
@@ -33,15 +34,22 @@ class TokenUsageRecord:
     total_tokens: int
 
 
-def get_agent_usage_source() -> tuple[str, str]:
-    if settings.use_kilo:
+def get_agent_usage_source(
+    runtime_config: SessionRuntimeConfig | None = None,
+) -> tuple[str, str]:
+    if runtime_config is not None:
+        if runtime_config.use_kilo:
+            return "agent.kilo", runtime_config.kilo_model_id
+        return "agent.gemini", runtime_config.gemini_vision_model
+
+    if settings.use_kilo and not settings.require_byok:
         return "agent.kilo", settings.kilo_model_id
     return "agent.gemini", settings.gemini_vision_model
 
 
 def get_expected_usage_sources() -> list[str]:
     sources = [get_agent_usage_source()[0]]
-    if settings.google_api_key:
+    if settings.require_byok or settings.google_api_key or settings.google_project_id:
         sources.append("voice.gemini_live")
     return sources
 

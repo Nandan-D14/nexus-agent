@@ -3,16 +3,17 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "@/lib/use-session";
-import { DemoPicker } from "@/components/demo-picker";
 import { useState, useEffect } from "react";
-import { motion, useScroll, useTransform, useSpring, AnimatePresence } from "framer-motion";
+import { motion, useScroll, useSpring } from "framer-motion";
 import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
 import type { RecentSession } from "@/lib/message-types";
+import { fetchUserSettings, requiresByokSetup } from "@/lib/user-settings";
+import { Code2, Cpu, Layout, Mic, Shield, Terminal, ArrowRight, Github } from "lucide-react";
 
 export default function HomePage() {
   const router = useRouter();
-  const { createSession, isLoading, error } = useSession();
+  const { createSession, isLoading } = useSession();
   const {
     user,
     isLoading: authLoading,
@@ -47,570 +48,575 @@ export default function HomePage() {
     return () => { cancelled = true; };
   }, [user]);
 
-  const handleStart = async (demoCommand?: string) => {
-    if (!user) return;
-    if (!demoCommand) {
-      router.push("/session/new");
-      return;
-    }
-    const session = await createSession();
-    if (session) {
+  useEffect(() => {
+    let cancelled = false;
+    async function maybeRedirectToSetup() {
+      if (!user) return;
       try {
-        const key = `nexus.pendingSessionAction:${session.session_id}`;
-        sessionStorage.setItem(
-          key,
-          JSON.stringify({ type: "demo", text: demoCommand }),
-        );
-      } catch {
-        // Ignore storage failures and just navigate.
-      }
-      router.push(`/session/${session.session_id}`);
+        const userSettings = await fetchUserSettings();
+        if (!cancelled && requiresByokSetup(userSettings)) {
+          router.replace("/settings/api?setup=1");
+        }
+      } catch {}
     }
+    void maybeRedirectToSetup();
+    return () => { cancelled = true; };
+  }, [router, user]);
+
+  const handleStart = async () => {
+    if (!user) return;
+    router.push("/session/new");
   };
 
   const fadeInUp = {
-    initial: { opacity: 0, y: 30 },
+    initial: { opacity: 0, y: 20 },
     whileInView: { opacity: 1, y: 0 },
-    viewport: { once: true, margin: "-100px" },
-    transition: { duration: 0.8, ease: [0.22, 1, 0.36, 1] }
-  };
-
-  const staggerContainer = {
-    initial: {},
-    whileInView: { transition: { staggerChildren: 0.1, delayChildren: 0.2 } },
-    viewport: { once: true, margin: "-100px" }
+    viewport: { once: true, margin: "-50px" },
+    transition: { duration: 0.7, ease: [0.22, 1, 0.36, 1] }
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground selection:bg-cyan-500/30 overflow-x-hidden">
-      {/* Scroll Progress Indicator */}
+    <div className="min-h-screen bg-white dark:bg-[#0A0A0A] text-zinc-900 dark:text-zinc-50 selection:bg-blue-500/30 overflow-x-hidden font-sans">
+      {/* Scroll Progress */}
       <motion.div
-        className="fixed top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-cyan-500 to-emerald-500 z-[60] origin-left"
+        className="fixed top-0 left-0 right-0 h-[2px] bg-blue-500 z-[60] origin-left"
         style={{ scaleX }}
       />
 
       {/* Navigation */}
-      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 px-8 py-5 ${scrolled ? "bg-white/80 dark:bg-black/60 backdrop-blur-xl border-b border-zinc-200 dark:border-white/5" : "bg-transparent"}`}>
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <motion.div 
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="flex items-center gap-3 group cursor-pointer"
-          >
-            <div className="relative">
-              <div className="absolute inset-0 bg-cyan-500/20 blur-lg group-hover:bg-cyan-500/40 transition-all duration-500 rounded-full" />
-              <div className="relative w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-400 flex items-center justify-center shadow-lg transform group-hover:rotate-6 transition-transform">
-                <span className="text-black font-black text-2xl italic">N</span>
+      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 border-b ${scrolled ? "bg-white/80 dark:bg-[#0A0A0A]/80 backdrop-blur-xl border-zinc-200 dark:border-white/10" : "bg-transparent border-transparent"}`}>
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-8">
+            <Link href="/" className="flex items-center gap-2 group">
+              <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold transform group-hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
+                <Terminal className="w-4 h-4" />
               </div>
+              <span className="font-semibold text-lg tracking-tight">Nexus</span>
+            </Link>
+            
+            <div className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-500 dark:text-zinc-400">
+              <a href="#features" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Features</a>
+              <a href="#how-it-works" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">How it Works</a>
             </div>
-            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors text-foreground">Nexus</span>
-          </motion.div>
-          
-          <div className="hidden lg:flex items-center gap-10 text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-500 dark:text-zinc-400">
-            {["Capabilities", "Operation", "Missions", "API"].map((item) => (
-              <a 
-                key={item} 
-                href={`#${item.toLowerCase()}`} 
-                className="hover:text-cyan-400 transition-all relative group py-2"
-              >
-                {item}
-                <span className="absolute bottom-0 left-0 w-full h-[1px] bg-cyan-500 scale-x-0 group-hover:scale-x-100 transition-transform origin-right group-hover:origin-left duration-300" />
-              </a>
-            ))}
           </div>
 
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="flex items-center gap-4"
-          >
+          <div className="flex items-center gap-4">
             {user ? (
               <>
-                <span className="hidden md:inline text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest truncate max-w-[120px]">
-                  {user.displayName || user.email}
-                </span>
-                <button
-                  onClick={() => { void signOutUser().catch(() => {}); }}
-                  className="px-4 py-2 rounded-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:border-zinc-300 dark:hover:border-white/20 transition-all"
-                >
-                  Sign out
-                </button>
+                <Link href="/dashboard" className="hidden sm:block text-sm font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
+                  Dashboard
+                </Link>
                 <button
                   onClick={() => handleStart()}
                   disabled={isLoading}
-                  className="px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-black/5 dark:shadow-white/5"
+                  className="px-4 py-2 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95 disabled:opacity-50"
                 >
-                  {isLoading ? "Opening..." : "Launch Console"}
+                  {isLoading ? "Starting..." : "Launch Console"}
+                </button>
+                <button
+                  onClick={() => { void signOutUser().catch(() => {}); }}
+                  className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
+                >
+                  Sign out
                 </button>
               </>
             ) : (
               <button
                 onClick={() => { void signInWithGoogle().catch(() => {}); }}
                 disabled={authLoading}
-                className="px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-[11px] font-black uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all active:scale-95 disabled:opacity-50 shadow-xl shadow-black/5 dark:shadow-white/5"
+                className="px-4 py-2 rounded-md bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-blue-600 dark:hover:bg-blue-500 transition-all shadow-md"
               >
-                {authLoading ? "Loading..." : "Sign In"}
+                {authLoading ? "Loading..." : "Get Started"}
               </button>
             )}
-          </motion.div>
+          </div>
         </div>
       </nav>
 
       {/* Hero Section */}
-      <section className="relative min-h-screen flex items-center pt-20 px-8 overflow-hidden">
-        {/* Dynamic Background Elements */}
-        <div className="absolute inset-0 z-0 pointer-events-none">
-          <motion.div 
-            animate={{ 
-              scale: [1, 1.2, 1],
-              opacity: [0.1, 0.15, 0.1],
-              rotate: [0, 45, 0]
-            }}
-            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-            className="absolute top-[-20%] left-[-10%] w-[80%] h-[80%] bg-cyan-500/10 rounded-full blur-[160px]" 
-          />
-          <motion.div 
-            animate={{ 
-              scale: [1, 1.3, 1],
-              opacity: [0.1, 0.12, 0.1],
-              rotate: [0, -30, 0]
-            }}
-            transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
-            className="absolute bottom-[-20%] right-[-10%] w-[80%] h-[80%] bg-emerald-500/10 rounded-full blur-[160px]" 
-          />
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#8080800a_1px,transparent_1px),linear-gradient(to_bottom,#8080800a_1px,transparent_1px)] bg-[size:40px_40px] mask-radial opacity-40" />
+      <section className="relative pt-32 pb-20 md:pt-48 md:pb-32 px-6 overflow-hidden">
+        {/* Subtle Background Gradients */}
+        <div className="absolute inset-0 z-0 pointer-events-none flex items-center justify-center">
+          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-blue-500/10 dark:bg-blue-500/20 blur-[120px] rounded-full" />
         </div>
 
-        <div className="relative z-10 max-w-7xl mx-auto flex flex-col items-center text-center">
+        <div className="relative z-10 max-w-5xl mx-auto text-center">
           <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-3 px-5 py-2 rounded-full bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 backdrop-blur-md mb-12 shadow-sm dark:shadow-none"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.5 }}
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 text-blue-600 dark:text-blue-400 text-xs font-semibold mb-8"
           >
-            <div className="w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_10px_rgba(34,211,238,0.8)] animate-pulse" />
-            <span className="text-[11px] font-bold uppercase tracking-[0.3em] text-zinc-500 dark:text-zinc-300">v2.5 Hybrid Intelligence Protocol</span>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+            </span>
+            Enterprise Beta Access
           </motion.div>
           
           <motion.h1 
-            initial={{ opacity: 0, filter: "blur(20px)", scale: 0.95 }}
-            animate={{ opacity: 1, filter: "blur(0px)", scale: 1 }}
-            transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
-            className="text-5xl md:text-8xl font-black tracking-tighter leading-[0.9] italic mb-10"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.7, delay: 0.1 }}
+            className="text-5xl md:text-7xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 leading-[1.1]"
           >
-            <span className="block text-gradient">COMMAND THE</span>
-            <span className="block text-accent-gradient drop-shadow-[0_0_50px_rgba(34,211,238,0.2)]">AUTONOMOUS.</span>
+            The Agentic Desktop <br className="hidden md:block" />
+            <span className="text-zinc-400 dark:text-zinc-500">Operating System</span>
           </motion.h1>
 
           <motion.p 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4, duration: 1 }}
-            className="max-w-3xl mx-auto text-zinc-400 text-xl md:text-2xl font-light leading-relaxed mb-12"
+            transition={{ duration: 0.7, delay: 0.2 }}
+            className="max-w-2xl mx-auto text-zinc-600 dark:text-zinc-400 mb-10 leading-relaxed"
           >
-            Nexus is a multimodal neural orchestrator for Linux environments. 
-            Speak, and it executes — from complex devops to recursive web exploration.
+            NEXUS is a voice-controlled AI agent with full native Linux access. 
+            Speak your intent, and watch it execute commands, browse the web, and build software in an isolated cloud sandbox.
           </motion.p>
 
           <motion.div 
-            initial={{ opacity: 0, y: 30 }}
+            initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.6, duration: 1 }}
-            className="flex flex-col items-center gap-6"
+            transition={{ duration: 0.7, delay: 0.3 }}
+            className="flex flex-col sm:flex-row items-center justify-center gap-4"
           >
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
-              <button
-                onClick={() => handleStart()}
-                disabled={isLoading || !user || authLoading}
-                className="group relative px-12 py-6 rounded-2xl bg-zinc-900 dark:bg-white text-white dark:text-black font-black text-xs uppercase tracking-[0.2em] overflow-hidden transition-all hover:scale-105 active:scale-95 shadow-2xl shadow-black/5 dark:shadow-white/5"
-              >
-                <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <span className="relative z-10 flex items-center gap-3">
-                  {isLoading ? "Opening Session..." : user ? "Start Neural Session" : "Sign in to Start"}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-300">
-                    <path d="M5 12h14M12 5l7 7-7 7" />
-                  </svg>
-                </span>
-              </button>
-              <a href="#missions" className="group px-12 py-6 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 text-zinc-800 dark:text-white font-bold text-xs uppercase tracking-[0.2em] hover:bg-zinc-100 dark:hover:bg-white/10 transition-all flex items-center gap-2 shadow-sm dark:shadow-none">
-                Mission Profiles
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4 text-zinc-500 group-hover:translate-y-1 transition-transform">
-                  <path d="M19 14l-7 7-7-7M12 3v18" />
-                </svg>
-              </a>
-            </div>
-
-            {error && (
-              <motion.p 
-                initial={{ opacity: 0 }} 
-                animate={{ opacity: 1 }} 
-                className="mt-4 text-red-400 text-[10px] font-black uppercase tracking-[0.3em]"
-              >
-                Initialization Failure: {error}
-              </motion.p>
-            )}
+            <button
+              onClick={() => user ? handleStart() : signInWithGoogle()}
+              disabled={isLoading || authLoading}
+              className="group w-full sm:w-48 h-14 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-lg hover:shadow-blue-500/25 flex items-center justify-center gap-2"
+            >
+               {isLoading ? "Starting..." : user ? "Launch Console" : "Start Free"}
+               <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+            </button>
+            <button
+              onClick={() => signInWithGoogle()}
+              disabled={authLoading}
+              className="w-full sm:w-48 h-14 rounded-xl bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-900 dark:text-white font-medium transition-all flex items-center justify-center gap-2"
+            >
+              {authLoading ? "Loading..." : "Sign Up"}
+            </button>
           </motion.div>
         </div>
 
-        {/* Floating Mockup (Scroll-linked Parallax) */}
+        {/* Hero Image / Mockup - Enhanced with Scrolling Interaction */}
         <motion.div 
-          style={{ y: useTransform(scrollYProgress, [0, 0.2], [0, -100]) }}
-          className="absolute bottom-[-10%] left-1/2 -translate-x-1/2 w-full max-w-6xl px-8 pointer-events-none"
+          initial={{ opacity: 0, y: 100, scale: 0.95 }}
+          whileInView={{ opacity: 1, y: 0, scale: 1 }}
+          viewport={{ once: true, margin: "-100px" }}
+          transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
+          className="mt-24 max-w-6xl mx-auto relative group"
         >
-          <div className="relative glass-panel rounded-3xl p-3 shadow-[0_0_100px_rgba(0,0,0,0.1)] dark:shadow-[0_0_100px_rgba(0,0,0,1)] group bg-white/40 dark:bg-transparent">
-            <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#030303] via-transparent to-transparent z-10 opacity-50 dark:opacity-100" />
-            <div className="flex items-center gap-2 px-6 py-4 border-b border-zinc-200 dark:border-white/5">
-              <div className="flex gap-2">
-                <div className="w-3 h-3 rounded-full bg-red-500/20" />
-                <div className="w-3 h-3 rounded-full bg-amber-500/20" />
-                <div className="w-3 h-3 rounded-full bg-emerald-500/20" />
+          {/* Decorative glow background */}
+          <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-emerald-500 rounded-[2.5rem] blur opacity-10 group-hover:opacity-20 transition duration-1000 group-hover:duration-200" />
+          
+          <div className="relative rounded-[2rem] overflow-hidden border border-zinc-200 dark:border-white/10 bg-white/80 dark:bg-[#0A0A0A]/80 backdrop-blur-3xl shadow-2xl">
+            <div className="h-12 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/50 dark:bg-zinc-900/50 flex items-center px-6 gap-2">
+              <div className="flex gap-1.5">
+                <div className="w-3 h-3 rounded-full bg-[#FF5F56] shadow-sm" />
+                <div className="w-3 h-3 rounded-full bg-[#FFBD2E] shadow-sm" />
+                <div className="w-3 h-3 rounded-full bg-[#27C93F] shadow-sm" />
               </div>
-              <div className="mx-auto text-[11px] font-bold text-zinc-500 dark:text-zinc-600 uppercase tracking-[0.5em]">nexus_control_surface_v2.5</div>
-            </div>
-            <div className="aspect-[21/9] bg-zinc-900 border border-t-0 border-zinc-800 dark:border-0 dark:bg-black relative flex items-center justify-center overflow-hidden rounded-b-2xl">
-              <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.3),transparent_70%)]" />
-              <div className="text-center space-y-6">
-                <motion.div 
-                  animate={{ scale: [1, 1.1, 1], opacity: [0.6, 1, 0.6] }}
-                  transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                  className="w-24 h-24 rounded-full border border-cyan-500/30 flex items-center justify-center mx-auto"
-                >
-                  <div className="w-6 h-6 rounded-full bg-cyan-500 shadow-[0_0_30px_rgba(34,211,238,1)]" />
-                </motion.div>
-                <div className="space-y-2">
-                  <p className="text-[12px] font-mono text-cyan-500 uppercase tracking-[0.5em] font-black">Neural Uplink Active</p>
-                  <div className="h-1 w-48 bg-zinc-900 mx-auto rounded-full overflow-hidden">
-                    <motion.div 
-                      animate={{ x: [-192, 192] }}
-                      transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-                      className="h-full w-full bg-cyan-500/40" 
-                    />
-                  </div>
+              <div className="ml-4 flex-1 flex justify-center">
+                <div className="px-4 py-1 text-[10px] font-mono font-bold text-zinc-400 dark:text-zinc-500 bg-zinc-200/50 dark:bg-zinc-800/50 rounded-full flex items-center gap-2">
+                  <div className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
+                  nexus-prod-instance.cloud
                 </div>
               </div>
+              <div className="flex gap-4 items-center">
+                <div className="h-4 w-[1px] bg-zinc-200 dark:bg-zinc-800" />
+                <div className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">v2.5.0-LTS</div>
+              </div>
+            </div>
+            
+            <div className="aspect-[16/9] bg-zinc-100 dark:bg-black relative flex overflow-hidden">
+               {/* Sidebar */}
+               <div className="w-1/4 border-r border-zinc-200 dark:border-white/5 p-6 flex flex-col gap-6 bg-zinc-50 dark:bg-[#0D0D0D]">
+                  <div className="space-y-4">
+                    <div className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-4">Neural Input</div>
+                    <motion.div 
+                       animate={{ scale: [1, 1.02, 1] }}
+                       transition={{ duration: 2, repeat: Infinity }}
+                       className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-white/10 p-4 shadow-sm"
+                    >
+                       <div className="flex gap-3 items-center mb-3">
+                          <div className="w-8 h-8 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500">
+                            <Mic className="w-4 h-4" />
+                          </div>
+                          <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100">Live Audio</div>
+                       </div>
+                       <div className="space-y-1.5">
+                          <motion.div 
+                            initial={{ width: "20%" }}
+                            animate={{ width: ["20%", "90%", "40%", "80%", "30%"] }}
+                            transition={{ duration: 4, repeat: Infinity }}
+                            className="h-1 bg-blue-500/40 rounded-full" 
+                          />
+                          <motion.div 
+                             initial={{ width: "40%" }}
+                             animate={{ width: ["40%", "70%", "90%", "50%", "85%"] }}
+                             transition={{ duration: 3, repeat: Infinity, delay: 0.5 }}
+                             className="h-1 bg-blue-500/20 rounded-full" 
+                          />
+                       </div>
+                    </motion.div>
+                  </div>
+
+                  <div className="flex-1 space-y-4">
+                     <div className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em]">Context Store</div>
+                     {[1, 2, 3].map(i => (
+                       <div key={i} className="h-6 w-full bg-zinc-200/50 dark:bg-zinc-800/50 rounded-lg animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
+                     ))}
+                  </div>
+               </div>
+
+               {/* Main Terminal Area */}
+               <div className="flex-1 p-8 relative flex flex-col bg-white dark:bg-black overflow-hidden group/desktop">
+                  <div className="absolute inset-0 opacity-20 pointer-events-none group-hover/desktop:opacity-30 transition-opacity">
+                    <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_50%,rgba(59,130,246,0.1),transparent_70%)]" />
+                    {/* Abstract Desktop Grid Pattern overlay */}
+                    <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:40px_40px]" />
+                  </div>
+
+                  <div className="flex-1 rounded-2xl border border-zinc-200 dark:border-white/5 bg-[#050505]/90 backdrop-blur-md overflow-hidden shadow-2xl flex flex-col relative z-10 transition-transform duration-500 group-hover/desktop:translate-y-[-4px]">
+                     <div className="bg-zinc-950 px-5 py-3 border-b border-white/5 flex items-center justify-between">
+                       <div className="flex items-center gap-3">
+                          <Terminal className="w-3.5 h-3.5 text-blue-500" />
+                          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Root@Nexus-Sandbox:~</span>
+                       </div>
+                       <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-1.5">
+                             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                             <span className="text-[9px] font-mono text-emerald-500/80">LATENCY: 14ms</span>
+                          </div>
+                       </div>
+                     </div>
+                     <div className="p-6 text-xs font-mono text-zinc-300 space-y-3 flex-1 overflow-hidden">
+                        <img 
+                           src="https://images.wallpapersden.com/image/download/windows-11-4k-esthetics_bWpmZ22UmZqaraWkpJRqZmdlrWdtbWU.jpg" 
+                           alt="Windows 11 Desktop"
+                           className="w-full h-full object-cover rounded-xl border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-transform duration-700 hover:scale-[1.05]"
+                        />
+                     </div>
+                  </div>
+
+                  {/* Floating Action Badge */}
+                  <motion.div 
+                    initial={{ opacity: 0, x: 20 }}
+                    whileInView={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 1 }}
+                    className="absolute bottom-12 right-12 px-4 py-2 bg-blue-600 text-white rounded-full text-[10px] font-black uppercase tracking-widest shadow-xl flex items-center gap-2 border border-blue-400/50"
+                  >
+                    <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                    Agent Real-time Feedback
+                  </motion.div>
+               </div>
             </div>
           </div>
         </motion.div>
       </section>
 
-      {/* Capabilities Section */}
-      <section id="capabilities" className="py-40 px-8 relative overflow-hidden">
-        <div className="max-w-7xl mx-auto">
-          <motion.div 
-            {...fadeInUp}
-            className="max-w-2xl mb-24 space-y-6"
-          >
-            <h2 className="text-xs font-black text-cyan-500 uppercase tracking-[0.5em]">Capabilities</h2>
-            <h3 className="text-5xl md:text-7xl font-black italic tracking-tighter uppercase leading-[0.9]">
-              The Architecture of <br /> <span className="text-gradient">Total Autonomy.</span>
-            </h3>
-            <p className="text-zinc-500 text-lg font-medium leading-relaxed">
-              Nexus isn&apos;t just a chatbot; it&apos;s a fully-integrated pilot for a high-performance Linux kernel.
-            </p>
-          </motion.div>
+      {/* Features Grid */}
+      <section id="features" className="py-32 relative bg-white dark:bg-[#0A0A0A] overflow-hidden">
+        {/* Subtle grid background */}
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
 
-          <motion.div 
-            variants={staggerContainer}
-            initial="initial"
-            whileInView="whileInView"
-            viewport={{ once: true, margin: "-100px" }}
-            className="grid grid-cols-1 md:grid-cols-3 gap-8"
-          >
+        <div className="max-w-7xl mx-auto px-6 relative z-10">
+          <div className="text-center max-w-2xl mx-auto mb-20">
+            <h2 className="text-blue-600 dark:text-blue-500 font-semibold text-xs mb-3 uppercase tracking-widest">Capabilities</h2>
+            <h3 className="text-3xl md:text-5xl font-bold tracking-tight mb-6 text-zinc-900 dark:text-white leading-tight">Engineered for absolute autonomy</h3>
+            <p className="text-zinc-600 dark:text-zinc-400 text-lg">A fully integrated architecture bridging Google's Agent Developer Kit and secure, transient cloud environments.</p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-6">
             {[
               {
-                title: "Multimodal Synthesis",
-                description: "Seamlessly integrates high-fidelity speech recognition with real-time visual analysis of the desktop environment.",
-                icon: <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                title: "Voice-First Control",
+                desc: "Talk to your desktop naturally. Powered by Gemini Live API for sub-second multimoal reasoning and response.",
+                icon: <Mic className="w-5 h-5 text-blue-600 dark:text-blue-400" />,
+                bg: "bg-blue-50 dark:bg-blue-900/20",
+                border: "group-hover:border-blue-500/50"
               },
               {
-                title: "Isolated Sandbox",
-                description: "Deploy missions within secure, transient E2B Desktop sandboxes. Zero persistent threat, full environment control.",
-                icon: <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                title: "E2B Cloud Sandboxes",
+                desc: "Every session boots a secure, isolated Linux environment in milliseconds with full network and shell access.",
+                icon: <BoxIcon className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />,
+                bg: "bg-emerald-50 dark:bg-emerald-900/20",
+                border: "group-hover:border-emerald-500/50"
               },
               {
-                title: "ADK Core V2",
-                description: "Built on the Google Agent Developer Kit, utilizing optimized hybrid reasoning models for low-latency decision making.",
-                icon: <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                title: "Computer Control",
+                desc: "UI navigation, terminal interaction, and visual feedback processing using the newest Agent Frameworks.",
+                icon: <Layout className="w-5 h-5 text-purple-600 dark:text-purple-400" />,
+                bg: "bg-purple-50 dark:bg-purple-900/20",
+                border: "group-hover:border-purple-500/50"
+              },
+              {
+                title: "Visual Telemetry",
+                desc: "The agent sees what you see. Live screenshots are streamed directly to the model for perfect context.",
+                icon: <CameraIcon className="w-5 h-5 text-orange-600 dark:text-orange-400" />,
+                bg: "bg-orange-50 dark:bg-orange-900/20",
+                border: "group-hover:border-orange-500/50"
+              },
+              {
+                title: "Persistent History",
+                desc: "Pick up right where you left off. All session metrics, files, and transcripts are securely state-managed.",
+                icon: <HistoryIcon className="w-5 h-5 text-teal-600 dark:text-teal-400" />,
+                bg: "bg-teal-50 dark:bg-teal-900/20",
+                border: "group-hover:border-teal-500/50"
+              },
+              {
+                title: "BYOK Security",
+                desc: "Bring your own API keys. No vendor lock-in, with complete open-source transparency on your infrastructure.",
+                icon: <Shield className="w-5 h-5 text-rose-600 dark:text-rose-400" />,
+                bg: "bg-rose-50 dark:bg-rose-900/20",
+                border: "group-hover:border-rose-500/50"
               }
-            ].map((feature, idx) => (
+            ].map((f, i) => (
               <motion.div 
-                key={idx}
-                variants={fadeInUp}
-                className="glass-card bg-zinc-50/50 dark:bg-transparent group p-10 rounded-[2.5rem] relative overflow-hidden"
+                key={i}
+                {...fadeInUp}
+                className={`group relative p-8 rounded-3xl bg-white dark:bg-[#0f0f0f] border border-zinc-200 dark:border-zinc-800 hover:shadow-xl transition-all duration-300 overflow-hidden ${f.border}`}
               >
-                <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-20 transition-opacity">
-                  <span className="text-8xl font-black italic select-none">0{idx + 1}</span>
-                </div>
-                <div className="relative z-10 space-y-8">
-                  <div className="w-14 h-14 rounded-2xl bg-zinc-200 dark:bg-white/5 flex items-center justify-center text-zinc-600 dark:text-zinc-400 group-hover:bg-cyan-100 dark:group-hover:bg-cyan-500/20 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-all duration-500 shadow-inner">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-7 h-7">
-                      {feature.icon}
-                      {idx === 0 && <><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="22" /></>}
-                      {idx === 1 && <path d="M7 11V7a5 5 0 0 1 10 0v4" />}
-                    </svg>
+                {/* Hover gradient effect inside card */}
+                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 bg-gradient-to-br from-zinc-50 to-transparent dark:from-zinc-900 dark:to-transparent pointer-events-none" />
+                
+                <div className="relative z-10">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-6 shadow-sm ${f.bg}`}>
+                    {f.icon}
                   </div>
-                  <div className="space-y-4">
-                    <h4 className="text-xl font-black italic uppercase tracking-tight text-zinc-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{feature.title}</h4>
-                    <p className="text-zinc-600 dark:text-zinc-500 text-base leading-relaxed font-medium">{feature.description}</p>
-                  </div>
-                  <div className="pt-4 flex items-center gap-2 text-[10px] font-black text-cyan-600 dark:text-cyan-500 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-all transform translate-y-4 group-hover:translate-y-0">
-                    System Verified <div className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
-                  </div>
+                  <h4 className="text-xl font-bold text-zinc-900 dark:text-white mb-3 tracking-tight">{f.title}</h4>
+                  <p className="text-zinc-600 dark:text-zinc-400 text-sm leading-relaxed">{f.desc}</p>
                 </div>
               </motion.div>
             ))}
-          </motion.div>
+          </div>
         </div>
       </section>
 
-      {/* Operation Section (Scroll-linked progress) */}
-      <section id="operation" className="py-40 px-8 bg-white/[0.01] border-y border-white/5 relative">
-        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-32 items-center">
-          <div className="space-y-20">
-            <motion.div {...fadeInUp} className="space-y-6">
-              <h2 className="text-xs font-black text-emerald-500 uppercase tracking-[0.5em]">The Protocol</h2>
-              <h3 className="text-5xl md:text-7xl font-black italic tracking-tighter uppercase leading-[0.9]">
-                Fluid <br /> <span className="text-gradient">Intelligence.</span>
-              </h3>
-            </motion.div>
-            
-            <motion.div 
-              variants={staggerContainer}
-              initial="initial"
-              whileInView="whileInView"
-              viewport={{ once: true }}
-              className="space-y-12"
-            >
-              {[
-                { n: "01", t: "Neural Initiation", d: "Nexus establishes a high-bandwidth uplink via voice or JSON-RPC. Intent is mapped across neural clusters for optimal resource routing." },
-                { n: "02", t: "Sandbox Synthesis", d: "A dedicated kernel environment is spun up within 800ms. Tools are hot-loaded based on the specific mission profile." },
-                { n: "03", t: "Recursive Optimization", d: "Agent performs continuous self-correction using visual and textual telemetry, ensuring mission finality without manual oversight." }
-              ].map((step, i) => (
-                <motion.div key={i} variants={fadeInUp} className="flex gap-10 group">
-                  <span className="text-5xl font-black italic text-zinc-200 dark:text-zinc-900 group-hover:text-cyan-500/40 transition-colors duration-700 select-none">
-                    {step.n}
-                  </span>
-                  <div className="space-y-3">
-                    <h4 className="text-lg font-black uppercase tracking-widest text-zinc-800 dark:text-zinc-200 group-hover:text-black dark:group-hover:text-white transition-colors">{step.t}</h4>
-                    <p className="text-zinc-500 text-sm leading-relaxed font-medium max-w-sm">{step.d}</p>
-                  </div>
-                </motion.div>
-              ))}
-            </motion.div>
+      {/* Stats Section with simple fade-in */}
+      <section className="py-20 bg-white dark:bg-[#0A0A0A] border-b border-zinc-100 dark:border-zinc-800/30">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+            {[
+              { label: "Execution Latency", value: "< 800ms", color: "text-blue-500", desc: "Sub-second response" },
+              { label: "Sandbox Uptime", value: "99.99%", color: "text-emerald-500", desc: "Enterprise reliability" },
+              { label: "Active Nodes", value: "2.4k+", color: "text-purple-500", desc: "Global infrastructure" },
+              { label: "Success Rate", value: "98.2%", color: "text-orange-500", desc: "Task completion" },
+            ].map((stat, i) => (
+              <motion.div 
+                key={i}
+                initial={{ opacity: 0, y: 15 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.5, delay: i * 0.1 }}
+                className="text-center md:text-left space-y-1"
+              >
+                <div className={`text-2xl md:text-3xl font-bold tracking-tight ${stat.color}`}>{stat.value}</div>
+                <div className="text-xs font-bold uppercase tracking-widest text-zinc-400">{stat.label}</div>
+                <div className="text-[10px] text-zinc-500 font-medium">{stat.desc}</div>
+              </motion.div>
+            ))}
           </div>
-          
-          <motion.div 
-            initial={{ opacity: 0, x: 40 }}
-            whileInView={{ opacity: 1, x: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 1, ease: [0.22, 1, 0.36, 1] }}
-            className="relative h-[600px]"
-          >
-            <div className="absolute inset-0 bg-cyan-500/10 rounded-full blur-[160px] animate-pulse" />
-            <div className="relative h-full glass-panel bg-white/40 dark:bg-transparent rounded-[3rem] p-10 border border-zinc-200 dark:border-white/10 flex flex-col shadow-[0_0_100px_rgba(0,0,0,0.05)] dark:shadow-2xl">
-              <div className="flex items-center justify-between mb-10">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
-                    <div className="w-2 h-2 rounded-full bg-cyan-500 animate-ping" />
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-[10px] font-black text-zinc-500 uppercase tracking-widest leading-none mb-1">Telemetry Uplink</span>
-                    <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-widest leading-none animate-pulse">Live // Stream_88-X</span>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <div className="h-4 w-[1px] bg-zinc-800" />
-                  <span className="text-[10px] font-mono text-zinc-600">88.293-AZ</span>
-                </div>
-              </div>
+        </div>
+      </section>
 
-              <div className="flex-1 space-y-6 font-mono text-[11px] leading-relaxed overflow-hidden">
-                <AnimatePresence>
-                  {[
-                    { c: "> CONNECTING_NEURAL_UPLINK...", col: "text-cyan-500" },
-                    { c: "> ANALYZING_USER_INTENT: 'DEPLOY MICROSERVICE'", col: "text-zinc-400" },
-                    { c: "> BOOTING_KERNAL_VM_IMAGE: E2B-LINUX-G2", col: "text-zinc-500" },
-                    { c: "> PROGRESS: [████████████░░░░] 74%", col: "text-cyan-500/50" },
-                    { c: "> SANDBOX_ACTIVE: ID_882_99_X", col: "text-emerald-500" },
-                    { c: "> RUNNING: pip install flask --quiet", col: "text-zinc-400" },
-                    { c: "> OPENING_PORT: 5000 (LOCAL_UPLINK)", col: "text-zinc-400" },
-                    { c: "> SYSTEM_READY. AWAITING_TRANSCRIPT...", col: "text-cyan-500 animate-pulse" },
-                  ].map((line, idx) => (
-                    <motion.p 
-                      key={idx}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: 1 + idx * 0.2 }}
-                      className={line.col}
-                    >
-                      {line.c}
-                    </motion.p>
-                  ))}
-                </AnimatePresence>
+      {/* New: Technical Deep-Dive (Company scale details) */}
+      <section id="how-it-works" className="py-32 bg-white dark:bg-[#0A0A0A] overflow-hidden">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-col lg:flex-row gap-20 items-center">
+            <motion.div 
+              initial={{ opacity: 0, x: -30 }}
+              whileInView={{ opacity: 1, x: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.8 }}
+              className="flex-1 space-y-8"
+            >
+              <h2 className="text-blue-600 font-semibold text-xs uppercase tracking-[0.2em]">The Core Protocol</h2>
+              <h3 className="text-4xl md:text-5xl font-bold tracking-tight text-zinc-900 dark:text-white leading-tight">
+                Designed for the <br /> <span className="text-zinc-500">Autonomous Era.</span>
+              </h3>
+              <p className="text-zinc-600 dark:text-zinc-400 text-lg leading-relaxed">
+                Nexus isn't just a voice interface—it's a distributed neural network. We orchestrate the world's most advanced LLMs to drive real-time Linux kernels with near-zero latency, ensuring every command is precise, secure, and context-aware.
+              </p>
+              
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 pt-4">
+                {[
+                  { t: "Neural Protocol", d: "Proprietary intent mapping to system syscalls." },
+                  { t: "Native Sandbox", d: "Isolated, transient Ubuntu cloud instances." },
+                  { t: "Visual Loop", d: "Sub-second frame analysis for UI navigation." },
+                  { t: "Auto-Scale", d: "Global edge deployment for instant compute." }
+                ].map((item, i) => (
+                  <div key={i} className="space-y-2">
+                    <h4 className="text-xs font-bold text-zinc-900 dark:text-white uppercase tracking-widest flex items-center gap-2">
+                      <div className="w-1 h-1 rounded-full bg-blue-500" />
+                      {item.t}
+                    </h4>
+                    <p className="text-xs text-zinc-500 leading-relaxed font-medium">{item.d}</p>
+                  </div>
+                ))}
               </div>
+            </motion.div>
 
-              <div className="mt-10 pt-10 border-t border-white/5 flex items-center justify-between">
-                <div className="flex gap-6">
-                  <div className="flex flex-col">
-                    <span className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest mb-1">CPU LOAD</span>
-                    <span className="text-zinc-400 font-mono text-xs">14.2%</span>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest mb-1">LATENCY</span>
-                    <span className="text-emerald-500 font-mono text-xs">22MS</span>
-                  </div>
-                </div>
-                <div className="w-24 h-8 bg-zinc-100 dark:bg-zinc-900/50 rounded-lg flex items-center justify-center border border-zinc-300 dark:border-white/5">
-                   <div className="w-16 h-1.5 bg-zinc-300 dark:bg-zinc-800 rounded-full overflow-hidden">
-                      <motion.div animate={{ width: ["10%", "90%", "40%"] }} transition={{ duration: 4, repeat: Infinity }} className="h-full bg-cyan-500" />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              whileInView={{ opacity: 1, scale: 1 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.8 }}
+              className="flex-1 relative"
+            >
+              <div className="absolute inset-0 bg-blue-500/5 blur-[100px] rounded-full" />
+              <div className="relative rounded-[2rem] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#0f0f0f] p-8 shadow-2xl">
+                <div className="space-y-6">
+                   <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-4">
+                      <div className="flex gap-1.5">
+                         <div className="w-2.5 h-2.5 rounded-full bg-red-400/20" />
+                         <div className="w-2.5 h-2.5 rounded-full bg-amber-400/20" />
+                         <div className="w-2.5 h-2.5 rounded-full bg-emerald-400/20" />
+                      </div>
+                      <div className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Global_Status // OK</div>
+                   </div>
+                   <div className="space-y-4 pt-2">
+                      <motion.div 
+                        initial={{ width: "30%" }} 
+                        whileInView={{ width: "90%" }} 
+                        transition={{ duration: 1, delay: 0.5 }}
+                        className="h-1.5 bg-blue-500 rounded-full" 
+                      />
+                      <div className="h-1.5 w-full bg-zinc-100 dark:bg-zinc-800 rounded-full" />
+                      <div className="h-1.5 w-2/3 bg-zinc-100 dark:bg-zinc-800 rounded-full" />
+                   </div>
+                   <div className="pt-4 grid grid-cols-2 gap-4">
+                      <div className="h-24 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-100 dark:border-zinc-800 flex items-end p-4">
+                         <div className="w-full space-y-2">
+                            <div className="h-1 w-1/2 bg-blue-500/30 rounded-full" />
+                            <div className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest">Compute Load</div>
+                         </div>
+                      </div>
+                      <div className="h-24 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-100 dark:border-zinc-800 flex items-end p-4">
+                         <div className="w-full space-y-2">
+                            <div className="h-1 w-2/3 bg-emerald-500/30 rounded-full" />
+                            <div className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest">Neural Uplink</div>
+                         </div>
+                      </div>
                    </div>
                 </div>
               </div>
-            </div>
-          </motion.div>
+            </motion.div>
+          </div>
         </div>
       </section>
 
-      {/* Missions (Missions) */}
-      <section id="missions" className="py-40 px-8 relative">
-        <div className="max-w-7xl mx-auto">
-          <motion.div 
-            {...fadeInUp}
-            className="text-center mb-24 space-y-6"
-          >
-            <h2 className="text-xs font-black text-cyan-500 uppercase tracking-[0.5em]">Operations</h2>
-            <h3 className="text-6xl md:text-8xl font-black italic tracking-tighter uppercase leading-none">
-              Mission <span className="text-gradient">Profiles.</span>
-            </h3>
-            <p className="text-zinc-500 text-lg font-medium leading-relaxed max-w-xl mx-auto">
-              Select a pre-configured mission profile or initialize a custom command sequence.
-            </p>
-          </motion.div>
-
-          <motion.div 
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 1 }}
-            className="max-w-6xl mx-auto"
-          >
-            <DemoPicker
-              onSelect={(cmd) => handleStart(cmd)}
-              disabled={isLoading || !user}
-            />
-          </motion.div>
-        </div>
-      </section>
-
-      {/* API Section */}
-      <section id="api" className="py-40 px-8 relative overflow-hidden">
+      {/* New: CTA Section */}
+      <section className="py-24 px-6 relative overflow-hidden">
         <div className="max-w-5xl mx-auto">
           <motion.div 
-            whileHover={{ scale: 1.01 }}
-            className="glass-panel bg-zinc-50/50 dark:bg-transparent rounded-[3rem] p-16 relative overflow-hidden border border-zinc-200 dark:border-white/10 text-center shadow-lg dark:shadow-none"
+            {...fadeInUp}
+            className="relative rounded-[3rem] p-12 md:p-20 overflow-hidden text-center bg-blue-600 dark:bg-blue-600 shadow-2xl shadow-blue-500/20"
           >
-            <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-emerald-500/10 opacity-40" />
-            <div className="relative z-10 space-y-10">
-              <h3 className="text-4xl md:text-6xl font-black italic tracking-tighter uppercase">Universal <span className="text-gradient">Expansion.</span></h3>
-              <p className="text-zinc-400 text-lg leading-relaxed max-w-2xl mx-auto">
-                Nexus is built for scale. Access the full power of the neural orchestrator via our high-bandwidth API, allowing for integrated autonomous agents in your own ecosystem.
+            {/* Background pattern */}
+            <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_2px_2px,#fff_1px,transparent_0)] bg-[size:24px_24px]" />
+            
+            <div className="relative z-10">
+              <h3 className="text-3xl md:text-5xl font-bold text-white mb-6">Experience the future of <br /> computer interaction.</h3>
+              <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto text-balance">
+                Nexus is open for early access. Start building multimodal agents today with $0 setup costs.
               </p>
-              <div className="flex justify-center gap-6">
-                <button className="px-10 py-4 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-black font-black text-[11px] uppercase tracking-widest hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-all shadow-xl shadow-black/5 dark:shadow-white/5">
-                  Request API Access
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+                <button
+                  onClick={() => user ? handleStart() : signInWithGoogle()}
+                  className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
+                >
+                  Get Started Now
                 </button>
-                <button className="px-10 py-4 rounded-xl bg-zinc-100 dark:bg-white/5 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-white font-black text-[11px] uppercase tracking-widest hover:bg-zinc-200 dark:hover:bg-white/10 transition-all">
+                <Link href="/docs" className="w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold hover:bg-blue-700/50 transition-colors">
                   Read Documentation
-                </button>
+                </Link>
               </div>
             </div>
           </motion.div>
         </div>
       </section>
 
-      {/* Recent Sessions */}
-      {user && recentSessions.length > 0 && (
-        <section className="py-20 px-8 relative">
-          <div className="max-w-4xl mx-auto">
-            <motion.div {...fadeInUp} className="space-y-6">
-              <h2 className="text-xs font-black text-emerald-500 uppercase tracking-[0.5em]">History</h2>
-              <h3 className="text-3xl font-black italic tracking-tighter uppercase">Recent Sessions</h3>
-            </motion.div>
-            <div className="mt-8 space-y-3">
-              {recentSessions.slice(0, 3).map((session) => (
-                <Link
-                  key={session.session_id}
-                  href={`/session/${session.session_id}`}
-                  className="block rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-white/[0.02] p-4 transition hover:border-cyan-500/50 hover:bg-zinc-100 dark:hover:bg-white/[0.04] shadow-sm dark:shadow-none"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-zinc-200">{session.title}</p>
-                      <p className="truncate text-xs text-zinc-500">{session.summary || "No summary yet"}</p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">{session.status}</p>
-                      <p className="text-[10px] text-zinc-600">
-                        {session.updated_at ? new Date(session.updated_at).toLocaleString() : "Recently created"}
-                      </p>
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </div>
-        </section>
-      )}
-
       {/* Footer */}
-      <footer className="pt-40 pb-20 px-8 border-t border-card-border dark:border-white/5 relative bg-card dark:bg-[#030303]">
-        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-20">
-          <div className="md:col-span-2 space-y-8">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-zinc-900 dark:bg-white flex items-center justify-center">
-                <span className="text-white dark:text-black font-black text-2xl italic">N</span>
+      <footer className="py-24 px-6 border-t border-zinc-100 dark:border-zinc-800/50 bg-white dark:bg-[#0A0A0A] relative z-20">
+        <div className="max-w-7xl mx-auto">
+          <div className="grid grid-cols-2 md:grid-cols-12 gap-12 mb-16">
+            <div className="col-span-2 md:col-span-4 space-y-6">
+              <Link href="/" className="flex items-center gap-2 group">
+                <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
+                  <Terminal className="w-4 h-4" />
+                </div>
+                <span className="font-bold text-xl tracking-tighter">Nexus</span>
+              </Link>
+              <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed max-w-xs">
+                Autonomous multimodal neural architecture bridging the gap between human language and native Linux environments.
+              </p>
+              <div className="flex items-center gap-4">
+                <a href="https://x.com" className="text-zinc-400 hover:text-blue-500 transition-colors"><svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
+                <a href="https://github.com" className="text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors"><Github className="w-5 h-5"/></a>
               </div>
-              <span className="text-2xl font-black tracking-tighter italic uppercase text-foreground">Nexus</span>
             </div>
-            <p className="text-zinc-500 text-sm font-medium leading-relaxed max-w-sm uppercase tracking-wider">
-              Autonomous Multimodal Neural Architecture. Built for the next era of computational intelligence.
-            </p>
-            <div className="flex gap-4">
-               {["X", "GH", "DC", "LI"].map(s => (
-                 <div key={s} className="w-10 h-10 rounded-lg bg-zinc-200 dark:bg-white/5 border border-zinc-300 dark:border-white/10 flex items-center justify-center text-[10px] font-black text-zinc-600 dark:text-zinc-500 hover:text-black dark:hover:text-white hover:border-zinc-400 dark:hover:border-white/20 transition-all cursor-pointer">{s}</div>
-               ))}
+
+            <div className="col-span-1 md:col-span-2 space-y-4">
+              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Product</h5>
+              <ul className="space-y-3 text-sm text-zinc-500 dark:text-zinc-400 font-medium">
+                <li className="hover:text-blue-500 transition-colors"><a href="#features">Features</a></li>
+                <li className="hover:text-blue-500 transition-colors"><Link href="/pricing">Pricing</Link></li>
+                <li className="hover:text-blue-500 transition-colors"><a href="#">Cloud Run</a></li>
+                <li className="hover:text-blue-500 transition-colors"><a href="#">API Access</a></li>
+              </ul>
+            </div>
+
+            <div className="col-span-1 md:col-span-2 space-y-4">
+              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Resources</h5>
+              <ul className="space-y-3 text-sm text-zinc-500 dark:text-zinc-400 font-medium">
+                <li className="hover:text-blue-500 transition-colors"><a href="#">Documentation</a></li>
+                <li className="hover:text-blue-500 transition-colors"><a href="#">Github</a></li>
+                <li className="hover:text-blue-500 transition-colors"><a href="#">Devpost</a></li>
+                <li className="hover:text-blue-500 transition-colors"><a href="#">Help Center</a></li>
+              </ul>
+            </div>
+
+            <div className="col-span-2 md:col-span-4 space-y-4">
+              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Subscribe</h5>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Join 2,000+ developers building with Nexus.</p>
+              <form className="flex gap-2" onSubmit={(e) => e.preventDefault()}>
+                <input 
+                  type="email" 
+                  placeholder="Enter your email" 
+                  className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                />
+                <button className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold hover:bg-zinc-800 transition-colors">
+                  Join
+                </button>
+              </form>
             </div>
           </div>
           
-          <div className="space-y-8">
-            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-zinc-900 dark:text-white">Ecosystem</h5>
-            <ul className="space-y-4 text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Gemini 2.5 Flash</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Google ADK Core</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">E2B Desktop V2</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Cloud Run Infra</a></li>
-            </ul>
+          <div className="pt-8 border-t border-zinc-100 dark:border-zinc-800/50 flex flex-col md:flex-row justify-between items-center gap-6 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
+            <p>© {new Date().getFullYear()} Nexus Systems Architecture. All rights reserved.</p>
+            <div className="flex items-center gap-6">
+              <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Privacy Policy</a>
+              <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Terms of Service</a>
+              <div className="flex items-center gap-2 text-emerald-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                SYSTEMS OPERATIONAL
+              </div>
+            </div>
           </div>
-
-          <div className="space-y-8">
-            <h5 className="text-[11px] font-black uppercase tracking-[0.4em] text-zinc-900 dark:text-white">Resources</h5>
-            <ul className="space-y-4 text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Documentation</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Github Repo</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">Hackathon Info</a></li>
-              <li className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"><a href="#">System Status</a></li>
-            </ul>
-          </div>
-        </div>
-        
-        <div className="max-w-7xl mx-auto mt-40 pt-10 border-t border-zinc-200 dark:border-white/5 flex flex-col md:flex-row justify-between items-center gap-6 text-[9px] font-black text-zinc-500 dark:text-zinc-600 uppercase tracking-[0.4em]">
-          <p>© 2026 NEXUS SYSTEMS ARCHITECTURE // ALL RIGHTS RESERVED</p>
-          <p className="flex items-center gap-4">
-            <span>Security Protocol v9.2.0</span>
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span>Encrypted Neural Link</span>
-          </p>
         </div>
       </footer>
     </div>
   );
+}
+
+// Temporary icon fallbacks for lucide-react if missing specific ones
+function BoxIcon({ className }: { className?: string }) {
+  return <Cpu className={className} />;
+}
+function CameraIcon({ className }: { className?: string }) {
+  return <Code2 className={className} />;
+}
+function HistoryIcon({ className }: { className?: string }) {
+  return <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
 }

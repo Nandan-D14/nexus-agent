@@ -9,11 +9,27 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings, apply_runtime_env_overrides
 from nexus.history_repository import FirestoreHistoryRepository
-from nexus.models import ErrorResponse, HealthResponse, SessionInfo, SessionResponse, StatusMessage
+from nexus.models import (
+    ErrorResponse,
+    HealthResponse,
+    SessionInfo,
+    SessionResponse,
+    StatusMessage,
+    UserSettingsResponse,
+    UserSettingsUpdateRequest,
+)
+from nexus.runtime_config import (
+    build_byok_error_payload,
+    build_byok_storage_update,
+    build_public_user_settings,
+    get_byok_status,
+    resolve_session_runtime_config,
+)
 from nexus.session import SessionManager
 from nexus.usage import get_expected_usage_sources
 from nexus.ws_handler import handle_websocket
@@ -43,7 +59,7 @@ def _live_session_payloads(user_id: str) -> list[dict[str, Any]]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
-    apply_runtime_env_overrides()  # ensure GOOGLE_API_KEY / Vertex AI env vars are set before any ADK agent is created
+    apply_runtime_env_overrides()
     logger.info("NEXUS agent service starting...")
     session_manager.start_cleanup()
     yield
@@ -80,6 +96,15 @@ async def health():
 async def create_session(user: AuthenticatedUser = Depends(require_current_user)):
     """Create a new NEXUS session. Sandbox boot is deferred until activation."""
     await history_repository.upsert_user(user)
+    user_settings = await history_repository.get_user_settings(user.uid)
+
+    if settings.require_byok:
+        byok_status = get_byok_status(user_settings)
+        if not byok_status.configured:
+            return JSONResponse(
+                status_code=403,
+                content=build_byok_error_payload(user_settings),
+            )
 
     # Check token quota before allowing new session
     quota = await history_repository.get_user_quota(user.uid)
@@ -90,7 +115,10 @@ async def create_session(user: AuthenticatedUser = Depends(require_current_user)
         )
 
     try:
-        session = await session_manager.create_session(owner_id=user.uid)
+        session = await session_manager.create_session(
+            owner_id=user.uid,
+            runtime_config=resolve_session_runtime_config(user_settings),
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -224,15 +252,45 @@ async def get_history_messages(session_id: str, user: AuthenticatedUser = Depend
     messages = await history_repository.get_session_messages(session_id)
     return {"messages": messages}
 
-@app.get("/api/v1/user/settings")
+@app.get("/api/v1/user/settings", response_model=UserSettingsResponse)
 async def get_user_settings(user: AuthenticatedUser = Depends(require_current_user)):
-    settings = await history_repository.get_user_settings(user.uid)
-    return settings
+    user_settings = await history_repository.get_user_settings(user.uid)
+    return build_public_user_settings(user_settings)
 
-@app.patch("/api/v1/user/settings")
-async def update_user_settings(updates: dict[str, Any], user: AuthenticatedUser = Depends(require_current_user)):
-    await history_repository.update_user_settings(user.uid, updates)
-    return {"status": "ok"}
+
+@app.patch("/api/v1/user/settings", response_model=UserSettingsResponse)
+async def update_user_settings(
+    updates: UserSettingsUpdateRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    current_settings = await history_repository.get_user_settings(user.uid)
+    update_payload = dict(updates.model_extra or {})
+
+    byok_updates = (
+        updates.byok.model_dump(exclude_unset=True)
+        if updates.byok is not None
+        else {}
+    )
+    if byok_updates:
+        try:
+            update_payload["byok"] = build_byok_storage_update(
+                current_settings,
+                byok_updates,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    for raw_key in ("e2bApiKey", "geminiApiKey"):
+        update_payload.pop(raw_key, None)
+
+    if update_payload:
+        try:
+            await history_repository.update_user_settings(user.uid, update_payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    updated_settings = await history_repository.get_user_settings(user.uid)
+    return build_public_user_settings(updated_settings)
 
 
 @app.get("/api/v1/user/quota")

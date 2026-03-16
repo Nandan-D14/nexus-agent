@@ -34,10 +34,11 @@ def take_screenshot() -> dict:
         dict with a text description of the screen and a base64 PNG for the frontend.
     """
     try:
-        from nexus.config import settings
-        from nexus.tools._context import get_sandbox
+        from nexus.tools._context import get_runtime_config, get_sandbox
+        from nexus.runtime_config import build_genai_client
 
         sandbox = get_sandbox()
+        runtime_config = get_runtime_config()
 
         # Raw PNG for forwarding to the frontend
         img_bytes = sandbox.screenshot()
@@ -55,20 +56,21 @@ def take_screenshot() -> dict:
         )
 
         try:
-            if settings.use_vision:
-                from google import genai
+            if runtime_config.gemini_available:
                 from google.genai import types
                 from google.genai.errors import ClientError
 
-                client = genai.Client(api_key=settings.google_api_key)
+                client = build_genai_client(runtime_config)
 
                 # Build ordered list of models to try: primary first, then fallbacks
-                fallbacks = [
-                    m.strip()
-                    for m in settings.gemini_vision_fallback_models.split(",")
-                    if m.strip()
+                models_to_try = [
+                    runtime_config.gemini_vision_model,
+                    *[
+                        model
+                        for model in runtime_config.gemini_vision_fallback_models
+                        if model != runtime_config.gemini_vision_model
+                    ],
                 ]
-                models_to_try = [settings.gemini_vision_model] + fallbacks
 
                 description = None
                 last_error: Exception | None = None
@@ -113,7 +115,7 @@ def take_screenshot() -> dict:
             else:
                 description = (
                     "Screenshot captured. Vision analysis is not available because no Google "
-                    "Gemini API key is configured. Use bash commands like 'xdotool getactivewindow "
+                    "Gemini provider is configured for this session. Use bash commands like 'xdotool getactivewindow "
                     "getwindowname' or 'wmctrl -l' to inspect window state, or use xdotool for "
                     "mouse and keyboard actions."
                 )
