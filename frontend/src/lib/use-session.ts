@@ -1,8 +1,11 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 
-import { authenticatedFetch, parseApiError } from "./api-client";
+import { useToast } from "@/components/toast-provider";
+
+import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
 import type { SessionData, SessionInfo } from "./message-types";
 
 export interface UseSessionReturn {
@@ -15,6 +18,8 @@ export interface UseSessionReturn {
 }
 
 export function useSession(): UseSessionReturn {
+  const router = useRouter();
+  const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
   const [isGetting, setIsGetting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -34,7 +39,14 @@ export function useSession(): UseSessionReturn {
       });
 
       if (!res.ok) {
-        throw new Error(await parseApiError(res));
+        const apiError = await readApiError(res);
+        if (apiError.code === "BYOK_REQUIRED") {
+          setCreateError(apiError.message);
+          toast(apiError.message, "error");
+          router.push("/settings/api?setup=1");
+          return null;
+        }
+        throw new Error(apiError.message);
       }
 
       return (await res.json()) as SessionData;
@@ -46,7 +58,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, []);
+  }, [router, toast]);
 
   const getSession = useCallback(async (sessionId: string) => {
     setIsGetting(true);

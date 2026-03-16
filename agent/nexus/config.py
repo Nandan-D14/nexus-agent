@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # E2B Desktop
     e2b_api_key: str = ""
 
+    # BYO keys
+    require_byok: bool = False
+    byok_encryption_key: str = ""
+
     # Google / Gemini
     google_api_key: str = ""
     google_project_id: str = ""
@@ -67,8 +71,8 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-in-production"
 
     # E2B Sandbox defaults
-    sandbox_resolution_w: int = 1424
-    sandbox_resolution_h: int = 868
+    sandbox_resolution_w: int = 1324
+    sandbox_resolution_h: int = 968
     sandbox_timeout_seconds: int = 800
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
@@ -90,7 +94,7 @@ settings = Settings()
 
 
 def apply_runtime_env_overrides() -> None:
-    """Expose env-file values to SDKs that read directly from process env."""
+    """Expose env-file values only where process-global env is still required."""
     # NOTE: We intentionally do NOT set GOOGLE_APPLICATION_CREDENTIALS in os.environ
     # when Vertex AI is configured, because that env var is global — both Firebase
     # Admin SDK and the genai/Vertex AI SDK read it.  The Firebase SA key is from a
@@ -111,16 +115,18 @@ def apply_runtime_env_overrides() -> None:
     if project_id:
         os.environ.setdefault("GCLOUD_PROJECT", project_id)
 
-    # Expose Google API key so ADK's internal genai.Client() can find it
-    if settings.google_api_key and not os.environ.get("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = settings.google_api_key
+    if not settings.require_byok:
+        # Expose Google API key for any legacy SDK paths that still read process env.
+        if settings.google_api_key and not os.environ.get("GOOGLE_API_KEY"):
+            os.environ["GOOGLE_API_KEY"] = settings.google_api_key
 
-    # Vertex AI SDK reads these from env
-    if settings.google_project_id:
-        os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.google_project_id)
-        os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
-    if settings.google_cloud_region:
-        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)
+        # Keep project/location available for SDKs that inspect them directly, but do
+        # not force Vertex mode globally. Gemini API-key clients must opt in/out
+        # explicitly per request to avoid cross-user auth leakage.
+        if settings.google_project_id:
+            os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.google_project_id)
+        if settings.google_cloud_region:
+            os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)
 
     # Allow oauthlib to use HTTP (non-HTTPS) redirect URIs during local development
     if settings.frontend_url.startswith("http://"):

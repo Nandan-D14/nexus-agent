@@ -9,7 +9,7 @@ from typing import AsyncGenerator, Optional
 from google import genai
 from google.genai import types
 
-from nexus.config import settings
+from nexus.runtime_config import SessionRuntimeConfig, build_genai_client
 from nexus.usage import TokenUsageRecord, extract_token_usage_records
 
 logger = logging.getLogger(__name__)
@@ -22,15 +22,12 @@ class VoiceConnectionError(RuntimeError):
 class GeminiLiveManager:
     """Manages a persistent bidirectional Gemini Live session for voice I/O."""
 
-    def __init__(self) -> None:
-        if settings.google_project_id:
-            self._client = genai.Client(
-                vertexai=True,
-                project=settings.google_project_id,
-                location=settings.gemini_live_region,
-            )
-        else:
-            self._client = genai.Client(api_key=settings.google_api_key)
+    def __init__(self, runtime_config: SessionRuntimeConfig) -> None:
+        self._runtime_config = runtime_config
+        self._client = build_genai_client(
+            runtime_config,
+            location=runtime_config.gemini_live_region,
+        )
         self._session = None
         self._live = None
         self._connected = False
@@ -55,9 +52,12 @@ class GeminiLiveManager:
             output_audio_transcription={},
         )
 
-        logger.info("Connecting to Gemini Live (model=%s)...", settings.gemini_live_model)
+        logger.info(
+            "Connecting to Gemini Live (model=%s)...",
+            self._runtime_config.gemini_live_model,
+        )
         self._session = self._client.aio.live.connect(
-            model=settings.gemini_live_model, config=config
+            model=self._runtime_config.gemini_live_model, config=config
         )
         # The session is an async context manager — we enter it
         self._live = await self._session.__aenter__()
@@ -150,7 +150,7 @@ class GeminiLiveManager:
                 for usage in extract_token_usage_records(
                     response,
                     default_source="voice.gemini_live",
-                    default_model=settings.gemini_live_model,
+                    default_model=self._runtime_config.gemini_live_model,
                 ):
                     yield ("usage", usage)
 

@@ -530,7 +530,6 @@ export default function SessionPage() {
       setPageError(null);
       const session = await createSession();
       if (!session) {
-        setPageError("Failed to create session.");
         return;
       }
 
@@ -795,15 +794,15 @@ export default function SessionPage() {
                 <button
                   suppressHydrationWarning
                   onClick={handleShowDesktop}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200"
+                  className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white border border-blue-700 dark:bg-blue-500 dark:border-blue-400 hover:bg-blue-700 dark:hover:bg-blue-600 transition-all duration-200"
                 >
                   Open Desktop
                 </button>
               )}
               <button
                 suppressHydrationWarning
-                onClick={() => router.push("/settings/profile")}
-                className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200"
+                onClick={() => router.push("/settings/api")}
+                className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-400 hover:bg-blue-100 dark:hover:bg-blue-600/20 transition-all duration-200"
               >
                 Settings
               </button>
@@ -947,7 +946,7 @@ export default function SessionPage() {
                   <button
                     suppressHydrationWarning
                     onClick={isDesktopVisible ? handleHideDesktop : handleShowDesktop}
-                    className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200 flex items-center gap-1.5"
+                    className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white border border-blue-700 dark:bg-blue-500 dark:border-blue-400 hover:bg-blue-700 dark:hover:bg-blue-600 transition-all duration-200 flex items-center gap-1.5"
                   >
                     <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
                       {isDesktopVisible ? (
@@ -962,8 +961,8 @@ export default function SessionPage() {
 
                 <button
                   suppressHydrationWarning
-                  onClick={() => router.push("/settings/profile")}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-card-border dark:border-[#1c1c1e] text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-zinc-800/50 hover:text-foreground dark:hover:text-white transition-all duration-200"
+                  onClick={() => router.push("/settings/api")}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-400 hover:bg-blue-100 dark:hover:bg-blue-600/20 transition-all duration-200"
                 >
                   Settings
                 </button>

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Optional
 import jwt
 
 from nexus.config import settings
+from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxManager
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class Session:
 
     id: str
     owner_id: str
+    runtime_config: SessionRuntimeConfig
     sandbox: SandboxManager
     sandbox_id: str = ""
     stream_url: str = ""
@@ -94,13 +96,18 @@ class SessionManager:
 
     # ── CRUD ───────────────────────────────────────────────────
 
-    async def create_session(self, owner_id: str) -> Session:
+    async def create_session(
+        self,
+        owner_id: str,
+        runtime_config: SessionRuntimeConfig,
+    ) -> Session:
         """Create a session record. Sandbox boot is deferred until activation."""
         session_id = uuid.uuid4().hex[:12]
         session = Session(
             id=session_id,
             owner_id=owner_id,
-            sandbox=SandboxManager(),
+            runtime_config=runtime_config,
+            sandbox=SandboxManager(e2b_api_key=runtime_config.e2b_api_key),
         )
 
         self._sessions[session_id] = session

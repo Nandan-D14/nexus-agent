@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from google.adk.agents import Agent
 
-from nexus.config import settings
+from nexus.credentialed_gemini import CredentialedGemini
+from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tools.screen import take_screenshot
 from nexus.tools.bash import run_command
 
@@ -69,19 +70,23 @@ Be precise, be transparent, and always verify your work."""
 # Factory
 # ---------------------------------------------------------------------------
 
-def _get_model():
+def _get_model(runtime_config: SessionRuntimeConfig):
     """Return the model for the orchestrator."""
-    if settings.use_kilo:
+    if runtime_config.use_kilo:
         from google.adk.models.lite_llm import LiteLlm
         return LiteLlm(
-            model=f"openai/{settings.kilo_model_id}",
-            api_key=settings.kilo_api_key,
-            api_base=settings.kilo_gateway_url,
+            model=f"openai/{runtime_config.kilo_model_id}",
+            api_key=runtime_config.kilo_api_key,
+            api_base=runtime_config.kilo_gateway_url,
         )
-    return settings.gemini_vision_model
+    return CredentialedGemini(
+        runtime_config=runtime_config,
+        model=runtime_config.gemini_vision_model,
+    )
 
 
 def create_orchestrator_agent(
+    runtime_config: SessionRuntimeConfig,
     computer_agent: Agent,
     browser_agent: Agent,
     code_agent: Agent,
@@ -100,7 +105,7 @@ def create_orchestrator_agent(
 
     return Agent(
         name="nexus_orchestrator",
-        model=_get_model(),
+        model=_get_model(runtime_config),
         instruction=ORCHESTRATOR_PROMPT,
         tools=tools,
         sub_agents=[computer_agent, browser_agent, code_agent],

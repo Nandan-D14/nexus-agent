@@ -12,6 +12,12 @@ type JsonValue =
   | boolean
   | null;
 
+export type ApiErrorData = {
+  message: string;
+  code?: string;
+  missing?: string[];
+};
+
 function mergeHeaders(initHeaders: HeadersInit | undefined, authHeader: string) {
   const headers = new Headers(initHeaders);
   headers.set("Authorization", authHeader);
@@ -56,17 +62,50 @@ export async function authenticatedFetch(
   return response;
 }
 
-export async function parseApiError(response: Response): Promise<string> {
+export async function readApiError(response: Response): Promise<ApiErrorData> {
   const body = (await response.json().catch(() => null)) as JsonValue | null;
+  const fallback: ApiErrorData = {
+    message: `HTTP ${response.status}`,
+  };
 
-  if (
-    body &&
-    typeof body === "object" &&
-    !Array.isArray(body) &&
-    "detail" in body
-  ) {
-    return String(body.detail);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return fallback;
   }
 
-  return `HTTP ${response.status}`;
+  const record = body as Record<string, unknown>;
+  const nestedDetail =
+    record.detail && typeof record.detail === "object" && !Array.isArray(record.detail)
+      ? (record.detail as Record<string, unknown>)
+      : null;
+
+  const message =
+    (typeof record.detail === "string" && record.detail) ||
+    (typeof record.message === "string" && record.message) ||
+    (nestedDetail && typeof nestedDetail.message === "string" && nestedDetail.message) ||
+    (nestedDetail && typeof nestedDetail.detail === "string" && nestedDetail.detail) ||
+    fallback.message;
+
+  const code =
+    (typeof record.code === "string" && record.code) ||
+    (nestedDetail && typeof nestedDetail.code === "string" && nestedDetail.code) ||
+    undefined;
+
+  const missing =
+    (Array.isArray(record.missing)
+      ? record.missing
+      : nestedDetail && Array.isArray(nestedDetail.missing)
+        ? nestedDetail.missing
+        : [])
+      .filter((value): value is string => typeof value === "string");
+
+  return {
+    message,
+    code,
+    missing: missing.length > 0 ? missing : undefined,
+  };
+}
+
+export async function parseApiError(response: Response): Promise<string> {
+  const error = await readApiError(response);
+  return error.message;
 }

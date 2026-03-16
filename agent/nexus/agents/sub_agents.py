@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from google.adk.agents import Agent
 
-from nexus.config import settings
+from nexus.credentialed_gemini import CredentialedGemini
+from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tools.computer import (
     left_click,
     right_click,
@@ -89,23 +90,26 @@ RULES:
 # Sub-agent factories
 # ---------------------------------------------------------------------------
 
-def _get_model():
+def _get_model(runtime_config: SessionRuntimeConfig):
     """Return the model identifier for sub-agents."""
-    if settings.use_kilo:
+    if runtime_config.use_kilo:
         from google.adk.models.lite_llm import LiteLlm
         return LiteLlm(
-            model=f"openai/{settings.kilo_model_id}",
-            api_key=settings.kilo_api_key,
-            api_base=settings.kilo_gateway_url,
+            model=f"openai/{runtime_config.kilo_model_id}",
+            api_key=runtime_config.kilo_api_key,
+            api_base=runtime_config.kilo_gateway_url,
         )
-    return settings.gemini_vision_model
+    return CredentialedGemini(
+        runtime_config=runtime_config,
+        model=runtime_config.gemini_vision_model,
+    )
 
 
-def create_computer_agent() -> Agent:
+def create_computer_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     """Create the Computer Agent for GUI interactions."""
     return Agent(
         name="computer_agent",
-        model=_get_model(),
+        model=_get_model(runtime_config),
         instruction=COMPUTER_AGENT_PROMPT,
         tools=[
             take_screenshot,
@@ -120,11 +124,11 @@ def create_computer_agent() -> Agent:
     )
 
 
-def create_browser_agent() -> Agent:
+def create_browser_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     """Create the Browser Agent for web browsing and research."""
     return Agent(
         name="browser_agent",
-        model=_get_model(),
+        model=_get_model(runtime_config),
         instruction=BROWSER_AGENT_PROMPT,
         tools=[
             open_browser,
@@ -138,11 +142,11 @@ def create_browser_agent() -> Agent:
     )
 
 
-def create_code_agent() -> Agent:
+def create_code_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     """Create the Code Agent for terminal commands and code execution."""
     return Agent(
         name="code_agent",
-        model=_get_model(),
+        model=_get_model(runtime_config),
         instruction=CODE_AGENT_PROMPT,
         tools=[
             run_command,

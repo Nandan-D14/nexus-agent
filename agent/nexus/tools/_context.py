@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from nexus.background_tasks import BackgroundTaskManager
+    from nexus.runtime_config import SessionRuntimeConfig
     from nexus.sandbox import SandboxManager
 
 _current_sandbox: contextvars.ContextVar["SandboxManager"] = contextvars.ContextVar(
@@ -19,6 +20,9 @@ _current_sandbox: contextvars.ContextVar["SandboxManager"] = contextvars.Context
 
 _current_bg_task_manager: contextvars.ContextVar[Optional["BackgroundTaskManager"]] = (
     contextvars.ContextVar("_current_bg_task_manager", default=None)
+)
+_current_runtime_config: contextvars.ContextVar["SessionRuntimeConfig"] = (
+    contextvars.ContextVar("_current_runtime_config")
 )
 
 
@@ -43,3 +47,18 @@ def set_bg_task_manager(manager: "BackgroundTaskManager") -> contextvars.Token:
 def get_bg_task_manager() -> Optional["BackgroundTaskManager"]:
     """Retrieve the background task manager (may be None)."""
     return _current_bg_task_manager.get()
+
+
+def set_runtime_config(runtime_config: "SessionRuntimeConfig") -> contextvars.Token:
+    """Set the runtime configuration for the current execution context."""
+    return _current_runtime_config.set(runtime_config)
+
+
+def get_runtime_config() -> "SessionRuntimeConfig":
+    """Retrieve the runtime configuration for the current execution context."""
+    try:
+        return _current_runtime_config.get()
+    except LookupError:
+        raise RuntimeError(
+            "No runtime config in current context. Was set_runtime_config() called?"
+        )

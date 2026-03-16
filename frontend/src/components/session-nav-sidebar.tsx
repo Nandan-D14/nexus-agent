@@ -24,7 +24,7 @@ const NAV_ITEMS = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/history", icon: History, label: "History" },
   { href: "/connectors", icon: Cable, label: "Connectors" },
-  { href: "/settings/profile", icon: Settings, label: "Settings" },
+  { href: "/settings/api", icon: Settings, label: "Settings" },
 ] as const;
 
 /* ------------------------------------------------------------------ */

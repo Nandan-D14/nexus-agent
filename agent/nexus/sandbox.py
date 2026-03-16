@@ -25,9 +25,10 @@ class SandboxDeadError(RuntimeError):
 class SandboxManager:
     """Manages a single E2B Desktop sandbox instance."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, e2b_api_key: str = "") -> None:
         self._sandbox = None
         self._stream_url: Optional[str] = None
+        self._e2b_api_key = e2b_api_key
 
     @property
     def is_alive(self) -> bool:
@@ -82,7 +83,7 @@ class SandboxManager:
                 suffix = f" (attempt {attempt}/{retries})" if retries > 1 else ""
                 logger.info("Creating E2B desktop sandbox%s...", suffix)
                 self._sandbox = Sandbox.create(
-                    api_key=settings.e2b_api_key or None,
+                    api_key=self._e2b_api_key or None,
                     resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
                     timeout=settings.sandbox_timeout_seconds,
                 )
@@ -120,39 +121,20 @@ class SandboxManager:
         raise RuntimeError("Sandbox creation failed") from last_exc
 
     def _set_wallpaper(self) -> None:
-        """Set a branded NEXUS dark gradient wallpaper via XFCE config. Cosmetic — errors are swallowed."""
-        py_gen = (
-            "import struct,zlib;"
-            "W,H=1024,768;"
-            "rows=bytearray();"
-            "[rows.extend(bytes([0])+bytes([int(8+y/H*8),int(8+y/H*8),int(15+y/H*13)])*W) for y in range(H)];"
-            "idat=zlib.compress(bytes(rows),1);"
-            "c=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff);"
-            r"open('/tmp/nexus_bg.png','wb').write(b'\x89PNG\r\n\x1a\n'"
-            "+c(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))"
-            "+c(b'IDAT',idat)+c(b'IEND',b''))"
-        )
+        """Set a custom Windows 11 wallpaper via XFCE config. Cosmetic — errors are swallowed."""
+        wallpaper_url = "https://images.wallpapersden.com/image/download/windows-11-4k-esthetics_bWpmZ22UmZqaraWkpJRqZmdlrWdtbWU.jpg"
         cmd = (
             "sleep 3; "
-            # Step 1: generate the wallpaper image
-            "if command -v convert >/dev/null 2>&1; then "
-            "  convert -size 1024x768 gradient:'#08080f-#0e0e1c' "
-            "  -fill '#22d3ee' -font DejaVu-Sans-Bold -pointsize 72 "
-            "  -gravity Center -annotate +0-15 'NEXUS' "
-            "  -fill '#1a3a4a' -pointsize 14 "
-            "  -gravity Center -annotate +0+48 'AI DESKTOP AGENT' "
-            "  /tmp/nexus_bg.png 2>/dev/null || "
-            f"  python3 -c \"{py_gen}\" 2>/dev/null; "
-            "else "
-            f"  python3 -c \"{py_gen}\" 2>/dev/null; "
-            "fi; "
+            # Step 1: download the wallpaper image
+            f"curl -L -o /tmp/nexus_bg.jpg '{wallpaper_url}' 2>/dev/null || "
+            f"wget -O /tmp/nexus_bg.jpg '{wallpaper_url}' 2>/dev/null; "
             # Step 2: write into ALL existing XFCE last-image properties
             "for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep 'last-image'); do "
-            "  xfconf-query -c xfce4-desktop -p \"$p\" -s /tmp/nexus_bg.png 2>/dev/null || true; "
+            "  xfconf-query -c xfce4-desktop -p \"$p\" -s /tmp/nexus_bg.jpg 2>/dev/null || true; "
             "done; "
             "xfconf-query -c xfce4-desktop "
             "  -p /backdrop/screen0/monitorVirtual-1/workspace0/last-image "
-            "  -s /tmp/nexus_bg.png --create -t string 2>/dev/null || true; "
+            "  -s /tmp/nexus_bg.jpg --create -t string 2>/dev/null || true; "
             "xfconf-query -c xfce4-desktop "
             "  -p /backdrop/screen0/monitorVirtual-1/workspace0/image-style "
             "  -s 4 --create -t int 2>/dev/null || true; "
@@ -163,9 +145,9 @@ class SandboxManager:
         )
         try:
             self._sandbox.commands.run(cmd, timeout=35)
-            logger.debug("Branded wallpaper applied via xfconf-query + xfdesktop restart")
+            logger.debug("Custom wallpaper applied via curl + xfconf-query")
         except Exception:
-            logger.debug("Wallpaper setup skipped (non-critical)", exc_info=True)
+            logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
     def keep_alive(self, timeout: int = 300) -> None:
         """Extend sandbox timeout."""
@@ -202,7 +184,7 @@ class SandboxManager:
         logger.info("Resuming sandbox %s ...", sandbox_id)
         self._sandbox = Sandbox.resume(
             sandbox_id,
-            api_key=settings.e2b_api_key or None,
+            api_key=self._e2b_api_key or None,
             timeout=settings.sandbox_timeout_seconds,
         )
         self._sandbox.stream.start(require_auth=False)

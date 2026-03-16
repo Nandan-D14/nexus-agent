@@ -16,8 +16,10 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+from nexus.credentialed_gemini import CredentialedGemini
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
+from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tools import ALL_TOOLS
 from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
 
@@ -33,31 +35,34 @@ class AgentTurnResult:
     usage_records: list[TokenUsageRecord]
 
 
-def _get_model():
+def _get_model(runtime_config: SessionRuntimeConfig):
     """Return either a LiteLlm wrapper (Kilo) or a Gemini model string."""
-    if settings.use_kilo:
+    if runtime_config.use_kilo:
         from google.adk.models.lite_llm import LiteLlm
-        logger.info("Using Kilo gateway model: %s", settings.kilo_model_id)
+        logger.info("Using Kilo gateway model: %s", runtime_config.kilo_model_id)
         return LiteLlm(
-            model=f"openai/{settings.kilo_model_id}",
-            api_key=settings.kilo_api_key,
-            api_base=settings.kilo_gateway_url,
+            model=f"openai/{runtime_config.kilo_model_id}",
+            api_key=runtime_config.kilo_api_key,
+            api_base=runtime_config.kilo_gateway_url,
         )
-    return settings.gemini_vision_model
+    return CredentialedGemini(
+        runtime_config=runtime_config,
+        model=runtime_config.gemini_vision_model,
+    )
 
 
-def create_agent() -> Agent:
+def create_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     """Create the single NEXUS ADK agent with all desktop control tools."""
     agent = Agent(
         name="nexus",
-        model=_get_model(),
+        model=_get_model(runtime_config),
         instruction=SYSTEM_PROMPT,
         tools=ALL_TOOLS,
     )
     return agent
 
 
-def create_multi_agent() -> Agent:
+def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     """Create a hierarchical multi-agent system.
 
     Returns the top-level orchestrator agent which delegates to:
@@ -73,11 +78,12 @@ def create_multi_agent() -> Agent:
     )
     from nexus.tools.bg_task import request_background_task
 
-    computer = create_computer_agent()
-    browser = create_browser_agent()
-    code = create_code_agent()
+    computer = create_computer_agent(runtime_config)
+    browser = create_browser_agent(runtime_config)
+    code = create_code_agent(runtime_config)
 
     orchestrator = create_orchestrator_agent(
+        runtime_config=runtime_config,
         computer_agent=computer,
         browser_agent=browser,
         code_agent=code,
@@ -104,6 +110,7 @@ async def run_agent_turn(
     session_id: str,
     user_id: str,
     message: str,
+    runtime_config: SessionRuntimeConfig,
     event_callback=None,
 ) -> AgentTurnResult:
     """Execute a single agent turn with a user message.
@@ -132,7 +139,7 @@ async def run_agent_turn(
     usage_seen: set[tuple[str, str, int, int, int]] = set()
     turn_count = 0
     max_turns = settings.max_agent_turns
-    usage_source, usage_model = get_agent_usage_source()
+    usage_source, usage_model = get_agent_usage_source(runtime_config)
 
     async for event in runner.run_async(
         user_id=user_id,

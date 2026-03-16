@@ -19,6 +19,7 @@ dependencies = [
     "PyJWT>=2.8.0",
     "Pillow>=10.0.0",
     "google-auth-oauthlib>=1.2.0",
+    "cryptography>=44.0.0",
 ]
 
 [build-system]
