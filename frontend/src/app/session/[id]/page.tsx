@@ -75,6 +75,7 @@ export default function SessionPage() {
   const [textInput, setTextInput] = useState("");
   const [hasActivatedSession, setHasActivatedSession] = useState(false);
   const [isDesktopVisible, setIsDesktopVisible] = useState(false);
+  const [isDesktopFullscreen, setIsDesktopFullscreen] = useState(false);
   const [pendingText, setPendingText] = useState<string | null>(null);
   const [pendingMicStart, setPendingMicStart] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
@@ -666,7 +667,20 @@ export default function SessionPage() {
 
   const handleHideDesktop = useCallback(() => {
     setIsDesktopVisible(false);
+    setIsDesktopFullscreen(false);
   }, []);
+
+  const handleToggleDesktopFullscreen = useCallback(() => {
+    if (viewMode !== "live") return;
+
+    if (!isDesktopVisible) {
+      handleShowDesktop();
+      setIsDesktopFullscreen(false);
+      return;
+    }
+
+    setIsDesktopFullscreen((prev) => !prev);
+  }, [handleShowDesktop, isDesktopVisible, viewMode]);
 
   const handleDemo = useCallback(
     (text: string) => {
@@ -945,17 +959,33 @@ export default function SessionPage() {
                 {viewMode === "live" && (
                   <button
                     suppressHydrationWarning
-                    onClick={isDesktopVisible ? handleHideDesktop : handleShowDesktop}
+                    onClick={handleToggleDesktopFullscreen}
                     className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white border border-blue-700 dark:bg-blue-500 dark:border-blue-400 hover:bg-blue-700 dark:hover:bg-blue-600 transition-all duration-200 flex items-center gap-1.5"
                   >
                     <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
-                      {isDesktopVisible ? (
-                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm2.25 2.75a.75.75 0 011.06 0L10 9.44l2.69-2.69a.75.75 0 111.06 1.06L11.06 10.5l2.69 2.69a.75.75 0 11-1.06 1.06L10 11.56l-2.69 2.69a.75.75 0 11-1.06-1.06l2.69-2.69-2.69-2.69a.75.75 0 010-1.06z" />
+                      {isDesktopFullscreen ? (
+                        <path d="M2.75 5A2.25 2.25 0 0 1 5 2.75h2a.75.75 0 0 1 0 1.5H5A.75.75 0 0 0 4.25 5v2a.75.75 0 0 1-1.5 0V5Zm10.25-2.25A.75.75 0 0 1 13.75 2h2A2.25 2.25 0 0 1 18 4.25v2a.75.75 0 0 1-1.5 0v-2a.75.75 0 0 0-.75-.75h-2a.75.75 0 0 1-.75-.75ZM3.5 12.75a.75.75 0 0 1 .75.75v2a.75.75 0 0 0 .75.75h2a.75.75 0 0 1 0 1.5H5a2.25 2.25 0 0 1-2.25-2.25v-2a.75.75 0 0 1 .75-.75Zm13.75 0a.75.75 0 0 1 .75.75v2A2.25 2.25 0 0 1 15.75 18h-2a.75.75 0 0 1 0-1.5h2a.75.75 0 0 0 .75-.75v-2a.75.75 0 0 1 .75-.75Z" />
+                      ) : isDesktopVisible ? (
+                        <path d="M3.5 2.75A.75.75 0 0 1 4.25 2h3a.75.75 0 0 1 0 1.5H5.53l3.69 3.72a.75.75 0 1 1-1.06 1.06L4.5 4.6v1.65a.75.75 0 0 1-1.5 0v-3.5Zm13 0a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V4.6l-3.69 3.68A.75.75 0 0 1 11 7.22l3.72-3.72h-1.97a.75.75 0 0 1 0-1.5h3a.75.75 0 0 1 .75.75ZM8.16 11.72a.75.75 0 0 1 1.06 1.06L5.53 16.5h1.72a.75.75 0 0 1 0 1.5h-3A.75.75 0 0 1 3.5 17.25v-3.5a.75.75 0 0 1 1.5 0v1.65l3.16-3.68Zm3.9 1.06a.75.75 0 1 1 1.06-1.06l3.16 3.68v-1.65a.75.75 0 0 1 1.5 0v3.5a.75.75 0 0 1-.75.75h-3a.75.75 0 0 1 0-1.5h1.72l-3.69-3.72Z" />
                       ) : (
                         <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm5.25 1.75a.75.75 0 011.5 0V9h3.25a.75.75 0 010 1.5H10.75v3.25a.75.75 0 01-1.5 0V10.5H6a.75.75 0 010-1.5h3.25V5.75z" />
                       )}
                     </svg>
-                    {isDesktopVisible ? "Hide Desktop" : "Open Desktop"}
+                    {isDesktopFullscreen
+                      ? "Show Chat"
+                      : isDesktopVisible
+                        ? "Fullscreen Desktop"
+                        : "Open Desktop"}
+                  </button>
+                )}
+
+                {viewMode === "live" && isDesktopVisible && !isDesktopFullscreen && (
+                  <button
+                    suppressHydrationWarning
+                    onClick={handleHideDesktop}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-zinc-100 text-zinc-700 border border-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-all duration-200"
+                  >
+                    Hide Desktop
                   </button>
                 )}
 
@@ -980,10 +1010,12 @@ export default function SessionPage() {
             <div className="flex-1 flex overflow-hidden">
               {/* Left/Middle: Chat Sidebar */}
               <div
-                className={`flex flex-col bg-[#fafafa] dark:bg-[#111114] overflow-hidden transition-all duration-300 ease-in-out ${
-                  isDesktopVisible
-                    ? "flex-1 min-w-[380px] max-w-4xl border-r border-zinc-200 dark:border-white/5"
-                    : "flex-1 min-w-0"
+                className={`bg-[#fafafa] dark:bg-[#111114] overflow-hidden transition-all duration-300 ease-in-out ${
+                  isDesktopVisible && isDesktopFullscreen
+                    ? "hidden"
+                    : isDesktopVisible
+                      ? "flex flex-col flex-1 min-w-[380px] max-w-4xl border-r border-zinc-200 dark:border-white/5"
+                      : "flex flex-col flex-1 min-w-0"
                 }`}
               >
                 {/* Minimal top status area for Desktop mode */}
