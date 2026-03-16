@@ -7,15 +7,49 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _reset_screenshot_cooldown() -> None:
+    """Reset the screenshot cooldown so the next take_screenshot works immediately.
+
+    Called after every action tool (click, type, scroll, etc.) so the agent
+    can screenshot right after acting without hitting the cooldown guard.
+    """
+    from nexus.tools.screen import _last_call_time
+    _last_call_time.t = 0.0
+
+
+def move_mouse(x: int, y: int) -> dict:
+    """Move the mouse cursor to screen coordinates (x, y) without clicking.
+
+    Use this to hover over elements, reveal tooltips, or position the cursor
+    before scrolling. The cursor movement is visible on the VNC stream.
+
+    Args:
+        x: Horizontal position from left edge (0-1324).
+        y: Vertical position from top edge (0-968).
+
+    Returns:
+        dict with status message.
+    """
+    try:
+        from nexus.tools._context import get_sandbox
+        sandbox = get_sandbox()
+        sandbox.move_mouse(x, y)
+        _reset_screenshot_cooldown()
+        return {"status": "success", "message": f"Moved mouse to ({x}, {y})"}
+    except Exception as e:
+        logger.error("move_mouse failed: %s", e)
+        return {"status": "error", "message": f"Move mouse failed: {e}"}
+
+
 def left_click(x: int, y: int) -> dict:
     """Click the left mouse button at screen coordinates (x, y).
 
     Use this to click buttons, links, icons, or any UI element.
-    Coordinates are based on the 1024x768 screen resolution.
+    Coordinates are based on the 1324x968 screen resolution.
 
     Args:
-        x: Horizontal position from left edge (0-1024).
-        y: Vertical position from top edge (0-768).
+        x: Horizontal position from left edge (0-1324).
+        y: Vertical position from top edge (0-968).
 
     Returns:
         dict with status message.
@@ -24,6 +58,7 @@ def left_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.left_click(x, y)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Left clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("left_click failed: %s", e)
@@ -34,8 +69,8 @@ def right_click(x: int, y: int) -> dict:
     """Right-click at screen coordinates (x, y) to open context menus.
 
     Args:
-        x: Horizontal position (0-1024).
-        y: Vertical position (0-768).
+        x: Horizontal position (0-1324).
+        y: Vertical position (0-968).
 
     Returns:
         dict with status message.
@@ -44,6 +79,7 @@ def right_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.right_click(x, y)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Right clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("right_click failed: %s", e)
@@ -54,8 +90,8 @@ def double_click(x: int, y: int) -> dict:
     """Double-click at screen coordinates (x, y) to open files or select text.
 
     Args:
-        x: Horizontal position (0-1024).
-        y: Vertical position (0-768).
+        x: Horizontal position (0-1324).
+        y: Vertical position (0-968).
 
     Returns:
         dict with status message.
@@ -64,6 +100,7 @@ def double_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.double_click(x, y)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Double clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("double_click failed: %s", e)
@@ -86,6 +123,7 @@ def type_text(text: str) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.type_text(text)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Typed {len(text)} characters"}
     except Exception as e:
         logger.error("type_text failed: %s", e)
@@ -102,7 +140,7 @@ def press_key(key: str) -> dict:
         press_key("alt+tab")     - Switch windows
         press_key("ctrl+s")      - Save
         press_key("escape")      - Escape
-        press_key("tab")         - Tab
+        press_key("tab")         - Tab (move to next form field)
         press_key("backspace")   - Backspace
         press_key("ctrl+shift+t") - Reopen closed tab
 
@@ -116,6 +154,7 @@ def press_key(key: str) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.press_key(key)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Pressed {key}"}
     except Exception as e:
         logger.error("press_key failed: %s", e)
@@ -127,7 +166,7 @@ def scroll_screen(direction: str, amount: int = 3) -> dict:
 
     Args:
         direction: 'up' or 'down'.
-        amount: Number of scroll steps (default 3).
+        amount: Number of scroll steps (default 3). Use 5+ for faster scrolling.
 
     Returns:
         dict with status message.
@@ -136,6 +175,7 @@ def scroll_screen(direction: str, amount: int = 3) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.scroll(direction, amount)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Scrolled {direction} by {amount}"}
     except Exception as e:
         logger.error("scroll_screen failed: %s", e)
@@ -160,6 +200,7 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.drag(from_x, from_y, to_x, to_y)
+        _reset_screenshot_cooldown()
         return {"status": "success", "message": f"Dragged from ({from_x},{from_y}) to ({to_x},{to_y})"}
     except Exception as e:
         logger.error("drag failed: %s", e)

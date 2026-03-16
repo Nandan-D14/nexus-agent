@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import threading
+import time
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +16,11 @@ logger = logging.getLogger(__name__)
 # The orchestrator reads this after a take_screenshot tool call
 # to forward the image to the frontend without bloating the LLM context.
 _last_screenshot = threading.local()
+
+# Track the last screenshot time to prevent back-to-back calls.
+# If called within _COOLDOWN_SECONDS of the last call, return a reminder to act.
+_COOLDOWN_SECONDS = 3.0
+_last_call_time = threading.local()
 
 
 def get_last_screenshot_b64() -> str | None:
@@ -22,17 +31,28 @@ def get_last_screenshot_b64() -> str | None:
 
 
 def take_screenshot() -> dict:
-    """Take a screenshot of the current screen to see what is displayed.
+    """Take a screenshot to see the current screen state.
 
-    ALWAYS call this tool:
-    - Before starting any task (to see the current state)
-    - After every GUI action (click, type, open) to verify results
-    - When you need to read text on screen
-    - When you need to find where to click
+    Call this ONCE before acting, and ONCE after acting to verify.
+    Do NOT call this twice in a row — you must perform an action between calls.
 
     Returns:
-        dict with a text description of the screen and a base64 PNG for the frontend.
+        dict with a text description of all visible elements and their (x, y) coordinates.
     """
+    # Enforce cooldown — prevent back-to-back screenshot calls without acting
+    now = time.monotonic()
+    last_time = getattr(_last_call_time, "t", 0.0)
+    if now - last_time < _COOLDOWN_SECONDS and last_time > 0:
+        _last_call_time.t = now
+        return {
+            "description": (
+                "STOP — you just took a screenshot. Do NOT take another one. "
+                "You MUST perform an action now based on what you saw in the previous screenshot. "
+                "Click a button, type text, scroll, or do something. Then you can screenshot again."
+            )
+        }
+    _last_call_time.t = now
+
     try:
         from nexus.tools._context import get_runtime_config, get_sandbox
         from nexus.runtime_config import build_genai_client
@@ -40,19 +60,31 @@ def take_screenshot() -> dict:
         sandbox = get_sandbox()
         runtime_config = get_runtime_config()
 
-        # Raw PNG for forwarding to the frontend
+        # Single screenshot capture — reuse bytes for both frontend and vision
         img_bytes = sandbox.screenshot()
         img_b64 = base64.b64encode(img_bytes).decode()
 
-        # Smaller JPEG for vision analysis
-        jpeg_bytes = sandbox.screenshot_jpeg(quality=85, max_dim=1024)
+        # Convert to JPEG for vision analysis (smaller payload)
+        img = Image.open(io.BytesIO(img_bytes))
+        img.thumbnail((1324, 968))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        jpeg_bytes = buf.getvalue()
 
         vision_prompt = (
-            "Describe exactly what you see on this Linux desktop screenshot. "
-            "List all visible windows, UI elements, buttons, text fields, "
-            "icons, menus, and any readable text. Be precise about element "
-            "positions (left/right/top/bottom/center). Note which element "
-            "appears focused or active."
+            "You are a screen analysis assistant for an AI computer agent. "
+            "The screen resolution is 1324x968 pixels, origin (0,0) top-left.\n\n"
+            "Analyze this screenshot and provide:\n"
+            "1. CURRENT STATE: What app/page is open? What is the user looking at?\n"
+            "2. INTERACTIVE ELEMENTS: List every clickable element with its approximate (x, y) coordinates:\n"
+            "   - Buttons: [name] at (x, y)\n"
+            "   - Text fields/inputs: [label] at (x, y)\n"
+            "   - Links: [text] at (x, y)\n"
+            "   - Icons: [description] at (x, y)\n"
+            "   - Menus/tabs: [name] at (x, y)\n"
+            "3. TEXT CONTENT: Any readable text on screen (form labels, page content, errors, etc.)\n"
+            "4. FOCUSED ELEMENT: Which element currently has focus/is selected?\n\n"
+            "Be precise with coordinates. The agent will use them to click."
         )
 
         try:
@@ -109,15 +141,14 @@ def take_screenshot() -> dict:
                     )
                     description = (
                         "Screenshot captured but all vision models have exhausted their "
-                        "free-tier quota for today. Navigating by text commands (bash/xdotool) "
-                        "is still available."
+                        "free-tier quota for today. Use terminal commands like "
+                        "'xdotool getactivewindow getwindowname' to inspect the screen state."
                     )
             else:
                 description = (
-                    "Screenshot captured. Vision analysis is not available because no Google "
-                    "Gemini provider is configured for this session. Use bash commands like 'xdotool getactivewindow "
-                    "getwindowname' or 'wmctrl -l' to inspect window state, or use xdotool for "
-                    "mouse and keyboard actions."
+                    "Screenshot captured but vision analysis is not available (no Gemini "
+                    "provider configured). Use 'xdotool getactivewindow getwindowname' or "
+                    "'wmctrl -l' to inspect window state."
                 )
         except Exception:
             logger.exception("Vision analysis failed for screenshot")
@@ -125,6 +156,12 @@ def take_screenshot() -> dict:
 
         # Store the full image for the frontend (orchestrator picks it up)
         _last_screenshot.image = img_b64
+
+        # Append a reminder to act after viewing
+        description += (
+            "\n\n--- NOW PERFORM AN ACTION based on what you see above. "
+            "Click, type, scroll, or interact. Do NOT call take_screenshot again until you act. ---"
+        )
 
         # Return ONLY the description to the LLM — the base64 image would
         # blow up the context window and choke the model.

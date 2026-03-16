@@ -1,6 +1,7 @@
 """NEXUS agent tools — computer control primitives for ADK."""
 
 from nexus.tools.computer import (
+    move_mouse,
     left_click,
     right_click,
     double_click,
@@ -17,6 +18,7 @@ from nexus.tools.bg_task import request_background_task
 ALL_TOOLS = [
     take_screenshot,
     run_command,
+    move_mouse,
     left_click,
     right_click,
     double_click,
