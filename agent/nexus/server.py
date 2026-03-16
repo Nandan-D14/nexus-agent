@@ -254,6 +254,9 @@ def _gdrive_redirect_uri() -> str:
 def _gdrive_flow():
     """Build a google-auth-oauthlib Flow. Returns None if OAuth is not configured."""
     if not (settings.google_oauth_client_id and settings.google_oauth_client_secret):
+        logger.warning("Google Drive OAuth not configured: client_id=%r secret_set=%s",
+                       settings.google_oauth_client_id[:8] if settings.google_oauth_client_id else "",
+                       bool(settings.google_oauth_client_secret))
         return None
     try:
         from google_auth_oauthlib.flow import Flow
@@ -271,7 +274,8 @@ def _gdrive_flow():
             scopes=_GDRIVE_SCOPES,
             redirect_uri=_gdrive_redirect_uri(),
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("_gdrive_flow failed: %s", exc, exc_info=True)
         return None
 
 

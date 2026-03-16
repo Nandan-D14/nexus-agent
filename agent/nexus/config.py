@@ -30,10 +30,10 @@ class Settings(BaseSettings):
     google_cloud_region: str = "us-central1"
 
     # Gemini models
-    gemini_live_model: str = "gemini-2.0-flash-live-001"
-    gemini_vision_model: str = "gemini-2.5-flash"
+    gemini_live_model: str = "gemini-live-2.5-flash-preview-native-audio-09-2025"
+    gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
-    gemini_vision_fallback_models: str = "gemini-2.0-flash-lite,gemini-1.5-flash,gemini-1.5-flash-8b"
+    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview,gemini-2.5-pro,gemini-2.5-flash"
 
     # Kilo Code (OpenAI-compatible gateway — can be used alongside Gemini)
     kilo_api_key: str = ""
@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-in-production"
 
     # E2B Sandbox defaults
-    sandbox_resolution_w: int = 1024
-    sandbox_resolution_h: int = 768
-    sandbox_timeout_seconds: int = 600
+    sandbox_resolution_w: int = 1424
+    sandbox_resolution_h: int = 868
+    sandbox_timeout_seconds: int = 800
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0
@@ -120,3 +120,7 @@ def apply_runtime_env_overrides() -> None:
         os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
     if settings.google_cloud_region:
         os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)
+
+    # Allow oauthlib to use HTTP (non-HTTPS) redirect URIs during local development
+    if settings.frontend_url.startswith("http://"):
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
