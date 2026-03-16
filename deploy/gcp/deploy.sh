@@ -15,6 +15,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 AGENT_DIR="${ROOT_DIR}/agent"
 FRONTEND_DIR="${ROOT_DIR}/frontend"
 
+# Firebase Web SDK values (public — safe to embed in frontend JS)
 FB_API_KEY="${FIREBASE_API_KEY:?Set FIREBASE_API_KEY}"
 FB_AUTH_DOMAIN="${FIREBASE_AUTH_DOMAIN:?Set FIREBASE_AUTH_DOMAIN}"
 FB_PROJECT_ID="${FIREBASE_PROJECT_ID:?Set FIREBASE_PROJECT_ID}"
