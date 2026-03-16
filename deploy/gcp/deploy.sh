@@ -33,6 +33,18 @@ echo ""
 # Google Drive OAuth (optional — set these env vars before running deploy.sh)
 GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
 GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+REQUIRE_BYOK="${REQUIRE_BYOK:-false}"
+BYOK_ENCRYPTION_KEY_SECRET="${BYOK_ENCRYPTION_KEY_SECRET:-}"
+
+AGENT_SECRET_FLAGS=(
+  "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
+)
+
+if [[ -n "${BYOK_ENCRYPTION_KEY_SECRET}" ]]; then
+  AGENT_SECRET_FLAGS+=(
+    "--set-secrets=BYOK_ENCRYPTION_KEY=${BYOK_ENCRYPTION_KEY_SECRET}:latest"
+  )
+fi
 
 # ── 0. Create Artifact Registry repo (idempotent) ─────────────
 echo "Ensuring Artifact Registry repository exists..."
@@ -61,8 +73,8 @@ gcloud run deploy nexus-agent \
   --timeout=3600 \
   --concurrency=10 \
   --allow-unauthenticated \
-  --set-secrets="E2B_API_KEY=e2b-api-key:latest" \
-  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}"
+  "${AGENT_SECRET_FLAGS[@]}" \
+  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET},REQUIRE_BYOK=${REQUIRE_BYOK}"
 
 AGENT_URL=$(gcloud run services describe nexus-agent \
   --project="${PROJECT_ID}" \

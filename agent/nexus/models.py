@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -41,3 +41,33 @@ class ErrorResponse(BaseModel):
 
 class StatusMessage(BaseModel):
     status: str
+
+
+# ── User Settings ────────────────────────────────────────────────
+
+class ByokResponse(BaseModel):
+    e2bKeySet: bool = False
+    geminiKeySet: bool = False
+    geminiProvider: Literal["apiKey", "vertex"] = "apiKey"
+    missing: list[str] = Field(default_factory=list)
+    configured: bool = False
+    vertexConfigured: bool = False
+
+
+class UserSettingsResponse(BaseModel):
+    requireByok: bool = False
+    googleDriveConnected: bool = False
+    settings: dict[str, Any] = Field(default_factory=dict)
+    byok: ByokResponse = Field(default_factory=ByokResponse)
+
+
+class ByokUpdateRequest(BaseModel):
+    e2bApiKey: str | None = None
+    geminiApiKey: str | None = None
+    geminiProvider: Literal["apiKey", "vertex"] | None = None
+
+
+class UserSettingsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    byok: ByokUpdateRequest | None = None

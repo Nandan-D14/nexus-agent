@@ -11,8 +11,9 @@ from starlette.websockets import WebSocket
 from nexus.agent import create_agent, create_multi_agent, create_runner, run_agent_turn
 from nexus.background_tasks import BackgroundTaskManager
 from nexus.history_repository import FirestoreHistoryRepository
+from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxDeadError
-from nexus.tools._context import set_sandbox, set_bg_task_manager
+from nexus.tools._context import set_bg_task_manager, set_runtime_config, set_sandbox
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 from nexus.usage import TokenUsageRecord
@@ -42,6 +43,7 @@ class NexusOrchestrator:
     ) -> None:
         self.session = session
         self.ws = ws
+        self.runtime_config: SessionRuntimeConfig = session.runtime_config
         self.voice = None
         self._voice_connected = False
         self._voice_connect_task: asyncio.Task | None = None
@@ -50,17 +52,17 @@ class NexusOrchestrator:
         self.history_repository = history_repository
 
         # Only create voice manager when Gemini credentials are available
-        if settings.google_api_key or settings.google_project_id:
+        if self.runtime_config.gemini_available:
             from nexus.voice import GeminiLiveManager, VoiceConnectionError
-            self.voice = GeminiLiveManager()
+            self.voice = GeminiLiveManager(self.runtime_config)
             self._voice_connection_error_cls = VoiceConnectionError
 
         # ADK agent + runner (multi-agent or single-agent based on config)
         if settings.use_multi_agent:
-            self._agent = create_multi_agent()
+            self._agent = create_multi_agent(self.runtime_config)
             logger.info("Using multi-agent orchestrator mode")
         else:
-            self._agent = create_agent()
+            self._agent = create_agent(self.runtime_config)
             logger.info("Using single-agent mode")
         self._runner, self._session_service = create_runner(self._agent)
         self._adk_session_id: str | None = None
@@ -85,6 +87,7 @@ class NexusOrchestrator:
         # Bind sandbox and bg task manager to tool context
         set_sandbox(self.session.sandbox)
         set_bg_task_manager(self.bg_task_manager)
+        set_runtime_config(self.runtime_config)
 
         # Voice is NOT connected here — deferred until start_voice() is called
         if self.voice:
@@ -364,6 +367,7 @@ class NexusOrchestrator:
                     session_id=self._adk_session_id,
                     user_id=self._user_id,
                     message=message,
+                    runtime_config=self.runtime_config,
                     event_callback=self._on_agent_event,
                 )
             except _AgentStopped:
