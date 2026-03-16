@@ -11,6 +11,9 @@ export type ByokSettings = {
   missing: string[];
   configured: boolean;
   vertexConfigured: boolean;
+  sharedAccessEnabled: boolean;
+  sharedAccessCodeConfigured: boolean;
+  serverE2bConfigured: boolean;
 };
 
 export type UserSettingsResponse = {
@@ -25,6 +28,7 @@ export type UserSettingsUpdatePayload = {
     e2bApiKey?: string | null;
     geminiApiKey?: string | null;
     geminiProvider?: GeminiProvider;
+    accessCode?: string | null;
   };
 };
 

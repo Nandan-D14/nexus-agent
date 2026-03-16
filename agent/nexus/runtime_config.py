@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
+import logging
 from typing import Any, Literal, Mapping
 
-import google.auth
 from google.genai import Client, types
 
 from nexus.config import settings
 from nexus.crypto import decrypt_secret, encrypt_secret
+
+logger = logging.getLogger(__name__)
 
 GeminiProvider = Literal["apiKey", "vertex"]
 
@@ -18,6 +21,7 @@ _DEFAULT_GEMINI_PROVIDER: GeminiProvider = "apiKey"
 _E2B_CIPHERTEXT_FIELD = "e2bApiKeyEncrypted"
 _GEMINI_CIPHERTEXT_FIELD = "geminiApiKeyEncrypted"
 _GEMINI_PROVIDER_FIELD = "geminiProvider"
+_SHARED_ACCESS_CODE_HASH_FIELD = "sharedAccessCodeHash"
 
 
 @dataclass(frozen=True)
@@ -27,10 +31,21 @@ class ByokStatus:
     gemini_provider: GeminiProvider
     missing: tuple[str, ...]
     vertex_configured: bool
+    shared_access_enabled: bool
+    shared_access_code_configured: bool
+    server_e2b_configured: bool
 
     @property
     def configured(self) -> bool:
         return not self.missing
+
+    @property
+    def shared_e2b_available(self) -> bool:
+        return self.shared_access_enabled and self.server_e2b_configured
+
+    @property
+    def shared_vertex_available(self) -> bool:
+        return self.shared_access_enabled and self.vertex_configured
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,14 @@ def server_vertex_configured() -> bool:
     return bool(settings.google_project_id) and _server_vertex_credentials_available()
 
 
+def server_e2b_configured() -> bool:
+    return bool(settings.e2b_api_key.strip())
+
+
+def shared_access_code_configured() -> bool:
+    return bool(settings.shared_access_code.strip())
+
+
 def get_byok_payload(user_settings: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(user_settings, Mapping):
         return {}
@@ -83,15 +106,20 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     e2b_key_set = bool(_decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD)))
     gemini_key_set = bool(_decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD)))
     vertex_configured = server_vertex_configured()
+    shared_access_enabled = _shared_access_enabled(payload)
+    shared_access_code_is_configured = shared_access_code_configured()
+    server_e2b_is_configured = server_e2b_configured()
 
     missing: list[str] = []
-    if not e2b_key_set:
+    if not (e2b_key_set or (shared_access_enabled and server_e2b_is_configured)):
         missing.append("e2b")
 
-    gemini_satisfied = (
-        vertex_configured if gemini_provider == "vertex" else gemini_key_set
-    )
-    if not gemini_satisfied:
+    if gemini_provider == "vertex":
+        if not shared_access_enabled:
+            missing.append("accessCode" if shared_access_code_is_configured else "vertex")
+        elif not vertex_configured:
+            missing.append("vertex")
+    elif not gemini_key_set:
         missing.append("gemini")
 
     return ByokStatus(
@@ -100,6 +128,9 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
         gemini_provider=gemini_provider,
         missing=tuple(missing),
         vertex_configured=vertex_configured,
+        shared_access_enabled=shared_access_enabled,
+        shared_access_code_configured=shared_access_code_is_configured,
+        server_e2b_configured=server_e2b_is_configured,
     )
 
 
@@ -126,6 +157,9 @@ def build_public_user_settings(user_settings: Mapping[str, Any] | None) -> dict[
             "missing": list(status.missing),
             "configured": status.configured,
             "vertexConfigured": status.vertex_configured,
+            "sharedAccessEnabled": status.shared_access_enabled,
+            "sharedAccessCodeConfigured": status.shared_access_code_configured,
+            "serverE2bConfigured": status.server_e2b_configured,
         },
     }
 
@@ -141,6 +175,7 @@ def build_byok_storage_update(
         _E2B_CIPHERTEXT_FIELD: payload.get(_E2B_CIPHERTEXT_FIELD),
         _GEMINI_CIPHERTEXT_FIELD: payload.get(_GEMINI_CIPHERTEXT_FIELD),
         _GEMINI_PROVIDER_FIELD: current_provider,
+        _SHARED_ACCESS_CODE_HASH_FIELD: payload.get(_SHARED_ACCESS_CODE_HASH_FIELD),
     }
 
     if _GEMINI_PROVIDER_FIELD in updates:
@@ -156,6 +191,11 @@ def build_byok_storage_update(
             updates.get("geminiApiKey")
         )
 
+    if "accessCode" in updates:
+        next_payload[_SHARED_ACCESS_CODE_HASH_FIELD] = _hash_or_clear_access_code(
+            updates.get("accessCode")
+        )
+
     return next_payload
 
 
@@ -169,35 +209,26 @@ def resolve_session_runtime_config(
     user_gemini_api_key = _decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD))
     gemini_provider = status.gemini_provider
 
-    if settings.require_byok:
+    if user_e2b_api_key:
         e2b_api_key = user_e2b_api_key
+    elif status.shared_e2b_available:
+        e2b_api_key = settings.e2b_api_key.strip()
     else:
-        e2b_api_key = user_e2b_api_key or settings.e2b_api_key
+        e2b_api_key = ""
 
     resolved_provider = _DEFAULT_GEMINI_PROVIDER
     resolved_api_key = ""
     resolved_project_id = ""
 
-    if settings.require_byok:
-        if gemini_provider == "vertex" and status.vertex_configured:
-            resolved_provider = "vertex"
-            resolved_project_id = settings.google_project_id
-        else:
-            resolved_provider = "apiKey"
-            resolved_api_key = user_gemini_api_key
-    else:
-        if gemini_provider == "vertex" and status.vertex_configured:
-            resolved_provider = "vertex"
-            resolved_project_id = settings.google_project_id
-        elif user_gemini_api_key:
-            resolved_provider = "apiKey"
-            resolved_api_key = user_gemini_api_key
-        elif settings.google_api_key:
-            resolved_provider = "apiKey"
-            resolved_api_key = settings.google_api_key
-        elif status.vertex_configured:
-            resolved_provider = "vertex"
-            resolved_project_id = settings.google_project_id
+    if gemini_provider == "vertex" and status.shared_vertex_available:
+        resolved_provider = "vertex"
+        resolved_project_id = settings.google_project_id
+    elif user_gemini_api_key:
+        resolved_provider = "apiKey"
+        resolved_api_key = user_gemini_api_key
+    elif not settings.require_byok and settings.google_api_key and status.shared_access_enabled:
+        resolved_provider = "apiKey"
+        resolved_api_key = settings.google_api_key
 
     return SessionRuntimeConfig(
         e2b_api_key=e2b_api_key,
@@ -286,7 +317,13 @@ def _decrypt_or_empty(value: Any) -> str:
 def _build_byok_error_message(status: ByokStatus) -> str:
     missing_labels: list[str] = []
     if "e2b" in status.missing:
-        missing_labels.append("an E2B API key")
+        if status.shared_access_code_configured and status.server_e2b_configured:
+            missing_labels.append("an E2B API key or a valid access code")
+        else:
+            missing_labels.append("an E2B API key")
+
+    if "accessCode" in status.missing:
+        missing_labels.append("a valid access code for shared Vertex AI credits")
 
     if "gemini" in status.missing:
         if status.gemini_provider == "vertex" and not status.vertex_configured:
@@ -294,19 +331,52 @@ def _build_byok_error_message(status: ByokStatus) -> str:
         else:
             missing_labels.append("a Gemini API key or Vertex AI")
 
+    if "vertex" in status.missing:
+        missing_labels.append("server-side Vertex AI configuration")
+
     joined = " and ".join(missing_labels) if missing_labels else "your required API keys"
     return f"API & Keys setup is incomplete. Add {joined} in Settings before starting a session."
+
+
+def _shared_access_enabled(payload: Mapping[str, Any]) -> bool:
+    stored_hash = payload.get(_SHARED_ACCESS_CODE_HASH_FIELD)
+    configured_code = settings.shared_access_code.strip()
+    if not isinstance(stored_hash, str) or not configured_code:
+        return False
+    return stored_hash == _hash_access_code(configured_code)
+
+
+def _hash_or_clear_access_code(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    configured_code = settings.shared_access_code.strip()
+    if not configured_code:
+        raise PermissionError("Shared access codes are not enabled on this server.")
+    if text != configured_code:
+        raise PermissionError("Invalid access code.")
+    return _hash_access_code(configured_code)
+
+
+def _hash_access_code(value: str) -> str:
+    return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
 
 
 @lru_cache(maxsize=1)
 def _server_vertex_credentials_available() -> bool:
     try:
-        _, detected_project_id = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        client = Client(
+            vertexai=True,
+            project=settings.google_project_id,
+            location=settings.gemini_live_region or "us-central1",
         )
-    except Exception:
+        models = client.models.list(config={"page_size": 1})
+        next(iter(models), None)
+        return True
+    except Exception as exc:
+        logger.warning("Vertex AI probe failed: %s", exc)
         return False
-
-    if detected_project_id and settings.google_project_id:
-        return detected_project_id == settings.google_project_id
-    return True

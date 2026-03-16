@@ -21,12 +21,18 @@ import {
 
 function missingLabel(key: string, provider: GeminiProvider, vertexConfigured: boolean) {
   if (key === "e2b") {
-    return "E2B API key";
+    return "E2B API key or access code";
+  }
+  if (key === "accessCode") {
+    return "Access code for shared Vertex AI";
+  }
+  if (key === "vertex") {
+    return "Vertex AI server configuration";
   }
   if (provider === "vertex" && !vertexConfigured) {
     return "Vertex AI server configuration";
   }
-  return "Gemini provider";
+  return "Gemini API key";
 }
 
 export default function ApiSettingsPage() {
@@ -38,6 +44,7 @@ export default function ApiSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accessCode, setAccessCode] = useState("");
   const [e2bApiKey, setE2bApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiProvider, setGeminiProvider] = useState<GeminiProvider>("apiKey");
@@ -88,26 +95,49 @@ export default function ApiSettingsPage() {
     );
   }, [geminiProvider, settings]);
 
+  const sharedE2bReady = Boolean(
+    settings?.byok.sharedAccessEnabled && settings.byok.serverE2bConfigured,
+  );
+  const sharedVertexReady = Boolean(
+    settings?.byok.sharedAccessEnabled && settings.byok.vertexConfigured,
+  );
+  const e2bReady = Boolean(settings?.byok.e2bKeySet || sharedE2bReady);
+  const geminiReady = Boolean(
+    settings &&
+      (geminiProvider === "vertex" ? sharedVertexReady : settings.byok.geminiKeySet),
+  );
+
   const handleSave = async () => {
     if (!settings) {
       return;
     }
 
-    const nextHasE2b = settings.byok.e2bKeySet || e2bApiKey.trim().length > 0;
+    const hasPendingAccessCode = accessCode.trim().length > 0;
+    const nextHasE2b =
+      settings.byok.e2bKeySet ||
+      e2bApiKey.trim().length > 0 ||
+      sharedE2bReady ||
+      hasPendingAccessCode;
     const nextHasGemini =
       geminiProvider === "vertex"
-        ? settings.byok.vertexConfigured
+        ? sharedVertexReady || hasPendingAccessCode
         : settings.byok.geminiKeySet || geminiApiKey.trim().length > 0;
 
     if (settings.requireByok && !nextHasE2b) {
-      setError("An E2B API key is required before you can start a session.");
+      setError(
+        settings.byok.sharedAccessCodeConfigured && settings.byok.serverE2bConfigured
+          ? "An E2B API key or a valid access code is required before you can start a session."
+          : "An E2B API key is required before you can start a session.",
+      );
       return;
     }
 
     if (settings.requireByok && !nextHasGemini) {
       setError(
-        geminiProvider === "vertex" && !settings.byok.vertexConfigured
-          ? "Vertex AI is not configured on the server. Use a Gemini API key instead."
+        geminiProvider === "vertex" && settings.byok.sharedAccessCodeConfigured
+          ? "Enter a valid access code to unlock shared Vertex AI credits, or switch to Gemini API Key."
+          : geminiProvider === "vertex" && !settings.byok.vertexConfigured
+            ? "Vertex AI is not configured on the server. Use a Gemini API key instead."
           : "Choose a Gemini provider and supply the required key before saving.",
       );
       return;
@@ -122,6 +152,7 @@ export default function ApiSettingsPage() {
           geminiProvider: GeminiProvider;
           e2bApiKey?: string;
           geminiApiKey?: string;
+          accessCode?: string;
         };
       } = {
         byok: {
@@ -137,8 +168,13 @@ export default function ApiSettingsPage() {
         payload.byok.geminiApiKey = geminiApiKey.trim();
       }
 
+      if (accessCode.trim()) {
+        payload.byok.accessCode = accessCode.trim();
+      }
+
       const updated = await updateUserSettings(payload);
       setSettings(updated);
+      setAccessCode("");
       setE2bApiKey("");
       setGeminiApiKey("");
       setGeminiProvider(updated.byok.geminiProvider);
@@ -211,6 +247,54 @@ export default function ApiSettingsPage() {
         </div>
       )}
 
+      {settings.byok.sharedAccessCodeConfigured && (
+        <section className="space-y-5 rounded-3xl border border-zinc-200 bg-white p-6 dark:border-[#2f2f35] dark:bg-[#111114]">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                Shared Access Code
+              </h3>
+              <p className="text-sm text-zinc-500">
+                Unlock shared Vertex AI credits and server E2B sandbox usage. Without it, use your own E2B and Gemini API keys.
+              </p>
+            </div>
+            <div
+              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${
+                settings.byok.sharedAccessEnabled
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                  : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+              }`}
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {settings.byok.sharedAccessEnabled ? "Unlocked" : "Locked"}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-300">
+            {settings.byok.sharedAccessEnabled
+              ? `Shared resources are active for this account.${sharedVertexReady ? " Vertex AI is unlocked." : ""}${sharedE2bReady ? " Server E2B sandbox access is unlocked." : ""}`
+              : "Enter the access code to unlock shared server resources for this account."}
+          </div>
+
+          <label className="space-y-2 block">
+            <span className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">
+              Access Code
+            </span>
+            <input
+              type="password"
+              value={accessCode}
+              onChange={(event) => setAccessCode(event.target.value)}
+              placeholder={
+                settings.byok.sharedAccessEnabled
+                  ? "Leave blank to keep shared access unlocked"
+                  : "Enter access code"
+              }
+              className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-100 dark:focus:border-zinc-600"
+            />
+          </label>
+        </section>
+      )}
+
       <section className="space-y-5 rounded-3xl border border-zinc-200 bg-white p-6 dark:border-[#2f2f35] dark:bg-[#111114]">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
@@ -218,18 +302,24 @@ export default function ApiSettingsPage() {
               E2B Sandbox
             </h3>
             <p className="text-sm text-zinc-500">
-              Required to create desktop sessions.
+              {sharedE2bReady
+                ? "Shared sandbox access is unlocked for this account. Add your own key only if you want to override it."
+                : "Required to create desktop sessions unless shared access is unlocked."}
             </p>
           </div>
           <div
             className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${
-              settings.byok.e2bKeySet
+              e2bReady
                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
                 : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
             }`}
           >
             <CheckCircle2 className="h-3.5 w-3.5" />
-            {settings.byok.e2bKeySet ? "Saved" : "Not set"}
+            {settings.byok.e2bKeySet
+              ? "Saved"
+              : sharedE2bReady
+                ? "Ready via access code"
+                : "Not set"}
           </div>
         </div>
 
@@ -242,7 +332,11 @@ export default function ApiSettingsPage() {
             value={e2bApiKey}
             onChange={(event) => setE2bApiKey(event.target.value)}
             placeholder={
-              settings.byok.e2bKeySet ? "Leave blank to keep the saved key" : "Enter your E2B API key"
+              settings.byok.e2bKeySet
+                ? "Leave blank to keep the saved key"
+                : sharedE2bReady
+                  ? "Shared sandbox access is unlocked; add your own key only if you want to override it"
+                  : "Enter your E2B API key"
             }
             className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-100 dark:focus:border-zinc-600"
           />
@@ -256,20 +350,18 @@ export default function ApiSettingsPage() {
               Gemini Provider
             </h3>
             <p className="text-sm text-zinc-500">
-              Use your Gemini API key or the server&apos;s Vertex AI configuration.
+              Use your Gemini API key, or unlock the server&apos;s Vertex AI credits with the access code.
             </p>
           </div>
           <div
             className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${
-              settings.byok.geminiKeySet || (geminiProvider === "vertex" && settings.byok.vertexConfigured)
+              geminiReady
                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
                 : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
             }`}
           >
             <CheckCircle2 className="h-3.5 w-3.5" />
-            {settings.byok.geminiKeySet || (geminiProvider === "vertex" && settings.byok.vertexConfigured)
-              ? "Ready"
-              : "Needs setup"}
+            {geminiReady ? "Ready" : "Needs setup"}
           </div>
         </div>
 
@@ -308,18 +400,22 @@ export default function ApiSettingsPage() {
                 Vertex AI
               </div>
               <p className="text-sm text-zinc-500">
-                Uses server-side Vertex AI. No Gemini API key is required.
+                Uses shared server-side Vertex AI. No Gemini API key is required after the access code is accepted.
               </p>
               <p
                 className={`text-xs font-medium ${
-                  settings.byok.vertexConfigured
+                  sharedVertexReady
                     ? "text-emerald-600 dark:text-emerald-300"
-                    : "text-red-600 dark:text-red-300"
+                    : settings.byok.vertexConfigured
+                      ? "text-amber-600 dark:text-amber-300"
+                      : "text-red-600 dark:text-red-300"
                 }`}
               >
-                {settings.byok.vertexConfigured
-                  ? "Vertex AI is configured on the server."
-                  : "Vertex AI is not configured on the server."}
+                {sharedVertexReady
+                  ? "Shared Vertex AI credits are unlocked."
+                  : settings.byok.vertexConfigured
+                    ? "Enter the access code to unlock shared Vertex AI credits."
+                    : "Vertex AI is not configured on the server."}
               </p>
             </div>
           </button>

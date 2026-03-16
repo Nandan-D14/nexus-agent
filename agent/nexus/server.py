@@ -277,6 +277,8 @@ async def update_user_settings(
                 current_settings,
                 byok_updates,
             )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
 
