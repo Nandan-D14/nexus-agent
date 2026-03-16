@@ -782,7 +782,7 @@ export default function SessionPage() {
   const hasStarted = hasConversationStarted || isDesktopVisible;
 
   return (
-    <div className="h-screen flex overflow-hidden bg-background dark:bg-[#09090b]">
+    <div className="h-screen flex overflow-hidden bg-[#fafafa] dark:bg-[#111114]">
       {/* ─── Left nav sidebar ─── */}
       <SessionNavSidebar />
 
@@ -816,36 +816,37 @@ export default function SessionPage() {
               </button>
             </div>
 
-            <div className="max-w-2xl w-full flex flex-col items-center gap-8 mb-20 mt-10">
+            <div className="max-w-3xl w-full flex flex-col items-center gap-8 mb-20 mt-10">
               <div className="text-center space-y-4">
-                <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight text-foreground dark:text-zinc-100">
-                  Hello {greetingName}.
+                <h1 className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
+                  Welcome to Nexus
                 </h1>
-                <p className="text-xl text-muted dark:text-zinc-400">
-                  What can I do for you?
+                <p className="text-[15px] text-zinc-500">
+                  What can I help you with?
                 </p>
               </div>
 
               {/* Floating Input Box */}
-              <div className="w-full relative group max-w-2xl mx-auto mt-4">     
-                <div className="absolute inset-0 bg-zinc-100/5 dark:bg-cyan-500/5 rounded-3xl blur-xl transition-all duration-300 group-hover:bg-zinc-200/50 dark:group-hover:bg-cyan-500/10" />
-                <div className="relative flex flex-col bg-white dark:bg-[#111114] border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-sm hover:shadow-md transition-all duration-300 p-3 pl-4">
-                  <textarea
-                    suppressHydrationWarning
-                    ref={landingInputRef}
-                    value={textInput}
-                    onChange={(e) => setTextInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        handleTextSubmit();
-                      }
-                    }}
-                    placeholder="Give Nexus a task to work on..."
-                    rows={2}
-                    className="w-full bg-transparent border-none outline-none text-base text-foreground dark:text-zinc-100 placeholder:text-muted dark:placeholder:text-zinc-500 resize-none overflow-y-auto min-h-14 max-h-50 leading-relaxed"
-                  />
-                  <div className="flex items-center justify-between mt-2">
+              <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
+                <div className="relative flex flex-col bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl shadow-sm focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all duration-300 p-2">
+                  <div className="relative min-h-[60px] flex items-center px-2">
+                    <textarea
+                      suppressHydrationWarning
+                      ref={landingInputRef}
+                      value={textInput}
+                      onChange={(e) => setTextInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleTextSubmit();
+                        }
+                      }}
+                      placeholder="Send message to Nexus..."
+                      rows={1}
+                      className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between mt-2 px-2">
                     <div className="flex items-center gap-3 text-zinc-400">
                       {/* Paperclip */}
                       <button className="hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
@@ -857,10 +858,10 @@ export default function SessionPage() {
                       {/* Model Selector */}
                       <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors text-sm font-medium">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-                          <path d="M12 8v4l3 3" />
+                          <circle cx="12" cy="12" r="10" />
+                          <circle cx="12" cy="12" r="2" fill="currentColor" />
                         </svg>
-                        Standard
+                        Gemini
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
                         </svg>
@@ -894,7 +895,7 @@ export default function SessionPage() {
 
               {/* Demo picker */}
               {viewMode === "live" && (
-                <div className="w-full max-w-2xl mx-auto mt-4 relative">
+                <div className="w-full max-w-4xl mx-auto mt-4 relative">
                   <DemoPicker onSelect={handleDemo} disabled={false} />
                 </div>
               )}
@@ -914,30 +915,28 @@ export default function SessionPage() {
         ) : (
           <>
             {/* ─── Header ─── */}
-            <header className="relative flex items-center justify-between px-5 py-2.5 border-b border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b]">
-              <div className="absolute bottom-0 left-0 right-0 h-px bg-linear-to-r from-transparent via-cyan-500/30 to-transparent" />
-
+            <header className="relative flex items-center justify-between px-5 py-3">
               <div className="flex items-center gap-4">
-                <h1 className="text-lg font-bold tracking-tight">
-                  <span className="text-[#22d3ee]">NEXUS</span>
+                <h1 className="text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                  Nexus
                 </h1>
 
                 {viewMode === "live" && isConnected && (
-                  <span className="flex items-center gap-1.5 text-xs text-emerald-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                     LIVE
                   </span>
                 )}
 
                 {viewMode === "archived" && (
-                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] uppercase tracking-wider text-amber-300">
+                  <span className="rounded-full bg-zinc-100 dark:bg-[#212126] px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
                     Archived
                   </span>
                 )}
 
                 {viewMode === "live" && activeAgent && activeAgent !== "nexus" && (
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-[10px] uppercase tracking-widest font-bold text-zinc-600 dark:text-zinc-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#f4f4f5] dark:bg-[#212126] text-[10px] uppercase tracking-widest font-bold text-zinc-600 dark:text-zinc-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
                     {activeAgent.replace(/_/g, " ")}
                   </div>
                 )}

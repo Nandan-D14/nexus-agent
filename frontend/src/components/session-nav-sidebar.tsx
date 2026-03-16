@@ -66,11 +66,11 @@ export function SessionNavSidebar() {
 
   return (
     <>
-      {/* Sidebar toggle */}
+      {/* Sidebar toggle - Mobile */}
       <button
         type="button"
         onClick={() => setIsSidebarOpen((prev) => !prev)}
-        className={`fixed top-3 z-60 p-2 rounded-lg bg-card/90 dark:bg-[#0a0a0a]/90 border border-card-border dark:border-white/10 text-muted dark:text-zinc-300 hover:text-foreground dark:hover:text-white transition-all ${
+        className={`fixed top-3 z-60 p-2 rounded-lg bg-card/90 dark:bg-[#0a0a0a]/90 border border-card-border dark:border-white/10 text-muted dark:text-zinc-300 hover:text-foreground dark:hover:text-white transition-all md:hidden ${
           isSidebarOpen ? "left-58" : "left-3"
         }`}
         title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
@@ -78,25 +78,34 @@ export function SessionNavSidebar() {
         {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
       </button>
 
+      {/* Sidebar toggle - Desktop */}
+      <button
+        type="button"
+        onClick={() => setIsSidebarOpen((prev) => !prev)}
+        className={`hidden md:block fixed top-3 z-60 p-2 rounded-lg bg-white/90 dark:bg-[#0a0a0a]/90 border border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all shadow-sm ${
+          isSidebarOpen ? "left-[252px]" : "left-3"
+        }`}
+        title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+      >
+        {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+      </button>
+
       <aside
-        className={`fixed top-0 left-0 z-40 h-screen w-64 bg-card dark:bg-[#0a0a0a] border-r border-card-border dark:border-white/5 flex flex-col transition-transform duration-300 ease-in-out ${
+        className={`fixed top-0 left-0 z-40 h-screen w-64 bg-white dark:bg-[#111114] border-r border-zinc-200 dark:border-[#1c1c1e] flex flex-col transition-transform duration-300 ease-in-out ${
           isSidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-      <div className="p-6">
+      <div className="p-4 md:p-6 pb-2">
         <div className="flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group" title="NEXUS — New Session">
-            <div className="relative w-10 h-10 rounded-xl bg-linear-to-br from-cyan-400 to-emerald-400 flex items-center justify-center shadow-lg transform group-hover:rotate-6 transition-transform">
-              <span className="text-black font-black text-2xl italic">N</span>
-            </div>
-            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors text-foreground">
+          <Link href="/" className="flex items-center gap-3 px-2 group" title="NEXUS — New Session">
+            <span className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
               Nexus
             </span>
           </Link>
           <button
             type="button"
             onClick={() => setIsSidebarOpen(false)}
-            className="p-2 rounded-lg text-muted dark:text-zinc-400 hover:text-foreground dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5"
+            className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             title="Close sidebar"
           >
             <X className="w-5 h-5" />
@@ -104,19 +113,19 @@ export function SessionNavSidebar() {
         </div>
       </div>
 
-      <div className="px-4 py-2">
+      <div className="px-4 py-2 mt-2">
         <button
           type="button"
           title="New Session"
           onClick={handleNewSession}
-          className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95"
+          className="flex items-center gap-2 justify-center w-full px-4 py-2 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 rounded-full font-medium text-sm transition-colors hover:bg-zinc-800 dark:hover:bg-white"
         >
-          <PlusCircle className="w-5 h-5" />
-          New Session
+          <PlusCircle className="w-4 h-4" />
+          New Chat
         </button>
       </div>
 
-      <nav className="flex-1 px-3 py-6 flex flex-col gap-2 overflow-y-auto">
+      <nav className="flex-1 px-3 py-4 flex flex-col gap-1 overflow-y-auto">
         {NAV_ITEMS.map(({ href, icon: Icon, label }) => {
           const active = pathname.startsWith(href);
           return (
@@ -127,16 +136,16 @@ export function SessionNavSidebar() {
               onClick={() => {
                 if (isMobileViewport()) setIsSidebarOpen(false);
               }}
-              className={`relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
+              className={`relative flex items-center gap-3 px-4 py-2.5 rounded-full transition-all ${
                 active
-                  ? "bg-black/5 dark:bg-white/10 text-cyan-600 dark:text-cyan-400 font-bold"
-                  : "text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground font-medium"
+                  ? "bg-[#f4f4f5] dark:bg-[#212126] text-zinc-900 dark:text-zinc-100 font-medium"
+                  : "text-zinc-500 dark:text-zinc-400 hover:bg-[#f4f4f5] dark:hover:bg-[#212126] hover:text-zinc-900 dark:hover:text-zinc-100 font-medium"
               }`}
             >
-              <Icon className="w-5 h-5" />
-              <span className="text-sm tracking-wide">{label}</span>
+              <Icon className="w-4 h-4" />
+              <span className="text-sm">{label}</span>
               {active && (
-                <span className="absolute left-0 w-1 h-8 bg-cyan-600 dark:bg-cyan-500 rounded-r-full" />
+                <span className="absolute left-2 w-1 h-5 bg-zinc-900 dark:bg-zinc-100 rounded-full" />
               )}
             </Link>
           );

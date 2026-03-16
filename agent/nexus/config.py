@@ -30,10 +30,10 @@ class Settings(BaseSettings):
     google_cloud_region: str = "global"
 
     # Gemini models
-    gemini_live_model: str = "gemini-live-2.5-flash-preview-native-audio-09-2025"
+    gemini_live_model: str = "gemini-3-flash-preview"
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
-    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview,gemini-2.5-pro,gemini-2.5-flash"
+    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview,gemini-2.5-flash"
 
     # Kilo Code (OpenAI-compatible gateway — can be used alongside Gemini)
     kilo_api_key: str = ""

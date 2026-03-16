@@ -536,7 +536,7 @@ export default function HomePage() {
               <h3 className="text-3xl font-black italic tracking-tighter uppercase">Recent Sessions</h3>
             </motion.div>
             <div className="mt-8 space-y-3">
-              {recentSessions.map((session) => (
+              {recentSessions.slice(0, 3).map((session) => (
                 <Link
                   key={session.session_id}
                   href={`/session/${session.session_id}`}

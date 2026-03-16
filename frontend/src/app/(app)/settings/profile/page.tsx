@@ -1,254 +1,190 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
+import { Mail, Shield, User as UserIcon, Monitor, Moon, Sun, Cloud, HardDrive, Key } from "lucide-react";
 import { useState, useEffect } from "react";
-import { Save, Loader2, Camera, Moon, Sun, Monitor, HardDrive, Link, Unlink } from "lucide-react";
-import { authenticatedFetch } from "@/lib/api-client";
-import { useToast } from "@/components/toast-provider";
 import { useTheme } from "next-themes";
+import Link from 'next/link';
+import { db } from "@/lib/firebase-client";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+
+interface DrivePrefs {
+  autoExportDocs: boolean;
+  exportFormat: "markdown" | "html" | "plain";
+  includeAudio: boolean;
+}
 
 export default function ProfileSettingsPage() {
   const { user } = useAuth();
-  const { toast } = useToast();
   const { theme, setTheme } = useTheme();
-
   const [mounted, setMounted] = useState(false);
-  const [saving, setSaving] = useState(false);
-
+  const [loadingDrive, setLoadingDrive] = useState(false);
+  
   // Google Drive state
-  const [gdriveConnected, setGdriveConnected] = useState(false);
-  const [gdriveLoading, setGdriveLoading] = useState(false);
-  const [gdriveSupported, setGdriveSupported] = useState(false);
-
-  const [displayName, setDisplayName] = useState(user?.displayName || "");
-  const [bio, setBio] = useState("");
-  const [avatarUrl, setAvatarUrl] = useState(user?.photoURL || "");
+  const [driveConnected, setDriveConnected] = useState(false);
+  const [drivePrefs, setDrivePrefs] = useState<DrivePrefs>({
+    autoExportDocs: true,
+    exportFormat: "markdown",
+    includeAudio: false
+  });
 
   useEffect(() => {
     setMounted(true);
-    // Load user settings to check Google Drive status
-    authenticatedFetch("/api/v1/user/settings")
-      .then((r) => r.json())
-      .then((data: Record<string, unknown>) => {
-        setGdriveConnected(!!data?.googleDriveRefreshToken);
-      })
-      .catch(() => {});
-    // Check if Google Drive OAuth is configured on the backend
-    authenticatedFetch("/api/v1/auth/google-drive/url")
-      .then(() => setGdriveSupported(true))
-      .catch(() => {
-        // 501 = not configured; we still mark as unsupported
-        setGdriveSupported(false);
-      });
-  }, []);
+    checkDriveStatus();
+  }, [user]);
 
-  // Listen for OAuth popup success
-  useEffect(() => {
-    const handler = (evt: MessageEvent) => {
-      if (evt.origin !== window.location.origin) return;
-      if ((evt.data as { type?: string })?.type === "google_drive_connected") {
-        setGdriveConnected(true);
-        toast("Google Drive connected!", "success");
+  const checkDriveStatus = async () => {
+    if (!user) return;
+    try {
+      const docSnap = await getDoc(doc(db, "users", user.uid));
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.googleDriveTokens) {
+          setDriveConnected(true);
+        }
+        if (data.drivePrefs) {
+          setDrivePrefs({ ...drivePrefs, ...data.drivePrefs });
+        }
       }
-    };
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
-  }, [toast]);
-
-  const handleConnectGDrive = async () => {
-    setGdriveLoading(true);
-    try {
-      const data = (await authenticatedFetch("/api/v1/auth/google-drive/url").then((r) => r.json())) as {
-        auth_url: string;
-      };
-      const popup = window.open(
-        data.auth_url,
-        "Google Drive Authorization",
-        "width=550,height=650,scrollbars=yes,resizable=yes"
-      );
-      if (!popup) toast("Pop-up blocked. Please allow pop-ups for this page.", "error");
-    } catch {
-      toast("Failed to start Google Drive authorization.", "error");
-    } finally {
-      setGdriveLoading(false);
+    } catch (err) {
+      console.error("Failed to check Drive status:", err);
     }
   };
 
-  const handleDisconnectGDrive = async () => {
-    setGdriveLoading(true);
+  const handleConnectDrive = () => {
+    if (!user) return;
+    window.location.href = `/api/auth/google-drive/init?uid=${user.uid}`;
+  };
+
+  const handleDisconnectDrive = async () => {
+    if (!user || !confirm("Disconnect Google Drive? Features relying on Drive will stop working.")) return;
+    
+    setLoadingDrive(true);
     try {
-      await authenticatedFetch("/api/v1/auth/google-drive", { method: "DELETE" });
-      setGdriveConnected(false);
-      toast("Google Drive disconnected.", "success");
-    } catch {
-      toast("Failed to disconnect Google Drive.", "error");
+      await setDoc(doc(db, "users", user.uid), {
+        googleDriveTokens: null
+      }, { merge: true });
+      setDriveConnected(false);
+    } catch (err) {
+      console.error("Failed to disconnect Drive:", err);
+      alert("Failed to disconnect Drive");
     } finally {
-      setGdriveLoading(false);
+      setLoadingDrive(false);
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => setAvatarUrl(evt.target?.result as string);
-    reader.readAsDataURL(file);
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await authenticatedFetch("/api/v1/user/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName, bio, avatarUrl }),
-      });
-      toast("Profile updated successfully", "success");
-    } catch {
-      toast("Failed to save profile", "error");
-    } finally {
-      setSaving(false);
-    }
-  };
+  if (!mounted) return null;
 
   return (
     <div className="space-y-8 max-w-2xl text-zinc-900 dark:text-zinc-100">
       <div>
-        <h2 className="text-xl font-black uppercase tracking-widest text-zinc-900 dark:text-white mb-2">Public Profile</h2>
-        <p className="text-sm text-zinc-500">Your information visible to the network.</p>
-      </div>
-
-      <div className="flex items-center gap-6 pb-6 border-b border-zinc-200 dark:border-white/10">
-        <label className="relative group cursor-pointer block">
-          <input type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
-          {avatarUrl ? (
-            <img src={avatarUrl} alt="Avatar" className="w-24 h-24 rounded-full border border-black/10 dark:border-white/10 object-cover" />
-          ) : (
-            <div className="w-24 h-24 rounded-full bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center border border-black/10 dark:border-white/10">
-              <span className="text-4xl text-zinc-500 font-bold">{user?.email?.[0].toUpperCase()}</span>
-            </div>
-          )}
-          <div className="absolute inset-0 bg-black/60 rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-            <Camera className="w-6 h-6 text-white" />
-          </div>
-        </label>
-        <div>
-          <h3 className="font-bold text-zinc-900 dark:text-white">{user?.email}</h3>
-          <p className="text-xs text-zinc-500 mt-1 uppercase tracking-widest font-mono">UID: {user?.uid.slice(0, 8)}...</p>
-        </div>
+        <h2 className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 mb-2">Account</h2>
+        <p className="text-sm text-zinc-500">Manage your user profile and workspace preferences.</p>
       </div>
 
       <div className="space-y-6">
-        <div className="space-y-2">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Display Name</label>
-          <input
-            type="text"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            className="w-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 placeholder:text-zinc-400 dark:text-white dark:focus:border-cyan-500/50 focus:border-cyan-600 focus:outline-none transition-colors"
-            placeholder="Agent Name"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Bio / Designation</label>
-          <textarea
-            value={bio}
-            onChange={(e) => setBio(e.target.value)}
-            rows={4}
-            className="w-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 placeholder:text-zinc-400 dark:text-white dark:focus:border-cyan-500/50 focus:border-cyan-600 focus:outline-none transition-colors resize-none"
-            placeholder="System operations expert..."
-          />
-        </div>
-
-        {mounted && (
-          <div className="space-y-3 pt-4 border-t border-zinc-200 dark:border-white/10">
-            <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400 block mb-2">Theme Preference</label>
-            <div className="flex bg-zinc-200 dark:bg-zinc-900/50 p-1 rounded-2xl w-fit">
-              <button
-                onClick={() => setTheme("light")}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                  theme === "light"
-                    ? "bg-white text-cyan-600 shadow-sm"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300"
-                }`}
-              >
-                <Sun className="w-4 h-4" />
-                Light
-              </button>
-              <button
-                onClick={() => setTheme("dark")}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                  theme === "dark"
-                    ? "bg-zinc-800 text-cyan-400 shadow-sm"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300"
-                }`}
-              >
-                <Moon className="w-4 h-4" />
-                Dark
-              </button>
-              <button
-                onClick={() => setTheme("system")}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                  theme === "system"
-                    ? "bg-white dark:bg-zinc-800 text-cyan-600 dark:text-cyan-400 shadow-sm"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300"
-                }`}
-              >
-                <Monitor className="w-4 h-4" />
-                System
-              </button>
-            </div>
+        <section className="p-6 rounded-3xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-[#2f2f35]">
+          <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-4 flex items-center gap-2">
+            <Mail className="w-4 h-4 text-zinc-500" />
+            Contact Email
+          </h3>
+          <div className="flex items-center gap-3 w-full bg-zinc-50 dark:bg-zinc-800/50 p-3 rounded-full border border-zinc-200 dark:border-zinc-800">
+             <div className="text-sm text-zinc-500 font-mono px-2">{user?.email || "Not signed in"}</div>
           </div>
-        )}
+          <p className="text-xs text-zinc-500 mt-2 px-2">This email is used for authentication and communications.</p>
+        </section>
+
+
+        {/* Appearance Settings */}
+        <section className="p-6 rounded-3xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-[#2f2f35]">
+          <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-4 flex items-center gap-2">
+            <Monitor className="w-4 h-4 text-zinc-500" />
+            Theme Preferences
+          </h3>
+          
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button
+              onClick={() => setTheme("light")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm transition-all ${
+                theme === "light" 
+                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" 
+                  : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              }`}
+            >
+              <Sun className="w-4 h-4" />
+              Light
+            </button>
+            <button
+              onClick={() => setTheme("dark")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm transition-all ${
+                theme === "dark" 
+                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" 
+                  : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              }`}
+            >
+              <Moon className="w-4 h-4" />
+              Dark
+            </button>
+            <button
+              onClick={() => setTheme("system")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm transition-all ${
+                theme === "system" 
+                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" 
+                  : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              }`}
+            >
+              <Monitor className="w-4 h-4" />
+              System
+            </button>
+          </div>
+        </section>
 
         {/* Google Drive Integration */}
-        <div className="space-y-3 pt-4 border-t border-zinc-200 dark:border-white/10">
-          <div className="flex items-center gap-2 mb-1">
-            <HardDrive className="w-4 h-4 text-zinc-500" />
-            <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Google Drive</label>
-          </div>
-          <p className="text-xs text-zinc-500 dark:text-zinc-600">
-            Mount your Google Drive at <code className="font-mono text-cyan-600 dark:text-cyan-400">~/gdrive</code> in every sandbox session.
-          </p>
-
-          {gdriveConnected ? (
-            <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1.5 text-xs text-emerald-500 font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+        <section className="p-6 rounded-3xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-[#2f2f35]">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+              <Cloud className="w-4 h-4 text-emerald-500" />
+              Google Drive Cloud
+            </h3>
+            {driveConnected ? (
+              <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-500 text-xs font-medium border border-emerald-500/20">
                 Connected
               </span>
-              <button
-                onClick={handleDisconnectGDrive}
-                disabled={gdriveLoading}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 text-xs font-bold uppercase tracking-widest text-zinc-600 dark:text-zinc-400 hover:border-red-500 hover:text-red-500 transition-all disabled:opacity-50"
-              >
-                {gdriveLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Unlink className="w-3 h-3" />}
-                Disconnect
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={handleConnectGDrive}
-              disabled={gdriveLoading || !gdriveSupported}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 text-xs font-bold uppercase tracking-widest text-zinc-700 dark:text-zinc-300 hover:border-cyan-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {gdriveLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link className="w-3 h-3" />}
-              {gdriveSupported ? "Connect Google Drive" : "Not configured"}
-            </button>
-          )}
-        </div>
-      </div>
+            ) : null}
+          </div>
+          
+          <p className="text-sm text-zinc-500 mb-6">
+            Connect your Google Drive to allow Nexus to read documents, create spreadsheets, and continuously auto-export session transcripts.
+          </p>
 
-      <div className="pt-6">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-6 py-3 rounded-xl bg-cyan-600 dark:bg-cyan-500 text-white dark:text-black font-black text-xs uppercase tracking-widest hover:bg-cyan-500 dark:hover:bg-cyan-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? "Saving..." : "Save Changes"}
-        </button>
+          {!driveConnected ? (
+            <button
+              onClick={handleConnectDrive}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium text-sm transition-all hover:opacity-90"
+            >
+              <HardDrive className="w-4 h-4" />
+              Connect Google Drive via OAuth
+            </button>
+          ) : (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-zinc-50 dark:bg-zinc-800/30 border border-zinc-200 dark:border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Storage Authorized</h4>
+                    <p className="text-xs text-zinc-500 mt-1">Nexus has secure, sandboxed access to manage files.</p>
+                  </div>
+                  <button
+                    onClick={handleDisconnectDrive}
+                    disabled={loadingDrive}
+                    className="px-4 py-2 rounded-full border border-red-500/20 text-red-500 text-sm font-medium hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

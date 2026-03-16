@@ -60,18 +60,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             key={item.href}
             href={item.href}
             onClick={() => setMobileMenuOpen(false)}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
+            className={`relative flex items-center gap-3 px-4 py-2.5 rounded-full transition-all ${
               isActive
-                ? "bg-black/5 dark:bg-white/10 text-cyan-600 dark:text-cyan-400 font-bold"
-                : "text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground font-medium"
+                ? "bg-[#f4f4f5] dark:bg-[#212126] text-zinc-900 dark:text-zinc-100 font-medium"
+                : "text-zinc-500 dark:text-zinc-400 hover:bg-[#f4f4f5] dark:hover:bg-[#212126] hover:text-zinc-900 dark:hover:text-zinc-100 font-medium"
             }`}
           >
-            <item.icon className="w-5 h-5" />
-            <span className="text-sm tracking-wide">{item.name}</span>
+            <item.icon className="w-4 h-4" />
+            <span className="text-sm">{item.name}</span>
             {isActive && (
               <motion.div
                 layoutId="activeNav"
-                className="absolute left-0 w-1 h-8 bg-cyan-600 dark:bg-cyan-500 rounded-r-full"
+                className="absolute left-2 w-1 h-5 bg-zinc-900 dark:bg-zinc-100 rounded-full"
               />
             )}
           </Link>
@@ -81,18 +81,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden text-foreground selection:bg-cyan-500/30">
+    <div className="flex h-screen bg-white dark:bg-[#09090b] overflow-hidden text-zinc-900 dark:text-zinc-100">
       {/* Mobile Header */}
-      <div className="md:hidden fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-xl border-b border-zinc-200 dark:border-white/5 z-50 flex items-center justify-between px-4">
+      <div className="md:hidden fixed top-0 left-0 right-0 h-14 bg-white/80 dark:bg-[#09090b]/80 backdrop-blur-xl border-b border-zinc-200 dark:border-[#1c1c1e] z-50 flex items-center justify-between px-4">
         <Link href="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-emerald-400 flex items-center justify-center">
-            <span className="text-black font-black text-xl italic">N</span>
-          </div>
-          <span className="font-black tracking-tighter italic uppercase text-lg text-foreground">Nexus</span>
+          <span className="font-semibold tracking-tight text-lg text-zinc-900 dark:text-zinc-100">Nexus</span>
         </Link>
         <button
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          className="p-2 text-zinc-500 dark:text-zinc-400 hover:text-foreground"
+          className="p-2 text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
         >
           {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
         </button>
@@ -100,31 +97,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Sidebar */}
       <motion.aside
-        className={`fixed md:sticky top-0 left-0 z-40 h-screen w-64 bg-card dark:bg-[#0a0a0a] border-r border-card-border dark:border-white/5 flex flex-col transition-transform duration-300 ease-in-out ${
+        className={`fixed md:sticky top-0 left-0 z-40 h-screen w-64 bg-white dark:bg-[#111114] border-r border-zinc-200 dark:border-[#1c1c1e] flex flex-col transition-transform duration-300 ease-in-out ${
           mobileMenuOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
         }`}
       >
-        <div className="p-6">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="relative w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-400 flex items-center justify-center shadow-lg transform group-hover:rotate-6 transition-transform">
-              <span className="text-black font-black text-2xl italic">N</span>
-            </div>
-            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors text-foreground">Nexus</span>
+        <div className="p-4 md:p-6 pb-2">
+          <Link href="/" className="flex items-center gap-3 px-2 group">
+            <span className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+              Nexus
+            </span>
           </Link>
         </div>
 
-        <div className="px-4 py-2">
+        <div className="px-4 py-2 mt-2">
           <button
             type="button"
             onClick={handleNewSession}
-            className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95"
+            className="flex items-center gap-2 justify-center w-full px-4 py-2 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 rounded-full font-medium text-sm transition-colors hover:bg-zinc-800 dark:hover:bg-white"
           >
-            <PlusCircle className="w-5 h-5" />
-            New Session
+            <PlusCircle className="w-4 h-4" />
+            New Chat
           </button>
         </div>
 
-        <nav className="flex-1 px-3 py-6 flex flex-col gap-2 overflow-y-auto">
+        <nav className="flex-1 px-3 py-4 flex flex-col gap-1 overflow-y-auto">
           <NavLinks />
         </nav>
 
@@ -199,7 +195,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </motion.aside>
 
       {/* Main Content */}
-      <main className="flex-1 h-screen overflow-y-auto w-full pt-16 md:pt-0">
+      <main className="flex-1 h-screen overflow-y-auto w-full pt-14 md:pt-0">
         {children}
       </main>
 

@@ -66,13 +66,15 @@ export default function HistoryPage() {
   };
 
   return (
-    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-20 h-full flex flex-col text-foreground">
+    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-6 pb-20 h-full flex flex-col text-zinc-900 dark:text-zinc-100">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 shrink-0">
         <div>
-          <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter text-foreground">
+          <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
             Mission History
           </h1>
-          <p className="text-zinc-500 dark:text-zinc-400 mt-2">Review past operations and transcripts.</p>
+          <p className="text-sm text-zinc-500 mt-2">
+            Review past operations and transcripts.
+          </p>
         </div>
       </div>
 
@@ -84,15 +86,15 @@ export default function HistoryPage() {
             placeholder="Search transcripts..." 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl py-3 pl-12 pr-4 text-foreground placeholder-zinc-400 focus:outline-none focus:border-cyan-500/50 transition-colors shadow-sm dark:shadow-none"
+            className="w-full bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl py-3 pl-12 pr-4 text-zinc-900 dark:text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-600 transition-colors shadow-sm"
           />
         </div>
         <div className="relative shrink-0">
           <Filter className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
-          <select 
+          <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="appearance-none bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl py-3 pl-10 pr-10 text-foreground focus:outline-none focus:border-cyan-500/50 transition-colors shadow-sm dark:shadow-none"
+            className="w-full sm:w-48 appearance-none bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl py-3 pl-10 pr-10 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-600 shadow-sm"
           >
             <option value="all" className="bg-white dark:bg-zinc-900">All Statuses</option>
             <option value="ready" className="bg-white dark:bg-zinc-900">Ready</option>
