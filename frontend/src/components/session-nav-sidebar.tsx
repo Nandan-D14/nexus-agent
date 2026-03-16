@@ -2,9 +2,18 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback } from "react";
-import { LayoutDashboard, History, Settings, PlusCircle, LogOut } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  History,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  PlusCircle,
+  Settings,
+  X,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { authenticatedFetch } from "@/lib/api-client";
 
 /* ------------------------------------------------------------------ */
 /*  Nav items                                                          */
@@ -12,8 +21,8 @@ import { useAuth } from "@/lib/auth-context";
 
 const NAV_ITEMS = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { href: "/history",   icon: History,         label: "History"   },
-  { href: "/settings/profile", icon: Settings, label: "Settings"  },
+  { href: "/history", icon: History, label: "History" },
+  { href: "/settings/profile", icon: Settings, label: "Settings" },
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -24,6 +33,19 @@ export function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  const [quota, setQuota] = useState<{ limit: number; used: number; remaining: number } | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  const isMobileViewport = () => typeof window !== "undefined" && window.innerWidth < 768;
+
+  useEffect(() => {
+    if (!user) return;
+    authenticatedFetch("/api/v1/user/quota")
+      .then(async (res) => {
+        if (res.ok) setQuota(await res.json());
+      })
+      .catch(() => {});
+  }, [user]);
 
   const handleSignOut = async () => {
     await signOutUser();
@@ -32,41 +54,69 @@ export function SessionNavSidebar() {
 
   const handleNewSession = useCallback(() => {
     if (!user) {
+      if (isMobileViewport()) setIsSidebarOpen(false);
       router.push("/");
       return;
     }
+    if (isMobileViewport()) setIsSidebarOpen(false);
     router.push("/session/new");
   }, [router, user]);
 
-  const initial = user?.displayName?.[0] ?? user?.email?.[0] ?? "U";
+  const initial = user?.displayName?.[0]?.toUpperCase() ?? user?.email?.[0]?.toUpperCase() ?? "U";
 
   return (
-    <aside className="flex flex-col shrink-0 w-14 h-full bg-card dark:bg-[#0a0a0a] border-r border-card-border dark:border-white/5 z-20">
-      {/* Logo */}
-      <div className="flex items-center justify-center h-14 border-b border-card-border dark:border-white/5 shrink-0">
-        <Link
-          href="/"
-          className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-400 flex items-center justify-center shadow-lg hover:scale-105 transition-transform"
-          title="NEXUS — New Session"
-        >
-          <span className="text-black font-black text-xl italic">N</span>
-        </Link>
+    <>
+      {/* Sidebar toggle */}
+      <button
+        type="button"
+        onClick={() => setIsSidebarOpen((prev) => !prev)}
+        className={`fixed top-3 z-60 p-2 rounded-lg bg-card/90 dark:bg-[#0a0a0a]/90 border border-card-border dark:border-white/10 text-muted dark:text-zinc-300 hover:text-foreground dark:hover:text-white transition-all ${
+          isSidebarOpen ? "left-58" : "left-3"
+        }`}
+        title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+      >
+        {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+      </button>
+
+      <aside
+        className={`fixed md:sticky top-0 left-0 z-40 h-screen w-64 bg-card dark:bg-[#0a0a0a] border-r border-card-border dark:border-white/5 flex flex-col transition-transform duration-300 ease-in-out ${
+          isSidebarOpen ? "translate-x-0 md:translate-x-0" : "-translate-x-full md:-translate-x-full"
+        }`}
+      >
+      <div className="p-6">
+        <div className="flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-3 group" title="NEXUS — New Session">
+            <div className="relative w-10 h-10 rounded-xl bg-linear-to-br from-cyan-400 to-emerald-400 flex items-center justify-center shadow-lg transform group-hover:rotate-6 transition-transform">
+              <span className="text-black font-black text-2xl italic">N</span>
+            </div>
+            <span className="text-2xl font-black tracking-tighter italic uppercase group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors text-foreground">
+              Nexus
+            </span>
+          </Link>
+          <button
+            type="button"
+            onClick={() => setIsSidebarOpen(false)}
+            className="p-2 rounded-lg text-muted dark:text-zinc-400 hover:text-foreground dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5"
+            title="Close sidebar"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
-      {/* New session */}
-      <div className="flex items-center justify-center py-3 border-b border-card-border dark:border-white/5 shrink-0">
+      <div className="px-4 py-2">
         <button
           type="button"
           title="New Session"
           onClick={handleNewSession}
-          className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 hover:bg-cyan-500/10 dark:hover:bg-cyan-500/20 hover:text-cyan-600 dark:hover:text-cyan-400 text-muted dark:text-zinc-400 flex items-center justify-center transition-colors"
+          className="flex items-center gap-2 justify-center w-full px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black rounded-xl font-bold text-sm tracking-wider uppercase hover:bg-cyan-600 dark:hover:bg-cyan-400 transition-colors shadow-none dark:shadow-lg active:scale-95"
         >
           <PlusCircle className="w-5 h-5" />
+          New Session
         </button>
       </div>
 
-      {/* Nav items */}
-      <nav className="flex flex-col items-center gap-1 py-3 flex-1">
+      <nav className="flex-1 px-3 py-6 flex flex-col gap-2 overflow-y-auto">
         {NAV_ITEMS.map(({ href, icon: Icon, label }) => {
           const active = pathname.startsWith(href);
           return (
@@ -74,44 +124,101 @@ export function SessionNavSidebar() {
               key={href}
               href={href}
               title={label}
-              className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${
+              onClick={() => {
+                if (isMobileViewport()) setIsSidebarOpen(false);
+              }}
+              className={`relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
                 active
-                  ? "bg-black/5 dark:bg-white/10 text-cyan-600 dark:text-cyan-400"
-                  : "text-muted dark:text-zinc-500 hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground dark:hover:text-white"
+                  ? "bg-black/5 dark:bg-white/10 text-cyan-600 dark:text-cyan-400 font-bold"
+                  : "text-muted dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground font-medium"
               }`}
             >
-              {active && (
-                <span className="absolute left-0 -translate-x-full top-1/2 -translate-y-1/2 w-1 h-5 bg-cyan-500 rounded-r-full" />
-              )}
               <Icon className="w-5 h-5" />
+              <span className="text-sm tracking-wide">{label}</span>
+              {active && (
+                <span className="absolute left-0 w-1 h-8 bg-cyan-600 dark:bg-cyan-500 rounded-r-full" />
+              )}
             </Link>
           );
         })}
       </nav>
 
-      {/* User avatar + sign out */}
-      <div className="flex flex-col items-center gap-2 py-3 border-t border-card-border dark:border-white/5 shrink-0">
-        <div
-          className="w-9 h-9 rounded-full overflow-hidden border border-card-border dark:border-white/10 shrink-0"
-          title={user?.email ?? ""}
-        >
+      {quota && (
+        <div className="px-4 pb-2">
+          <div className="rounded-xl bg-background dark:bg-white/5 border border-card-border dark:border-white/10 px-3 py-2.5">
+            <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.15em] text-muted dark:text-zinc-500 mb-1.5">
+              <span>Free Tier</span>
+              <span
+                className={
+                  quota.remaining <= 0
+                    ? "text-red-500"
+                    : quota.used / quota.limit >= 0.8
+                      ? "text-amber-500"
+                      : "text-zinc-500 dark:text-zinc-400"
+                }
+              >
+                {Math.min(100, Math.round((quota.used / quota.limit) * 100))}%
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${
+                  quota.remaining <= 0
+                    ? "bg-red-500"
+                    : quota.used / quota.limit >= 0.8
+                      ? "bg-amber-500"
+                      : "bg-cyan-500"
+                }`}
+                style={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
+              />
+            </div>
+            <p className="text-[10px] text-muted dark:text-zinc-500 mt-1">
+              {new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
+                quota.used
+              )}{" "}
+              /{" "}
+              {new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
+                quota.limit
+              )}{" "}
+              tokens
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="p-4 border-t border-card-border dark:border-white/5">
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-background dark:bg-white/5 border border-card-border dark:border-white/10 shadow-sm dark:shadow-none">
           {user?.photoURL ? (
-            <img src={user.photoURL} alt={user.displayName ?? "User"} className="w-full h-full object-cover" />
+            <img src={user.photoURL} alt={user.displayName || "User"} className="w-10 h-10 rounded-full" />
           ) : (
-            <div className="w-full h-full bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center">
-              <span className="text-foreground dark:text-zinc-300 font-bold text-sm uppercase">{initial}</span>
+            <div className="w-10 h-10 rounded-full bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center">
+              <span className="text-muted dark:text-zinc-400 font-bold text-lg">{initial}</span>
             </div>
           )}
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold text-foreground dark:text-zinc-200 truncate">
+              {user?.displayName || "User"}
+            </p>
+            <p className="text-xs text-muted dark:text-zinc-500 truncate">{user?.email}</p>
+          </div>
+          <button
+            suppressHydrationWarning
+            onClick={handleSignOut}
+            title="Sign Out"
+            className="p-2 text-muted dark:text-zinc-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/10 dark:hover:bg-red-500/10 rounded-lg transition-colors"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
         </div>
-        <button
-          suppressHydrationWarning
-          onClick={handleSignOut}
-          title="Sign Out"
-          className="w-9 h-9 rounded-xl text-muted dark:text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/10 flex items-center justify-center transition-colors"
-        >
-          <LogOut className="w-4 h-4" />
-        </button>
       </div>
-    </aside>
+      </aside>
+
+      {isSidebarOpen && (
+        <div
+          className="md:hidden fixed inset-0 z-30 bg-black/50 backdrop-blur-sm"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+    </>
   );
 }
