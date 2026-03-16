@@ -159,7 +159,7 @@ export function UnifiedChatPanel({
       ref={scrollRef}
       className="overflow-y-auto h-full custom-scrollbar flex flex-col px-4 py-8"
     >
-      <div className="mx-auto max-w-3xl w-full flex flex-col gap-2 pb-4">
+      <div className="mx-auto max-w-4xl w-full flex flex-col gap-2 pb-4">
         {/* Optional Filter (hidden/minimal to match clean layout) */}
         <div className="flex justify-end pb-4 opacity-50 hover:opacity-100 transition-opacity">
           <div className="flex items-center gap-1">

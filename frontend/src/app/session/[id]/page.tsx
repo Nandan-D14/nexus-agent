@@ -983,7 +983,7 @@ export default function SessionPage() {
               <div
                 className={`flex flex-col bg-[#fafafa] dark:bg-[#111114] overflow-hidden transition-all duration-300 ease-in-out ${
                   isDesktopVisible
-                    ? "w-105 min-w-95 border-r border-zinc-200 dark:border-white/5"
+                    ? "flex-1 min-w-[380px] max-w-4xl border-r border-zinc-200 dark:border-white/5"
                     : "flex-1 min-w-0"
                 }`}
               >
@@ -1030,7 +1030,7 @@ export default function SessionPage() {
                 {/* Input area */}
                 {viewMode === "live" ? (
                   <div className="px-4 pb-6 pt-2 shrink-0">
-                    <div className="mx-auto w-full max-w-3xl relative">
+                    <div className="mx-auto w-full max-w-4xl relative">
                       <div className="flex items-center gap-2 bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-full p-2 shadow-sm transition-all focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600">
                         {/* Action buttons left */}
                         <div className="flex items-center gap-1 shrink-0">
@@ -1097,7 +1097,7 @@ export default function SessionPage() {
 
               {/* Right: Desktop panel */}
               {viewMode === "live" && isDesktopVisible ? (
-                <div className="flex-1 min-w-0 flex overflow-hidden transition-all duration-300 ease-in-out">
+                <div className="flex-[2] min-w-0 flex overflow-hidden transition-all duration-300 ease-in-out">
                   <div className="flex-1 flex flex-col overflow-hidden p-3 bg-zinc-50 dark:bg-[#151515]">
                     <div className="w-full h-full xl:max-w-7xl mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 shadow-2xl relative">
                       <DesktopPanel streamUrl={streamUrl} />
@@ -1130,7 +1130,7 @@ export default function SessionPage() {
             </div>
 
             {/* ─── Footer ─── */}
-            <StatusBar phase={phase} isConnected={viewMode === "live" && isConnected} tokenQuota={tokenQuota} />
+            {/* <StatusBar phase={phase} isConnected={viewMode === "live" && isConnected} tokenQuota={tokenQuota} /> */}
 
             {(pageError || error) && (
               <div className="border-t border-red-500/20 bg-red-950/20 px-4 py-2 text-sm text-red-300">

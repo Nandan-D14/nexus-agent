@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useRouter, usePathname } from "next/navigation";
 import { motion } from "framer-motion";
 import {
+  Cable,
   LayoutDashboard,
   History,
   Settings,
@@ -35,6 +36,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navigation = [
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "History", href: "/history", icon: History },
+    { name: "Connectors", href: "/connectors", icon: Cable },
     { name: "Settings", href: "/settings/profile", icon: Settings },
   ];
 

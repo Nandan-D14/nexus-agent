@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
+  Cable,
   History,
   LayoutDashboard,
   LogOut,
@@ -22,6 +23,7 @@ import { authenticatedFetch } from "@/lib/api-client";
 const NAV_ITEMS = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/history", icon: History, label: "History" },
+  { href: "/connectors", icon: Cable, label: "Connectors" },
   { href: "/settings/profile", icon: Settings, label: "Settings" },
 ] as const;
 
