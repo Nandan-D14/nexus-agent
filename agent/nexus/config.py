@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # BYO keys
     require_byok: bool = False
     byok_encryption_key: str = ""
+    shared_access_code: str = ""
 
     # Google / Gemini
     google_api_key: str = ""

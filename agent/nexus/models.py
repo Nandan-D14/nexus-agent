@@ -52,6 +52,9 @@ class ByokResponse(BaseModel):
     missing: list[str] = Field(default_factory=list)
     configured: bool = False
     vertexConfigured: bool = False
+    sharedAccessEnabled: bool = False
+    sharedAccessCodeConfigured: bool = False
+    serverE2bConfigured: bool = False
 
 
 class UserSettingsResponse(BaseModel):
@@ -65,6 +68,7 @@ class ByokUpdateRequest(BaseModel):
     e2bApiKey: str | None = None
     geminiApiKey: str | None = None
     geminiProvider: Literal["apiKey", "vertex"] | None = None
+    accessCode: str | None = None
 
 
 class UserSettingsUpdateRequest(BaseModel):
