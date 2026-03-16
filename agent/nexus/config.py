@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # E2B Sandbox defaults
     sandbox_resolution_w: int = 1324
     sandbox_resolution_h: int = 968
-    sandbox_timeout_seconds: int = 800
+    sandbox_timeout_seconds: int = 3600
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0

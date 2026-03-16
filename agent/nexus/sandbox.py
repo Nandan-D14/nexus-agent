@@ -46,7 +46,7 @@ class SandboxManager:
                 "Please end this session and create a new one."
             )
 
-    def extend_timeout(self, timeout: int = 300) -> None:
+    def extend_timeout(self, timeout: int = 900) -> None:
         """Best-effort extend sandbox lifetime."""
         if self._sandbox:
             try:
@@ -149,7 +149,7 @@ class SandboxManager:
         except Exception:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
-    def keep_alive(self, timeout: int = 300) -> None:
+    def keep_alive(self, timeout: int = 900) -> None:
         """Extend sandbox timeout."""
         if self._sandbox:
             self._sandbox.set_timeout(timeout)

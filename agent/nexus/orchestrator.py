@@ -15,7 +15,7 @@ from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxDeadError
 from nexus.tools._context import set_bg_task_manager, set_runtime_config, set_sandbox
 from nexus.config import settings
-from nexus.prompts.system import SYSTEM_PROMPT
+from nexus.prompts.system import SYSTEM_PROMPT, VOICE_SYSTEM_PROMPT
 from nexus.usage import TokenUsageRecord
 
 if TYPE_CHECKING:
@@ -493,7 +493,7 @@ class NexusOrchestrator:
 
         # Extend sandbox timeout before each agent turn to prevent mid-task death
         try:
-            self.session.sandbox.extend_timeout(300)
+            self.session.sandbox.extend_timeout(900)
         except Exception:
             logger.debug("Could not extend sandbox timeout", exc_info=True)
 
@@ -650,7 +650,7 @@ class NexusOrchestrator:
                 except Exception:
                     logger.debug("Failed to get user voice preference", exc_info=True)
 
-            await self.voice.connect(system_instruction=SYSTEM_PROMPT, voice_name=voice_name)
+            await self.voice.connect(system_instruction=VOICE_SYSTEM_PROMPT, voice_name=voice_name)
             self._voice_connected = self.voice.connected
             logger.info("Gemini Live voice connected with voice %s", voice_name)
         except asyncio.CancelledError:

@@ -99,13 +99,17 @@ class GeminiLiveManager:
             ) from exc
 
     async def send_text(self, text: str) -> None:
-        """Send text to Gemini Live (e.g., agent response for TTS)."""
+        """Send agent response text to Gemini Live for TTS playback.
+
+        Uses role="model" so Gemini treats this as the assistant's speech
+        (not as user input) and reads it aloud naturally.
+        """
         if not self._live or not self._connected:
             raise VoiceConnectionError("Gemini Live is not connected")
         try:
             await self._live.send_client_content(
                 turns=types.Content(
-                    role="user", parts=[types.Part(text=text)]
+                    role="model", parts=[types.Part(text=text)]
                 ),
                 turn_complete=True,
             )

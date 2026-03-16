@@ -28,6 +28,9 @@ def run_command(command: str, background: bool = False) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         result = sandbox.run_command(command, timeout=120, background=background)
+        # Reset screenshot cooldown so agent can screenshot right after
+        from nexus.tools.screen import _last_call_time
+        _last_call_time.t = 0.0
         return result
     except Exception as e:
         logger.error("run_command failed: %s", e)

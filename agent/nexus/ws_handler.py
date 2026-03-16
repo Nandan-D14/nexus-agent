@@ -111,6 +111,11 @@ async def handle_websocket(
                     elif msg_type == "ping":
                         await ws.send_json({"type": "pong"})
                         session.touch()
+                        # Keep sandbox alive on every ping from frontend
+                        try:
+                            session.sandbox.extend_timeout(900)
+                        except Exception:
+                            pass
 
                     else:
                         logger.debug("Unknown message type: %s", msg_type)
