@@ -27,10 +27,11 @@ class Settings(BaseSettings):
     # Google / Gemini
     google_api_key: str = ""
     google_project_id: str = ""
-    google_cloud_region: str = "global"
+    google_cloud_region: str = "global"  # For Gemini 3 vision/agent (must be "global")
 
     # Gemini models
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
+    gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
     gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-pro,gemini-3.1-pro-preview,gemini-2.5-flash"

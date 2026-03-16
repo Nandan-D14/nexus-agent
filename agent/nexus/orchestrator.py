@@ -341,7 +341,8 @@ class NexusOrchestrator:
 
     # ── Private ────────────────────────────────────────────────
 
-    _RATE_LIMIT_MAX_RETRIES = 3
+    _RATE_LIMIT_MAX_RETRIES = 4
+    _RATE_LIMIT_BASE_WAIT = 10.0  # seconds; doubles each attempt: 10, 20, 40, 80
     _RATE_LIMIT_PATTERNS = ("429", "RESOURCE_EXHAUSTED", "quota", "rate limit", "too many requests")
 
     def _is_rate_limit_error(self, exc: BaseException) -> bool:
@@ -349,7 +350,11 @@ class NexusOrchestrator:
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
     async def _run_agent_with_retry(self, message: str):
-        """Run agent turn with automatic retry on rate-limit (429) errors."""
+        """Run agent turn with automatic retry on rate-limit (429) errors.
+
+        Uses exponential backoff (10s, 20s, 40s, 80s) to avoid hammering the
+        Vertex AI quota endpoint while it recovers.
+        """
         last_exc: Exception | None = None
         for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
             try:
@@ -367,14 +372,17 @@ class NexusOrchestrator:
                 if not self._is_rate_limit_error(exc):
                     raise
                 last_exc = exc
-                wait = 15 * attempt  # 15s, 30s, 45s
+                wait = self._RATE_LIMIT_BASE_WAIT * (2 ** (attempt - 1))  # 10, 20, 40, 80 s
                 logger.warning(
-                    "Rate limited (attempt %d/%d) for session %s — waiting %ds: %s",
+                    "Rate limited (attempt %d/%d) for session %s — waiting %.0fs: %s",
                     attempt, self._RATE_LIMIT_MAX_RETRIES, self.session.id, wait, exc,
                 )
                 await self._send_json({
                     "type": "agent_thinking",
-                    "content": f"Rate limited — retrying in {wait}s (attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})...",
+                    "content": (
+                        f"⏳ Temporarily rate-limited by Vertex AI — backing off {wait:.0f}s "
+                        f"(attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})..."
+                    ),
                 })
                 await asyncio.sleep(wait)
 

@@ -27,7 +27,7 @@ def run_command(command: str, background: bool = False) -> dict:
     try:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
-        result = sandbox.run_command(command, timeout=30, background=background)
+        result = sandbox.run_command(command, timeout=120, background=background)
         return result
     except Exception as e:
         logger.error("run_command failed: %s", e)

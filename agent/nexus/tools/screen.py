@@ -92,7 +92,8 @@ def take_screenshot() -> dict:
                         break  # success
                     except ClientError as exc:
                         last_error = exc
-                        if exc.status_code == 429:
+                        status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+                        if status == 429 or "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
                             logger.warning(
                                 "Vision model %s quota exhausted (429), trying next fallback.",
                                 model,

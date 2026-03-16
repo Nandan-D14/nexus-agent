@@ -27,7 +27,7 @@ class GeminiLiveManager:
             self._client = genai.Client(
                 vertexai=True,
                 project=settings.google_project_id,
-                location=settings.google_cloud_region,
+                location=settings.gemini_live_region,
             )
         else:
             self._client = genai.Client(api_key=settings.google_api_key)
