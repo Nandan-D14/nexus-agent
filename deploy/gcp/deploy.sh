@@ -3,7 +3,8 @@ set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────
 PROJECT_ID="${GOOGLE_PROJECT_ID:?Set GOOGLE_PROJECT_ID}"
-REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
+REGION="${GOOGLE_CLOUD_REGION:-us-central1}"          # Cloud Run / Artifact Registry region
+GEMINI_REGION="${GOOGLE_GEMINI_REGION:-global}"        # Gemini API region (Gemini 3 requires "global")
 
 # Use Artifact Registry (gcr.io is deprecated)
 AR_HOST="${REGION}-docker.pkg.dev"
@@ -62,7 +63,7 @@ gcloud run deploy nexus-agent \
   --concurrency=10 \
   --allow-unauthenticated \
   --set-secrets="E2B_API_KEY=e2b-api-key:latest" \
-  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}"
+  --set-env-vars="FIREBASE_PROJECT_ID=${FB_PROJECT_ID},GOOGLE_PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_REGION=${GEMINI_REGION},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GEMINI_REGION},GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}"
 
 AGENT_URL=$(gcloud run services describe nexus-agent \
   --project="${PROJECT_ID}" \
