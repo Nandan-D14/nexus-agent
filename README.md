@@ -1,9 +1,12 @@
+---
+NOTE : to use vertex ai set secret in settings as PES2UG23CS363 else use your own api key ot use this app, [https://nexus-frontend-5mrr4rm3eq-uc.a.run.app/settings/api](https://nexus-frontend-5mrr4rm3eq-uc.a.run.app/settings/api)
+---
 # Nexus: The Autonomous Cloud Desktop Agent
 
 Nexus is a state-of-the-art, voice-enabled autonomous agent designed to navigate, control, and execute complex workflows within a secure, persistent cloud-based desktop environment. Powered by the latest **Gemini** models through **Google Vertex AI**, Nexus bridges the gap between conversational AI and real-world task execution.
 
 ## 🚀 Project Highlights
-- **Leverages Gemini 1.5 Pro, 2.0 Flash, & 2.5/3.0 Preview Models** for reasoning, vision, and voice.
+- **Leverages Gemini 3.1 Pro, 3.0 Flash Preview Models and gemini flash native 2.5** for reasoning, vision, and voice.
 - **Built with the Google GenAI SDK** for seamless integration with Vertex AI endpoints.
 - **Powered by Google Cloud Services**, including Cloud Run (Serverless Compute), Artifact Registry, and Secret Manager.
 - **Secure Sandbox Execution** using E2B Desktop Sandboxes for safe, isolated code and browser operations.
@@ -30,7 +33,7 @@ Gemini output -> Backend -> Frontend (text/audio/events)
 ---
 
 ## 📺 Demonstration Video
-[**Watch the 4-Minute Demo Video Here**](https://link-to-your-video.com)  
+[**Watch the 4-Minute Demo Video Here**](https://www.youtube.com/watch?v=9g9S6vdoNbA)  
 *This video showcases the agent's ability to browse the web, execute terminal commands, and persist data across sessions using Google Drive.*
 
 ---
