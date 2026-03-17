@@ -1,5 +1,5 @@
 ---
-# NOTE : to use vertex ai set secret in settings as PES2UG23CS363 else use your own api key ot use this app, [(https://nexus-frontend-422420122490.us-central1.run.app/settings/api)]
+NOTE : to use vertex ai set secret in settings as PES2UG23CS363 else use your own api key ot use this app, [(https://nexus-frontend-422420122490.us-central1.run.app/settings/api)]
 ---
 # Nexus: The Autonomous Cloud Desktop Agent
 
