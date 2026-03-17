@@ -51,9 +51,11 @@ export interface UseMicrophoneReturn {
  * simpler than AudioWorklet for streaming use-cases).
  *
  * @param sendBinary - callback that transmits an ArrayBuffer over WebSocket
+ * @param onSpeechStart - optional callback triggered when voice activity is detected
  */
 export function useMicrophone(
   sendBinary: (data: ArrayBuffer) => void,
+  onSpeechStart?: () => void,
 ): UseMicrophoneReturn {
   const [isRecording, setIsRecording] = useState(false);
 
@@ -69,12 +71,18 @@ export function useMicrophone(
    */
   const accumulatorRef = useRef<Float32Array>(new Float32Array(0));
 
-  /** Ref to always read the latest sendBinary without re-creating callbacks. */
+  /** Ref to always read the latest callbacks without re-creating functions. */
   const sendBinaryRef = useRef(sendBinary);
+  const onSpeechStartRef = useRef(onSpeechStart);
+  
+  // Track if we are currently in a "speaking" burst to avoid firing the callback too often
+  const isSpeakingRef = useRef(false);
+  const speechTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     sendBinaryRef.current = sendBinary;
-  }, [sendBinary]);
+    onSpeechStartRef.current = onSpeechStart;
+  }, [sendBinary, onSpeechStart]);
 
   const start = useCallback(async () => {
     if (streamRef.current) return; // already recording
@@ -104,9 +112,29 @@ export function useMicrophone(
 
       // Reset accumulator.
       accumulatorRef.current = new Float32Array(0);
+      isSpeakingRef.current = false;
 
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
         const input = e.inputBuffer.getChannelData(0);
+
+        // Simple VAD: Calculate RMS volume
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) {
+          sum += input[i] * input[i];
+        }
+        const rms = Math.sqrt(sum / input.length);
+        
+        // Threshold for speech detection (tuned for typical mic input)
+        if (rms > 0.02) {
+          if (!isSpeakingRef.current) {
+            isSpeakingRef.current = true;
+            onSpeechStartRef.current?.();
+          }
+          if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
+          speechTimeoutRef.current = setTimeout(() => {
+            isSpeakingRef.current = false;
+          }, 500); // 500ms silence to reset the speaking state
+        }
 
         // Append incoming samples to the accumulator.
         const prev = accumulatorRef.current;

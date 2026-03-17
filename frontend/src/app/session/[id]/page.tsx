@@ -122,8 +122,13 @@ export default function SessionPage() {
   const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
     useWebSocket(shouldConnectWs ? wsUrl : null);
 
+  const handleSpeechStart = useCallback(() => {
+    // Zero-latency barge-in: stop agent audio the moment the user starts speaking
+    audioPlayer.current.stop();
+  }, []);
+
   const { start: startMic, stop: stopMic, isRecording } =
-    useMicrophone(sendBinary);
+    useMicrophone(sendBinary, handleSpeechStart);
 
   /* ---- Audio playback ---- */
   useEffect(() => {
