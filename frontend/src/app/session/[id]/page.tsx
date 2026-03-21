@@ -50,6 +50,12 @@ type ChatItem =
     }
   | { kind: "delegation"; from: string; to: string; ts: number };
 
+type PendingSessionAction =
+  | { type: "demo"; text: string }
+  | { type: "prompt"; text: string }
+  | { type: "openDesktop" }
+  | { type: "startMic" };
+
 type SessionSurface = "conversation" | "run_log" | "outputs";
 
 function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
@@ -99,7 +105,6 @@ export default function SessionPage() {
     getSessionArtifacts,
     getSessionRun,
     getSessionRunSteps,
-    getResumeWorkspace,
     refreshTicket,
     destroySession,
     isLoading,
@@ -478,20 +483,6 @@ export default function SessionPage() {
       setViewMode("live");
 
       if (isNewSession) {
-        const workspace = await getResumeWorkspace();
-        if (cancelled) {
-          return;
-        }
-        if (workspace?.available && workspace.session?.session_id) {
-          router.replace(`/session/${workspace.session.session_id}?resume=1`);
-          return;
-        }
-        const session = await createSession();
-        if (!cancelled && session) {
-          router.replace(`/session/${session.session_id}`);
-        } else if (!cancelled && !session) {
-          setPageError("Failed to open a new thread.");
-        }
         return;
       }
 
@@ -570,10 +561,8 @@ export default function SessionPage() {
   }, [
     authLoading,
     clearDesktop,
-    createSession,
     getSessionMessages,
     getSessionArtifacts,
-    getResumeWorkspace,
     getSessionRun,
     getSessionRunSteps,
     getSession,
@@ -716,6 +705,56 @@ export default function SessionPage() {
     ],
   );
 
+  const createThreadFromAction = useCallback(
+    async (action: PendingSessionAction) => {
+      if (isLoading) {
+        return;
+      }
+
+      if (
+        (action.type === "prompt" || action.type === "demo") &&
+        !action.text.trim()
+      ) {
+        return;
+      }
+
+      setPageError(null);
+      const session = await createSession({ mode: "fresh" });
+      if (!session) {
+        setPageError("Failed to create a new thread.");
+        return;
+      }
+
+      if (action.type === "prompt" || action.type === "demo") {
+        setTextInput("");
+      }
+
+      try {
+        sessionStorage.setItem(
+          `nexus.pendingSessionAction:${session.session_id}`,
+          JSON.stringify(action),
+        );
+      } catch {
+        // Ignore storage failures and continue to the created session.
+      }
+
+      router.replace(`/session/${session.session_id}`);
+    },
+    [createSession, isLoading, router],
+  );
+
+  const createThreadFromPrompt = useCallback(
+    async (text: string) => {
+      const prompt = text.trim();
+      if (!prompt) {
+        return;
+      }
+
+      await createThreadFromAction({ type: "prompt", text: prompt });
+    },
+    [createThreadFromAction],
+  );
+
   const sendTextOrQueue = useCallback(
     (text: string) => {
       if (isNewSession) {
@@ -747,6 +786,7 @@ export default function SessionPage() {
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
     if (isNewSession) {
+      void createThreadFromAction({ type: "startMic" });
       return;
     }
     if (viewMode === "archived") {
@@ -788,6 +828,7 @@ export default function SessionPage() {
       setPhase("listening");
     }
   }, [
+    createThreadFromAction,
     continueCurrentThread,
     hasActivatedSession,
     isConnected,
@@ -804,15 +845,16 @@ export default function SessionPage() {
     const text = textInput.trim();
     if (!text) return;
     if (isNewSession) {
-      setTextInput("");
+      void createThreadFromPrompt(text);
       return;
     }
     sendTextOrQueue(text);
     setTextInput("");
-  }, [isNewSession, sendTextOrQueue, textInput]);
+  }, [createThreadFromPrompt, isNewSession, sendTextOrQueue, textInput]);
 
   const handleShowDesktop = useCallback(() => {
     if (isNewSession) {
+      void createThreadFromAction({ type: "openDesktop" });
       return;
     }
     if (viewMode === "archived") {
@@ -823,7 +865,7 @@ export default function SessionPage() {
     if (!hasActivatedSession) {
       setHasActivatedSession(true);
     }
-  }, [continueCurrentThread, hasActivatedSession, isNewSession, viewMode]);
+  }, [createThreadFromAction, continueCurrentThread, hasActivatedSession, isNewSession, viewMode]);
 
   const handleHideDesktop = useCallback(() => {
     setIsDesktopVisible(false);
@@ -845,6 +887,7 @@ export default function SessionPage() {
   const handleDemo = useCallback(
     (text: string) => {
       if (isNewSession) {
+        void createThreadFromAction({ type: "demo", text });
         return;
       }
       if (viewMode === "archived") {
@@ -853,7 +896,7 @@ export default function SessionPage() {
       }
       sendTextOrQueue(text);
     },
-    [continueCurrentThread, isNewSession, sendTextOrQueue, viewMode],
+    [continueCurrentThread, createThreadFromAction, isNewSession, sendTextOrQueue, viewMode],
   );
 
   const handlePermissionRespond = useCallback(
@@ -870,14 +913,13 @@ export default function SessionPage() {
   }, [sendJson]);
 
   useEffect(() => {
-    if (isNewSession || viewMode !== "live") {
+    if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
       return;
     }
     if (autoActionHandledRef.current) {
       return;
     }
 
-    let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       const key = pendingActionKeyRef.current;
       const raw = sessionStorage.getItem(key);
@@ -886,48 +928,27 @@ export default function SessionPage() {
       }
       sessionStorage.removeItem(key);
 
-      const action = JSON.parse(raw) as
-        | { type: "demo"; text: string }
-        | { type: "prompt"; text: string }
-        | { type: "openDesktop" }
-        | { type: "startMic" };
+      const action = JSON.parse(raw) as PendingSessionAction;
 
       autoActionHandledRef.current = true;
+      setActiveSurface("conversation");
 
       if (action.type === "openDesktop") {
-        handleShowDesktop();
+        setHasActivatedSession(true);
+        setIsDesktopVisible(true);
       } else if (action.type === "startMic") {
-        if (!hasActivatedSession) {
-          setHasActivatedSession(true);
-        }
+        setHasActivatedSession(true);
         setPendingMicStart(true);
         setPhase("listening");
-      } else if (action.type === "demo") {
-        timer = setTimeout(() => {
-          handleDemo(action.text);
-        }, 400);
-      } else if (action.type === "prompt") {
-        timer = setTimeout(() => {
-          sendTextOrQueue(action.text);
-        }, 400);
+      } else if (action.type === "demo" || action.type === "prompt") {
+        setHasActivatedSession(true);
+        setPendingText(action.text);
+        setPhase("thinking");
       }
     } catch {
       // Ignore invalid storage payloads.
     }
-
-    return () => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-    };
-  }, [
-    handleDemo,
-    handleShowDesktop,
-    hasActivatedSession,
-    isNewSession,
-    sendTextOrQueue,
-    viewMode,
-  ]);
+  }, [isNewSession, sessionData?.session_id, viewMode]);
 
   useEffect(() => {
     if (
@@ -1016,27 +1037,13 @@ export default function SessionPage() {
             <div className="max-w-3xl w-full flex flex-col items-center gap-8 mb-20 mt-10">
               <div className="text-center space-y-4">
                 <h1 className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
-                  {isNewSession ? "Opening your thread" : "Welcome to Nexus"}
+                  Welcome to Nexus
                 </h1>
-                <p className="text-[15px] text-zinc-500">
-                  {isNewSession
-                    ? "Restoring your latest workspace or preparing a new thread."
-                    : "What can I help you with?"}
-                </p>
+                <p className="text-[15px] text-zinc-500">What can I help you with?</p>
               </div>
 
-              {isNewSession ? (
-                <div className="flex flex-col items-center gap-4 rounded-3xl border border-zinc-200 bg-white/80 px-8 py-8 text-center shadow-sm dark:border-[#2f2f35] dark:bg-[#16161b]">
-                  <div className="h-8 w-8 rounded-full border-4 border-cyan-600 border-t-transparent animate-spin" />
-                  <p className="text-sm text-zinc-600 dark:text-zinc-300">
-                    Auto-resume is enabled. Nexus is reopening the latest thread with the lowest-cost available workspace path.
-                  </p>
-                </div>
-              ) : null}
-
               {/* Floating Input Box */}
-              {!isNewSession ? (
-                <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
+              <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
                 <div className="relative flex flex-col bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl shadow-sm focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all duration-300 p-2">
                   <div className="relative min-h-[60px] flex items-center px-2">
                     <textarea
@@ -1086,9 +1093,9 @@ export default function SessionPage() {
                       />
                       <button
                         onClick={handleTextSubmit}
-                        disabled={!textInput.trim()}
+                        disabled={!textInput.trim() || isLoading}
                         className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
-                          textInput.trim() 
+                          textInput.trim() && !isLoading
                             ? "bg-zinc-900 text-white dark:bg-white dark:text-black hover:scale-105" 
                             : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
                         }`}
@@ -1101,10 +1108,9 @@ export default function SessionPage() {
                   </div>
                 </div>
               </div>
-              ) : null}
 
               {/* Demo picker */}
-              {viewMode === "live" && !isNewSession && (
+              {viewMode === "live" && (
                 <div className="w-full max-w-4xl mx-auto mt-4 relative">
                   <DemoPicker onSelect={handleDemo} disabled={false} />
                 </div>
@@ -1365,9 +1371,9 @@ export default function SessionPage() {
                           />
                           <button
                             onClick={handleTextSubmit}
-                            disabled={!textInput.trim()}
+                            disabled={!textInput.trim() || isLoading}
                             className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
-                              textInput.trim() 
+                              textInput.trim() && !isLoading
                                 ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-white' 
                                 : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
                             }`}

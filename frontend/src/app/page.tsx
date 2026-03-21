@@ -6,8 +6,6 @@ import { useState, useEffect } from "react";
 import { motion, useScroll, useSpring } from "framer-motion";
 import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
-import { authenticatedFetch, parseApiError } from "@/lib/api-client";
-import { useToast } from "@/components/toast-provider";
 import type { RecentSession } from "@/lib/message-types";
 import { fetchUserSettings, requiresByokSetup } from "@/lib/user-settings";
 import { Code2, Cpu, Layout, Mic, Shield, Terminal, ArrowRight, Github } from "lucide-react";
@@ -21,8 +19,6 @@ export default function HomePage() {
     signInWithGoogle,
     signOutUser,
   } = useAuth();
-  const { toast } = useToast();
-  const [isPausing, setIsPausing] = useState(false);
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [scrolled, setScrolled] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -125,30 +121,6 @@ export default function HomePage() {
                   className="px-4 py-2 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95 disabled:opacity-50"
                 >
                   {isLaunching ? "Starting..." : resumableSession ? "Resume Workspace" : "Launch Console"}
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!user) return;
-                    setIsPausing(true);
-                    try {
-                      const res = await authenticatedFetch("/api/v1/workspace/pause", { method: "POST" });
-                      if (!res.ok) {
-                        const msg = await parseApiError(res);
-                        toast(msg, "error");
-                      } else {
-                        toast("Desktop paused. You can resume later.", "success");
-                      }
-                    } catch (err) {
-                      const msg = err instanceof Error ? err.message : "Failed to pause desktop";
-                      toast(msg, "error");
-                    } finally {
-                      setIsPausing(false);
-                    }
-                  }}
-                  disabled={isPausing}
-                  className="px-3 py-2 rounded-lg bg-yellow-500 text-white text-sm font-medium hover:bg-yellow-600 transition-all disabled:opacity-50"
-                >
-                  {isPausing ? "Pausing..." : "Pause Desktop"}
                 </button>
                 <button
                   onClick={() => { void signOutUser().catch(() => {}); }}
