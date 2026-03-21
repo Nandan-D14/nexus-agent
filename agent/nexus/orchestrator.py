@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket
 
 from nexus.agent import create_agent, create_multi_agent, create_runner, run_agent_turn
-from nexus.background_tasks import BackgroundTaskManager
+from nexus.background_tasks import BackgroundTask, BackgroundTaskManager
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxDeadError
@@ -71,6 +71,15 @@ class NexusOrchestrator:
 
         # Background task manager
         self.bg_task_manager = BackgroundTaskManager(send_json=self._send_json)
+        self.bg_task_manager.set_callbacks(
+            on_permission_requested=self._on_permission_requested,
+            on_permission_resolved=self._on_permission_resolved,
+            on_task_started=self._on_background_task_started,
+            on_task_finished=self._on_background_task_finished,
+        )
+        self._current_run_id = session.current_run_id
+        self._current_turn_step_id: str | None = None
+        self._tool_step_ids: dict[str, list[str]] = {}
 
         # Tracks the currently running agent turn so it can be cancelled
         self._agent_task: asyncio.Task | None = None
@@ -104,16 +113,27 @@ class NexusOrchestrator:
         # Replay prior conversation context so the agent remembers past turns
         if self.history_repository:
             try:
-                messages = await self.history_repository.get_session_messages(self.session.id)
-                if messages:
-                    self._prior_context = self._format_history_context(messages)
-                    logger.info(
-                        "History replay: injecting %d messages into session %s",
-                        len(messages),
-                        self.session.id,
-                    )
+                stored_session = await self.history_repository.get_session(self.session.id)
+                if stored_session and stored_session.context_packet:
+                    self._prior_context = self._format_context_packet(stored_session.context_packet)
+                    logger.info("Using cached context packet for session %s", self.session.id)
+                else:
+                    messages = await self.history_repository.get_session_messages(self.session.id)
+                    if messages:
+                        self._prior_context = self._format_history_context(messages)
+                        logger.info(
+                            "History replay fallback: injecting %d messages into session %s",
+                            len(messages),
+                            self.session.id,
+                        )
             except Exception:
                 logger.warning("Failed to load history for replay", exc_info=True)
+
+        if self.session.seed_context:
+            if self._prior_context:
+                self._prior_context = f"{self._prior_context}\n\n{self.session.seed_context}"
+            else:
+                self._prior_context = self.session.seed_context
 
         # Notify frontend
         await self._send_json({
@@ -131,6 +151,11 @@ class NexusOrchestrator:
             "status": "available" if self.voice else "unavailable",
             "message": "Voice ready — click mic to connect." if self.voice else "Voice unavailable (no credentials).",
         })
+        if self._current_run_id:
+            await self._send_json({
+                "type": "run_status",
+                "run": self._run_payload(status=self.session.run_status),
+            })
 
     async def handle_user_audio(self, pcm_data: bytes) -> None:
         """Forward mic audio to Gemini Live."""
@@ -195,7 +220,7 @@ class NexusOrchestrator:
         """Handle direct text input (bypass voice)."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="typed", text=text)
-        await self._run_agent_tracked(self._with_prior_context(text))
+        await self._run_agent_tracked(self._with_prior_context(text), source="typed")
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
         """Route a permission_response from the frontend to the bg task manager."""
@@ -205,16 +230,27 @@ class NexusOrchestrator:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="voice", text=text)
-        await self._run_agent_tracked(self._with_prior_context(text))
+        await self._run_agent_tracked(self._with_prior_context(text), source="voice")
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
         sandbox = self.session.sandbox
+        screen_step_id = await self._create_step(
+            step_type="system_event",
+            title="Analyze current screen",
+            detail="Manual screen analysis requested.",
+            source="system",
+        )
 
         # Auto-reconnect sandbox if it died
         if not sandbox.is_alive:
             reconnected = await self._reconnect_sandbox()
             if not reconnected:
+                await self._fail_step(
+                    screen_step_id,
+                    detail="Sandbox is not running and could not be reconnected.",
+                    error="Sandbox is not running and could not be reconnected.",
+                )
                 await self._send_json({
                     "type": "agent_screenshot",
                     "error": "Sandbox is not running and could not be reconnected.",
@@ -232,13 +268,28 @@ class NexusOrchestrator:
                 try:
                     img_b64 = await loop.run_in_executor(None, self.session.sandbox.screenshot_base64)
                 except Exception:
+                    await self._fail_step(
+                        screen_step_id,
+                        detail="Screenshot failed after reconnect.",
+                        error="Screenshot failed after reconnect.",
+                    )
                     await self._send_json({"type": "agent_screenshot", "error": "Screenshot failed after reconnect"})
                     return
             else:
+                await self._fail_step(
+                    screen_step_id,
+                    detail="Sandbox died and could not reconnect.",
+                    error="Sandbox died and could not reconnect.",
+                )
                 await self._send_json({"type": "agent_screenshot", "error": "Sandbox died and could not reconnect"})
                 return
         except Exception as exc:
             logger.exception("Screenshot capture failed: %s", exc)
+            await self._fail_step(
+                screen_step_id,
+                detail="Screenshot capture failed.",
+                error=str(exc),
+            )
             await self._send_json({
                 "type": "agent_screenshot",
                 "error": "Screenshot capture failed",
@@ -249,8 +300,22 @@ class NexusOrchestrator:
             "image_b64": img_b64,
             "analysis": "Screenshot captured. Sending to agent...",
         })
+        await self._complete_step(
+            screen_step_id,
+            detail="Screenshot captured and queued for analysis.",
+        )
+        await self._create_artifact(
+            kind="screenshot_reference",
+            title="Manual screen capture",
+            preview="Screenshot captured and queued for analysis.",
+            source_step_id=screen_step_id,
+            metadata={"source": "manual_screen_analysis"},
+        )
         # Feed screenshot context to agent
-        await self._run_agent_tracked("Look at the current screen and describe what you see.")
+        await self._run_agent_tracked(
+            "Look at the current screen and describe what you see.",
+            source="screen",
+        )
 
     async def stop_agent(self) -> None:
         """Cancel the currently running agent turn."""
@@ -406,8 +471,8 @@ class NexusOrchestrator:
 
     @staticmethod
     def _format_history_context(messages: list[dict]) -> str:
-        """Format the last 20 stored messages as a plain-text prior-context block."""
-        recent = messages[-20:]
+        """Fallback formatter when no cached context packet exists."""
+        recent = messages[-4:]
         lines = []
         for msg in recent:
             role = (msg.get("role") or "user").upper()
@@ -418,11 +483,37 @@ class NexusOrchestrator:
             return ""
         history = "\n".join(lines)
         return (
-            "[PRIOR CONVERSATION — you have already spoken with this user]\n"
+            "[RECENT CONVERSATION FALLBACK]\n"
             f"{history}\n"
-            "[END PRIOR CONVERSATION]\n\n"
+            "[END RECENT CONVERSATION FALLBACK]\n\n"
             "Continue naturally from where you left off."
         )
+
+    @staticmethod
+    def _format_context_packet(packet: dict[str, Any]) -> str:
+        lines = ["[CACHED SESSION CONTEXT]"]
+        for label, key in (
+            ("Summary", "summary"),
+            ("Goal", "goal"),
+            ("Latest run summary", "latestRunSummary"),
+        ):
+            value = packet.get(key)
+            if isinstance(value, str) and value.strip():
+                lines.append(f"{label}: {value.strip()}")
+        for label, key in (
+            ("Open tasks", "openTasks"),
+            ("Recent turns", "recentTurns"),
+            ("Artifacts", "artifactRefs"),
+        ):
+            values = packet.get(key)
+            if isinstance(values, list):
+                compact = [str(item).strip() for item in values if str(item).strip()]
+                if compact:
+                    lines.append(f"{label}:")
+                    lines.extend(f"- {item}" for item in compact[:4])
+        lines.append("[END CACHED SESSION CONTEXT]")
+        lines.append("Continue naturally from where you left off.")
+        return "\n".join(lines)
 
     async def _reconnect_sandbox(self) -> bool:
         """Attempt to create a new sandbox when the current one has died.
@@ -456,18 +547,51 @@ class NexusOrchestrator:
             })
             return False
 
-    async def _run_agent_tracked(self, message: str) -> None:
+    async def _run_agent_tracked(self, message: str, *, source: str) -> None:
         """Wrap _run_agent in a cancellable task and await it."""
         self._stop_requested = False
+        self._current_turn_step_id = await self._create_step(
+            step_type="agent_turn",
+            title="Process request",
+            detail=self._clip_text(message, 320),
+            source=source,
+            metadata={"input": self._clip_text(message, 1200), "source": source},
+        )
+        await self._set_run_status("running")
         self._agent_task = asyncio.create_task(self._run_agent(message))
         try:
-            await self._agent_task
+            result = await self._agent_task
+            if result["status"] == "completed":
+                await self._complete_step(
+                    self._current_turn_step_id,
+                    detail=self._clip_text(result.get("summary") or "Turn completed.", 1500),
+                )
+                await self._set_run_status("completed")
+            else:
+                await self._fail_unfinished_tool_steps(status="failed", error=result.get("summary"))
+                await self._fail_step(
+                    self._current_turn_step_id,
+                    detail=self._clip_text(result.get("summary") or "Turn failed.", 1500),
+                    error=result.get("summary"),
+                )
+                await self._set_run_status("failed")
         except asyncio.CancelledError:
             logger.info("Agent turn cancelled by user for session %s", self.session.id)
             self._active_agent = "nexus_orchestrator"
-            # agent_complete already sent by stop_agent(), skip here
+            await self._fail_unfinished_tool_steps(status="cancelled", error="Stopped by user.")
+            await self._fail_step(
+                self._current_turn_step_id,
+                detail="Stopped by user.",
+                error="Stopped by user.",
+                status="cancelled",
+            )
+            await self._set_run_status("cancelled")
+        finally:
+            self._tool_step_ids = {}
+            self._active_agent = "nexus_orchestrator"
+            self._current_turn_step_id = None
 
-    async def _run_agent(self, message: str) -> None:
+    async def _run_agent(self, message: str) -> dict[str, str]:
         """Run an ADK agent turn and stream events to frontend."""
         self.session.touch()
 
@@ -487,7 +611,10 @@ class NexusOrchestrator:
                         "used": quota["used"],
                         "remaining": 0,
                     })
-                    return
+                    return {
+                        "status": "failed",
+                        "summary": "Token quota exceeded.",
+                    }
             except Exception:
                 logger.debug("Quota check failed, allowing turn", exc_info=True)
 
@@ -506,7 +633,10 @@ class NexusOrchestrator:
                     "code": "SANDBOX_DEAD",
                     "message": "Sandbox is not running and could not be reconnected. Please start a new session.",
                 })
-                return
+                return {
+                    "status": "failed",
+                    "summary": "Sandbox is not running and could not be reconnected.",
+                }
 
         try:
             result = await self._run_agent_with_retry(message)
@@ -546,11 +676,27 @@ class NexusOrchestrator:
                     "summary": result.response[:200],
                 })
                 await self._mark_summary(result.response)
+                await self._create_artifact(
+                    kind="summary",
+                    title="Agent summary",
+                    preview=self._clip_text(result.response, 280),
+                    source_step_id=self._current_turn_step_id,
+                    metadata={"source": "agent_complete"},
+                )
+                return {
+                    "status": "completed",
+                    "summary": result.response,
+                }
+            return {
+                "status": "completed",
+                "summary": "Turn completed.",
+            }
 
         except _AgentStopped:
             logger.info("Agent stopped via _AgentStopped for session %s", self.session.id)
+            raise
 
-        except Exception:
+        except Exception as exc:
             logger.exception("Agent turn failed")
             await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
             await self._send_json({
@@ -558,6 +704,10 @@ class NexusOrchestrator:
                 "code": "AGENT_ERROR",
                 "message": "Agent encountered an error processing your request.",
             })
+            return {
+                "status": "failed",
+                "summary": str(exc) or "Agent encountered an error processing your request.",
+            }
 
     async def _on_agent_event(self, event: Any) -> None:
         """Callback for each ADK agent event — stream to frontend."""
@@ -581,6 +731,15 @@ class NexusOrchestrator:
             for fc in function_calls:
                 tool_name = self._get_attr(fc, "name", "tool_name") or str(fc)
                 tool_args = self._get_attr(fc, "args", "tool_input") or {}
+                step_id = await self._create_step(
+                    step_type="tool_call",
+                    title=f"Tool: {tool_name}",
+                    detail=self._clip_text(self._coerce_mapping(tool_args), 320),
+                    source=self._active_agent,
+                    metadata={"tool": tool_name, "args": self._coerce_mapping(tool_args)},
+                )
+                if step_id:
+                    self._tool_step_ids.setdefault(tool_name, []).append(step_id)
                 await self._send_json({
                     "type": "agent_tool_call",
                     "tool": tool_name,
@@ -605,12 +764,23 @@ class NexusOrchestrator:
                     output = self._get_attr(fn_resp, "response")
                     output_mapping = self._coerce_mapping(output)
                     output_str = str(output if output is not None else "")[:2000]
+                    step_id = None
+                    pending_steps = self._tool_step_ids.get(tool_name, [])
+                    if pending_steps:
+                        step_id = pending_steps.pop(0)
+                        if not pending_steps:
+                            self._tool_step_ids.pop(tool_name, None)
 
                     await self._send_json({
                         "type": "agent_tool_result",
                         "tool": tool_name,
                         "output": output_str,
                     })
+                    await self._complete_step(
+                        step_id,
+                        detail=self._clip_text(output_str, 1500),
+                        metadata={"tool": tool_name},
+                    )
 
                     if tool_name == "take_screenshot":
                         from nexus.tools.screen import get_last_screenshot_b64
@@ -622,6 +792,18 @@ class NexusOrchestrator:
                                 "image_b64": img_b64,
                                 "analysis": output_mapping.get("description", ""),
                             })
+
+                    artifact_ref = self._extract_reference_artifact(tool_name, output_mapping, output_str)
+                    if artifact_ref:
+                        await self._create_artifact(
+                            kind=artifact_ref["kind"],
+                            title=artifact_ref["title"],
+                            preview=artifact_ref["preview"],
+                            source_step_id=step_id,
+                            path=artifact_ref.get("path"),
+                            url=artifact_ref.get("url"),
+                            metadata=artifact_ref.get("metadata"),
+                        )
 
         except Exception:
             logger.exception("Error streaming agent event")
@@ -874,5 +1056,321 @@ class NexusOrchestrator:
                 status=status,
                 error_code=error_code,
             )
+            await self.history_repository.refresh_session_handoff(
+                self.session.id,
+                owner_id=self.session.owner_id,
+                resume_state=status,
+            )
         except Exception:
             logger.exception("Failed to update Firestore summary for session %s", self.session.id)
+
+    @staticmethod
+    def _clip_text(value: Any, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _serialize_datetime(value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            return value.isoformat()
+        except Exception:
+            return None
+
+    def _run_payload(self, run: Any | None = None, *, status: str | None = None) -> dict[str, Any]:
+        if run is not None:
+            return {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "owner_id": run.owner_id,
+                "status": run.status,
+                "created_at": self._serialize_datetime(run.created_at),
+                "updated_at": self._serialize_datetime(run.updated_at),
+                "started_at": self._serialize_datetime(run.started_at),
+                "completed_at": self._serialize_datetime(run.completed_at),
+                "last_step_at": self._serialize_datetime(run.last_step_at),
+                "step_count": run.step_count,
+                "artifact_count": run.artifact_count,
+                "title": run.title,
+                "source_session_id": run.source_session_id,
+            }
+        return {
+            "run_id": self._current_run_id,
+            "session_id": self.session.id,
+            "owner_id": self.session.owner_id,
+            "status": status or self.session.run_status,
+            "created_at": None,
+            "updated_at": None,
+            "started_at": None,
+            "completed_at": None,
+            "last_step_at": None,
+            "step_count": 0,
+            "artifact_count": self.session.artifact_count,
+            "title": self.session.initial_title,
+            "source_session_id": self.session.resume_source_session_id,
+        }
+
+    def _step_payload(self, step: Any) -> dict[str, Any]:
+        return {
+            "step_id": step.step_id,
+            "run_id": step.run_id,
+            "session_id": step.session_id,
+            "step_type": step.step_type,
+            "status": step.status,
+            "title": step.title,
+            "detail": step.detail,
+            "created_at": self._serialize_datetime(step.created_at),
+            "updated_at": self._serialize_datetime(step.updated_at),
+            "completed_at": self._serialize_datetime(step.completed_at),
+            "step_index": step.step_index,
+            "source": step.source,
+            "error": step.error,
+            "external_ref": step.external_ref,
+            "metadata": step.metadata or {},
+        }
+
+    def _artifact_payload(self, artifact: Any) -> dict[str, Any]:
+        return {
+            "artifact_id": artifact.artifact_id,
+            "run_id": artifact.run_id,
+            "session_id": artifact.session_id,
+            "kind": artifact.kind,
+            "title": artifact.title,
+            "preview": artifact.preview,
+            "created_at": self._serialize_datetime(artifact.created_at),
+            "source_step_id": artifact.source_step_id,
+            "path": artifact.path,
+            "url": artifact.url,
+            "metadata": artifact.metadata or {},
+        }
+
+    async def _set_run_status(self, status: str) -> None:
+        self.session.run_status = status
+        if not self.history_repository or not self._current_run_id:
+            await self._send_json({
+                "type": "run_status",
+                "run": self._run_payload(status=status),
+            })
+            return
+        try:
+            run = await self.history_repository.set_run_status(
+                session_id=self.session.id,
+                run_id=self._current_run_id,
+                status=status,
+            )
+            if run:
+                self.session.run_status = run.status
+                self.session.artifact_count = run.artifact_count
+            await self._send_json({
+                "type": "run_status",
+                "run": self._run_payload(run, status=status),
+            })
+        except Exception:
+            logger.exception("Failed to update run status for session %s", self.session.id)
+
+    async def _create_step(
+        self,
+        *,
+        step_type: str,
+        title: str,
+        detail: str = "",
+        source: str | None = None,
+        external_ref: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        if not self.history_repository or not self._current_run_id:
+            return None
+        try:
+            step = await self.history_repository.create_step(
+                session_id=self.session.id,
+                run_id=self._current_run_id,
+                step_type=step_type,
+                title=title,
+                detail=detail,
+                source=source,
+                external_ref=external_ref,
+                metadata=metadata,
+            )
+            await self._send_json({"type": "step_started", "step": self._step_payload(step)})
+            return step.step_id
+        except Exception:
+            logger.exception("Failed to create %s step for session %s", step_type, self.session.id)
+            return None
+
+    async def _complete_step(
+        self,
+        step_id: str | None,
+        *,
+        detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not step_id or not self.history_repository or not self._current_run_id:
+            return
+        try:
+            step = await self.history_repository.complete_step(
+                session_id=self.session.id,
+                run_id=self._current_run_id,
+                step_id=step_id,
+                detail=detail,
+                metadata=metadata,
+            )
+            if step:
+                await self._send_json({"type": "step_completed", "step": self._step_payload(step)})
+        except Exception:
+            logger.exception("Failed to complete step %s for session %s", step_id, self.session.id)
+
+    async def _fail_step(
+        self,
+        step_id: str | None,
+        *,
+        detail: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        status: str = "failed",
+    ) -> None:
+        if not step_id or not self.history_repository or not self._current_run_id:
+            return
+        try:
+            step = await self.history_repository.fail_step(
+                session_id=self.session.id,
+                run_id=self._current_run_id,
+                step_id=step_id,
+                detail=detail,
+                error=error,
+                metadata=metadata,
+                status=status,
+            )
+            if step:
+                await self._send_json({"type": "step_failed", "step": self._step_payload(step)})
+        except Exception:
+            logger.exception("Failed to fail step %s for session %s", step_id, self.session.id)
+
+    async def _fail_unfinished_tool_steps(self, *, status: str, error: str | None = None) -> None:
+        pending = [step_id for step_ids in self._tool_step_ids.values() for step_id in step_ids]
+        self._tool_step_ids = {}
+        for step_id in pending:
+            await self._fail_step(
+                step_id,
+                detail=error or "Tool step did not complete.",
+                error=error,
+                status=status,
+            )
+
+    async def _create_artifact(
+        self,
+        *,
+        kind: str,
+        title: str,
+        preview: str,
+        source_step_id: str | None = None,
+        path: str | None = None,
+        url: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.history_repository or not self._current_run_id:
+            return
+        try:
+            artifact = await self.history_repository.create_artifact(
+                session_id=self.session.id,
+                run_id=self._current_run_id,
+                kind=kind,
+                title=title,
+                preview=preview,
+                source_step_id=source_step_id,
+                path=path,
+                url=url,
+                metadata=metadata,
+            )
+            self.session.artifact_count += 1
+            await self.history_repository.refresh_session_handoff(
+                self.session.id,
+                owner_id=self.session.owner_id,
+                resume_state=self.session.run_status,
+            )
+            await self._send_json({
+                "type": "artifact_created",
+                "artifact": self._artifact_payload(artifact),
+            })
+        except Exception:
+            logger.exception("Failed to create artifact for session %s", self.session.id)
+
+    async def _on_permission_requested(self, task: BackgroundTask) -> str | None:
+        return await self._create_step(
+            step_type="permission_request",
+            title=task.description,
+            detail=f"Awaiting approval for a background task ({task.estimated_seconds}s estimate).",
+            source=task.agent,
+            external_ref=task.task_id,
+            metadata={"estimated_seconds": task.estimated_seconds},
+        )
+
+    async def _on_permission_resolved(self, task: BackgroundTask, approved: bool) -> None:
+        if approved:
+            await self._complete_step(
+                task.permission_step_id,
+                detail="Permission granted.",
+                metadata={"approved": True},
+            )
+            return
+        await self._fail_step(
+            task.permission_step_id,
+            detail="Permission denied or timed out.",
+            error="Permission denied or timed out.",
+            metadata={"approved": False},
+            status="cancelled",
+        )
+
+    async def _on_background_task_started(self, task: BackgroundTask) -> str | None:
+        return await self._create_step(
+            step_type="background_task",
+            title=task.description,
+            detail="Background task started.",
+            source=task.agent,
+            external_ref=task.task_id,
+            metadata={"estimated_seconds": task.estimated_seconds},
+        )
+
+    async def _on_background_task_finished(self, task: BackgroundTask, success: bool, result: str) -> None:
+        if success:
+            await self._complete_step(
+                task.background_step_id,
+                detail=self._clip_text(result, 1000),
+            )
+            return
+        await self._fail_step(
+            task.background_step_id,
+            detail=self._clip_text(result, 1000),
+            error=self._clip_text(result, 500),
+            status="cancelled" if "cancel" in result.lower() else "failed",
+        )
+
+    def _extract_reference_artifact(
+        self,
+        tool_name: str,
+        output_mapping: dict[str, Any],
+        output_str: str,
+    ) -> dict[str, Any] | None:
+        if tool_name == "take_screenshot":
+            description = output_mapping.get("description") if isinstance(output_mapping.get("description"), str) else output_str
+            return {
+                "kind": "screenshot_reference",
+                "title": "Screenshot capture",
+                "preview": self._clip_text(description, 280),
+                "metadata": {"tool": tool_name},
+            }
+
+        for key in ("path", "file_path", "output_path", "url", "download_url"):
+            value = output_mapping.get(key)
+            if isinstance(value, str) and value.strip():
+                return {
+                    "kind": "export_reference",
+                    "title": tool_name.replace("_", " "),
+                    "preview": self._clip_text(output_str or value, 280),
+                    "path": value if "path" in key else None,
+                    "url": value if "url" in key else None,
+                    "metadata": {"tool": tool_name, "ref_key": key},
+                }
+        return None

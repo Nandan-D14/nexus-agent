@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
 import threading
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 # The orchestrator reads this after a take_screenshot tool call
 # to forward the image to the frontend without bloating the LLM context.
 _last_screenshot = threading.local()
+_last_analysis = threading.local()
 
 # Track the last screenshot time to prevent back-to-back calls.
 # If called within _COOLDOWN_SECONDS of the last call, return a reminder to act.
@@ -63,6 +65,7 @@ def take_screenshot() -> dict:
         # Single screenshot capture — reuse bytes for both frontend and vision
         img_bytes = sandbox.screenshot()
         img_b64 = base64.b64encode(img_bytes).decode()
+        screenshot_hash = hashlib.sha256(img_bytes).hexdigest()
 
         # Convert to JPEG for vision analysis (smaller payload)
         img = Image.open(io.BytesIO(img_bytes))
@@ -88,7 +91,14 @@ def take_screenshot() -> dict:
         )
 
         try:
-            if runtime_config.gemini_available:
+            cached_hash = getattr(_last_analysis, "hash", None)
+            cached_description = getattr(_last_analysis, "description", None)
+            if cached_hash == screenshot_hash and isinstance(cached_description, str) and cached_description.strip():
+                description = (
+                    f"{cached_description}\n\n"
+                    "Screen unchanged since the last observation. Reusing cached visual analysis to save cost."
+                )
+            elif runtime_config.gemini_available:
                 from google.genai import types
                 from google.genai.errors import ClientError
 
@@ -153,6 +163,9 @@ def take_screenshot() -> dict:
         except Exception:
             logger.exception("Vision analysis failed for screenshot")
             description = "Screenshot captured but vision analysis failed. Try again."
+
+        _last_analysis.hash = screenshot_hash
+        _last_analysis.description = description
 
         # Store the full image for the frontend (orchestrator picks it up)
         _last_screenshot.image = img_b64

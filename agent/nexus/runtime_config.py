@@ -234,13 +234,13 @@ def resolve_session_runtime_config(
     else:
         e2b_api_key = ""
 
-    resolved_provider = _DEFAULT_GEMINI_PROVIDER
+    resolved_provider = gemini_provider
     resolved_api_key = ""
     resolved_project_id = ""
 
-    if gemini_provider == "vertex" and status.shared_vertex_available:
-        resolved_provider = "vertex"
-        resolved_project_id = settings.google_project_id
+    if gemini_provider == "vertex":
+        if status.shared_vertex_available:
+            resolved_project_id = settings.google_project_id
     elif user_gemini_api_key:
         resolved_provider = "apiKey"
         resolved_api_key = user_gemini_api_key
@@ -307,10 +307,39 @@ def build_genai_client(
             location=location or runtime_config.google_cloud_region,
             **client_kwargs,
         )
+    if not runtime_config.gemini_api_key:
+        if runtime_config.gemini_provider == "vertex":
+            raise RuntimeError(
+                "Vertex AI is selected for this session, but shared Vertex access is not available."
+            )
+        raise RuntimeError("Gemini API key is not configured for this session.")
     return Client(
         vertexai=False,
         api_key=runtime_config.gemini_api_key,
         **client_kwargs,
+    )
+
+
+def ensure_selected_gemini_provider_available(
+    user_settings: Mapping[str, Any] | None,
+) -> None:
+    status = get_byok_status(user_settings)
+    if status.gemini_provider != "vertex" or status.shared_vertex_available:
+        return
+
+    if not status.vertex_configured:
+        raise PermissionError(
+            "Vertex AI is selected, but it is not configured on this server. Switch to Gemini API Key."
+        )
+
+    if status.shared_access_code_configured and not status.shared_access_enabled:
+        raise PermissionError(
+            "Vertex AI is selected, but shared Vertex AI credits are locked for this account. "
+            "Enter the access code or switch to Gemini API Key."
+        )
+
+    raise PermissionError(
+        "Vertex AI is selected, but shared Vertex AI credits are not available for this account."
     )
 
 

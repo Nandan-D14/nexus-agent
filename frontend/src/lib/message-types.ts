@@ -11,6 +11,11 @@ export type WsMessage =
   | { type: "sandbox_status"; status: string }
   | { type: "vnc_url"; url: string }
   | { type: "transcript"; role: "user" | "agent"; text: string }
+  | { type: "run_status"; run: RunInfo | null }
+  | { type: "step_started"; step: RunStep }
+  | { type: "step_completed"; step: RunStep }
+  | { type: "step_failed"; step: RunStep }
+  | { type: "artifact_created"; artifact: RunArtifact }
   | { type: "agent_thinking"; content: string }
   | { type: "agent_tool_call"; tool: string; args: Record<string, unknown> }
   | { type: "agent_tool_result"; tool: string; output: string }
@@ -46,12 +51,49 @@ export type SessionStatus =
   | "error"
   | "destroyed";
 
+export type SessionCreateMode =
+  | "fresh"
+  | "continue_latest_workspace"
+  | "reuse_history_session";
+
+export type HistoryReuseMode = "continue" | "fresh";
+
+export type HandoffSummary = {
+  headline: string;
+  preview: string;
+  goal: string;
+  current_status: string;
+  completed_work: string[];
+  open_tasks: string[];
+  important_facts: string[];
+  artifacts: string[];
+  recommended_next_step: string;
+};
+
+export type ContextPacket = {
+  summary: string;
+  goal: string;
+  open_tasks: string[];
+  recent_turns: string[];
+  latest_run_summary: string;
+  artifact_refs: string[];
+  digest: string;
+};
+
 export type SessionData = {
   session_id: string;
   stream_url: string | null;
   ws_ticket: string;
   status: SessionStatus | string;
   created_at: string | null;
+  handoff_summary?: HandoffSummary | null;
+  resume_source_session_id?: string | null;
+  current_run_id?: string | null;
+  run_status?: string | null;
+  artifact_count?: number;
+  can_continue_conversation?: boolean;
+  exact_workspace_resume_available?: boolean;
+  continuation_mode?: string | null;
 };
 
 export type SessionInfo = {
@@ -63,6 +105,19 @@ export type SessionInfo = {
   ended_at?: string | null;
   summary?: string | null;
   message_count: number;
+  handoff_summary?: HandoffSummary | null;
+  can_continue_workspace?: boolean;
+  has_artifacts?: boolean;
+  resume_state?: string | null;
+  workspace_owner_session_id?: string | null;
+  resume_source_session_id?: string | null;
+  current_run_id?: string | null;
+  run_status?: string | null;
+  artifact_count?: number;
+  can_continue_conversation?: boolean;
+  exact_workspace_resume_available?: boolean;
+  continuation_mode?: string | null;
+  context_packet?: ContextPacket | null;
 };
 
 export type RecentSession = {
@@ -73,6 +128,70 @@ export type RecentSession = {
   created_at: string | null;
   updated_at: string | null;
   message_count: number;
+  handoff_summary?: HandoffSummary | null;
+  can_continue_workspace?: boolean;
+  has_artifacts?: boolean;
+  resume_state?: string | null;
+  workspace_owner_session_id?: string | null;
+  current_run_id?: string | null;
+  run_status?: string | null;
+  artifact_count?: number;
+  can_continue_conversation?: boolean;
+  exact_workspace_resume_available?: boolean;
+  continuation_mode?: string | null;
+};
+
+export type RunInfo = {
+  run_id: string;
+  session_id: string;
+  owner_id: string;
+  status: string;
+  created_at: string | null;
+  updated_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_step_at?: string | null;
+  step_count: number;
+  artifact_count: number;
+  title: string;
+  source_session_id?: string | null;
+};
+
+export type RunStep = {
+  step_id: string;
+  run_id: string;
+  session_id: string;
+  step_type: string;
+  status: string;
+  title: string;
+  detail: string;
+  created_at: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  step_index: number;
+  source?: string | null;
+  error?: string | null;
+  external_ref?: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type RunArtifact = {
+  artifact_id: string;
+  run_id: string;
+  session_id: string;
+  kind: string;
+  title: string;
+  preview: string;
+  created_at: string | null;
+  source_step_id?: string | null;
+  path?: string | null;
+  url?: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type WorkspaceResumeState = {
+  available: boolean;
+  session: SessionInfo | null;
 };
 
 export type ArchivedMessage = {

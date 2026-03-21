@@ -39,6 +39,40 @@ export async function listRecentSessions(
         updated_at: updatedAt?.toISOString?.() || null,
         message_count:
           typeof data.messageCount === "number" ? data.messageCount : 0,
+        handoff_summary:
+          data.handoffSummary && typeof data.handoffSummary === "object"
+            ? data.handoffSummary
+            : null,
+        can_continue_workspace: Boolean(data.canContinueWorkspace),
+        has_artifacts: Boolean(data.hasArtifacts),
+        resume_state:
+          typeof data.resumeState === "string" ? data.resumeState : null,
+        workspace_owner_session_id:
+          typeof data.workspaceOwnerSessionId === "string"
+            ? data.workspaceOwnerSessionId
+            : null,
+        current_run_id:
+          typeof data.currentRunId === "string"
+            ? data.currentRunId
+            : null,
+        run_status:
+          typeof data.runStatus === "string"
+            ? data.runStatus
+            : null,
+        artifact_count:
+          typeof data.artifactCount === "number" ? data.artifactCount : 0,
+        can_continue_conversation:
+          typeof data.canContinueConversation === "boolean"
+            ? data.canContinueConversation
+            : true,
+        exact_workspace_resume_available:
+          typeof data.exactWorkspaceResumeAvailable === "boolean"
+            ? data.exactWorkspaceResumeAvailable
+            : false,
+        continuation_mode:
+          typeof data.continuationMode === "string"
+            ? data.continuationMode
+            : null,
       };
     })
     .filter((session) => session.status !== "deleted")

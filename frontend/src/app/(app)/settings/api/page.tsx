@@ -132,6 +132,20 @@ export default function ApiSettingsPage() {
       return;
     }
 
+    if (geminiProvider === "vertex" && !settings.byok.vertexConfigured) {
+      setError("Vertex AI is not configured on the server. Switch to Gemini API Key instead.");
+      return;
+    }
+
+    if (geminiProvider === "vertex" && !sharedVertexReady && !hasPendingAccessCode) {
+      setError(
+        settings.byok.sharedAccessCodeConfigured
+          ? "Enter the access code to unlock shared Vertex AI credits before saving Vertex AI."
+          : "Shared Vertex AI credits are not available for this account.",
+      );
+      return;
+    }
+
     if (settings.requireByok && !nextHasGemini) {
       setError(
         geminiProvider === "vertex" && settings.byok.sharedAccessCodeConfigured

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import defaultdict
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -12,6 +14,26 @@ from nexus.orchestrator import NexusOrchestrator
 from nexus.session import Session, SessionManager
 
 logger = logging.getLogger(__name__)
+
+
+class _ActionRateLimiter:
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._hits: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, key: str) -> bool:
+        now = time.time()
+        recent = [hit for hit in self._hits[key] if now - hit < self.window_seconds]
+        if len(recent) >= self.max_requests:
+            self._hits[key] = recent
+            return False
+        recent.append(now)
+        self._hits[key] = recent
+        return True
+
+
+action_rate_limiter = _ActionRateLimiter(max_requests=25, window_seconds=60)
 
 
 async def handle_websocket(
@@ -86,6 +108,16 @@ async def handle_websocket(
                         continue
 
                     msg_type = data.get("type", "")
+                    if msg_type in {"text_input", "analyze_screen", "start_voice"}:
+                        if not action_rate_limiter.is_allowed(session.owner_id):
+                            await ws.send_json(
+                                {
+                                    "type": "error",
+                                    "code": "RATE_LIMITED",
+                                    "message": "Too many actions in a short period. Please wait a moment.",
+                                }
+                            )
+                            continue
 
                     if msg_type == "text_input":
                         text = data.get("text", "").strip()

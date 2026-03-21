@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -57,6 +58,8 @@ class Settings(BaseSettings):
         return bool(self.google_api_key or self.google_project_id)
 
     # Server
+    app_env: str = "development"
+    strict_config_validation: bool = False
     frontend_url: str = "http://localhost:3000"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -90,8 +93,42 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
 
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() == "production" or bool(os.environ.get("K_SERVICE"))
+
 
 settings = Settings()
+
+
+def validate_startup_settings() -> None:
+    """Fail fast on unsafe production config."""
+    if not (settings.is_production or settings.strict_config_validation):
+        return
+
+    issues: list[str] = []
+    parsed_frontend = urlparse(settings.frontend_url)
+
+    if settings.jwt_secret == "dev-secret-change-in-production":
+        issues.append("JWT_SECRET must be set to a non-default value")
+    if parsed_frontend.scheme not in {"http", "https"} or not parsed_frontend.netloc:
+        issues.append("FRONTEND_URL must be a valid absolute http(s) URL")
+    if not settings.firebase_project_id and not settings.firebase_auth_emulator_host:
+        issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
+    if not settings.require_byok and not settings.e2b_api_key:
+        issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
+    if not settings.require_byok and not (
+        settings.google_api_key
+        or settings.google_project_id
+        or settings.kilo_api_key
+    ):
+        issues.append("A server-side model provider must be configured when REQUIRE_BYOK is false")
+    if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
+        issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
+
+    if issues:
+        joined = "; ".join(issues)
+        raise RuntimeError(f"Invalid production configuration: {joined}")
 
 
 def apply_runtime_env_overrides() -> None:

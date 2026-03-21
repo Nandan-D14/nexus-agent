@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -12,14 +12,18 @@ import {
 import { DemoPicker } from "@/components/demo-picker";
 import { DesktopPanel } from "@/components/desktop-panel";
 import { MicButton } from "@/components/mic-button";
+import { OutputsPanel } from "@/components/outputs-panel";
+import { RunLogPanel } from "@/components/run-log-panel";
 import { SessionNavSidebar } from "@/components/session-nav-sidebar";
-import { StatusBar } from "@/components/status-bar";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
 import { useLiveDesktop } from "@/components/live-desktop-provider";
 import { useAuth } from "@/lib/auth-context";
 import { AudioPlayer } from "@/lib/audio-playback";
-import { listArchivedMessages } from "@/lib/firestore-history";
 import type {
+  ArchivedMessage,
+  RunArtifact,
+  RunInfo,
+  RunStep,
   SessionData,
   SessionInfo,
   SessionPhase,
@@ -46,6 +50,37 @@ type ChatItem =
     }
   | { kind: "delegation"; from: string; to: string; ts: number };
 
+type SessionSurface = "conversation" | "run_log" | "outputs";
+
+function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
+  const existingIndex = prev.findIndex((step) => step.step_id === nextStep.step_id);
+  if (existingIndex === -1) {
+    return [...prev, nextStep].sort((left, right) => left.step_index - right.step_index);
+  }
+  const updated = [...prev];
+  updated[existingIndex] = nextStep;
+  return updated.sort((left, right) => left.step_index - right.step_index);
+}
+
+function upsertArtifact(prev: RunArtifact[], artifact: RunArtifact): RunArtifact[] {
+  const existingIndex = prev.findIndex((item) => item.artifact_id === artifact.artifact_id);
+  if (existingIndex === -1) {
+    return [artifact, ...prev];
+  }
+  const updated = [...prev];
+  updated[existingIndex] = artifact;
+  return updated;
+}
+
+function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatItem[] {
+  return messages.map((message) => ({
+    kind: "message" as const,
+    role: message.role,
+    text: message.text,
+    ts: message.created_at ? new Date(message.created_at).getTime() : Date.now(),
+  }));
+}
+
 /* ------------------------------------------------------------------ */
 /*  Page component                                                     */
 /* ------------------------------------------------------------------ */
@@ -53,27 +88,41 @@ type ChatItem =
 export default function SessionPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const sessionId = params.id as string;
   const { user, isLoading: authLoading } = useAuth();
   const {
     createSession,
+    continueSession,
     getSession,
+    getSessionMessages,
+    getSessionArtifacts,
+    getSessionRun,
+    getSessionRunSteps,
+    getResumeWorkspace,
     refreshTicket,
     destroySession,
     isLoading,
     error,
   } = useSession();
   const isNewSession = sessionId === "new";
+  const shouldAutoResume = searchParams.get("resume") === "1";
+  const shouldAutoContinue = searchParams.get("continue") === "1";
 
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
+  const [runSteps, setRunSteps] = useState<RunStep[]>([]);
+  const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
   const [viewMode, setViewMode] = useState<"live" | "archived">("live");
+  const [activeSurface, setActiveSurface] = useState<SessionSurface>("conversation");
   const [pageError, setPageError] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [textInput, setTextInput] = useState("");
   const [hasActivatedSession, setHasActivatedSession] = useState(false);
+  const [isContinuingThread, setIsContinuingThread] = useState(false);
   const [isDesktopVisible, setIsDesktopVisible] = useState(false);
   const [isDesktopFullscreen, setIsDesktopFullscreen] = useState(false);
   const [pendingText, setPendingText] = useState<string | null>(null);
@@ -83,12 +132,6 @@ export default function SessionPage() {
   const [voiceStatus, setVoiceStatus] = useState<
     "available" | "unavailable" | "connecting" | "connected" | "reconnecting" | "disconnected"
   >("disconnected");
-  const [tokenQuota, setTokenQuota] = useState<{
-    limit: number;
-    used: number;
-    remaining: number;
-  } | null>(null);
-
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
@@ -96,13 +139,9 @@ export default function SessionPage() {
   const viewModeRef = useRef<"live" | "archived">("live");
   const autoActionHandledRef = useRef(false);
   const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
+  const autoResumeTriggeredRef = useRef(false);
   const { registerDesktop, clearDesktop, minimizeDesktop } = useLiveDesktop();
   const minimizeDesktopRef = useRef(minimizeDesktop);
-  const greetingName =
-    user?.displayName?.trim() ||
-    user?.email?.split("@")[0]?.trim() ||
-    "there";
-
   const wsUrl =
     typeof window !== "undefined"
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}?ticket=${sessionData?.ws_ticket || ""}`
@@ -165,6 +204,7 @@ export default function SessionPage() {
 
   useEffect(() => {
     autoActionHandledRef.current = false;
+    autoResumeTriggeredRef.current = false;
     pendingActionKeyRef.current = `nexus.pendingSessionAction:${sessionId}`;
   }, [sessionId]);
 
@@ -178,6 +218,56 @@ export default function SessionPage() {
           ...prev,
           { kind: "event", type: msg.type, status: msg.status, ts },
         ]);
+        break;
+
+      case "run_status":
+        setRunInfo(msg.run);
+        setSessionInfo((prev) =>
+          prev
+            ? {
+                ...prev,
+                current_run_id: msg.run?.run_id ?? prev.current_run_id,
+                run_status: msg.run?.status ?? prev.run_status,
+                artifact_count: msg.run?.artifact_count ?? prev.artifact_count,
+              }
+            : prev,
+        );
+        break;
+
+      case "step_started":
+      case "step_completed":
+      case "step_failed":
+        setRunSteps((prev) => upsertRunStep(prev, msg.step));
+        setRunInfo((prev) =>
+          prev
+            ? {
+                ...prev,
+                step_count: Math.max(prev.step_count, msg.step.step_index),
+                status:
+                  msg.type === "step_failed"
+                    ? msg.step.status
+                    : prev.status,
+              }
+            : prev,
+        );
+        break;
+
+      case "artifact_created":
+        setRunArtifacts((prev) => upsertArtifact(prev, msg.artifact));
+        setRunInfo((prev) =>
+          prev
+            ? { ...prev, artifact_count: prev.artifact_count + 1 }
+            : prev,
+        );
+        setSessionInfo((prev) =>
+          prev
+            ? {
+                ...prev,
+                has_artifacts: true,
+                artifact_count: (prev.artifact_count ?? 0) + 1,
+              }
+            : prev,
+        );
         break;
 
       case "vnc_url":
@@ -317,11 +407,6 @@ export default function SessionPage() {
         break;
 
       case "quota_update":
-        setTokenQuota({
-          limit: msg.limit,
-          used: msg.used,
-          remaining: msg.remaining,
-        });
         break;
 
       case "pong":
@@ -378,6 +463,10 @@ export default function SessionPage() {
       setPageError(null);
       setPhase("idle");
       setChatItems([]);
+      setActiveSurface("conversation");
+      setRunInfo(null);
+      setRunSteps([]);
+      setRunArtifacts([]);
       setStreamUrl(null);
       setSessionData(null);
       setSessionInfo(null);
@@ -389,6 +478,20 @@ export default function SessionPage() {
       setViewMode("live");
 
       if (isNewSession) {
+        const workspace = await getResumeWorkspace();
+        if (cancelled) {
+          return;
+        }
+        if (workspace?.available && workspace.session?.session_id) {
+          router.replace(`/session/${workspace.session.session_id}?resume=1`);
+          return;
+        }
+        const session = await createSession();
+        if (!cancelled && session) {
+          router.replace(`/session/${session.session_id}`);
+        } else if (!cancelled && !session) {
+          setPageError("Failed to open a new thread.");
+        }
         return;
       }
 
@@ -401,33 +504,23 @@ export default function SessionPage() {
       }
 
       setSessionInfo(info);
+      const [messages, run, steps, artifacts] = await Promise.all([
+        getSessionMessages(sessionId),
+        getSessionRun(sessionId),
+        getSessionRunSteps(sessionId),
+        getSessionArtifacts(sessionId),
+      ]);
+      if (cancelled) return;
+      setChatItems(mapStoredMessagesToChatItems(messages));
+      setRunInfo(run);
+      setRunSteps(steps);
+      setRunArtifacts(artifacts);
 
       if (!info.is_live) {
         clearDesktop(sessionId);
-        try {
-          const archivedMessages = await listArchivedMessages(sessionId);
-          if (!cancelled) {
-            setViewMode("archived");
-            setChatItems(
-              archivedMessages.map((message) => ({
-                kind: "message" as const,
-                role: message.role,
-                text: message.text,
-                ts: message.created_at
-                  ? new Date(message.created_at).getTime()
-                  : Date.now(),
-              })),
-            );
-            setPhase("done");
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setPageError(
-              err instanceof Error
-                ? err.message
-                : "Failed to load archived messages",
-            );
-          }
+        if (!cancelled) {
+          setViewMode("archived");
+          setPhase("done");
         }
         return;
       }
@@ -439,30 +532,9 @@ export default function SessionPage() {
 
       if (!wsTicket) {
         clearDesktop(sessionId);
-        try {
-          const archivedMessages = await listArchivedMessages(sessionId);
-          if (!cancelled) {
-            setViewMode("archived");
-            setChatItems(
-              archivedMessages.map((message) => ({
-                kind: "message" as const,
-                role: message.role,
-                text: message.text,
-                ts: message.created_at
-                  ? new Date(message.created_at).getTime()
-                  : Date.now(),
-              })),
-            );
-            setPhase("done");
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setPageError(
-              err instanceof Error
-                ? err.message
-                : "Failed to load archived messages",
-            );
-          }
+        if (!cancelled) {
+          setViewMode("archived");
+          setPhase("done");
         }
         return;
       }
@@ -475,6 +547,9 @@ export default function SessionPage() {
           ws_ticket: wsTicket,
           status: info.status,
           created_at: info.created_at,
+          current_run_id: info.current_run_id,
+          run_status: info.run_status,
+          artifact_count: info.artifact_count,
         });
         setStreamUrl(info.stream_url);
 
@@ -495,6 +570,12 @@ export default function SessionPage() {
   }, [
     authLoading,
     clearDesktop,
+    createSession,
+    getSessionMessages,
+    getSessionArtifacts,
+    getResumeWorkspace,
+    getSessionRun,
+    getSessionRunSteps,
     getSession,
     isNewSession,
     refreshTicket,
@@ -520,56 +601,128 @@ export default function SessionPage() {
     }
   }, [isConnected, pendingMicStart, pendingText, sendJson, startMic, viewMode, voiceStatus]);
 
-  const startSession = useCallback(
+  useEffect(() => {
+    if (!sessionData?.session_id || viewMode !== "live" || isNewSession) {
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      const wsTicket = await refreshTicket(sessionData.session_id);
+      if (!wsTicket) {
+        return;
+      }
+      setSessionData((prev) => {
+        if (!prev || prev.ws_ticket === wsTicket) {
+          return prev;
+        }
+        return { ...prev, ws_ticket: wsTicket };
+      });
+    }, 8 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [isNewSession, refreshTicket, sessionData?.session_id, viewMode]);
+
+  const loadRunState = useCallback(async (targetSessionId: string) => {
+    const [run, steps, artifacts] = await Promise.all([
+      getSessionRun(targetSessionId),
+      getSessionRunSteps(targetSessionId),
+      getSessionArtifacts(targetSessionId),
+    ]);
+    setRunInfo(run);
+    setRunSteps(steps);
+    setRunArtifacts(artifacts);
+  }, [getSessionArtifacts, getSessionRun, getSessionRunSteps]);
+
+  const continueCurrentThread = useCallback(
     async (options?: {
       prompt?: string;
       demo?: string;
       openDesktop?: boolean;
       startMic?: boolean;
     }) => {
-      if (authLoading) return;
+      if (isNewSession || viewMode === "live" || isContinuingThread) {
+        return true;
+      }
+      if (authLoading) return false;
       if (!user) {
         router.push("/");
-        return;
+        return false;
       }
 
+      setIsContinuingThread(true);
       setPageError(null);
-      const session = await createSession();
-      if (!session) {
-        return;
-      }
-
       try {
-        const key = `nexus.pendingSessionAction:${session.session_id}`;
-        if (options?.demo) {
-          sessionStorage.setItem(
-            key,
-            JSON.stringify({ type: "demo", text: options.demo }),
-          );
-        } else if (options?.prompt) {
-          sessionStorage.setItem(
-            key,
-            JSON.stringify({ type: "prompt", text: options.prompt }),
-          );
-        } else if (options?.openDesktop) {
-          sessionStorage.setItem(key, JSON.stringify({ type: "openDesktop" }));
-        } else if (options?.startMic) {
-          sessionStorage.setItem(key, JSON.stringify({ type: "startMic" }));
+        const session = await continueSession(sessionId);
+        if (!session) {
+          return false;
         }
-      } catch {
-        // If storage is unavailable, fall back to plain navigation.
-      }
 
-      router.push(`/session/${session.session_id}`);
+        setSessionData(session);
+        setSessionInfo((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: session.status,
+                current_run_id: session.current_run_id ?? prev.current_run_id,
+                run_status: session.run_status ?? prev.run_status,
+                artifact_count: session.artifact_count ?? prev.artifact_count,
+                can_continue_conversation:
+                  session.can_continue_conversation ?? prev.can_continue_conversation,
+                exact_workspace_resume_available:
+                  session.exact_workspace_resume_available ?? prev.exact_workspace_resume_available,
+                continuation_mode:
+                  session.continuation_mode ?? prev.continuation_mode,
+              }
+            : prev,
+        );
+        setViewMode("live");
+        setActiveSurface("conversation");
+        setIsDesktopFullscreen(false);
+        setHasActivatedSession(true);
+        if (options?.openDesktop || shouldAutoResume) {
+          setIsDesktopVisible(true);
+        } else {
+          setIsDesktopVisible(false);
+        }
+        await loadRunState(sessionId);
+
+        if (options?.prompt) {
+          setPendingText(options.prompt);
+          setPhase("thinking");
+        } else if (options?.demo) {
+          setPendingText(options.demo);
+          setPhase("thinking");
+        } else if (options?.startMic) {
+          setPendingMicStart(true);
+          setPhase("listening");
+        }
+        return true;
+      } finally {
+        setIsContinuingThread(false);
+      }
     },
-    [authLoading, createSession, router, user],
+    [
+      authLoading,
+      continueSession,
+      isContinuingThread,
+      isNewSession,
+      loadRunState,
+      router,
+      sessionId,
+      shouldAutoContinue,
+      shouldAutoResume,
+      user,
+      viewMode,
+    ],
   );
 
   const sendTextOrQueue = useCallback(
     (text: string) => {
-      if (viewMode !== "live") return;
       if (isNewSession) {
-        void startSession({ prompt: text });
+        return;
+      }
+      if (viewMode === "archived") {
+        void continueCurrentThread({ prompt: text });
         return;
       }
 
@@ -588,14 +741,16 @@ export default function SessionPage() {
 
       sendJson({ type: "text_input", text });
     },
-    [hasActivatedSession, isConnected, isNewSession, sendJson, startSession, viewMode],
+    [continueCurrentThread, hasActivatedSession, isConnected, isNewSession, sendJson, viewMode],
   );
 
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
-    if (viewMode !== "live") return;
     if (isNewSession) {
-      void startSession({ startMic: true });
+      return;
+    }
+    if (viewMode === "archived") {
+      void continueCurrentThread({ startMic: true });
       return;
     }
     // Voice unavailable — no credentials on backend
@@ -633,42 +788,42 @@ export default function SessionPage() {
       setPhase("listening");
     }
   }, [
+    continueCurrentThread,
     hasActivatedSession,
     isConnected,
     isNewSession,
     isRecording,
     sendJson,
     startMic,
-    startSession,
     stopMic,
     viewMode,
     voiceStatus,
   ]);
 
   const handleTextSubmit = useCallback(() => {
-    if (viewMode !== "live") return;
     const text = textInput.trim();
     if (!text) return;
     if (isNewSession) {
-      void startSession({ prompt: text });
       setTextInput("");
       return;
     }
     sendTextOrQueue(text);
     setTextInput("");
-  }, [isNewSession, sendTextOrQueue, startSession, textInput, viewMode]);
+  }, [isNewSession, sendTextOrQueue, textInput]);
 
   const handleShowDesktop = useCallback(() => {
-    if (viewMode !== "live") return;
     if (isNewSession) {
-      void startSession({ openDesktop: true });
+      return;
+    }
+    if (viewMode === "archived") {
+      void continueCurrentThread({ openDesktop: true });
       return;
     }
     setIsDesktopVisible(true);
     if (!hasActivatedSession) {
       setHasActivatedSession(true);
     }
-  }, [hasActivatedSession, isNewSession, startSession, viewMode]);
+  }, [continueCurrentThread, hasActivatedSession, isNewSession, viewMode]);
 
   const handleHideDesktop = useCallback(() => {
     setIsDesktopVisible(false);
@@ -689,14 +844,16 @@ export default function SessionPage() {
 
   const handleDemo = useCallback(
     (text: string) => {
-      if (viewMode !== "live") return;
       if (isNewSession) {
-        void startSession({ demo: text });
+        return;
+      }
+      if (viewMode === "archived") {
+        void continueCurrentThread({ demo: text });
         return;
       }
       sendTextOrQueue(text);
     },
-    [isNewSession, sendTextOrQueue, startSession, viewMode],
+    [continueCurrentThread, isNewSession, sendTextOrQueue, viewMode],
   );
 
   const handlePermissionRespond = useCallback(
@@ -772,6 +929,20 @@ export default function SessionPage() {
     viewMode,
   ]);
 
+  useEffect(() => {
+    if (
+      isNewSession ||
+      (!shouldAutoResume && !shouldAutoContinue) ||
+      viewMode !== "archived" ||
+      autoResumeTriggeredRef.current
+    ) {
+      return;
+    }
+    autoResumeTriggeredRef.current = true;
+    setActiveSurface("conversation");
+    void continueCurrentThread(shouldAutoResume ? { openDesktop: true } : undefined);
+  }, [continueCurrentThread, isNewSession, shouldAutoContinue, shouldAutoResume, viewMode]);
+
   const handleEnd = async () => {
     audioPlayer.current.stop();
     stopMic();
@@ -789,6 +960,14 @@ export default function SessionPage() {
     }
     router.push("/dashboard");
   };
+
+  const handleContinueArchivedThread = useCallback(() => {
+    if (isNewSession) {
+      return;
+    }
+    setActiveSurface("conversation");
+    void continueCurrentThread();
+  }, [continueCurrentThread, isNewSession]);
 
   /* ---- Render ---- */
   const hasConversationStarted =
@@ -837,15 +1016,27 @@ export default function SessionPage() {
             <div className="max-w-3xl w-full flex flex-col items-center gap-8 mb-20 mt-10">
               <div className="text-center space-y-4">
                 <h1 className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
-                  Welcome to Nexus
+                  {isNewSession ? "Opening your thread" : "Welcome to Nexus"}
                 </h1>
                 <p className="text-[15px] text-zinc-500">
-                  What can I help you with?
+                  {isNewSession
+                    ? "Restoring your latest workspace or preparing a new thread."
+                    : "What can I help you with?"}
                 </p>
               </div>
 
+              {isNewSession ? (
+                <div className="flex flex-col items-center gap-4 rounded-3xl border border-zinc-200 bg-white/80 px-8 py-8 text-center shadow-sm dark:border-[#2f2f35] dark:bg-[#16161b]">
+                  <div className="h-8 w-8 rounded-full border-4 border-cyan-600 border-t-transparent animate-spin" />
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                    Auto-resume is enabled. Nexus is reopening the latest thread with the lowest-cost available workspace path.
+                  </p>
+                </div>
+              ) : null}
+
               {/* Floating Input Box */}
-              <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
+              {!isNewSession ? (
+                <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
                 <div className="relative flex flex-col bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl shadow-sm focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all duration-300 p-2">
                   <div className="relative min-h-[60px] flex items-center px-2">
                     <textarea
@@ -910,9 +1101,10 @@ export default function SessionPage() {
                   </div>
                 </div>
               </div>
+              ) : null}
 
               {/* Demo picker */}
-              {viewMode === "live" && (
+              {viewMode === "live" && !isNewSession && (
                 <div className="w-full max-w-4xl mx-auto mt-4 relative">
                   <DemoPicker onSelect={handleDemo} disabled={false} />
                 </div>
@@ -961,6 +1153,15 @@ export default function SessionPage() {
               </div>
 
               <div className="flex items-center gap-2">
+                {viewMode === "archived" && (
+                  <button
+                    suppressHydrationWarning
+                    onClick={handleContinueArchivedThread}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-cyan-600 text-white border border-cyan-700 hover:bg-cyan-700 transition-all duration-200"
+                  >
+                    Continue Here
+                  </button>
+                )}
                 {viewMode === "live" && (
                   <button
                     suppressHydrationWarning
@@ -1038,27 +1239,83 @@ export default function SessionPage() {
                   </div>
                 )}
 
+                <div className="shrink-0 border-b border-zinc-200/80 px-4 py-3 dark:border-white/5">
+                  <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {([
+                        { id: "conversation", label: "Conversation" },
+                        { id: "run_log", label: "Run Log" },
+                        { id: "outputs", label: "Outputs" },
+                      ] as const).map((surface) => (
+                        <button
+                          key={surface.id}
+                          onClick={() => setActiveSurface(surface.id)}
+                          className={`rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] transition-colors ${
+                            activeSurface === surface.id
+                              ? "bg-zinc-900 text-white dark:bg-white dark:text-black"
+                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                          }`}
+                        >
+                          {surface.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="text-xs text-zinc-500">
+                      {runInfo?.status ? `Run ${runInfo.status}` : "Run queued"}
+                    </div>
+                  </div>
+                </div>
+
                 {/* Feed container */}
                 <div className="flex-1 overflow-hidden">
-                  {viewMode === "archived" && chatItems.length === 0 ? (
-                    <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
-                      <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                        Archived session
-                      </p>
-                      <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
-                        The live desktop is no longer attached. You can review the saved transcript below.
-                      </p>
-                      {sessionInfo?.summary && (
-                        <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-                          {sessionInfo.summary}
+                  {activeSurface === "conversation" ? (
+                    viewMode === "archived" && chatItems.length === 0 ? (
+                      <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
+                        <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                          Archived session
                         </p>
-                      )}
-                    </div>
+                        <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
+                          The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
+                        </p>
+                        {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
+                          <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                            {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
+                          </p>
+                        )}
+                        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                          <button
+                            onClick={handleContinueArchivedThread}
+                            className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
+                          >
+                            Continue Here
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <UnifiedChatPanel
+                        items={chatItems}
+                        isThinking={phase === "thinking"}
+                        onPermissionRespond={handlePermissionRespond}
+                      />
+                    )
+                  ) : activeSurface === "run_log" ? (
+                    <RunLogPanel
+                      run={runInfo}
+                      steps={runSteps}
+                      emptyState={
+                        viewMode === "archived"
+                          ? "This archived session does not have a stored run log yet."
+                          : "Waiting for the first persisted run step."
+                      }
+                    />
                   ) : (
-                    <UnifiedChatPanel
-                      items={chatItems}
-                      isThinking={phase === "thinking"}
-                      onPermissionRespond={handlePermissionRespond}
+                    <OutputsPanel
+                      artifacts={runArtifacts}
+                      emptyState={
+                        viewMode === "archived"
+                          ? "This archived session does not have stored outputs yet."
+                          : "Outputs from this run will appear here."
+                      }
                     />
                   )}
                 </div>
