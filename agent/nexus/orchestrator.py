@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import hashlib
 import logging
 from typing import TYPE_CHECKING, Any
@@ -442,45 +443,124 @@ class NexusOrchestrator:
         msg = str(exc).lower()
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
+    def _task_model_candidates(self) -> tuple[str, ...]:
+        primary = self.runtime_config.gemini_agent_model
+        if self.runtime_config.gemini_provider != "apiKey":
+            return (primary,)
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for model in (primary, *self.runtime_config.gemini_agent_fallback_models):
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            ordered.append(model)
+        return tuple(ordered) or (primary,)
+
+    def _rate_limit_source_label(self) -> str:
+        return "Vertex AI" if self.runtime_config.use_vertex_ai else "Gemini API"
+
+    def _rebuild_agent_for_task_model(self, task_model: str) -> None:
+        if task_model == self.runtime_config.gemini_agent_model:
+            return
+
+        self.runtime_config = replace(self.runtime_config, gemini_agent_model=task_model)
+        self.session.runtime_config = self.runtime_config
+        set_runtime_config(self.runtime_config)
+
+        if settings.use_multi_agent:
+            self._agent = create_multi_agent(self.runtime_config, task_model_override=task_model)
+        else:
+            self._agent = create_agent(self.runtime_config, task_model_override=task_model)
+        self._runner, self._session_service = create_runner(
+            self._agent,
+            session_service=self._session_service,
+        )
+        logger.info(
+            "Switched task model for session %s to %s",
+            self.session.id,
+            task_model,
+        )
+
     async def _run_agent_with_retry(self, message: str):
         """Run agent turn with automatic retry on rate-limit (429) errors.
 
         Uses exponential backoff (10s, 20s, 40s, 80s) to avoid hammering the
-        Vertex AI quota endpoint while it recovers.
+        active provider while it recovers. API-key sessions can also fall back
+        to alternate task models after retries are exhausted.
         """
         last_exc: Exception | None = None
-        for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
-            try:
-                return await run_agent_turn(
-                    runner=self._runner,
-                    session_service=self._session_service,
-                    session_id=self._adk_session_id,
-                    user_id=self._user_id,
-                    message=message,
-                    runtime_config=self.runtime_config,
-                    event_callback=self._on_agent_event,
-                )
-            except _AgentStopped:
-                raise
-            except Exception as exc:
-                if not self._is_rate_limit_error(exc):
-                    raise
-                last_exc = exc
-                wait = self._RATE_LIMIT_BASE_WAIT * (2 ** (attempt - 1))  # 10, 20, 40, 80 s
-                logger.warning(
-                    "Rate limited (attempt %d/%d) for session %s — waiting %.0fs: %s",
-                    attempt, self._RATE_LIMIT_MAX_RETRIES, self.session.id, wait, exc,
-                )
-                await self._send_json({
-                    "type": "agent_thinking",
-                    "content": (
-                        f"⏳ Temporarily rate-limited by Vertex AI — backing off {wait:.0f}s "
-                        f"(attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})..."
-                    ),
-                })
-                await asyncio.sleep(wait)
+        model_candidates = self._task_model_candidates()
 
-        raise RuntimeError(f"Rate limit exceeded after {self._RATE_LIMIT_MAX_RETRIES} retries: {last_exc}")
+        for model_index, task_model in enumerate(model_candidates, start=1):
+            if task_model != self.runtime_config.gemini_agent_model:
+                self._rebuild_agent_for_task_model(task_model)
+
+            for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
+                try:
+                    return await run_agent_turn(
+                        runner=self._runner,
+                        session_service=self._session_service,
+                        session_id=self._adk_session_id,
+                        user_id=self._user_id,
+                        message=message,
+                        runtime_config=self.runtime_config,
+                        event_callback=self._on_agent_event,
+                    )
+                except _AgentStopped:
+                    raise
+                except Exception as exc:
+                    if not self._is_rate_limit_error(exc):
+                        raise
+
+                    last_exc = exc
+                    is_last_retry = attempt == self._RATE_LIMIT_MAX_RETRIES
+                    has_next_model = model_index < len(model_candidates)
+
+                    if is_last_retry:
+                        if has_next_model:
+                            next_model = model_candidates[model_index]
+                            logger.warning(
+                                "Task model %s exhausted retries for session %s — switching to %s: %s",
+                                task_model,
+                                self.session.id,
+                                next_model,
+                                exc,
+                            )
+                            await self._send_json({
+                                "type": "agent_thinking",
+                                "content": (
+                                    f"Task model {task_model} hit quota limits. "
+                                    f"Switching to fallback model {next_model}."
+                                ),
+                            })
+                            break
+                        continue
+
+                    wait = self._RATE_LIMIT_BASE_WAIT * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Rate limited (attempt %d/%d model=%s) for session %s — waiting %.0fs: %s",
+                        attempt,
+                        self._RATE_LIMIT_MAX_RETRIES,
+                        task_model,
+                        self.session.id,
+                        wait,
+                        exc,
+                    )
+                    await self._send_json({
+                        "type": "agent_thinking",
+                        "content": (
+                            f"Temporarily rate-limited by {self._rate_limit_source_label()} "
+                            f"on {task_model} — backing off {wait:.0f}s "
+                            f"(attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})..."
+                        ),
+                    })
+                    await asyncio.sleep(wait)
+
+        raise RuntimeError(
+            "Rate limit exceeded after retries across task models "
+            f"{', '.join(model_candidates)}: {last_exc}"
+        )
 
     async def _build_turn_input(self, text: str) -> str:
         """Build the next turn input with compact resume context injected once."""

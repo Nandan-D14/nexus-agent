@@ -44,6 +44,11 @@ class Settings(BaseSettings):
 
     # Gemini models
     gemini_agent_model: str = "gemini-3-flash-preview"
+    gemini_api_key_agent_model: str = "gemini-3.1-pro-preview"
+    gemini_api_key_agent_fallback_models: str = (
+        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,"
+        "gemini-2.5-pro,gemini-2.5-flash"
+    )
     gemini_light_model: str = "gemini-3.1-flash-lite-preview"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"

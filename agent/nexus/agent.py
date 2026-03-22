@@ -7,7 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import TYPE_CHECKING
 
@@ -51,18 +51,34 @@ def _get_model(runtime_config: SessionRuntimeConfig):
     )
 
 
-def create_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def _runtime_for_task_model(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> SessionRuntimeConfig:
+    if not task_model_override or task_model_override == runtime_config.gemini_agent_model:
+        return runtime_config
+    return replace(runtime_config, gemini_agent_model=task_model_override)
+
+
+def create_agent(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> Agent:
     """Create the single NEXUS ADK agent with all desktop control tools."""
+    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
     agent = Agent(
         name="nexus",
-        model=_get_model(runtime_config),
+        model=_get_model(effective_runtime_config),
         instruction=SYSTEM_PROMPT,
         tools=ALL_TOOLS,
     )
     return agent
 
 
-def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def create_multi_agent(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> Agent:
     """Create a hierarchical multi-agent system.
 
     Returns the top-level orchestrator agent which delegates to:
@@ -70,6 +86,7 @@ def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
       - browser_agent (web browsing)
       - code_agent (terminal & code)
     """
+    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
     from nexus.agents import (
         create_browser_agent,
         create_code_agent,
@@ -78,12 +95,12 @@ def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     )
     from nexus.tools.bg_task import request_background_task
 
-    computer = create_computer_agent(runtime_config)
-    browser = create_browser_agent(runtime_config)
-    code = create_code_agent(runtime_config)
+    computer = create_computer_agent(effective_runtime_config)
+    browser = create_browser_agent(effective_runtime_config)
+    code = create_code_agent(effective_runtime_config)
 
     orchestrator = create_orchestrator_agent(
-        runtime_config=runtime_config,
+        runtime_config=effective_runtime_config,
         computer_agent=computer,
         browser_agent=browser,
         code_agent=code,
@@ -93,9 +110,12 @@ def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
     return orchestrator
 
 
-def create_runner(agent: Agent) -> tuple[Runner, InMemorySessionService]:
+def create_runner(
+    agent: Agent,
+    session_service: InMemorySessionService | None = None,
+) -> tuple[Runner, InMemorySessionService]:
     """Create a Runner for executing agent turns."""
-    session_service = InMemorySessionService()
+    session_service = session_service or InMemorySessionService()
     runner = Runner(
         agent=agent,
         app_name="nexus",
