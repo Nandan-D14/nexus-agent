@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - 'main'
+      - 'developer'
+      - 'fix-cicd-pipeline'
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -29,6 +31,8 @@ jobs:
         uses: 'google-github-actions/auth@v2'
         with:
           workload_identity_provider: '${{ env.WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+          token_format: 'access_token'
 
       - name: 'Set up Cloud SDK'
         uses: 'google-github-actions/setup-gcloud@v2'
@@ -37,7 +41,7 @@ jobs:
         uses: 'docker/login-action@v3'
         with:
           username: 'oauth2accesstoken'
-          password: '${{ steps.auth.outputs.auth_token }}'
+          password: '${{ steps.auth.outputs.access_token }}'
           registry: '${{ env.REGION }}-docker.pkg.dev'
 
       - name: 'Ensure Artifact Registry repository exists'
@@ -48,13 +52,11 @@ jobs:
             --location="${{ env.REGION }}" \
             --description="NEXUS container images" 2>/dev/null || true
 
-      - name: 'Build Agent Image (Cloud Build)'
+      - name: 'Build and Push Agent Image'
         run: |-
           AGENT_IMAGE="${{ env.AR_REPO }}/nexus-agent:${{ github.sha }}"
-          gcloud builds submit \
-            --project="${{ env.PROJECT_ID }}" \
-            --tag="${AGENT_IMAGE}" \
-            ./agent
+          docker build -t "${AGENT_IMAGE}" ./agent
+          docker push "${AGENT_IMAGE}"
           echo "AGENT_IMAGE=${AGENT_IMAGE}" >> $GITHUB_ENV
 
       - name: 'Deploy Agent to Cloud Run'
@@ -101,14 +103,20 @@ jobs:
           echo "AGENT_URL=${AGENT_URL}" >> $GITHUB_ENV
           echo "AGENT_WS_URL=${AGENT_WS_URL}" >> $GITHUB_ENV
 
-      - name: 'Build Frontend Image (Cloud Build)'
+      - name: 'Build and Push Frontend Image'
         run: |-
           FRONTEND_IMAGE="${{ env.AR_REPO }}/nexus-frontend:${{ github.sha }}"
-          gcloud builds submit \
-            --project="${{ env.PROJECT_ID }}" \
-            --config="./frontend/cloudbuild.yaml" \
-            --substitutions="_IMAGE=${FRONTEND_IMAGE},_NEXT_PUBLIC_FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }},_NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ secrets.FIREBASE_AUTH_DOMAIN }},_NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }},_NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ secrets.FIREBASE_STORAGE_BUCKET }},_NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }},_NEXT_PUBLIC_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }},_NEXT_PUBLIC_USE_FIREBASE_EMULATORS=false,_NEXT_PUBLIC_AGENT_WS_URL=${{ env.AGENT_WS_URL }}" \
-            ./frontend
+          docker build \
+            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY="${{ secrets.FIREBASE_API_KEY }}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${{ secrets.FIREBASE_AUTH_DOMAIN }}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID="${{ secrets.FIREBASE_PROJECT_ID }}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET="${{ secrets.FIREBASE_STORAGE_BUCKET }}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID="${{ secrets.FIREBASE_APP_ID }}" \
+            --build-arg NEXT_PUBLIC_USE_FIREBASE_EMULATORS=false \
+            --build-arg NEXT_PUBLIC_AGENT_WS_URL="${{ env.AGENT_WS_URL }}" \
+            -t "${FRONTEND_IMAGE}" ./frontend
+          docker push "${FRONTEND_IMAGE}"
           echo "FRONTEND_IMAGE=${FRONTEND_IMAGE}" >> $GITHUB_ENV
 
       - name: 'Deploy Frontend to Cloud Run'
