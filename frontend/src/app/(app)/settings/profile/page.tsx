@@ -4,28 +4,24 @@ import { useAuth } from "@/lib/auth-context";
 import { Mail, Monitor, Moon, Sun, Cloud, HardDrive } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "next-themes";
-import { db } from "@/lib/firebase-client";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import {
+  disconnectGoogleDrive,
+  fetchGoogleDriveAuthUrl,
+  fetchUserSettings,
+} from "@/lib/user-settings";
 
 export default function ProfileSettingsPage() {
   const { user } = useAuth();
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [loadingDrive, setLoadingDrive] = useState(false);
-  
-  // Google Drive state
   const [driveConnected, setDriveConnected] = useState(false);
 
   const checkDriveStatus = useCallback(async () => {
     if (!user) return;
     try {
-      const docSnap = await getDoc(doc(db, "users", user.uid));
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.googleDriveTokens) {
-          setDriveConnected(true);
-        }
-      }
+      const settings = await fetchUserSettings();
+      setDriveConnected(settings.googleDriveConnected);
     } catch (err) {
       console.error("Failed to check Drive status:", err);
     }
@@ -34,11 +30,39 @@ export default function ProfileSettingsPage() {
   useEffect(() => {
     setMounted(true);
     void checkDriveStatus();
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+      if (event.data?.type === "google_drive_connected") {
+        setDriveConnected(true);
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
   }, [checkDriveStatus]);
 
-  const handleConnectDrive = () => {
+  const handleConnectDrive = async () => {
     if (!user) return;
-    window.location.href = `/api/auth/google-drive/init?uid=${user.uid}`;
+
+    setLoadingDrive(true);
+    try {
+      const authUrl = await fetchGoogleDriveAuthUrl();
+      const popup = window.open(
+        authUrl,
+        "google-drive-oauth",
+        "width=560,height=720,resizable=yes,scrollbars=yes",
+      );
+      if (!popup) {
+        window.location.href = authUrl;
+      }
+    } catch (err) {
+      console.error("Failed to start Drive connection:", err);
+      alert("Failed to start Google Drive connection.");
+    } finally {
+      setLoadingDrive(false);
+    }
   };
 
   const handleDisconnectDrive = async () => {
@@ -46,9 +70,7 @@ export default function ProfileSettingsPage() {
     
     setLoadingDrive(true);
     try {
-      await setDoc(doc(db, "users", user.uid), {
-        googleDriveTokens: null
-      }, { merge: true });
+      await disconnectGoogleDrive();
       setDriveConnected(false);
     } catch (err) {
       console.error("Failed to disconnect Drive:", err);
@@ -145,10 +167,11 @@ export default function ProfileSettingsPage() {
           {!driveConnected ? (
             <button
               onClick={handleConnectDrive}
+              disabled={loadingDrive}
               className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium text-sm transition-all hover:opacity-90"
             >
               <HardDrive className="w-4 h-4" />
-              Connect Google Drive via OAuth
+              {loadingDrive ? "Connecting..." : "Connect Google Drive via OAuth"}
             </button>
           ) : (
             <div className="space-y-4">

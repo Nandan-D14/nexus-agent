@@ -130,6 +130,12 @@ class FirestoreHistoryRepository:
     def _db(self):
         return get_firestore_client()
 
+    def _user_public_ref(self, uid: str):
+        return self._db.collection("users").document(uid)
+
+    def _user_private_ref(self, uid: str):
+        return self._db.collection("userPrivate").document(uid)
+
     @staticmethod
     def _coerce_datetime(value: Any) -> datetime | None:
         if value is None:
@@ -153,6 +159,78 @@ class FirestoreHistoryRepository:
             "total": 0,
             "bySource": {},
         }
+
+    @staticmethod
+    def _expand_dot_notation_updates(updates: dict[str, Any]) -> dict[str, Any]:
+        nested_updates: dict[str, Any] = {}
+        for key, value in updates.items():
+            if "." not in key:
+                nested_updates[key] = value
+                continue
+
+            parts = key.split(".")
+            current = nested_updates
+            for part in parts[:-1]:
+                current = current.setdefault(part, {})
+            current[parts[-1]] = value
+        return nested_updates
+
+    def _apply_document_updates_sync(self, ref, updates: dict[str, Any]) -> None:
+        if not updates:
+            return
+        try:
+            ref.update(updates)
+        except Exception:
+            ref.set(self._expand_dot_notation_updates(updates), merge=True)
+
+    @staticmethod
+    def _is_private_user_setting_key(key: str) -> bool:
+        return (
+            key == "byok"
+            or key.startswith("byok.")
+            or key == "googleDriveRefreshToken"
+            or key.startswith("googleDriveRefreshToken.")
+        )
+
+    @classmethod
+    def _partition_user_settings_updates(
+        cls,
+        updates: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        public_updates: dict[str, Any] = {}
+        private_updates: dict[str, Any] = {}
+        for key, value in updates.items():
+            if cls._is_private_user_setting_key(key):
+                private_updates[key] = value
+            else:
+                public_updates[key] = value
+        return public_updates, private_updates
+
+    def _cleanup_public_user_sensitive_fields_sync(
+        self,
+        uid: str,
+        *,
+        delete_byok: bool = False,
+        delete_google_drive_refresh_token: bool = False,
+        delete_google_drive_tokens: bool = False,
+    ) -> None:
+        updates: dict[str, Any] = {}
+        if delete_byok:
+            updates["byok"] = firestore.DELETE_FIELD
+        if delete_google_drive_refresh_token:
+            updates["googleDriveRefreshToken"] = firestore.DELETE_FIELD
+        if delete_google_drive_tokens:
+            updates["googleDriveTokens"] = firestore.DELETE_FIELD
+        if not updates:
+            return
+
+        public_ref = self._user_public_ref(uid)
+        snapshot = public_ref.get()
+        if not snapshot.exists:
+            return
+
+        updates["updatedAt"] = utcnow()
+        public_ref.update(updates)
 
     @classmethod
     def _coerce_token_totals(cls, value: Any) -> dict[str, Any]:
@@ -1049,7 +1127,7 @@ class FirestoreHistoryRepository:
 
     def _upsert_user_sync(self, user: AuthenticatedUser) -> None:
         now = utcnow()
-        ref = self._db.collection("users").document(user.uid)
+        ref = self._user_public_ref(user.uid)
         base_payload: dict[str, Any] = {
             "uid": user.uid,
             "email": user.email,
@@ -2153,33 +2231,74 @@ class FirestoreHistoryRepository:
         return results
 
     def _get_user_settings_sync(self, uid: str) -> dict[str, Any]:
-        doc = self._db.collection("users").document(uid).get()
-        if not doc.exists:
-            return {}
-        return doc.to_dict()
+        public_ref = self._user_public_ref(uid)
+        private_ref = self._user_private_ref(uid)
+
+        public_doc = public_ref.get()
+        private_doc = private_ref.get()
+
+        public_data = public_doc.to_dict() or {}
+        private_data = private_doc.to_dict() or {}
+
+        private_updates: dict[str, Any] = {}
+        delete_byok = False
+        delete_google_drive_refresh_token = False
+        delete_google_drive_tokens = False
+
+        legacy_byok = public_data.get("byok")
+        if isinstance(legacy_byok, dict):
+            if not isinstance(private_data.get("byok"), dict):
+                private_updates["byok"] = legacy_byok
+            delete_byok = True
+
+        if "googleDriveRefreshToken" in public_data:
+            if "googleDriveRefreshToken" not in private_data:
+                private_updates["googleDriveRefreshToken"] = public_data.get("googleDriveRefreshToken")
+            delete_google_drive_refresh_token = True
+
+        if "googleDriveTokens" in public_data:
+            delete_google_drive_tokens = True
+
+        if private_updates:
+            private_updates["updatedAt"] = utcnow()
+            self._apply_document_updates_sync(private_ref, private_updates)
+            private_data = {**private_data, **private_updates}
+
+        if delete_byok or delete_google_drive_refresh_token or delete_google_drive_tokens:
+            self._cleanup_public_user_sensitive_fields_sync(
+                uid,
+                delete_byok=delete_byok,
+                delete_google_drive_refresh_token=delete_google_drive_refresh_token,
+                delete_google_drive_tokens=delete_google_drive_tokens,
+            )
+            public_data.pop("byok", None)
+            public_data.pop("googleDriveRefreshToken", None)
+            public_data.pop("googleDriveTokens", None)
+
+        merged = dict(public_data)
+        merged.update(private_data)
+        return merged
 
     def _update_user_settings_sync(self, uid: str, updates: dict[str, Any]) -> None:
-        # updates can contain nested dot-notation fields like "settings.voiceId" 
-        # which firestore handles natively in update() but for set(merge=True) we need to pass a dict
-        # Actually set(merge=True) requires a nested dict if using dict format, OR we can use update()
-        ref = self._db.collection("users").document(uid)
-        
-        # We'll try update first, if doc not found we'll fallback to creating it
-        try:
-            ref.update(updates)
-        except Exception:
-            # Simple conversion of dot-notation for merge=True fallback (basic)
-            nested_updates = {}
-            for k, v in updates.items():
-                if "." in k:
-                    parts = k.split(".")
-                    curr = nested_updates
-                    for part in parts[:-1]:
-                        curr = curr.setdefault(part, {})
-                    curr[parts[-1]] = v
-                else:
-                    nested_updates[k] = v
-            ref.set(nested_updates, merge=True)
+        public_updates, private_updates = self._partition_user_settings_updates(updates)
+        now = utcnow()
+
+        if public_updates:
+            public_updates.setdefault("updatedAt", now)
+            self._apply_document_updates_sync(self._user_public_ref(uid), public_updates)
+
+        if private_updates:
+            private_updates.setdefault("updatedAt", now)
+            self._apply_document_updates_sync(self._user_private_ref(uid), private_updates)
+            self._cleanup_public_user_sensitive_fields_sync(
+                uid,
+                delete_byok=any(key == "byok" or key.startswith("byok.") for key in private_updates),
+                delete_google_drive_refresh_token=any(
+                    key == "googleDriveRefreshToken" or key.startswith("googleDriveRefreshToken.")
+                    for key in private_updates
+                ),
+                delete_google_drive_tokens="googleDriveRefreshToken" in private_updates,
+            )
 
     def _get_beta_application_sync(self, uid: str) -> dict[str, Any] | None:
         doc = self._db.collection("betaApplications").document(uid).get()
@@ -2506,7 +2625,7 @@ class FirestoreHistoryRepository:
         return self._get_workspace_state_sync(owner_id).get("sandbox_id")
 
     def _get_workspace_state_sync(self, owner_id: str) -> dict[str, str | None]:
-        doc = self._db.collection("users").document(owner_id).get()
+        doc = self._user_public_ref(owner_id).get()
         if not doc.exists:
             return {"sandbox_id": None, "session_id": None}
         data = doc.to_dict() or {}
@@ -2524,7 +2643,7 @@ class FirestoreHistoryRepository:
         previous_session_id = state.get("session_id")
         now = utcnow()
         batch = self._db.batch()
-        user_ref = self._db.collection("users").document(owner_id)
+        user_ref = self._user_public_ref(owner_id)
         batch.set(
             user_ref,
             {

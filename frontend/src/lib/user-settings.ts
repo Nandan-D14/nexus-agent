@@ -24,6 +24,7 @@ export type UserSettingsResponse = {
 };
 
 export type UserSettingsUpdatePayload = {
+  settings?: Record<string, unknown>;
   byok?: {
     e2bApiKey?: string | null;
     geminiApiKey?: string | null;
@@ -62,4 +63,28 @@ export async function updateUserSettings(
   }
 
   return (await response.json()) as UserSettingsResponse;
+}
+
+export async function fetchGoogleDriveAuthUrl(): Promise<string> {
+  const response = await authenticatedFetch("/api/v1/auth/google-drive/url");
+  if (!response.ok) {
+    const error = await readApiError(response);
+    throw new Error(error.message);
+  }
+
+  const body = (await response.json()) as { auth_url?: string };
+  if (!body.auth_url) {
+    throw new Error("Google Drive auth URL was not returned.");
+  }
+  return body.auth_url;
+}
+
+export async function disconnectGoogleDrive(): Promise<void> {
+  const response = await authenticatedFetch("/api/v1/auth/google-drive", {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const error = await readApiError(response);
+    throw new Error(error.message);
+  }
 }
