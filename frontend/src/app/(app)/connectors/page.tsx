@@ -21,7 +21,7 @@ import { motion } from "framer-motion";
 const CONNECTORS = [
   { 
     name: "Google Drive", 
-    description: "Access and manage your cloud files directly from Nexus.", 
+    description: "Access and manage your cloud files directly from CoComputer.", 
     icon: Cloud, 
     color: "text-blue-500", 
     bg: "bg-blue-500/10" 
