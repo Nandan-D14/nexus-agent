@@ -1436,10 +1436,16 @@ class NexusOrchestrator:
         self._stop_requested = True
 
     def _ws_is_open(self) -> bool:
+        ws = getattr(self, "ws", None)
+        if ws is None:
+            return False
+
+        client_state = getattr(ws, "client_state", WebSocketState.CONNECTED)
+        application_state = getattr(ws, "application_state", WebSocketState.CONNECTED)
         return (
-            getattr(self, "_ws_connected", False)
-            and getattr(self.ws, "client_state", None) == WebSocketState.CONNECTED
-            and getattr(self.ws, "application_state", None) == WebSocketState.CONNECTED
+            getattr(self, "_ws_connected", True)
+            and client_state == WebSocketState.CONNECTED
+            and application_state == WebSocketState.CONNECTED
         )
 
     def _raise_if_agent_should_stop(self) -> None:
