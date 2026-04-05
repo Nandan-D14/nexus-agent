@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch } from "@/lib/api-client";
 
@@ -11,33 +11,69 @@ export const dynamic = "force-dynamic";
  * Reads query params from window.location.search (client-only popup).
  */
 export default function GoogleDriveCallbackPage() {
+  const hydrated = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
   const { user, isLoading } = useAuth();
-  const [status, setStatus] = useState<"pending" | "success" | "error">("pending");
-  const [message, setMessage] = useState("Connecting Google Drive...");
+  const [exchangeStatus, setExchangeStatus] = useState<"pending" | "success" | "error">("pending");
+  const [exchangeMessage, setExchangeMessage] = useState("Connecting Google Drive...");
+
+  const { code, state, oauthError } = useMemo(() => {
+    if (!hydrated) {
+      return {
+        code: null,
+        state: null,
+        oauthError: null,
+      };
+    }
+    const params = new URLSearchParams(window.location.search);
+    return {
+      code: params.get("code"),
+      state: params.get("state"),
+      oauthError: params.get("error"),
+    };
+  }, [hydrated]);
+
+  const preflight = useMemo(() => {
+    if (isLoading) {
+      return {
+        canExchange: false,
+        status: "pending" as const,
+        message: "Connecting Google Drive...",
+      };
+    }
+    if (oauthError) {
+      return {
+        canExchange: false,
+        status: "error" as const,
+        message: `Google refused access: ${oauthError}`,
+      };
+    }
+    if (!code || !state) {
+      return {
+        canExchange: false,
+        status: "error" as const,
+        message: "Missing code or state in redirect URL.",
+      };
+    }
+    if (!user) {
+      return {
+        canExchange: false,
+        status: "error" as const,
+        message: "Not authenticated. Please log in first.",
+      };
+    }
+    return {
+      canExchange: true,
+      status: "pending" as const,
+      message: "Connecting Google Drive...",
+    };
+  }, [code, isLoading, oauthError, state, user]);
 
   useEffect(() => {
-    if (isLoading) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    const state = params.get("state");
-    const error = params.get("error");
-
-    if (error) {
-      setStatus("error");
-      setMessage(`Google refused access: ${error}`);
-      return;
-    }
-
-    if (!code || !state) {
-      setStatus("error");
-      setMessage("Missing code or state in redirect URL.");
-      return;
-    }
-
-    if (!user) {
-      setStatus("error");
-      setMessage("Not authenticated. Please log in first.");
+    if (!preflight.canExchange || !code || !state) {
       return;
     }
 
@@ -47,18 +83,21 @@ export default function GoogleDriveCallbackPage() {
       body: JSON.stringify({ code, state }),
     })
       .then(() => {
-        setStatus("success");
-        setMessage("Google Drive connected!");
+        setExchangeStatus("success");
+        setExchangeMessage("Google Drive connected!");
         if (window.opener) {
           window.opener.postMessage({ type: "google_drive_connected" }, window.location.origin);
           setTimeout(() => window.close(), 1200);
         }
       })
       .catch((err: unknown) => {
-        setStatus("error");
-        setMessage(`Connection failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+        setExchangeStatus("error");
+        setExchangeMessage(`Connection failed: ${err instanceof Error ? err.message : "Unknown error"}`);
       });
-  }, [isLoading, user]);
+  }, [code, preflight.canExchange, state]);
+
+  const status = preflight.canExchange ? exchangeStatus : preflight.status;
+  const message = preflight.canExchange ? exchangeMessage : preflight.message;
 
   const color =
     status === "success"

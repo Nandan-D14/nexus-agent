@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NEXUS — AI Desktop Agent",
+  title: "CoComputer — AI Desktop Agent",
   description: "Voice-controlled AI agent with full Linux desktop access",
 };
 

@@ -11,10 +11,12 @@ import {
   Menu,
   PlusCircle,
   Settings,
+  Workflow,
   X,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch } from "@/lib/api-client";
+import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "@/lib/message-types";
 
 /* ------------------------------------------------------------------ */
 /*  Nav items                                                          */
@@ -23,6 +25,7 @@ import { authenticatedFetch } from "@/lib/api-client";
 const NAV_ITEMS = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/history", icon: History, label: "History" },
+  { href: "/templates", icon: Workflow, label: "Templates" },
   { href: "/connectors", icon: Cable, label: "Connectors" },
   { href: "/settings/api", icon: Settings, label: "Settings" },
 ] as const;
@@ -35,7 +38,7 @@ export function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
-  const [quota, setQuota] = useState<{ limit: number; used: number; remaining: number } | null>(null);
+  const [quota, setQuota] = useState<PlanQuota | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const isMobileViewport = () => typeof window !== "undefined" && window.innerWidth < 768;
@@ -44,9 +47,15 @@ export function SessionNavSidebar() {
     if (!user) return;
     authenticatedFetch("/api/v1/user/quota")
       .then(async (res) => {
-        if (res.ok) setQuota(await res.json());
+        if (res.ok) {
+          setQuota((await res.json()) as PlanQuota);
+          return;
+        }
+        setQuota(DEFAULT_PLAN_QUOTA);
       })
-      .catch(() => {});
+      .catch(() => {
+        setQuota(DEFAULT_PLAN_QUOTA);
+      });
   }, [user]);
 
   const handleSignOut = async () => {
@@ -99,9 +108,9 @@ export function SessionNavSidebar() {
       >
       <div className="p-4 md:p-6 pb-2">
         <div className="flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 px-2 group" title="NEXUS — New Session">
+          <Link href="/" className="flex items-center gap-3 px-2 group" title="CoComputer — New Session">
             <span className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-              Nexus
+              CoComputer
             </span>
           </Link>
           <button
@@ -158,7 +167,7 @@ export function SessionNavSidebar() {
         <div className="px-4 pb-2">
           <div className="rounded-xl bg-background dark:bg-white/5 border border-card-border dark:border-white/10 px-3 py-2.5">
             <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.15em] text-muted dark:text-zinc-500 mb-1.5">
-              <span>Free Tier</span>
+              <span>$5 Starter</span>
               <span
                 className={
                   quota.remaining <= 0
@@ -184,6 +193,9 @@ export function SessionNavSidebar() {
               />
             </div>
             <p className="text-[10px] text-muted dark:text-zinc-500 mt-1">
+              <span className="block font-semibold text-zinc-700 dark:text-zinc-300">
+                {quota.plan_name || "$5 Starter"}
+              </span>
               {new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
                 quota.used
               )}{" "}
@@ -191,7 +203,7 @@ export function SessionNavSidebar() {
               {new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
                 quota.limit
               )}{" "}
-              tokens
+              {quota.unit || "credits"}
             </p>
           </div>
         </div>

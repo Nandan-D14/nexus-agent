@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -28,6 +29,13 @@ class Settings(BaseSettings):
     require_byok: bool = False
     byok_encryption_key: str = ""
     shared_access_code: str = ""
+    # Future use: keep the controlled beta/access-code system in the codebase,
+    # but ship internal testing with the gate disabled by default.
+    beta_access_enabled: bool = False
+    beta_enforce_byok: bool = True
+    beta_admin_emails: str = ""
+    beta_google_sheet_id: str = ""
+    beta_google_sheet_name: str = "beta_applications"
 
     # Google / Gemini
     google_api_key: str = ""
@@ -35,11 +43,18 @@ class Settings(BaseSettings):
     google_cloud_region: str = "global"  # For Gemini 3 vision/agent (must be "global")
 
     # Gemini models
+    gemini_agent_model: str = "gemini-3-flash-preview"
+    gemini_api_key_agent_model: str = "gemini-3.1-pro-preview"
+    gemini_api_key_agent_fallback_models: str = (
+        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,"
+        "gemini-2.5-pro,gemini-2.5-flash"
+    )
+    gemini_light_model: str = "gemini-3.1-flash-lite-preview"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
-    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-pro,gemini-3.1-pro-preview,gemini-2.5-flash"
+    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
 
     # Kilo Code (OpenAI-compatible gateway — can be used alongside Gemini)
     kilo_api_key: str = ""
@@ -57,6 +72,8 @@ class Settings(BaseSettings):
         return bool(self.google_api_key or self.google_project_id)
 
     # Server
+    app_env: str = "development"
+    strict_config_validation: bool = False
     frontend_url: str = "http://localhost:3000"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -78,20 +95,67 @@ class Settings(BaseSettings):
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0
+    agent_workspace_root: str = "/home/user/CoComputer/Workspaces"
 
     # Multi-agent orchestration
     use_multi_agent: bool = True
     max_agent_turns: int = 30
 
-    # Token quota (per-user lifetime allowance for free tier)
+    # Development-only starter entitlement
+    default_plan_id: str = "starter_5"
+    default_plan_name: str = "$5 Starter"
+    default_plan_price_usd: int = 5
+    default_credit_limit: int = 4_000
+    default_credit_unit_usd: float = 0.001
+    default_credit_reset_version: str = "starter_4k_reset_20260322"
+
+    # Internal token safety cap (telemetry/debug only, not the user-facing plan allowance)
     default_token_limit: int = 100_000
 
     # Google OAuth 2.0 (for Google Drive integration)
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
 
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() == "production" or bool(os.environ.get("K_SERVICE"))
+
 
 settings = Settings()
+
+
+def validate_startup_settings() -> None:
+    """Fail fast on unsafe production config."""
+    if not (settings.is_production or settings.strict_config_validation):
+        return
+
+    issues: list[str] = []
+    parsed_frontend = urlparse(settings.frontend_url)
+
+    if settings.jwt_secret in {"dev-secret-change-in-production", "change-this-in-production"}:
+        issues.append("JWT_SECRET must be set to a non-default value")
+    if parsed_frontend.scheme not in {"http", "https"} or not parsed_frontend.netloc:
+        issues.append("FRONTEND_URL must be a valid absolute http(s) URL")
+    if not settings.firebase_project_id and not settings.firebase_auth_emulator_host:
+        issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
+    if not settings.require_byok and not settings.e2b_api_key:
+        issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
+    if not settings.require_byok and not (
+        settings.google_api_key
+        or settings.google_project_id
+        or settings.kilo_api_key
+    ):
+        issues.append("A server-side model provider must be configured when REQUIRE_BYOK is false")
+    if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
+        issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
+    if settings.beta_access_enabled and not settings.beta_admin_emails.strip():
+        issues.append("BETA_ADMIN_EMAILS must include at least one admin email")
+    if settings.beta_access_enabled and not settings.beta_google_sheet_id.strip():
+        issues.append("BETA_GOOGLE_SHEET_ID must be configured for beta application sync")
+
+    if issues:
+        joined = "; ".join(issues)
+        raise RuntimeError(f"Invalid production configuration: {joined}")
 
 
 def apply_runtime_env_overrides() -> None:

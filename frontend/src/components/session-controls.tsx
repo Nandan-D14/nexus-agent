@@ -56,7 +56,7 @@ export function SessionControls({
           />
         </svg>
         <span className="text-sm text-zinc-400">
-          {hasSession ? "Shutting down..." : "Launching NEXUS..."}
+          {hasSession ? "Shutting down..." : "Launching CoComputer..."}
         </span>
       </div>
     );
@@ -96,7 +96,7 @@ export function SessionControls({
           <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
           <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
         </svg>
-        Launch NEXUS
+        Launch CoComputer
       </button>
     );
   }

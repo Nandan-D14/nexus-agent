@@ -1,10 +1,9 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
-import { Mic, Volume2, Save, Loader2, Play } from "lucide-react";
+import { Volume2, Save, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
-import { db } from "@/lib/firebase-client";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { fetchUserSettings, updateUserSettings } from "@/lib/user-settings";
 
 const VOICES = [
   { id: "Puck", name: "Puck", desc: "Warm, natural, clear", gender: "Male" },
@@ -16,41 +15,79 @@ const VOICES = [
 
 export default function VoiceSettingsPage() {
   const { user } = useAuth();
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [voiceId, setVoiceId] = useState("Puck");
   const [ttsSpeed, setTtsSpeed] = useState(1.0);
 
   useEffect(() => {
-    if (user) {
-      getDoc(doc(db, "users", user.uid)).then(snap => {
-        if (snap.exists() && snap.data().voiceSettings) {
-          const vs = snap.data().voiceSettings;
-          setVoiceId(vs.voiceId || "Puck");
-          setTtsSpeed(vs.speed || 1.0);
+    let cancelled = false;
+
+    async function loadSettings() {
+      if (!user) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetchUserSettings();
+        if (cancelled) {
+          return;
         }
-      });
+
+        const voiceSettings =
+          response.settings.voice &&
+          typeof response.settings.voice === "object" &&
+          !Array.isArray(response.settings.voice)
+            ? (response.settings.voice as { voiceId?: string; speed?: number })
+            : null;
+
+        setVoiceId(voiceSettings?.voiceId || "Puck");
+        setTtsSpeed(
+          typeof voiceSettings?.speed === "number" ? voiceSettings.speed : 1.0,
+        );
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to load voice settings:", err);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }
+
+    void loadSettings();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   const handleSave = async () => {
     if (!user) return;
     setSaving(true);
     try {
-      await setDoc(doc(db, "users", user.uid), {
-        voiceSettings: { voiceId, speed: ttsSpeed }
-      }, { merge: true });
+      await updateUserSettings({
+        settings: {
+          voice: {
+            voiceId,
+            speed: ttsSpeed,
+          },
+        },
+      });
+    } catch (err) {
+      console.error("Failed to save voice settings:", err);
     } finally {
       setSaving(false);
     }
   };
 
-  const selectedVoice = VOICES.find(v => v.id === voiceId) || VOICES[0];
-
   return (
     <div className="space-y-8 max-w-2xl text-zinc-900 dark:text-zinc-100">
       <div>
         <h2 className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 mb-2">Voice & Audio</h2>
-        <p className="text-sm text-zinc-500">Configure how Nexus sounds and processes your speech.</p>
+        <p className="text-sm text-zinc-500">Configure how CoComputer sounds and processes your speech.</p>
       </div>
 
       <div className="space-y-6">
@@ -111,11 +148,11 @@ export default function VoiceSettingsPage() {
       <div className="pt-6 border-t border-zinc-200 dark:border-[#2f2f35]">
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || loading || !user}
           className="flex items-center justify-center gap-2 px-6 py-2.5 rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-sm transition-colors hover:bg-zinc-800 dark:hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
         >
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? "Saving..." : "Save Configuration"}
+          {saving || loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          {loading ? "Loading..." : saving ? "Saving..." : "Save Configuration"}
         </button>
       </div>
     </div>

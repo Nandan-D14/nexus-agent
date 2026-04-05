@@ -1,11 +1,13 @@
 "use client";
 
+import type { PlanQuota } from "@/lib/message-types";
+
 type Phase = "idle" | "listening" | "thinking" | "acting" | "done";
 
 type Props = {
   phase: Phase;
   isConnected: boolean;
-  tokenQuota?: { limit: number; used: number; remaining: number } | null;
+  tokenQuota?: PlanQuota | null;
 };
 
 const STEPS: { key: Phase; label: string }[] = [
@@ -29,7 +31,7 @@ function getStepState(
   return "future";
 }
 
-function formatTokenCount(n: number): string {
+function formatUsageCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
@@ -80,11 +82,11 @@ export function StatusBar({ phase, isConnected, tokenQuota }: Props) {
         </div>
       </div>
 
-      {/* Token Quota + Connection */}
+      {/* Plan Quota + Connection */}
       <div className="flex items-center gap-6">
         {tokenQuota && (
           <div className="hidden md:flex items-center gap-3 text-muted dark:text-zinc-600 border-r border-card-border dark:border-zinc-800 pr-6">
-            <span className="text-[9px]">TOKENS</span>
+            <span className="text-[9px]">CREDITS</span>
             <div className="flex items-center gap-2">
               <div className="w-20 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
                 <div
@@ -103,9 +105,9 @@ export function StatusBar({ phase, isConnected, tokenQuota }: Props) {
                   ? "text-red-400"
                   : isWarning
                     ? "text-amber-400"
-                    : "text-foreground dark:text-zinc-400"
+                  : "text-foreground dark:text-zinc-400"
               }`}>
-                {formatTokenCount(tokenQuota.used)}/{formatTokenCount(tokenQuota.limit)}
+                {formatUsageCount(tokenQuota.used)}/{formatUsageCount(tokenQuota.limit)}
               </span>
             </div>
           </div>

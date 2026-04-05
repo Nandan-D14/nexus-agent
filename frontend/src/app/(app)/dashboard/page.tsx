@@ -19,6 +19,7 @@ import {
 import { UsageChart, type UsageChartPoint } from "@/components/usage-chart";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch, parseApiError } from "@/lib/api-client";
+import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "@/lib/message-types";
 
 type TokenTotals = {
   input: number;
@@ -181,7 +182,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [endingSessionId, setEndingSessionId] = useState<string | null>(null);
-  const [quota, setQuota] = useState<{ limit: number; used: number; remaining: number } | null>(null);
+  const [quota, setQuota] = useState<PlanQuota | null>(null);
 
   const refreshDashboard = useCallback(async () => {
     if (!user) {
@@ -224,8 +225,10 @@ export default function DashboardPage() {
       };
 
       if (quotaRes.ok) {
-        const quotaBody = (await quotaRes.json()) as { limit: number; used: number; remaining: number };
+        const quotaBody = (await quotaRes.json()) as PlanQuota;
         setQuota(quotaBody);
+      } else {
+        setQuota(DEFAULT_PLAN_QUOTA);
       }
 
       setStats({
@@ -346,7 +349,7 @@ export default function DashboardPage() {
         </div>
       ) : null}
 
-      {/* Token Quota Banner */}
+      {/* Starter Plan Banner */}
       {quota && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
@@ -362,25 +365,25 @@ export default function DashboardPage() {
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-                Free Tier Usage
+                {quota.plan_name || "$5 Starter"}
               </p>
               <p className="mt-1 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
                 {formatCompactNumber(quota.used)}{" "}
                 <span className="text-base font-normal text-zinc-500 dark:text-zinc-400">
-                  / {formatCompactNumber(quota.limit)} tokens
+                  / {formatCompactNumber(quota.limit)} {quota.unit || "credits"}
                 </span>
               </p>
               {quota.remaining <= 0 ? (
                 <p className="mt-1 text-sm text-red-600 dark:text-red-400 font-medium">
-                  Quota exhausted — upgrade to continue using NEXUS.
+                  Starter plan balance exhausted for this development entitlement.
                 </p>
               ) : quota.used / quota.limit >= 0.8 ? (
                 <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">
-                  {formatNumber(quota.remaining)} tokens remaining
+                  {formatNumber(quota.remaining)} {quota.unit || "credits"} remaining
                 </p>
               ) : (
                 <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                  {formatNumber(quota.remaining)} tokens remaining
+                  {formatNumber(quota.remaining)} {quota.unit || "credits"} remaining
                 </p>
               )}
             </div>

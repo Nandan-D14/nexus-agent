@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from typing import Any, Awaitable, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,8 @@ class BackgroundTask:
     estimated_seconds: int
     agent: str = "nexus"
     approved: bool = False
+    permission_step_id: str | None = None
+    background_step_id: str | None = None
     _permission_future: asyncio.Future | None = field(default=None, repr=False)
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -30,6 +32,23 @@ class BackgroundTaskManager:
     def __init__(self, send_json: Callable[..., Any]) -> None:
         self._send_json = send_json
         self._tasks: dict[str, BackgroundTask] = {}
+        self._on_permission_requested: Callable[[BackgroundTask], Awaitable[str | None]] | None = None
+        self._on_permission_resolved: Callable[[BackgroundTask, bool], Awaitable[None]] | None = None
+        self._on_task_started: Callable[[BackgroundTask], Awaitable[str | None]] | None = None
+        self._on_task_finished: Callable[[BackgroundTask, bool, str], Awaitable[None]] | None = None
+
+    def set_callbacks(
+        self,
+        *,
+        on_permission_requested: Callable[[BackgroundTask], Awaitable[str | None]] | None = None,
+        on_permission_resolved: Callable[[BackgroundTask, bool], Awaitable[None]] | None = None,
+        on_task_started: Callable[[BackgroundTask], Awaitable[str | None]] | None = None,
+        on_task_finished: Callable[[BackgroundTask, bool, str], Awaitable[None]] | None = None,
+    ) -> None:
+        self._on_permission_requested = on_permission_requested
+        self._on_permission_resolved = on_permission_resolved
+        self._on_task_started = on_task_started
+        self._on_task_finished = on_task_finished
 
     async def request_permission(
         self,
@@ -55,6 +74,12 @@ class BackgroundTaskManager:
         task._permission_future = future
         self._tasks[task_id] = task
 
+        if self._on_permission_requested:
+            try:
+                task.permission_step_id = await self._on_permission_requested(task)
+            except Exception:
+                logger.exception("Failed to create permission step for task %s", task_id)
+
         await self._send_json({
             "type": "permission_request",
             "task_id": task_id,
@@ -76,6 +101,11 @@ class BackgroundTaskManager:
             })
 
         task.approved = approved
+        if self._on_permission_resolved:
+            try:
+                await self._on_permission_resolved(task, approved)
+            except Exception:
+                logger.exception("Failed to resolve permission step for task %s", task_id)
         return task_id, approved
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
@@ -123,16 +153,39 @@ class BackgroundTaskManager:
             return None
 
         async def _wrapper() -> Any:
+            if self._on_task_started:
+                try:
+                    task.background_step_id = await self._on_task_started(task)
+                except Exception:
+                    logger.exception("Failed to create background task step for %s", task_id)
             try:
                 result = await coro
-                await self.send_complete(task_id, success=True, result=str(result) if result else "Task completed.")
+                result_text = str(result) if result else "Task completed."
+                await self.send_complete(task_id, success=True, result=result_text)
+                if self._on_task_finished:
+                    try:
+                        await self._on_task_finished(task, True, result_text)
+                    except Exception:
+                        logger.exception("Failed to finalize background task step for %s", task_id)
                 return result
             except asyncio.CancelledError:
-                await self.send_complete(task_id, success=False, result="Task was cancelled.")
+                result_text = "Task was cancelled."
+                await self.send_complete(task_id, success=False, result=result_text)
+                if self._on_task_finished:
+                    try:
+                        await self._on_task_finished(task, False, result_text)
+                    except Exception:
+                        logger.exception("Failed to finalize background task step for %s", task_id)
                 return None
             except Exception as exc:
                 logger.exception("Background task %s failed", task_id)
-                await self.send_complete(task_id, success=False, result=f"Task failed: {exc}")
+                result_text = f"Task failed: {exc}"
+                await self.send_complete(task_id, success=False, result=result_text)
+                if self._on_task_finished:
+                    try:
+                        await self._on_task_finished(task, False, result_text)
+                    except Exception:
+                        logger.exception("Failed to finalize background task step for %s", task_id)
                 return None
 
         asyncio_task = asyncio.create_task(_wrapper())

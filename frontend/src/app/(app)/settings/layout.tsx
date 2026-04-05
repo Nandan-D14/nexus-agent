@@ -16,12 +16,12 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
   ];
 
   return (
-    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6 pb-20 h-full flex flex-col text-zinc-900 dark:text-zinc-100">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6 pb-20 h-full flex flex-col text-foreground">
       <div className="shrink-0">
-        <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+        <h1 className="text-3xl font-bold tracking-tight">
           Settings
         </h1>
-        <p className="text-sm text-zinc-500 mt-2">
+        <p className="text-sm text-muted-foreground mt-2">
           Manage your account and preferences.
         </p>
       </div>
@@ -36,8 +36,8 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
                 href={tab.href}
                 className={`relative flex items-center gap-3 px-4 py-2.5 rounded-full transition-all whitespace-nowrap ${
                   isActive
-                    ? "bg-[#f4f4f5] dark:bg-[#212126] text-zinc-900 dark:text-zinc-100 font-medium"
-                    : "text-zinc-500 hover:bg-[#f4f4f5] dark:hover:bg-[#212126] hover:text-zinc-900 dark:hover:text-zinc-100 font-medium"
+                    ? "bg-muted text-foreground font-semibold"
+                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground font-medium"
                 }`}
               >
                 <tab.icon className="w-4 h-4" />
@@ -45,13 +45,13 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
                 {isActive && (
                   <motion.div
                     layoutId="activeSettingsTab"
-                    className="absolute left-2 w-1 h-5 bg-zinc-900 dark:bg-zinc-100 rounded-full hidden md:block"
+                    className="absolute left-2 w-1 h-5 bg-foreground rounded-full hidden md:block"
                   />
                 )}
                 {isActive && (
                   <motion.div
                     layoutId="activeSettingsTabBottom"
-                    className="absolute bottom-0 inset-x-6 h-1 bg-zinc-900 dark:bg-zinc-100 rounded-t-full md:hidden"
+                    className="absolute bottom-0 inset-x-6 h-1 bg-foreground rounded-t-full md:hidden"
                   />
                 )}
               </Link>
@@ -59,7 +59,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
           })}
         </nav>
 
-        <div className="flex-1 bg-white dark:bg-[#111114] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl p-6 md:p-8 relative overflow-hidden h-fit shadow-sm">
+        <div className="flex-1 bg-card border border-card-border rounded-3xl p-6 md:p-8 relative overflow-hidden h-fit shadow-sm">
           <div className="relative z-10 w-full">
             {children}
           </div>

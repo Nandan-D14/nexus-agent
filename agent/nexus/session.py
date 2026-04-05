@@ -60,12 +60,22 @@ async def _maybe_mount_gdrive(
 
 @dataclass
 class Session:
-    """A single NEXUS session with its own sandbox and agent state."""
+    """A single CoComputer session with its own sandbox and agent state."""
 
     id: str
     owner_id: str
     runtime_config: SessionRuntimeConfig
     sandbox: SandboxManager
+    resume_mode: str = "fresh"
+    resume_source_session_id: str | None = None
+    seed_context: str = ""
+    initial_title: str = "New session"
+    current_run_id: str | None = None
+    run_status: str = "queued"
+    artifact_count: int = 0
+    can_continue_conversation: bool = True
+    exact_workspace_resume_available: bool = False
+    continuation_mode: str | None = None
     sandbox_id: str = ""
     stream_url: str = ""
     status: str = "idle"  # idle | creating | ready | active | error | destroyed
@@ -83,7 +93,7 @@ class Session:
 
 
 class SessionManager:
-    """Creates, tracks, and cleans up NEXUS sessions."""
+    """Creates, tracks, and cleans up CoComputer sessions."""
 
     def __init__(self, history_repository: Optional["FirestoreHistoryRepository"] = None) -> None:
         self._sessions: dict[str, Session] = {}
@@ -100,19 +110,87 @@ class SessionManager:
         self,
         owner_id: str,
         runtime_config: SessionRuntimeConfig,
+        *,
+        resume_mode: str = "fresh",
+        resume_source_session_id: str | None = None,
+        seed_context: str = "",
+        initial_title: str = "New session",
+        session_id: str | None = None,
+        created_at: datetime | None = None,
+        artifact_count: int = 0,
+        exact_workspace_resume_available: bool = False,
+        continuation_mode: str | None = None,
     ) -> Session:
         """Create a session record. Sandbox boot is deferred until activation."""
-        session_id = uuid.uuid4().hex[:12]
+        session_id = session_id or uuid.uuid4().hex[:12]
         session = Session(
             id=session_id,
             owner_id=owner_id,
             runtime_config=runtime_config,
             sandbox=SandboxManager(e2b_api_key=runtime_config.e2b_api_key),
+            resume_mode=resume_mode,
+            resume_source_session_id=resume_source_session_id,
+            seed_context=seed_context,
+            initial_title=initial_title,
+            created_at=created_at or datetime.now(timezone.utc),
+            artifact_count=artifact_count,
+            exact_workspace_resume_available=exact_workspace_resume_available,
+            continuation_mode=continuation_mode,
         )
 
         self._sessions[session_id] = session
         await self._sync_session(session)
+        if self.history_repository:
+            try:
+                run = await self.history_repository.create_run(
+                    session_id=session.id,
+                    owner_id=session.owner_id,
+                    title=session.initial_title,
+                    source_session_id=session.resume_source_session_id,
+                )
+                session.current_run_id = run.run_id
+                session.run_status = run.status
+                session.artifact_count = run.artifact_count
+                await self._sync_session(session)
+            except Exception:
+                logger.exception("Failed to create initial run for session %s", session_id)
         logger.info("Session %s created and waiting for activation", session_id)
+        return session
+
+    async def continue_session(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        runtime_config: SessionRuntimeConfig,
+        created_at: datetime,
+        resume_mode: str,
+        seed_context: str,
+        initial_title: str,
+        artifact_count: int = 0,
+        exact_workspace_resume_available: bool = False,
+        continuation_mode: str | None = None,
+    ) -> Session:
+        """Rehydrate an existing stored thread into a live session with the same ID."""
+        existing = self._sessions.get(session_id)
+        if existing:
+            if existing.owner_id != owner_id:
+                raise PermissionError("Not the session owner")
+            return existing
+
+        session = await self.create_session(
+            owner_id=owner_id,
+            runtime_config=runtime_config,
+            resume_mode=resume_mode,
+            resume_source_session_id=session_id,
+            seed_context=seed_context,
+            initial_title=initial_title,
+            session_id=session_id,
+            created_at=created_at,
+            artifact_count=artifact_count,
+            exact_workspace_resume_available=exact_workspace_resume_available,
+            continuation_mode=continuation_mode,
+        )
         return session
 
     async def ensure_session_ready(self, session_id: str) -> Session:
@@ -138,7 +216,7 @@ class SessionManager:
 
                 # Try to resume a previously paused sandbox
                 paused_id: str | None = None
-                if self.history_repository:
+                if self.history_repository and session.resume_mode == "continue_latest_workspace":
                     try:
                         paused_id = await self.history_repository.get_persistent_sandbox(session.owner_id)
                     except Exception:
@@ -152,7 +230,7 @@ class SessionManager:
                         # Clear paused ID — it has been consumed
                         if self.history_repository:
                             try:
-                                await self.history_repository.save_paused_sandbox(session.owner_id, None)
+                                await self.history_repository.save_paused_sandbox(session.owner_id, None, None)
                             except Exception:
                                 pass
                         logger.info("Session %s resumed from paused sandbox", session_id)
@@ -218,12 +296,13 @@ class SessionManager:
         if session.owner_id != owner_id:
             raise PermissionError("Not the session owner")
         self._sessions.pop(session_id, None)
+        paused_id: str | None = None
         if session.sandbox.is_alive:
             loop = asyncio.get_event_loop()
             paused_id = await loop.run_in_executor(None, session.sandbox.pause)
             if paused_id and self.history_repository:
                 try:
-                    await self.history_repository.save_paused_sandbox(session.owner_id, paused_id)
+                    await self.history_repository.save_paused_sandbox(session.owner_id, paused_id, session.id)
                     logger.info("Session %s sandbox paused (sandbox_id=%s)", session_id, paused_id)
                 except Exception:
                     logger.warning("Failed to save paused sandbox ID for session %s", session_id)
@@ -236,9 +315,21 @@ class SessionManager:
             status=status,
             ended_at=datetime.now(timezone.utc),
         )
+        if self.history_repository:
+            try:
+                await self.history_repository.refresh_session_handoff(
+                    session.id,
+                    owner_id=session.owner_id,
+                    resume_state="paused" if paused_id else "ended",
+                    workspace_owner_session_id=session.id if paused_id else None,
+                    can_continue_workspace=bool(paused_id),
+                )
+            except Exception:
+                logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
     async def destroy_session(self, session_id: str, status: str = "ended", error_code: str | None = None) -> None:
         session = self._sessions.pop(session_id, None)
+        paused_id: str | None = None
         if session and session.sandbox.is_alive:
             loop = asyncio.get_event_loop()
             if status in {"ended"} and self.history_repository:
@@ -246,7 +337,7 @@ class SessionManager:
                 paused_id = await loop.run_in_executor(None, session.sandbox.pause)
                 if paused_id:
                     try:
-                        await self.history_repository.save_paused_sandbox(session.owner_id, paused_id)
+                        await self.history_repository.save_paused_sandbox(session.owner_id, paused_id, session.id)
                     except Exception:
                         pass
             else:
@@ -256,6 +347,17 @@ class SessionManager:
             logger.info("Session %s %s", session_id, session.status)
         if session:
             await self._sync_session(session, status=status, ended_at=datetime.now(timezone.utc), error_code=error_code)
+            if self.history_repository:
+                try:
+                    await self.history_repository.refresh_session_handoff(
+                        session.id,
+                        owner_id=session.owner_id,
+                        resume_state="paused" if paused_id else status,
+                        workspace_owner_session_id=session.id if paused_id else None,
+                        can_continue_workspace=bool(paused_id),
+                    )
+                except Exception:
+                    logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
     async def activate_session(self, session_id: str) -> Session:
         session = await self.ensure_session_ready(session_id)

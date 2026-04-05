@@ -80,7 +80,7 @@ export function ConversationPanel({ messages, isThinking = false }: Props) {
           >
             <div className="flex items-center gap-2 mb-2 px-1">
               <span className={`text-[9px] font-black uppercase tracking-[0.2em] ${msg.role === "user" ? "text-cyan-500" : "text-emerald-500"}`}>
-                {msg.role === "user" ? "Protocol: User" : "Source: NEXUS"}
+                {msg.role === "user" ? "Protocol: User" : "Source: COCOMPUTER"}
               </span>
               <div className={`w-1 h-1 rounded-full ${msg.role === "user" ? "bg-cyan-500/40" : "bg-emerald-500/40"}`} />
             </div>
@@ -107,7 +107,7 @@ export function ConversationPanel({ messages, isThinking = false }: Props) {
           >
             <div className="flex items-center gap-2 mb-2 px-1">
               <span className="text-[9px] font-black text-emerald-500 uppercase tracking-[0.2em]">
-                Source: NEXUS
+                Source: COCOMPUTER
               </span>
               <div className="w-1 h-1 rounded-full bg-emerald-500/40" />
             </div>

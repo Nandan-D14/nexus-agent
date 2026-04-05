@@ -12,7 +12,7 @@ from nexus.tools._context import set_sandbox
 
 
 async def main():
-    print("=== NEXUS Agent Test (text mode) ===\n")
+    print("=== co-computer Agent Test (text mode) ===\n")
 
     # Boot sandbox
     print("[1/3] Creating sandbox...")

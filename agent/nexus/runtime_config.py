@@ -55,6 +55,9 @@ class SessionRuntimeConfig:
     gemini_api_key: str
     google_project_id: str
     google_cloud_region: str
+    gemini_agent_model: str
+    gemini_agent_fallback_models: tuple[str, ...]
+    gemini_light_model: str
     gemini_live_model: str
     gemini_live_region: str
     gemini_vision_model: str
@@ -72,6 +75,9 @@ class SessionRuntimeConfig:
             f"gemini_api_key='***', "
             f"google_project_id='{self.google_project_id}', "
             f"google_cloud_region='{self.google_cloud_region}', "
+            f"gemini_agent_model='{self.gemini_agent_model}', "
+            f"gemini_agent_fallback_models={self.gemini_agent_fallback_models}, "
+            f"gemini_light_model='{self.gemini_light_model}', "
             f"gemini_live_model='{self.gemini_live_model}', "
             f"gemini_live_region='{self.gemini_live_region}', "
             f"gemini_vision_model='{self.gemini_vision_model}', "
@@ -107,6 +113,19 @@ def server_e2b_configured() -> bool:
 
 def shared_access_code_configured() -> bool:
     return bool(settings.shared_access_code.strip())
+
+
+def _parse_model_list(value: str, *, exclude: str | None = None) -> tuple[str, ...]:
+    models: list[str] = []
+    seen: set[str] = set()
+    excluded = (exclude or "").strip()
+    for raw in value.split(","):
+        model = raw.strip()
+        if not model or model == excluded or model in seen:
+            continue
+        seen.add(model)
+        models.append(model)
+    return tuple(models)
 
 
 def get_byok_payload(user_settings: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -165,7 +184,7 @@ def build_public_user_settings(user_settings: Mapping[str, Any] | None) -> dict[
         else None
     )
     return {
-        "requireByok": settings.require_byok,
+        "requireByok": settings.require_byok or settings.beta_enforce_byok,
         "googleDriveConnected": google_drive_connected,
         "settings": raw_settings,
         "byok": {
@@ -234,13 +253,13 @@ def resolve_session_runtime_config(
     else:
         e2b_api_key = ""
 
-    resolved_provider = _DEFAULT_GEMINI_PROVIDER
+    resolved_provider = gemini_provider
     resolved_api_key = ""
     resolved_project_id = ""
 
-    if gemini_provider == "vertex" and status.shared_vertex_available:
-        resolved_provider = "vertex"
-        resolved_project_id = settings.google_project_id
+    if gemini_provider == "vertex":
+        if status.shared_vertex_available:
+            resolved_project_id = settings.google_project_id
     elif user_gemini_api_key:
         resolved_provider = "apiKey"
         resolved_api_key = user_gemini_api_key
@@ -248,21 +267,36 @@ def resolve_session_runtime_config(
         resolved_provider = "apiKey"
         resolved_api_key = settings.google_api_key
 
+    if resolved_provider == "apiKey":
+        agent_model = settings.gemini_api_key_agent_model
+        agent_fallback_models = _parse_model_list(
+            settings.gemini_api_key_agent_fallback_models,
+            exclude=agent_model,
+        )
+    else:
+        agent_model = settings.gemini_agent_model
+        agent_fallback_models = _parse_model_list(
+            settings.gemini_api_key_agent_fallback_models,
+            exclude=agent_model,
+        )
+
     return SessionRuntimeConfig(
         e2b_api_key=e2b_api_key,
         gemini_provider=resolved_provider,
         gemini_api_key=resolved_api_key,
         google_project_id=resolved_project_id,
         google_cloud_region=settings.google_cloud_region,
+        gemini_agent_model=agent_model,
+        gemini_agent_fallback_models=agent_fallback_models,
+        gemini_light_model=settings.gemini_light_model,
         gemini_live_model=settings.gemini_live_model,
         gemini_live_region=settings.gemini_live_region,
         gemini_vision_model=settings.gemini_vision_model,
-        gemini_vision_fallback_models=tuple(
-            model.strip()
-            for model in settings.gemini_vision_fallback_models.split(",")
-            if model.strip()
+        gemini_vision_fallback_models=_parse_model_list(
+            settings.gemini_vision_fallback_models,
+            exclude=settings.gemini_vision_model,
         ),
-        use_kilo=settings.use_kilo and not settings.require_byok,
+        use_kilo=False,
         kilo_api_key=settings.kilo_api_key,
         kilo_model_id=settings.kilo_model_id,
         kilo_gateway_url=settings.kilo_gateway_url,
@@ -307,10 +341,39 @@ def build_genai_client(
             location=location or runtime_config.google_cloud_region,
             **client_kwargs,
         )
+    if not runtime_config.gemini_api_key:
+        if runtime_config.gemini_provider == "vertex":
+            raise RuntimeError(
+                "Vertex AI is selected for this session, but shared Vertex access is not available."
+            )
+        raise RuntimeError("Gemini API key is not configured for this session.")
     return Client(
         vertexai=False,
         api_key=runtime_config.gemini_api_key,
         **client_kwargs,
+    )
+
+
+def ensure_selected_gemini_provider_available(
+    user_settings: Mapping[str, Any] | None,
+) -> None:
+    status = get_byok_status(user_settings)
+    if status.gemini_provider != "vertex" or status.shared_vertex_available:
+        return
+
+    if not status.vertex_configured:
+        raise PermissionError(
+            "Vertex AI is selected, but it is not configured on this server. Switch to Gemini API Key."
+        )
+
+    if status.shared_access_code_configured and not status.shared_access_enabled:
+        raise PermissionError(
+            "Vertex AI is selected, but shared Vertex AI credits are locked for this account. "
+            "Enter the access code or switch to Gemini API Key."
+        )
+
+    raise PermissionError(
+        "Vertex AI is selected, but shared Vertex AI credits are not available for this account."
     )
 
 

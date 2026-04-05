@@ -62,7 +62,7 @@ export function DesktopPanel({ streamUrl }: Props) {
         src={streamUrl}
         className="w-full h-full border-0 grayscale-[0.15] contrast-[1.1] brightness-[1.05]"
         allow="clipboard-read; clipboard-write"
-        title="NEXUS Desktop"
+        title="CoComputer Desktop"
       />
       
       {/* Subtle Overlay Border */}

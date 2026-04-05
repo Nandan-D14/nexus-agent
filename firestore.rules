@@ -20,9 +20,36 @@ service cloud.firestore {
         && request.auth.uid in sessionDoc(sessionId).data.memberIds;
     }
 
+    function userBootstrapKeys() {
+      return [
+        "uid",
+        "email",
+        "displayName",
+        "photoURL",
+        "createdAt",
+        "lastLoginAt"
+      ];
+    }
+
+    function validUserBootstrapCreate(userId) {
+      return request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(userBootstrapKeys());
+    }
+
+    function validUserBootstrapUpdate(userId) {
+      return request.resource.data.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(userBootstrapKeys());
+    }
+
     match /users/{userId} {
-      allow read, create, update: if isSelf(userId);
+      allow read: if isSelf(userId);
+      allow create: if isSelf(userId) && validUserBootstrapCreate(userId);
+      allow update: if isSelf(userId) && validUserBootstrapUpdate(userId);
       allow delete: if false;
+    }
+
+    match /userPrivate/{userId} {
+      allow read, write: if false;
     }
 
     match /sessions/{sessionId} {

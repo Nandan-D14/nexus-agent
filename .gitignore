@@ -83,11 +83,9 @@ nexus_plan.md
 codex-plan.md
 phase2-plan.md
 producation-plan.md
-<<<<<<< HEAD
 next-step.md
-=======
-integrations_plan.md
->>>>>>> feature/integreations-1
+cloudflare-gcp.md
+integrations-plans.md
 
 # ── Tool configs ──────────────────────────────────────────────
 .zencoder/

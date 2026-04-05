@@ -1,4 +1,4 @@
-"""ADK agent definition — the NEXUS brain.
+"""ADK agent definition — the CoComputer brain.
 
 Supports two modes:
   1. Single agent (default fallback) — one agent with all tools.
@@ -7,7 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import TYPE_CHECKING
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 class AgentTurnResult:
     response: str | None
     usage_records: list[TokenUsageRecord]
+    error: str | None = None
 
 
 def _get_model(runtime_config: SessionRuntimeConfig):
@@ -47,55 +48,110 @@ def _get_model(runtime_config: SessionRuntimeConfig):
         )
     return CredentialedGemini(
         runtime_config=runtime_config,
-        model=runtime_config.gemini_vision_model,
+        model=runtime_config.gemini_agent_model,
     )
 
 
-def create_agent(runtime_config: SessionRuntimeConfig) -> Agent:
-    """Create the single NEXUS ADK agent with all desktop control tools."""
+def _runtime_for_task_model(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> SessionRuntimeConfig:
+    if not task_model_override or task_model_override == runtime_config.gemini_agent_model:
+        return runtime_config
+    return replace(runtime_config, gemini_agent_model=task_model_override)
+
+
+def create_agent(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> Agent:
+    """Create the single CoComputer ADK agent with all desktop control tools."""
+    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
     agent = Agent(
         name="nexus",
-        model=_get_model(runtime_config),
+        model=_get_model(effective_runtime_config),
         instruction=SYSTEM_PROMPT,
         tools=ALL_TOOLS,
     )
     return agent
 
 
-def create_multi_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def create_multi_agent(
+    runtime_config: SessionRuntimeConfig,
+    task_model_override: str | None = None,
+) -> Agent:
     """Create a hierarchical multi-agent system.
 
     Returns the top-level orchestrator agent which delegates to:
       - computer_agent (GUI interactions)
       - browser_agent (web browsing)
       - code_agent (terminal & code)
+      - deepresearcher (coordinated research workflows)
     """
+    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
     from nexus.agents import (
         create_browser_agent,
         create_code_agent,
         create_computer_agent,
+        create_deepresearcher_agent,
         create_orchestrator_agent,
     )
     from nexus.tools.bg_task import request_background_task
+    from nexus.tools.workspace import (
+        prepare_task_workspace,
+        write_todo_list,
+        update_todo_item,
+        write_workspace_file,
+        read_workspace_file,
+        list_workspace_files,
+    )
 
-    computer = create_computer_agent(runtime_config)
-    browser = create_browser_agent(runtime_config)
-    code = create_code_agent(runtime_config)
+    orchestrator_tools = [
+        prepare_task_workspace,
+        write_todo_list,
+        update_todo_item,
+        read_workspace_file,
+        list_workspace_files,
+        request_background_task,
+    ]
+    deepresearcher_tools = [
+        prepare_task_workspace,
+        write_todo_list,
+        update_todo_item,
+        write_workspace_file,
+        read_workspace_file,
+        list_workspace_files,
+        request_background_task,
+    ]
+
+    computer = create_computer_agent(effective_runtime_config)
+    browser = create_browser_agent(effective_runtime_config)
+    code = create_code_agent(effective_runtime_config)
+    deepresearcher = create_deepresearcher_agent(
+        effective_runtime_config,
+        extra_tools=deepresearcher_tools,
+    )
 
     orchestrator = create_orchestrator_agent(
-        runtime_config=runtime_config,
+        runtime_config=effective_runtime_config,
         computer_agent=computer,
         browser_agent=browser,
         code_agent=code,
-        extra_tools=[request_background_task],
+        deepresearcher_agent=deepresearcher,
+        extra_tools=orchestrator_tools,
     )
-    logger.info("Multi-agent orchestrator created with sub-agents: computer, browser, code")
+    logger.info(
+        "Multi-agent orchestrator created with sub-agents: computer, browser, code, deepresearcher"
+    )
     return orchestrator
 
 
-def create_runner(agent: Agent) -> tuple[Runner, InMemorySessionService]:
+def create_runner(
+    agent: Agent,
+    session_service: InMemorySessionService | None = None,
+) -> tuple[Runner, InMemorySessionService]:
     """Create a Runner for executing agent turns."""
-    session_service = InMemorySessionService()
+    session_service = session_service or InMemorySessionService()
     runner = Runner(
         agent=agent,
         app_name="nexus",

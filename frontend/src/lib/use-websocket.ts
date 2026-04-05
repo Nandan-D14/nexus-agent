@@ -164,7 +164,7 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
         wsRef.current = null;
       }
     };
-  }, [url, clearReconnectTimer]);
+  }, [clearReconnectTimer, connect, url]);
 
   const send = useCallback((data: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

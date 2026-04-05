@@ -1,4 +1,4 @@
-# Nexus Architecture (Mermaid + Plain Text)
+# Co-Computer Architecture (Mermaid + Plain Text)
 
 ## 1) Diagram (No Mermaid Required)
 

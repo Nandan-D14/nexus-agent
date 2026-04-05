@@ -26,8 +26,13 @@ FB_APP_ID="${FIREBASE_APP_ID:?Set FIREBASE_APP_ID}"
 GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
 GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
 REQUIRE_BYOK="${REQUIRE_BYOK:-false}"
+BETA_ENFORCE_BYOK="${BETA_ENFORCE_BYOK:-true}"
 BYOK_ENCRYPTION_KEY_SECRET="${BYOK_ENCRYPTION_KEY_SECRET:-}"
 SHARED_ACCESS_CODE="${SHARED_ACCESS_CODE:-}"
+BETA_ADMIN_EMAILS="${BETA_ADMIN_EMAILS:?Set BETA_ADMIN_EMAILS}"
+BETA_GOOGLE_SHEET_ID="${BETA_GOOGLE_SHEET_ID:?Set BETA_GOOGLE_SHEET_ID}"
+BETA_GOOGLE_SHEET_NAME="${BETA_GOOGLE_SHEET_NAME:-beta_applications}"
+JWT_SECRET="${JWT_SECRET:?Set JWT_SECRET}"
 
 AGENT_SECRET_FLAGS=(
   "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
@@ -40,6 +45,7 @@ if [[ -n "${BYOK_ENCRYPTION_KEY_SECRET}" ]]; then
 fi
 
 AGENT_ENV_VARS=(
+  "APP_ENV=production"
   "FIREBASE_PROJECT_ID=${FB_PROJECT_ID}"
   "GOOGLE_PROJECT_ID=${PROJECT_ID}"
   "GOOGLE_CLOUD_REGION=${GEMINI_REGION}"
@@ -49,11 +55,16 @@ AGENT_ENV_VARS=(
   "GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}"
   "GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}"
   "REQUIRE_BYOK=${REQUIRE_BYOK}"
+  "BETA_ENFORCE_BYOK=${BETA_ENFORCE_BYOK}"
   "SHARED_ACCESS_CODE=${SHARED_ACCESS_CODE}"
+  "BETA_ADMIN_EMAILS=${BETA_ADMIN_EMAILS}"
+  "BETA_GOOGLE_SHEET_ID=${BETA_GOOGLE_SHEET_ID}"
+  "BETA_GOOGLE_SHEET_NAME=${BETA_GOOGLE_SHEET_NAME}"
+  "JWT_SECRET=${JWT_SECRET}"
 )
 AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
-echo "=== NEXUS Deploy to Cloud Run ==="
+echo "=== Co-Computer Deploy to Cloud Run ==="
 echo "Project: ${PROJECT_ID}"
 echo "Region:  ${REGION}"
 echo ""
@@ -63,7 +74,7 @@ gcloud artifacts repositories create nexus \
   --project="${PROJECT_ID}" \
   --repository-format=docker \
   --location="${REGION}" \
-  --description="NEXUS container images" 2>/dev/null || true
+  --description="Co-Computer container images" 2>/dev/null || true
 
 echo "Building agent image..."
 gcloud builds submit \

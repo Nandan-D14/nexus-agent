@@ -1,1 +1,1 @@
-"""NEXUS - AI agent with full Linux desktop control."""
+"""CoComputer - AI agent with full Linux desktop control."""

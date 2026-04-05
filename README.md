@@ -1,9 +1,7 @@
----
-NOTE : to use vertex ai set secret in settings as PES2UG23CS363 else use your own api key ot use this app, [(https://nexus-frontend-422420122490.us-central1.run.app/settings/api)]
----
-# Nexus: The Autonomous Cloud Desktop Agent
+> Configure Vertex AI or your own API credentials in the Settings page before using the agent.
+# CoComputer: The Autonomous Cloud Desktop Agent
 
-Nexus is a state-of-the-art, voice-enabled autonomous agent designed to navigate, control, and execute complex workflows within a secure, persistent cloud-based desktop environment. Powered by the latest **Gemini** models through **Google Vertex AI**, Nexus bridges the gap between conversational AI and real-world task execution.
+CoComputer is a state-of-the-art, voice-enabled autonomous agent designed to navigate, control, and execute complex workflows within a secure, persistent cloud-based desktop environment. Powered by the latest **Gemini** models through **Google Vertex AI**, CoComputer bridges the gap between conversational AI and real-world task execution.
 
 ## 🚀 Project Highlights
 - **Leverages Gemini 3.1 Pro, 3.0 Flash Preview Models and gemini flash native 2.5** for reasoning, vision, and voice.

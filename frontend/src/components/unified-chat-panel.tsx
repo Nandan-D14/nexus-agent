@@ -303,7 +303,7 @@ function MessageBubble({
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[15px] font-medium text-zinc-800 dark:text-zinc-200">
-            Nexus
+            CoComputer
           </span>
           <span className="rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
             Lite
@@ -349,6 +349,11 @@ function getEventGroupTitle(
   const task = items.find((item) => item.type === "bg_task_progress");
   if (task && typeof task["message"] === "string") {
     return truncateText(task["message"], 64);
+  }
+
+  const contextPacket = items.find((item) => item.type === "context_packet");
+  if (contextPacket) {
+    return "Updated compact context";
   }
 
   return "Agent activity";
@@ -542,6 +547,29 @@ function EventRow({
           content={String(item["message"] || "")}
         />
       );
+    case "context_packet":
+      return (
+        <TimelineRow
+          isLast={isLast}
+          dotClass="bg-cyan-400"
+          time={time}
+          label="Context"
+          labelClass="text-cyan-300"
+          content={
+            <div className="space-y-2">
+              <div className="text-xs text-zinc-300">
+                {`Stage: ${String(item["stage"] || "updated").replace(/_/g, " ")}`}
+              </div>
+              <div className="text-xs text-zinc-400">
+                {`Compaction: ${String(item["action"] || "full").replace(/_/g, " ")}`}
+              </div>
+              <div className="font-mono text-[11px] text-cyan-200">
+                {String(item["reasoning_model"] || "")}
+              </div>
+            </div>
+          }
+        />
+      );
     case "error":
       return (
         <TimelineRow
@@ -595,7 +623,7 @@ function TimelineRow({
             {label}
           </span>
         </div>
-        <div className="text-xs text-zinc-300 dark:text-zinc-400 leading-relaxed">
+        <div className="min-w-0 overflow-hidden break-words text-xs text-zinc-300 dark:text-zinc-400 leading-relaxed">
           {content}
         </div>
       </div>
@@ -670,11 +698,36 @@ function EventRenderer({
           result={item["result"] as string}
         />
       );
+    case "budget_warning":
+      return (
+        <ErrorBadge
+          ts={item.ts}
+          message={item["message"] as string}
+          code={`budget:${String(item["state"] || "warning")}`}
+        />
+      );
+    case "resume_recovery":
+      return (
+        <VoiceStatusBadge
+          ts={item.ts}
+          status={String(item["state"] || "recovery")}
+          message={String(item["message"] || "")}
+        />
+      );
+    case "context_packet":
+      return (
+        <ToolResultPill
+          ts={item.ts}
+          tool="context_packet"
+          output={`stage=${String(item["stage"] || "updated")} action=${String(item["action"] || "full")} model=${String(item["reasoning_model"] || "")}`}
+        />
+      );
     case "error":
       return (
         <ErrorBadge
           ts={item.ts}
           message={item["message"] as string}
+          detail={item["detail"] as string | undefined}
           code={item["code"] as string | undefined}
         />
       );
@@ -957,10 +1010,12 @@ function VoiceStatusBadge({
 function ErrorBadge({
   ts,
   message,
+  detail,
   code,
 }: {
   ts: number;
   message: string;
+  detail?: string;
   code?: string;
 }) {
   return (
@@ -982,6 +1037,11 @@ function ErrorBadge({
         <p className="text-red-400 text-xs font-medium leading-relaxed">
           {message}
         </p>
+        {detail && detail !== message && (
+          <p className="text-red-300/90 text-[11px] leading-relaxed break-words">
+            {detail}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -1110,7 +1170,7 @@ function DelegationBadge({
 function ThinkingIndicator() {
   return (
     <div className="flex flex-col items-start py-4 px-2">
-      <div className="flex items-center gap-3 text-amber-500">
+      <div className="flex items-center gap-3 text-blue-500">
         <svg
           className="w-4 h-4 animate-[spin_3s_linear_infinite]"
           viewBox="0 0 24 24"
@@ -1127,7 +1187,7 @@ function ThinkingIndicator() {
           />
         </svg>
         <span className="text-[14px] font-medium">
-          Nexus will continue working after your reply
+          agent is working
         </span>
       </div>
     </div>

@@ -106,6 +106,7 @@ function ActivityEntry({ event }: { event: ActivityEvent }) {
               <ErrorEntry
                 time={time}
                 message={event.message as string}
+                detail={event.detail as string | undefined}
                 code={event.code as string | undefined}
               />
             );
@@ -261,10 +262,12 @@ function ScreenshotEntry({
 function ErrorEntry({
   time,
   message,
+  detail,
   code,
 }: {
   time: string;
   message: string;
+  detail?: string;
   code?: string;
 }) {
   return (
@@ -275,6 +278,9 @@ function ErrorEntry({
         {code && <span className="text-[9px] bg-red-500/20 text-red-400 px-1.5 rounded ml-1 font-bold tracking-tighter">{code}</span>}
       </div>
       <p className="text-red-400 font-medium leading-relaxed">{message}</p>
+      {detail && detail !== message && (
+        <p className="text-red-300/90 text-sm leading-relaxed break-words">{detail}</p>
+      )}
     </div>
   );
 }

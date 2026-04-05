@@ -38,13 +38,9 @@ def get_agent_usage_source(
     runtime_config: SessionRuntimeConfig | None = None,
 ) -> tuple[str, str]:
     if runtime_config is not None:
-        if runtime_config.use_kilo:
-            return "agent.kilo", runtime_config.kilo_model_id
-        return "agent.gemini", runtime_config.gemini_vision_model
+        return "agent.gemini", runtime_config.gemini_agent_model
 
-    if settings.use_kilo and not settings.require_byok:
-        return "agent.kilo", settings.kilo_model_id
-    return "agent.gemini", settings.gemini_vision_model
+    return "agent.gemini", settings.gemini_agent_model
 
 
 def get_expected_usage_sources() -> list[str]:

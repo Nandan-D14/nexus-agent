@@ -2,18 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useSession } from "@/lib/use-session";
-import { useState, useEffect } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { motion, useScroll, useSpring } from "framer-motion";
 import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
 import type { RecentSession } from "@/lib/message-types";
-import { fetchUserSettings, requiresByokSetup } from "@/lib/user-settings";
+import { fetchBetaStatus } from "@/lib/beta-access";
 import { Code2, Cpu, Layout, Mic, Shield, Terminal, ArrowRight, Github } from "lucide-react";
 
 export default function HomePage() {
   const router = useRouter();
-  const { createSession, isLoading } = useSession();
+  const [isLaunching, setIsLaunching] = useState(false);
   const {
     user,
     isLoading: authLoading,
@@ -22,6 +21,11 @@ export default function HomePage() {
   } = useAuth();
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [scrolled, setScrolled] = useState(false);
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
   const { scrollYProgress } = useScroll();
   const scaleX = useSpring(scrollYProgress, {
     stiffness: 100,
@@ -53,8 +57,15 @@ export default function HomePage() {
     async function maybeRedirectToSetup() {
       if (!user) return;
       try {
-        const userSettings = await fetchUserSettings();
-        if (!cancelled && requiresByokSetup(userSettings)) {
+        const betaStatus = await fetchBetaStatus();
+        if (cancelled) {
+          return;
+        }
+        if (!betaStatus.can_access_app) {
+          router.replace("/beta");
+          return;
+        }
+        if (betaStatus.requires_byok_setup) {
           router.replace("/settings/api?setup=1");
         }
       } catch {}
@@ -65,8 +76,11 @@ export default function HomePage() {
 
   const handleStart = async () => {
     if (!user) return;
+    setIsLaunching(true);
     router.push("/session/new");
   };
+
+  const resumableSession = recentSessions.find((session) => session.can_continue_workspace);
 
   const fadeInUp = {
     initial: { opacity: 0, y: 20 },
@@ -91,7 +105,7 @@ export default function HomePage() {
               <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold transform group-hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
                 <Terminal className="w-4 h-4" />
               </div>
-              <span className="font-semibold text-lg tracking-tight">Nexus</span>
+              <span className="font-semibold text-lg tracking-tight">CoComputer</span>
             </Link>
             
             <div className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-500 dark:text-zinc-400">
@@ -108,10 +122,10 @@ export default function HomePage() {
                 </Link>
                 <button
                   onClick={() => handleStart()}
-                  disabled={isLoading}
+                  disabled={isLaunching}
                   className="px-4 py-2 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95 disabled:opacity-50"
                 >
-                  {isLoading ? "Starting..." : "Launch Console"}
+                  {isLaunching ? "Starting..." : resumableSession ? "Resume Workspace" : "Launch Console"}
                 </button>
                 <button
                   onClick={() => { void signOutUser().catch(() => {}); }}
@@ -170,7 +184,7 @@ export default function HomePage() {
             transition={{ duration: 0.7, delay: 0.2 }}
             className="max-w-2xl mx-auto text-zinc-600 dark:text-zinc-400 mb-10 leading-relaxed"
           >
-            NEXUS is a voice-controlled AI agent with full native Linux access. 
+            CoComputer is a voice-controlled AI agent with full native Linux access. 
             Speak your intent, and watch it execute commands, browse the web, and build software in an isolated cloud sandbox.
           </motion.p>
 
@@ -182,10 +196,10 @@ export default function HomePage() {
           >
             <button
               onClick={() => user ? handleStart() : signInWithGoogle()}
-              disabled={isLoading || authLoading}
+              disabled={isLaunching || authLoading}
               className="group w-full sm:w-48 h-14 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-lg hover:shadow-blue-500/25 flex items-center justify-center gap-2"
             >
-               {isLoading ? "Starting..." : user ? "Launch Console" : "Start Free"}
+               {isLaunching ? "Starting..." : user ? (resumableSession ? "Resume Workspace" : "Launch Console") : "Start Free"}
                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
             </button>
             <button
@@ -219,7 +233,7 @@ export default function HomePage() {
               <div className="ml-4 flex-1 flex justify-center">
                 <div className="px-4 py-1 text-[10px] font-mono font-bold text-zinc-400 dark:text-zinc-500 bg-zinc-200/50 dark:bg-zinc-800/50 rounded-full flex items-center gap-2">
                   <div className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
-                  nexus-prod-instance.cloud
+                  cocomputer-prod-instance.cloud
                 </div>
               </div>
               <div className="flex gap-4 items-center">
@@ -281,7 +295,7 @@ export default function HomePage() {
                      <div className="bg-zinc-950 px-5 py-3 border-b border-white/5 flex items-center justify-between">
                        <div className="flex items-center gap-3">
                           <Terminal className="w-3.5 h-3.5 text-blue-500" />
-                          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Root@Nexus-Sandbox:~</span>
+                          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Root@CoComputer-Sandbox:~</span>
                        </div>
                        <div className="flex items-center gap-4">
                           <div className="flex items-center gap-1.5">
@@ -324,7 +338,7 @@ export default function HomePage() {
           <div className="text-center max-w-2xl mx-auto mb-20">
             <h2 className="text-blue-600 dark:text-blue-500 font-semibold text-xs mb-3 uppercase tracking-widest">Capabilities</h2>
             <h3 className="text-3xl md:text-5xl font-bold tracking-tight mb-6 text-zinc-900 dark:text-white leading-tight">Engineered for absolute autonomy</h3>
-            <p className="text-zinc-600 dark:text-zinc-400 text-lg">A fully integrated architecture bridging Google's Agent Developer Kit and secure, transient cloud environments.</p>
+            <p className="text-zinc-600 dark:text-zinc-400 text-lg">A fully integrated architecture bridging Google&apos;s Agent Developer Kit and secure, transient cloud environments.</p>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
@@ -436,7 +450,7 @@ export default function HomePage() {
                 Designed for the <br /> <span className="text-zinc-500">Autonomous Era.</span>
               </h3>
               <p className="text-zinc-600 dark:text-zinc-400 text-lg leading-relaxed">
-                Nexus isn't just a voice interface—it's a distributed neural network. We orchestrate the world's most advanced LLMs to drive real-time Linux kernels with near-zero latency, ensuring every command is precise, secure, and context-aware.
+                CoComputer isn&apos;t just a voice interface, it&apos;s a distributed neural network. We orchestrate the world&apos;s most advanced LLMs to drive real-time Linux kernels with near-zero latency, ensuring every command is precise, secure, and context-aware.
               </p>
               
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 pt-4">
@@ -519,18 +533,29 @@ export default function HomePage() {
             <div className="relative z-10">
               <h3 className="text-3xl md:text-5xl font-bold text-white mb-6">Experience the future of <br /> computer interaction.</h3>
               <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto text-balance">
-                Nexus is open for early access. Start building multimodal agents today with $0 setup costs.
+                CoComputer is open for early access. Start building multimodal agents today with $0 setup costs.
               </p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-                <button
-                  onClick={() => user ? handleStart() : signInWithGoogle()}
-                  className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
-                >
-                  Get Started Now
-                </button>
-                <Link href="/docs" className="w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold hover:bg-blue-700/50 transition-colors">
-                  Read Documentation
-                </Link>
+                {mounted ? (
+                  <>
+                    <button
+                      onClick={() => user ? handleStart() : signInWithGoogle()}
+                      className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
+                    >
+                      Get Started Now
+                    </button>
+                    <Link href="/docs" className="w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold hover:bg-blue-700/50 transition-colors">
+                      Read Documentation
+                    </Link>
+                  </>
+                ) : (
+                  // Render visually hidden placeholders on the server to keep
+                  // markup stable until the client mounts.
+                  <>
+                    <button aria-hidden className="invisible w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold transition-colors shadow-lg">Get Started Now</button>
+                    <div aria-hidden className="invisible w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold">Read Documentation</div>
+                  </>
+                )}
               </div>
             </div>
           </motion.div>
@@ -546,7 +571,7 @@ export default function HomePage() {
                 <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
                   <Terminal className="w-4 h-4" />
                 </div>
-                <span className="font-bold text-xl tracking-tighter">Nexus</span>
+                <span className="font-bold text-xl tracking-tighter">CoComputer</span>
               </Link>
               <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed max-w-xs">
                 Autonomous multimodal neural architecture bridging the gap between human language and native Linux environments.
@@ -579,22 +604,31 @@ export default function HomePage() {
 
             <div className="col-span-2 md:col-span-4 space-y-4">
               <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Subscribe</h5>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">Join 2,000+ developers building with Nexus.</p>
-              <form className="flex gap-2" onSubmit={(e) => e.preventDefault()}>
-                <input 
-                  type="email" 
-                  placeholder="Enter your email" 
-                  className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                />
-                <button className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold hover:bg-zinc-800 transition-colors">
-                  Join
-                </button>
-              </form>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Join 2,000+ developers building with CoComputer.</p>
+              {mounted ? (
+                <form className="flex gap-2" onSubmit={(e) => e.preventDefault()}>
+                  <input 
+                    type="email" 
+                    placeholder="Enter your email" 
+                    className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                  <button className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold hover:bg-zinc-800 transition-colors">
+                    Join
+                  </button>
+                </form>
+              ) : (
+                // Server-render stable placeholders until client mounts to avoid
+                // attribute injection (extensions) causing hydration mismatches.
+                <div className="flex gap-2" aria-hidden>
+                  <div className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm invisible">placeholder</div>
+                  <div className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold invisible">Join</div>
+                </div>
+              )}
             </div>
           </div>
           
           <div className="pt-8 border-t border-zinc-100 dark:border-zinc-800/50 flex flex-col md:flex-row justify-between items-center gap-6 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-            <p>© {new Date().getFullYear()} Nexus Systems Architecture. All rights reserved.</p>
+            <p>© {new Date().getFullYear()} CoComputer Systems. All rights reserved.</p>
             <div className="flex items-center gap-6">
               <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Privacy Policy</a>
               <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Terms of Service</a>

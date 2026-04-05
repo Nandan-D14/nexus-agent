@@ -40,13 +40,20 @@ function isNonReplayableBody(body: BodyInit | null | undefined): boolean {
   );
 }
 
+function resolveApiPath(path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return normalizedPath.startsWith(`${API_BASE}/`)
+    ? normalizedPath
+    : `${API_BASE}${normalizedPath}`;
+}
+
 export async function authenticatedFetch(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
   const perform = async (forceRefresh = false) => {
     const authHeader = await getAuthHeader(forceRefresh);
-    return fetch(`${API_BASE}${path}`, {
+    return fetch(resolveApiPath(path), {
       ...init,
       headers: mergeHeaders(init?.headers, authHeader),
     });

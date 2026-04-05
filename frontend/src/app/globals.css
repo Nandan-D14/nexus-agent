@@ -4,34 +4,79 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
+  /* Base Colors */
   --color-background: #ffffff;
-  --color-foreground: #030303;
-  --color-card: #f4f4f5;
+  --color-foreground: #09090b;
+  
+  /* Card & Surface Colors */
+  --color-card: #ffffff;
+  --color-card-foreground: #09090b;
   --color-card-border: #e4e4e7;
-  --color-accent: #00bcd4;
-  --color-accent-secondary: #4caf50;
-  --color-muted: #a1a1aa;
+  
+  /* Muted & Zinc-based Colors */
+  --color-muted: #f4f4f5;
+  --color-muted-foreground: #71717a;
+  
+  /* Primary Accents */
+  --color-accent: #0ea5e9;
+  --color-accent-foreground: #ffffff;
+  
+  /* Status Colors */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  
+  /* Custom NEXUS Blue-Cyan Scale */
+  --color-nexus-blue: #0ea5e9;
+  --color-nexus-cyan: #22d3ee;
+  --color-nexus-teal: #14b8a6;
   
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
 }
 
 @layer base {
   .dark {
-    --color-background: #030303;
-    --color-foreground: #ffffff;
-    --color-card: #0a0a0a;
-    --color-card-border: #1a1a1a;
-    --color-accent: #00f2ff;
-    --color-accent-secondary: #00ff88;
-    --color-muted: #666666;
+    --color-background: #09090b;
+    --color-foreground: #fafafa;
+    
+    --color-card: #111114;
+    --color-card-foreground: #fafafa;
+    --color-card-border: #1c1c1e;
+    
+    --color-muted: #18181b;
+    --color-muted-foreground: #a1a1aa;
+    
+    --color-accent: #0ea5e9;
+    --color-accent-foreground: #ffffff;
+    
+    /*  Co-Computer Dark Mode specific Glows */
+    --color-nexus-glow: rgba(14, 165, 233, 0.15);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-card-border outline-none;
+  }
+  
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans, system-ui, sans-serif);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
   }
 }
 
 /* Minimal Scrollbar */
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -39,57 +84,39 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #222;
-  border-radius: 10px;
+  @apply bg-zinc-200 dark:bg-zinc-800 rounded-full;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #333;
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  @apply bg-zinc-300 dark:bg-zinc-700;
 }
 
 /* Advanced Glassmorphism */
 .glass-panel {
-  background: rgba(10, 10, 10, 0.7);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+  @apply bg-white/70 dark:bg-[#111114]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  @apply bg-white/40 dark:bg-white/5 backdrop-blur-md border border-white/10 dark:border-white/5 transition-all duration-300;
 }
 
 .glass-card:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  transform: translateY(-4px);
+  @apply bg-white/60 dark:bg-white/10 border-white/20 dark:border-white/10 -translate-y-1;
 }
 
 /* Typography Effects */
 .text-glow {
-  text-shadow: 0 0 20px rgba(0, 242, 255, 0.4);
+  text-shadow: 0 0 20px rgba(14, 165, 233, 0.4);
 }
 
 .text-gradient {
-  background: linear-gradient(135deg, #fff 0%, #888 100%);
+  background: linear-gradient(135deg, #fff 0%, #a1a1aa 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
 .text-accent-gradient {
-  background: linear-gradient(135deg, #00f2ff 0%, #00ff88 100%);
+  background: linear-gradient(135deg, #0ea5e9 0%, #22d3ee 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -107,35 +134,9 @@ body {
   animation: mesh-flow 15s ease infinite;
 }
 
-@keyframes border-beam {
-  0% { offset-distance: 0%; }
-  100% { offset-distance: 100%; }
-}
-
-.border-beam-container {
-  position: relative;
-  overflow: hidden;
-}
-
-/* Custom transitions */
-.hover-reveal {
-  opacity: 0;
-  transform: translateY(10px);
-  transition: all 0.3s ease;
-}
-
-.group:hover .hover-reveal {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 @keyframes scan {
   from { transform: translateY(-100%); }
   to { transform: translateY(100%); }
-}
-
-.mask-radial {
-  mask-image: radial-gradient(circle at center, black, transparent 80%);
 }
 
 /* Chat markdown */
@@ -148,56 +149,20 @@ body {
   margin: 0.45em 0;
 }
 
-.markdown > :first-child {
-  margin-top: 0;
-}
-
-.markdown > :last-child {
-  margin-bottom: 0;
-}
-
-.markdown p {
-  margin: 0.35em 0;
-}
-
 .markdown a {
-  color: #22d3ee;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.markdown a:hover {
-  opacity: 0.85;
-}
-
-.markdown strong {
-  font-weight: 600;
+  @apply text-accent hover:underline underline-offset-2;
 }
 
 .markdown code {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-family: var(--font-mono);
 }
 
 .markdown :not(pre) > code {
-  padding: 0.15em 0.35em;
-  border-radius: 0.4em;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  font-size: 0.85em;
-}
-
-.dark .markdown :not(pre) > code {
-  background: rgba(2, 6, 23, 0.6);
-  border-color: rgba(148, 163, 184, 0.2);
+  @apply px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700/50 text-[0.85em];
 }
 
 .markdown pre {
-  margin: 0.6em 0;
-  padding: 0.75em 0.9em;
-  border-radius: 0.75em;
-  overflow-x: auto;
-  background: #0b0f14;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  @apply my-3 p-4 rounded-xl overflow-x-auto bg-[#0b0f14] border border-zinc-800;
 }
 
 .markdown pre code {
@@ -208,171 +173,51 @@ body {
   line-height: 1.6;
 }
 
-.markdown pre code.hljs {
-  background: transparent;
-}
-
 .markdown ul,
 .markdown ol {
-  margin: 0.4em 0 0.4em 1.2em;
-  padding: 0;
+  @apply my-2 ml-5 list-outside;
 }
 
-.markdown li {
-  margin: 0.2em 0;
-}
-
-.markdown li > p {
-  margin: 0.2em 0;
-}
+.markdown ul { @apply list-disc; }
+.markdown ol { @apply list-decimal; }
 
 .markdown blockquote {
-  margin: 0.6em 0;
-  padding-left: 0.75em;
-  border-left: 2px solid rgba(34, 211, 238, 0.35);
-  color: inherit;
-  opacity: 0.85;
-}
-
-.markdown hr {
-  border: none;
-  border-top: 1px solid rgba(148, 163, 184, 0.25);
-  margin: 0.75em 0;
+  @apply my-3 pl-4 border-l-2 border-accent/40 text-muted-foreground italic;
 }
 
 .markdown-table-wrapper {
-  width: 100%;
-  overflow-x: auto;
+  @apply w-full overflow-x-auto my-3 rounded-lg border border-zinc-200 dark:border-zinc-800;
 }
 
 .markdown table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.6em 0;
-  font-size: 0.85em;
+  @apply w-full border-collapse text-sm;
 }
 
 .markdown th,
 .markdown td {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  padding: 0.4em 0.6em;
-  text-align: left;
-  vertical-align: top;
+  @apply border-b border-zinc-200 dark:border-zinc-800 px-4 py-2 text-left;
 }
 
 .markdown th {
-  background: rgba(148, 163, 184, 0.15);
-  font-weight: 600;
+  @apply bg-zinc-50 dark:bg-zinc-900/50 font-semibold;
 }
 
 .markdown img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 0.6em;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-}
-
-.markdown input[type="checkbox"] {
-  margin-right: 0.4em;
-  accent-color: #22d3ee;
-}
-
-.chat-details > summary::-webkit-details-marker {
-  display: none;
-}
-
-.chat-details > summary {
-  list-style: none;
-}
-
-/* Chat timeline cards */
-.chat-log-card {
-  border-radius: 16px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(10, 10, 12, 0.65);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-  overflow: hidden;
-}
-
-.chat-log-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
-  cursor: pointer;
-}
-
-.chat-log-card > summary::-webkit-details-marker {
-  display: none;
-}
-
-.chat-log-card > summary {
-  list-style: none;
-}
-
-.chat-log-summary:hover {
-  background: rgba(34, 211, 238, 0.08);
-}
-
-.chat-log-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, #22d3ee, #34d399);
-  box-shadow: 0 0 12px rgba(34, 211, 238, 0.5);
-}
-
-.chat-log-chevron {
-  width: 10px;
-  height: 10px;
-  border-right: 2px solid rgba(148, 163, 184, 0.7);
-  border-bottom: 2px solid rgba(148, 163, 184, 0.7);
-  transform: rotate(45deg);
-  transition: transform 0.2s ease;
-}
-
-.chat-log-card[open] .chat-log-chevron {
-  transform: rotate(225deg);
-}
-
-.chat-log-body {
-  padding: 4px 18px 16px 18px;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
-}
-
-.chat-timeline-item {
-  position: relative;
-  display: grid;
-  grid-template-columns: 12px 1fr;
-  gap: 14px;
-  padding: 12px 0;
-}
-
-.chat-timeline-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  margin-top: 6px;
-}
-
-.chat-timeline-line {
-  position: absolute;
-  left: 4px;
-  top: 24px;
-  bottom: 8px;
-  width: 1px;
-  background: rgba(148, 163, 184, 0.2);
+  @apply max-w-full h-auto rounded-xl border border-zinc-200 dark:border-zinc-800 my-3;
 }
 
 .chat-code-block {
-  background: rgba(2, 6, 23, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: #e2e8f0;
+  @apply w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words break-all bg-black/60 border border-zinc-800 rounded-xl p-3 font-mono text-[11px] leading-relaxed text-zinc-300;
+}
+
+.chat-timeline-item {
+  @apply relative grid grid-cols-[12px_1fr] gap-4 py-3;
+}
+
+.chat-timeline-dot {
+  @apply w-2 h-2 rounded-full mt-1.5;
+}
+
+.chat-timeline-line {
+  @apply absolute left-1 top-6 bottom-2 w-[1px] bg-zinc-200 dark:bg-zinc-800;
 }

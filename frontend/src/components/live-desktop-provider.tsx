@@ -12,7 +12,6 @@ import {
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowUpRight, MonitorSmartphone, X } from "lucide-react";
-
 import { useToast } from "@/components/toast-provider";
 import { useAuth } from "@/lib/auth-context";
 import { useSession } from "@/lib/use-session";
