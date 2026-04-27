@@ -169,9 +169,25 @@ async def handle_websocket(
                     if msg_type == "text_input":
                         text = data.get("text", "").strip()
                         if text:
+                            connector_ids = [
+                                str(item).strip()
+                                for item in (data.get("connector_ids") or [])
+                                if str(item).strip()
+                            ]
+                            uploaded_files = [
+                                item
+                                for item in (data.get("uploaded_files") or [])
+                                if isinstance(item, dict)
+                            ]
                             # Run as background task so stop_agent can interrupt
                             _track(
-                                asyncio.create_task(orchestrator.handle_text_input(text)),
+                                asyncio.create_task(
+                                    orchestrator.handle_text_input(
+                                        text,
+                                        connector_ids=connector_ids,
+                                        uploaded_files=uploaded_files,
+                                    )
+                                ),
                                 label="handle_text_input",
                             )
 

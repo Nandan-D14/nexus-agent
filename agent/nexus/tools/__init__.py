@@ -23,6 +23,17 @@ from nexus.tools.workspace import (
     list_workspace_files,
 )
 from nexus.tools.web import web_search, scrape_web_page
+from nexus.tools.integrations import (
+    search_drive,
+    read_drive_file,
+    create_drive_doc,
+    upload_drive_file,
+    github_search_repos,
+    github_read_file,
+    github_list_issues,
+    github_create_issue,
+    github_summarize_pr,
+)
 
 ALL_TOOLS = [
     prepare_task_workspace,
@@ -33,6 +44,15 @@ ALL_TOOLS = [
     list_workspace_files,
     web_search,
     scrape_web_page,
+    search_drive,
+    read_drive_file,
+    create_drive_doc,
+    upload_drive_file,
+    github_search_repos,
+    github_read_file,
+    github_list_issues,
+    github_create_issue,
+    github_summarize_pr,
     take_screenshot,
     run_command,
     move_mouse,

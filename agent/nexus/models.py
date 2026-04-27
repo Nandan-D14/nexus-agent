@@ -194,6 +194,54 @@ class WorkflowTemplateRunResponse(BaseModel):
     initial_prompt: str
 
 
+# ── Integrations ──────────────────────────────────────────────────
+
+class IntegrationToolInfo(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationConnection(BaseModel):
+    connection_id: str
+    connector_type: str
+    provider: str
+    name: str
+    enabled: bool = False
+    status: str = "needs_setup"
+    tools: list[IntegrationToolInfo] = Field(default_factory=list)
+    resources: list[dict[str, Any]] = Field(default_factory=list)
+    tool_count: int = 0
+    last_checked_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class IntegrationCatalogItem(BaseModel):
+    provider: str
+    connector_type: str
+    name: str
+    description: str
+    status: str = "available"
+
+
+class CreateMcpConnectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=8, max_length=500)
+    bearer_token: str | None = Field(default=None, max_length=4000)
+    enabled: bool = True
+
+
+class UpdateIntegrationConnectionRequest(BaseModel):
+    enabled: bool | None = None
+
+
+class UpsertGithubConnectionRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
 # ── User Settings ────────────────────────────────────────────────
 
 class ByokResponse(BaseModel):

@@ -2,12 +2,15 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
+  type ChangeEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
+
+import { Check, ChevronDown, Link2, Paperclip, X } from "lucide-react";
 
 import { DemoPicker } from "@/components/demo-picker";
 import { DesktopPanel } from "@/components/desktop-panel";
@@ -30,9 +33,11 @@ import type {
   SessionData,
   SessionInfo,
   SessionPhase,
+  UploadedInputFile,
   WsMessage,
   WorkflowTemplateInputField,
 } from "@/lib/message-types";
+import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useWorkflowTemplates } from "@/lib/use-workflow-templates";
@@ -57,8 +62,8 @@ type ChatItem =
   | { kind: "delegation"; from: string; to: string; ts: number };
 
 type PendingSessionAction =
-  | { type: "demo"; text: string }
-  | { type: "prompt"; text: string }
+  | { type: "demo"; payload: PendingTurnInput }
+  | { type: "prompt"; payload: PendingTurnInput }
   | { type: "openDesktop" }
   | { type: "startMic" };
 
@@ -71,6 +76,75 @@ type ContextPacketMeta = {
   reasoning_model: string;
   vision_model: string;
 };
+
+type PendingTurnInput = {
+  text: string;
+  connectorIds?: string[];
+  uploadedFiles?: UploadedInputFile[];
+};
+
+type SessionConnector = {
+  connection_id: string;
+  connector_type: string;
+  provider: string;
+  name: string;
+  enabled: boolean;
+  status: string;
+};
+
+type SessionUploadResponse = {
+  path: string;
+  artifact: RunArtifact;
+  drive_status?: string | null;
+  drive_file_id?: string | null;
+  drive_web_view_link?: string | null;
+  drive_folder_path?: string | null;
+};
+
+const SYSTEM_CONNECTOR: SessionConnector = {
+  connection_id: "system",
+  connector_type: "system",
+  provider: "system",
+  name: "Cloud Desktop Tools",
+  enabled: true,
+  status: "connected",
+};
+
+function upsertRunArtifact(prev: RunArtifact[], nextArtifact: RunArtifact): RunArtifact[] {
+  const existingIndex = prev.findIndex((artifact) => artifact.artifact_id === nextArtifact.artifact_id);
+  if (existingIndex === -1) {
+    return [nextArtifact, ...prev];
+  }
+  const updated = [...prev];
+  updated[existingIndex] = nextArtifact;
+  return updated;
+}
+
+function normalizePendingTurnInput(value: unknown): PendingTurnInput | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const text = typeof record.text === "string" ? record.text.trim() : "";
+  if (!text) {
+    return null;
+  }
+  const connectorIds = Array.isArray(record.connectorIds)
+    ? record.connectorIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const uploadedFiles = Array.isArray(record.uploadedFiles)
+    ? record.uploadedFiles.filter((item): item is UploadedInputFile => Boolean(item && typeof item === "object"))
+    : [];
+  return { text, connectorIds, uploadedFiles };
+}
+
+function connectorButtonLabel(connectors: SessionConnector[], selectedIds: string[]): string {
+  if (selectedIds.length === 0) return "Connectors";
+  if (selectedIds.length === 1) {
+    return connectors.find((connector) => connector.connection_id === selectedIds[0])?.name ?? "1 connector";
+  }
+  return `${selectedIds.length} connectors`;
+}
 
 function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
   const existingIndex = prev.findIndex((step) => step.step_id === nextStep.step_id);
@@ -240,11 +314,16 @@ export default function SessionPage() {
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [contextMeta, setContextMeta] = useState<ContextPacketMeta | null>(null);
   const [textInput, setTextInput] = useState("");
+  const [availableConnectors, setAvailableConnectors] = useState<SessionConnector[]>([SYSTEM_CONNECTOR]);
+  const [selectedConnectorIds, setSelectedConnectorIds] = useState<string[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedInputFile[]>([]);
+  const [isConnectorMenuOpen, setIsConnectorMenuOpen] = useState(false);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [hasActivatedSession, setHasActivatedSession] = useState(false);
   const [isContinuingThread, setIsContinuingThread] = useState(false);
   const [isDesktopVisible, setIsDesktopVisible] = useState(false);
   const [isDesktopFullscreen, setIsDesktopFullscreen] = useState(false);
-  const [pendingText, setPendingText] = useState<string | null>(null);
+  const [pendingText, setPendingText] = useState<PendingTurnInput | null>(null);
   const [pendingMicStart, setPendingMicStart] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
   const [agentStatus, setAgentStatus] = useState("");
@@ -256,6 +335,8 @@ export default function SessionPage() {
   >("disconnected");
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const connectorMenuRef = useRef<HTMLDivElement>(null);
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
   const streamUrlRef = useRef<string | null>(null);
   const viewModeRef = useRef<"live" | "archived">("live");
@@ -290,6 +371,60 @@ export default function SessionPage() {
 
   const { start: startMic, stop: stopMic, isRecording } =
     useMicrophone(sendBinary, handleSpeechStart);
+
+  useEffect(() => {
+    if (authLoading || !user) {
+      setAvailableConnectors([SYSTEM_CONNECTOR]);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadAvailableConnectors() {
+      try {
+        const response = await authenticatedFetch("/v1/integrations/connections");
+        if (!response.ok) {
+          throw new Error(await parseApiError(response));
+        }
+        const body = (await response.json()) as { connections?: SessionConnector[] };
+        const usable = (body.connections ?? []).filter(
+          (connection) => connection.enabled && connection.status === "connected",
+        );
+        const nextConnectors = [SYSTEM_CONNECTOR, ...usable];
+        if (!cancelled) {
+          setAvailableConnectors(nextConnectors);
+          setSelectedConnectorIds((prev) =>
+            prev.filter((id) => nextConnectors.some((connector) => connector.connection_id === id)),
+          );
+        }
+      } catch (error) {
+        console.warn("[session] Failed to load connectors", error);
+        if (!cancelled) {
+          setAvailableConnectors([SYSTEM_CONNECTOR]);
+          setSelectedConnectorIds((prev) => prev.filter((id) => id === SYSTEM_CONNECTOR.connection_id));
+        }
+      }
+    }
+
+    void loadAvailableConnectors();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, user]);
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!connectorMenuRef.current?.contains(event.target as Node)) {
+        setIsConnectorMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, []);
 
   /* ---- Audio playback ---- */
   useEffect(() => {
@@ -771,7 +906,12 @@ export default function SessionPage() {
     }
 
     if (pendingText) {
-      sendJson({ type: "text_input", text: pendingText });
+      sendJson({
+        type: "text_input",
+        text: pendingText.text,
+        connector_ids: pendingText.connectorIds,
+        uploaded_files: pendingText.uploadedFiles,
+      });
       setPendingText(null);
     }
 
@@ -816,8 +956,8 @@ export default function SessionPage() {
 
   const continueCurrentThread = useCallback(
     async (options?: {
-      prompt?: string;
-      demo?: string;
+      prompt?: PendingTurnInput;
+      demo?: PendingTurnInput;
       openDesktop?: boolean;
       startMic?: boolean;
     }) => {
@@ -902,11 +1042,12 @@ export default function SessionPage() {
         return;
       }
 
-      if (
-        (action.type === "prompt" || action.type === "demo") &&
-        !action.text.trim()
-      ) {
-        return;
+      if (action.type === "prompt" || action.type === "demo") {
+        const payload = normalizePendingTurnInput(action.payload);
+        if (!payload) {
+          return;
+        }
+        action = { ...action, payload };
       }
 
       setPageError(null);
@@ -935,24 +1076,28 @@ export default function SessionPage() {
   );
 
   const createThreadFromPrompt = useCallback(
-    async (text: string) => {
-      const prompt = text.trim();
-      if (!prompt) {
+    async (payload: PendingTurnInput) => {
+      const nextPayload = normalizePendingTurnInput(payload);
+      if (!nextPayload) {
         return;
       }
 
-      await createThreadFromAction({ type: "prompt", text: prompt });
+      await createThreadFromAction({ type: "prompt", payload: nextPayload });
     },
     [createThreadFromAction],
   );
 
   const sendTextOrQueue = useCallback(
-    (text: string) => {
+    (payload: PendingTurnInput) => {
+      const nextPayload = normalizePendingTurnInput(payload);
+      if (!nextPayload) {
+        return;
+      }
       if (isNewSession) {
         return;
       }
       if (viewMode === "archived") {
-        void continueCurrentThread({ prompt: text });
+        void continueCurrentThread({ prompt: nextPayload });
         return;
       }
 
@@ -960,16 +1105,21 @@ export default function SessionPage() {
 
       if (!hasActivatedSession) {
         setHasActivatedSession(true);
-        setPendingText(text);
+        setPendingText(nextPayload);
         return;
       }
 
       if (!isConnected) {
-        setPendingText(text);
+        setPendingText(nextPayload);
         return;
       }
 
-      sendJson({ type: "text_input", text });
+      sendJson({
+        type: "text_input",
+        text: nextPayload.text,
+        connector_ids: nextPayload.connectorIds,
+        uploaded_files: nextPayload.uploadedFiles,
+      });
     },
     [continueCurrentThread, hasActivatedSession, isConnected, isNewSession, sendJson, viewMode],
   );
@@ -1032,16 +1182,98 @@ export default function SessionPage() {
     voiceStatus,
   ]);
 
+  const toggleConnectorSelection = useCallback((connectionId: string) => {
+    setSelectedConnectorIds((prev) =>
+      prev.includes(connectionId)
+        ? prev.filter((id) => id !== connectionId)
+        : [...prev, connectionId],
+    );
+  }, []);
+
+  const handleOpenFilePicker = useCallback(() => {
+    if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
+      toast("File upload is available in a live session.", "error");
+      return;
+    }
+    fileInputRef.current?.click();
+  }, [isNewSession, sessionData?.session_id, toast, viewMode]);
+
+  const handleFileUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      event.target.value = "";
+      if (files.length === 0) {
+        return;
+      }
+      if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
+        toast("Create or resume a live session before uploading files.", "error");
+        return;
+      }
+
+      setIsUploadingFile(true);
+      try {
+        for (const file of files) {
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("relative_path", `sources/uploads/${file.name}`);
+          formData.append("mirror_to_drive", "true");
+          const response = await authenticatedFetch(
+            `/api/v1/sessions/${encodeURIComponent(sessionData.session_id)}/files/upload`,
+            {
+              method: "POST",
+              body: formData,
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await parseApiError(response));
+          }
+          const body = (await response.json()) as SessionUploadResponse;
+          setRunArtifacts((prev) => upsertRunArtifact(prev, body.artifact));
+          setUploadedFiles((prev) => [
+            ...prev,
+            {
+              artifact_id: body.artifact.artifact_id,
+              name: body.artifact.title || file.name,
+              path: body.path,
+              mime_type: (body.artifact.metadata?.content_type as string | undefined) ?? file.type ?? null,
+              size: (body.artifact.metadata?.size as number | undefined) ?? file.size,
+              drive_status: body.drive_status ?? null,
+              drive_file_id: body.drive_file_id ?? null,
+              drive_web_view_link: body.drive_web_view_link ?? null,
+              drive_folder_path: body.drive_folder_path ?? null,
+            },
+          ]);
+        }
+      } catch (error) {
+        toast(error instanceof Error ? error.message : "File upload failed.", "error");
+      } finally {
+        setIsUploadingFile(false);
+      }
+    },
+    [isNewSession, sessionData?.session_id, toast, viewMode],
+  );
+
+  const handleRemoveUploadedFile = useCallback((path: string) => {
+    setUploadedFiles((prev) => prev.filter((file) => file.path !== path));
+  }, []);
+
   const handleTextSubmit = useCallback(() => {
     const text = textInput.trim();
     if (!text) return;
+    const payload: PendingTurnInput = {
+      text,
+      connectorIds: selectedConnectorIds,
+      uploadedFiles,
+    };
     if (isNewSession) {
-      void createThreadFromPrompt(text);
+      void createThreadFromPrompt(payload);
+      setTextInput("");
       return;
     }
-    sendTextOrQueue(text);
+    sendTextOrQueue(payload);
     setTextInput("");
-  }, [createThreadFromPrompt, isNewSession, sendTextOrQueue, textInput]);
+    setUploadedFiles([]);
+  }, [createThreadFromPrompt, isNewSession, selectedConnectorIds, sendTextOrQueue, textInput, uploadedFiles]);
 
   const handleShowDesktop = useCallback(() => {
     if (isNewSession) {
@@ -1077,15 +1309,16 @@ export default function SessionPage() {
 
   const handleDemo = useCallback(
     (text: string) => {
+      const payload: PendingTurnInput = { text };
       if (isNewSession) {
-        void createThreadFromAction({ type: "demo", text });
+        void createThreadFromAction({ type: "demo", payload });
         return;
       }
       if (viewMode === "archived") {
-        void continueCurrentThread({ demo: text });
+        void continueCurrentThread({ demo: payload });
         return;
       }
-      sendTextOrQueue(text);
+      sendTextOrQueue(payload);
     },
     [continueCurrentThread, createThreadFromAction, isNewSession, sendTextOrQueue, viewMode],
   );
@@ -1119,7 +1352,7 @@ export default function SessionPage() {
       }
       sessionStorage.removeItem(key);
 
-      const action = JSON.parse(raw) as PendingSessionAction;
+      const action = JSON.parse(raw) as PendingSessionAction | { type: "demo" | "prompt"; text?: string };
 
       autoActionHandledRef.current = true;
       setActiveSurface("conversation");
@@ -1132,8 +1365,14 @@ export default function SessionPage() {
         setPendingMicStart(true);
         setPhase("listening");
       } else if (action.type === "demo" || action.type === "prompt") {
+        const payload = normalizePendingTurnInput(
+          "payload" in action ? action.payload : { text: action.text ?? "" },
+        );
+        if (!payload) {
+          return;
+        }
         setHasActivatedSession(true);
-        setPendingText(action.text);
+        setPendingText(payload);
         setPhase("thinking");
       }
     } catch {
@@ -1225,9 +1464,18 @@ export default function SessionPage() {
     pendingMicStart ||
     viewMode === "archived";
   const hasStarted = hasConversationStarted || isDesktopVisible;
+  const selectedConnectorLabel = connectorButtonLabel(availableConnectors, selectedConnectorIds);
+  const uploadDisabled = isNewSession || viewMode !== "live" || isUploadingFile;
 
   return (
     <div className="h-screen flex overflow-hidden bg-[#fafafa] dark:bg-[#111114]">
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileUpload}
+      />
       {/* ─── Left nav sidebar ─── */}
       <SessionNavSidebar />
 
@@ -1289,26 +1537,88 @@ export default function SessionPage() {
                       className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed"
                     />
                   </div>
+                  {uploadedFiles.length > 0 ? (
+                    <div className="flex flex-wrap gap-2 px-3 pb-1">
+                      {uploadedFiles.map((file) => (
+                        <span
+                          key={file.path}
+                          className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                        >
+                          <Paperclip className="h-3.5 w-3.5" />
+                          <span className="max-w-44 truncate">{file.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveUploadedFile(file.path)}
+                            className="text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="flex items-center justify-between mt-2 px-2">
                     <div className="flex items-center gap-3 text-zinc-400">
                       {/* Paperclip */}
-                      <button className="hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                        </svg>
+                      <button
+                        type="button"
+                        onClick={handleOpenFilePicker}
+                        disabled={uploadDisabled}
+                        className="hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={isNewSession ? "File upload is available after the live session starts." : "Upload files"}
+                      >
+                        <Paperclip className="w-5 h-5" />
                       </button>
                       
-                      {/* Model Selector */}
-                      <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors text-sm font-medium">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                          <circle cx="12" cy="12" r="10" />
-                          <circle cx="12" cy="12" r="2" fill="currentColor" />
-                        </svg>
-                        Gemini
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
+                      <div ref={connectorMenuRef} className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setIsConnectorMenuOpen((open) => !open)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors text-sm font-medium"
+                        >
+                          <Link2 className="w-4 h-4" />
+                          <span>{selectedConnectorLabel}</span>
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                        {isConnectorMenuOpen ? (
+                          <div className="absolute left-0 bottom-full mb-2 w-72 rounded-2xl border border-zinc-200 bg-white p-2 shadow-xl dark:border-zinc-800 dark:bg-[#17171c]">
+                            <div className="px-2 pb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+                              Connected tools
+                            </div>
+                            <div className="space-y-1">
+                              {availableConnectors.map((connector) => {
+                                const checked = selectedConnectorIds.includes(connector.connection_id);
+                                return (
+                                  <button
+                                    key={connector.connection_id}
+                                    type="button"
+                                    onClick={() => toggleConnectorSelection(connector.connection_id)}
+                                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
+                                  >
+                                    <div>
+                                      <div className="font-medium text-zinc-900 dark:text-zinc-100">
+                                        {connector.name}
+                                      </div>
+                                      <div className="text-xs uppercase tracking-[0.12em] text-zinc-500">
+                                        {connector.provider}
+                                      </div>
+                                    </div>
+                                    <span
+                                      className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                        checked
+                                          ? "border-zinc-900 bg-zinc-900 text-white dark:border-white dark:bg-white dark:text-black"
+                                          : "border-zinc-300 text-transparent dark:border-zinc-700"
+                                      }`}
+                                    >
+                                      <Check className="h-3.5 w-3.5" />
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2 pr-1">
@@ -1320,9 +1630,9 @@ export default function SessionPage() {
                       />
                       <button
                         onClick={handleTextSubmit}
-                        disabled={!textInput.trim() || isLoading}
+                        disabled={!textInput.trim() || isLoading || isUploadingFile}
                         className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
-                          textInput.trim() && !isLoading
+                          textInput.trim() && !isLoading && !isUploadingFile
                             ? "bg-zinc-900 text-white dark:bg-white dark:text-black hover:scale-105" 
                             : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
                         }`}
@@ -1577,21 +1887,89 @@ export default function SessionPage() {
                 {viewMode === "live" ? (
                   <div className="px-4 pb-6 pt-2 shrink-0">
                     <div className="mx-auto w-full max-w-4xl relative">
+                      {uploadedFiles.length > 0 ? (
+                        <div className="mb-3 flex flex-wrap gap-2">
+                          {uploadedFiles.map((file) => (
+                            <span
+                              key={file.path}
+                              className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                            >
+                              <Paperclip className="h-3.5 w-3.5" />
+                              <span className="max-w-52 truncate">{file.name}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveUploadedFile(file.path)}
+                                className="text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="flex items-center gap-2 bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-full p-2 shadow-sm transition-all focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600">
                         {/* Action buttons left */}
                         <div className="flex items-center gap-1 shrink-0">
-                          <button className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-                              <line x1="12" y1="5" x2="12" y2="19"></line>
-                              <line x1="5" y1="12" x2="19" y2="12"></line>
-                            </svg>
+                          <button
+                            type="button"
+                            onClick={handleOpenFilePicker}
+                            disabled={uploadDisabled}
+                            title="Upload files"
+                            className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Paperclip className="w-4 h-4" />
                           </button>
-                          <button className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-                              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                            </svg>
-                          </button>
+                          <div ref={connectorMenuRef} className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setIsConnectorMenuOpen((open) => !open)}
+                              className="h-8 rounded-full px-3 text-sm font-medium text-zinc-500 transition-colors hover:bg-zinc-200/50 hover:text-zinc-800 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-300"
+                            >
+                              <span className="inline-flex items-center gap-1.5">
+                                <Link2 className="h-4 w-4" />
+                                <span className="max-w-32 truncate">{selectedConnectorLabel}</span>
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </span>
+                            </button>
+                            {isConnectorMenuOpen ? (
+                              <div className="absolute bottom-full left-0 mb-2 w-72 rounded-2xl border border-zinc-200 bg-white p-2 shadow-xl dark:border-zinc-800 dark:bg-[#17171c]">
+                                <div className="px-2 pb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+                                  Connected tools
+                                </div>
+                                <div className="space-y-1">
+                                  {availableConnectors.map((connector) => {
+                                    const checked = selectedConnectorIds.includes(connector.connection_id);
+                                    return (
+                                      <button
+                                        key={connector.connection_id}
+                                        type="button"
+                                        onClick={() => toggleConnectorSelection(connector.connection_id)}
+                                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
+                                      >
+                                        <div>
+                                          <div className="font-medium text-zinc-900 dark:text-zinc-100">
+                                            {connector.name}
+                                          </div>
+                                          <div className="text-xs uppercase tracking-[0.12em] text-zinc-500">
+                                            {connector.provider}
+                                          </div>
+                                        </div>
+                                        <span
+                                          className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                            checked
+                                              ? "border-zinc-900 bg-zinc-900 text-white dark:border-white dark:bg-white dark:text-black"
+                                              : "border-zinc-300 text-transparent dark:border-zinc-700"
+                                          }`}
+                                        >
+                                          <Check className="h-3.5 w-3.5" />
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
                         
                         {/* Text input */}
@@ -1618,9 +1996,9 @@ export default function SessionPage() {
                           />
                           <button
                             onClick={handleTextSubmit}
-                            disabled={!textInput.trim() || isLoading}
+                            disabled={!textInput.trim() || isLoading || isUploadingFile}
                             className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
-                              textInput.trim() && !isLoading
+                              textInput.trim() && !isLoading && !isUploadingFile
                                 ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-white' 
                                 : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
                             }`}

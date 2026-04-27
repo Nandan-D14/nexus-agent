@@ -64,6 +64,7 @@ def _runtime_for_task_model(
 def create_agent(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
+    integration_tools: list | None = None,
 ) -> Agent:
     """Create the single CoComputer ADK agent with all desktop control tools."""
     effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
@@ -71,7 +72,7 @@ def create_agent(
         name="nexus",
         model=_get_model(effective_runtime_config),
         instruction=SYSTEM_PROMPT,
-        tools=ALL_TOOLS,
+        tools=[*ALL_TOOLS, *(integration_tools or [])],
     )
     return agent
 
@@ -79,6 +80,7 @@ def create_agent(
 def create_multi_agent(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
+    integration_tools: list | None = None,
 ) -> Agent:
     """Create a hierarchical multi-agent system.
 
@@ -97,6 +99,17 @@ def create_multi_agent(
         create_orchestrator_agent,
     )
     from nexus.tools.bg_task import request_background_task
+    from nexus.tools.integrations import (
+        search_drive,
+        read_drive_file,
+        create_drive_doc,
+        upload_drive_file,
+        github_search_repos,
+        github_read_file,
+        github_list_issues,
+        github_create_issue,
+        github_summarize_pr,
+    )
     from nexus.tools.workspace import (
         prepare_task_workspace,
         write_todo_list,
@@ -113,6 +126,16 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
+        search_drive,
+        read_drive_file,
+        create_drive_doc,
+        upload_drive_file,
+        github_search_repos,
+        github_read_file,
+        github_list_issues,
+        github_create_issue,
+        github_summarize_pr,
+        *(integration_tools or []),
     ]
     deepresearcher_tools = [
         prepare_task_workspace,
@@ -122,6 +145,16 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
+        search_drive,
+        read_drive_file,
+        create_drive_doc,
+        upload_drive_file,
+        github_search_repos,
+        github_read_file,
+        github_list_issues,
+        github_create_issue,
+        github_summarize_pr,
+        *(integration_tools or []),
     ]
 
     computer = create_computer_agent(effective_runtime_config)

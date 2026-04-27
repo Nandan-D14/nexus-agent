@@ -1,0 +1,6 @@
+INFO:     Started server process [9944]
+INFO:     Waiting for application startup.
+2026-04-25 21:05:38,263 [nexus.server] INFO: CoComputer agent service starting...
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-25 21:06:22,652 [httpx] INFO: HTTP Request: GET https://us-central1-aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=1 "HTTP/1.1 200 OK"

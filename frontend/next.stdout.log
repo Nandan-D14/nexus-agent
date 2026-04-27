@@ -1,0 +1,16 @@
+
+> virtual-voice-agent@0.1.0 dev
+> next dev --webpack
+
+▲ Next.js 16.1.6 (webpack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.56.1:3000
+- Environments: .env.local
+
+✓ Starting...
+✓ Ready in 8.9s
+○ Compiling / ...
+ GET / 200 in 27.4s (compile: 24.1s, render: 3.4s)
+○ Compiling /api/[...path] ...
+ GET / 200 in 412ms (compile: 184ms, render: 228ms)
+ GET /api/v1/beta/status 200 in 21.9s (compile: 4.9s, render: 17.0s)

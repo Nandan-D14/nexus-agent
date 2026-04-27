@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import re
+import secrets
 import threading
 import time
 import uuid
@@ -11,10 +14,12 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode, urlparse
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, WebSocket
+import httpx
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.beta_access import (
@@ -32,6 +37,7 @@ from nexus.beta_access import (
 )
 from nexus.config import settings, apply_runtime_env_overrides, validate_startup_settings
 from nexus.firebase import get_firestore_client
+from nexus.google_drive import get_google_drive_client_for_user
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.models import (
     BetaApplicationRequest,
@@ -39,10 +45,13 @@ from nexus.models import (
     BetaStatusResponse,
     ContextPacket,
     CreateWorkflowTemplateRequest,
+    CreateMcpConnectionRequest,
     ErrorResponse,
     HealthResponse,
     HistoryReuseRequest,
     HandoffSummary,
+    IntegrationCatalogItem,
+    IntegrationConnection,
     RunWorkflowTemplateRequest,
     RunArtifact,
     RunInfo,
@@ -58,7 +67,10 @@ from nexus.models import (
     WorkflowTemplateInputField,
     WorkflowTemplateRunResponse,
     UpdateWorkflowTemplateRequest,
+    UpdateIntegrationConnectionRequest,
+    UpsertGithubConnectionRequest,
 )
+from nexus.mcp_client import McpRemoteClient, discovered_tools_payload, slugify_tool_part
 from nexus.runtime_config import (
     build_byok_error_payload,
     build_byok_storage_update,
@@ -68,6 +80,7 @@ from nexus.runtime_config import (
     resolve_session_runtime_config,
 )
 from nexus.session import SessionManager
+from nexus.tools.workspace import derive_workspace_path
 from nexus.usage import get_expected_usage_sources
 from nexus.ws_handler import handle_websocket
 
@@ -236,7 +249,90 @@ def _serialize_artifact(artifact) -> RunArtifact:
     )
 
 
+def _serialize_integration_connection(connection) -> IntegrationConnection:
+    public = connection.public or {}
+    raw_tools = public.get("tools") if isinstance(public.get("tools"), list) else []
+    raw_resources = public.get("resources") if isinstance(public.get("resources"), list) else []
+    return IntegrationConnection(
+        connection_id=connection.connection_id,
+        connector_type=connection.connector_type,
+        provider=connection.provider,
+        name=connection.name,
+        enabled=connection.enabled,
+        status=connection.status,
+        tools=[
+            {
+                "name": str(tool.get("name", "")),
+                "description": str(tool.get("description", "") or ""),
+                "input_schema": (
+                    tool.get("input_schema")
+                    if isinstance(tool.get("input_schema"), dict)
+                    else tool.get("inputSchema")
+                    if isinstance(tool.get("inputSchema"), dict)
+                    else {}
+                ),
+            }
+            for tool in raw_tools
+            if isinstance(tool, dict) and tool.get("name")
+        ],
+        resources=[resource for resource in raw_resources if isinstance(resource, dict)],
+        tool_count=int(public.get("toolCount", len(raw_tools)) or 0),
+        last_checked_at=connection.last_checked_at,
+        last_error=connection.last_error,
+        created_at=connection.created_at,
+        updated_at=connection.updated_at,
+    )
+
+
+def _validate_remote_mcp_url(url: str) -> str:
+    cleaned = (url or "").strip()
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="MCP server URL must be an absolute http(s) URL.")
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and (settings.is_production or parsed.hostname not in local_hosts):
+        raise HTTPException(status_code=400, detail="Remote MCP servers must use HTTPS.")
+    return cleaned
+
+
 _TEMPLATE_KEY_RE = re.compile(r"[^a-z0-9_]+")
+_SAFE_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/ -]+$")
+
+
+def _safe_workspace_relative_path(value: str) -> str:
+    raw = (value or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or ".." in raw.split("/"):
+        raise HTTPException(status_code=400, detail="relative_path must stay inside the run workspace")
+    if not _SAFE_RELATIVE_PATH_RE.match(raw):
+        raise HTTPException(status_code=400, detail="relative_path contains unsupported characters")
+    return "/".join(part for part in raw.split("/") if part and part != ".")
+
+
+async def _mirror_upload_to_google_drive(
+    *,
+    user_id: str,
+    session_id: str,
+    filename: str,
+    content: bytes,
+    mime_type: str | None,
+) -> dict[str, Any]:
+    client = await get_google_drive_client_for_user(history_repository, user_id)
+    if client is None:
+        return {"status": "skipped"}
+    folder = await client.ensure_folder_path(["CoComputer", "Sessions", session_id, "Uploads"])
+    uploaded = await client.upload_bytes(
+        filename=filename,
+        content=content,
+        mime_type=mime_type or "application/octet-stream",
+        parent_id=folder["folder_id"],
+    )
+    return {
+        "status": "uploaded",
+        "drive_file_id": uploaded.get("id"),
+        "web_view_link": uploaded.get("webViewLink"),
+        "folder_path": folder["path"],
+        "folder_id": folder["folder_id"],
+    }
 
 
 def _normalize_template_input_fields(
@@ -1161,6 +1257,106 @@ async def get_session_artifacts(session_id: str, user: AuthenticatedUser = Depen
     }
 
 
+@app.post("/api/v1/sessions/{session_id}/files/upload")
+async def upload_session_file(
+    session_id: str,
+    file: UploadFile = File(...),
+    relative_path: str | None = Form(default=None),
+    mirror_to_drive: bool = Form(default=True),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    session = session_manager.get_session(session_id)
+    if not session or session.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    if not session.current_run_id:
+        raise HTTPException(status_code=400, detail="Session does not have an active run")
+    await session_manager.ensure_session_ready(session_id)
+    filename = _safe_workspace_relative_path(relative_path or f"sources/uploads/{file.filename or 'upload.bin'}")
+    workspace_path = derive_workspace_path(session.id, session.current_run_id)
+    target_path = f"{workspace_path}/{filename}"
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File uploads are limited to 20 MB")
+    try:
+        session.sandbox.write_binary_file(target_path, content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write file into sandbox: {exc}")
+    drive_result: dict[str, Any] = {"status": "skipped"}
+    if mirror_to_drive:
+        try:
+            drive_result = await _mirror_upload_to_google_drive(
+                user_id=user.uid,
+                session_id=session.id,
+                filename=file.filename or filename.rsplit("/", 1)[-1] or "upload.bin",
+                content=content,
+                mime_type=file.content_type,
+            )
+        except Exception as exc:
+            logger.warning("Drive mirror failed for session upload %s: %s", session.id, exc, exc_info=True)
+            drive_result = {"status": "error", "error": str(exc)}
+    artifact_metadata = {
+        "relative_path": filename,
+        "size": len(content),
+        "content_type": file.content_type,
+        "drive_status": drive_result.get("status", "skipped"),
+    }
+    if drive_result.get("drive_file_id"):
+        artifact_metadata["drive_file_id"] = drive_result["drive_file_id"]
+    if drive_result.get("web_view_link"):
+        artifact_metadata["drive_web_view_link"] = drive_result["web_view_link"]
+    if drive_result.get("folder_path"):
+        artifact_metadata["drive_folder_path"] = drive_result["folder_path"]
+    if drive_result.get("error"):
+        artifact_metadata["drive_error"] = drive_result["error"]
+    artifact = await history_repository.create_artifact(
+        session_id=session.id,
+        run_id=session.current_run_id,
+        kind="uploaded_file",
+        title=file.filename or filename,
+        preview=f"Uploaded {file.filename or filename} to {target_path}",
+        path=target_path,
+        url=drive_result.get("web_view_link"),
+        metadata=artifact_metadata,
+    )
+    return {
+        "status": "uploaded",
+        "path": target_path,
+        "artifact": _serialize_artifact(artifact).model_dump(mode="json"),
+        "drive_status": drive_result.get("status", "skipped"),
+        "drive_file_id": drive_result.get("drive_file_id"),
+        "drive_web_view_link": drive_result.get("web_view_link"),
+        "drive_folder_path": drive_result.get("folder_path"),
+        "drive_error": drive_result.get("error"),
+    }
+
+
+@app.get("/api/v1/sessions/{session_id}/files/download")
+async def download_session_file(
+    session_id: str,
+    relative_path: str = Query(...),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    session = session_manager.get_session(session_id)
+    if not session or session.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    if not session.current_run_id:
+        raise HTTPException(status_code=400, detail="Session does not have an active run")
+    await session_manager.ensure_session_ready(session_id)
+    filename = _safe_workspace_relative_path(relative_path)
+    workspace_path = derive_workspace_path(session.id, session.current_run_id)
+    target_path = f"{workspace_path}/{filename}"
+    try:
+        content = session.sandbox.read_binary_file(target_path)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"File not found or unreadable: {exc}")
+    download_name = filename.rsplit("/", 1)[-1] or "download.bin"
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
+
+
 @app.get("/api/v1/sessions/{session_id}/run/steps")
 async def get_session_run_steps(session_id: str, user: AuthenticatedUser = Depends(require_current_user)):
     session = session_manager.get_session(session_id)
@@ -1377,6 +1573,182 @@ async def update_user_settings(
     return build_public_user_settings(updated_settings)
 
 
+# ── Integrations ─────────────────────────────────────────────────
+
+
+@app.get("/api/v1/integrations/catalog")
+async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_current_user)):
+    user_settings = await history_repository.get_user_settings(user.uid)
+    google_drive_connection = await history_repository.get_integration_connection(user.uid, "google_drive")
+    google_drive_connected = bool((user_settings or {}).get("googleDriveRefreshToken")) or (
+        bool(google_drive_connection)
+        and google_drive_connection.status == "connected"
+        and google_drive_connection.enabled
+    )
+    return {
+        "catalog": [
+            IntegrationCatalogItem(
+                provider="google_drive",
+                connector_type="native",
+                name="Google Drive",
+                description="Search, read, create, and upload Drive files.",
+                status="connected" if google_drive_connected else "needs_setup",
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="github",
+                connector_type="native",
+                name="GitHub",
+                description="Search repos, read files, list issues, create issues, and summarize PRs.",
+                status="available",
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="mcp",
+                connector_type="mcp_remote_http",
+                name="Remote MCP Server",
+                description="Connect any Streamable HTTP MCP server and expose its tools to the agent.",
+                status="available",
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="system",
+                connector_type="system",
+                name="Cloud Desktop Tools",
+                description="Built-in Linux, browser, workspace, screen, and file tools.",
+                status="connected",
+            ).model_dump(mode="json"),
+        ]
+    }
+
+
+@app.get("/api/v1/integrations/connections")
+async def list_integration_connections(user: AuthenticatedUser = Depends(require_current_user)):
+    user_settings = await history_repository.get_user_settings(user.uid)
+    if (user_settings or {}).get("googleDriveRefreshToken"):
+        drive_connection = await history_repository.get_integration_connection(user.uid, "google_drive")
+        if not drive_connection:
+            await history_repository.upsert_google_drive_connection(user.uid)
+    connections = await history_repository.list_integration_connections(user.uid)
+    return {
+        "connections": [
+            _serialize_integration_connection(connection).model_dump(mode="json")
+            for connection in connections
+        ]
+    }
+
+
+@app.post("/api/v1/integrations/mcp", response_model=IntegrationConnection)
+async def create_mcp_connection(
+    payload: CreateMcpConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    url = _validate_remote_mcp_url(payload.url)
+    connection_id = f"mcp_{slugify_tool_part(payload.name, fallback='server')}_{uuid.uuid4().hex[:6]}"
+    token = (payload.bearer_token or "").strip()
+    test = await McpRemoteClient(url=url, bearer_token=token).discover()
+    status = "connected" if test.ok else "error"
+    connection = await history_repository.upsert_mcp_connection(
+        user.uid,
+        connection_id=connection_id,
+        name=payload.name,
+        url=url,
+        bearer_token=token,
+        enabled=payload.enabled and test.ok,
+        tools=discovered_tools_payload(test.tools),
+        resources=test.resources,
+        status=status,
+        last_error=test.error or None,
+        latency_ms=test.latency_ms,
+    )
+    return _serialize_integration_connection(connection)
+
+
+@app.post("/api/v1/integrations/mcp/{connection_id}/test", response_model=IntegrationConnection)
+async def test_mcp_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    connection = await history_repository.get_integration_connection(user.uid, connection_id)
+    if not connection or connection.provider != "mcp":
+        raise HTTPException(status_code=404, detail="MCP connection not found")
+    url = _validate_remote_mcp_url(str(connection.private.get("url") or ""))
+    token = str(connection.private.get("bearerToken") or "")
+    test = await McpRemoteClient(url=url, bearer_token=token).discover()
+    updated = await history_repository.upsert_mcp_connection(
+        user.uid,
+        connection_id=connection_id,
+        name=connection.name,
+        url=url,
+        bearer_token="",
+        enabled=connection.enabled and test.ok,
+        tools=discovered_tools_payload(test.tools),
+        resources=test.resources,
+        status="connected" if test.ok else "error",
+        last_error=test.error or None,
+        latency_ms=test.latency_ms,
+    )
+    return _serialize_integration_connection(updated)
+
+
+@app.post("/api/v1/integrations/github", response_model=IntegrationConnection)
+async def upsert_github_connection(
+    payload: UpsertGithubConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    token = payload.token.strip()
+    status = "connected"
+    last_error = None
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        ) as client:
+            response = await client.get("https://api.github.com/user")
+            if response.status_code >= 400:
+                status = "error"
+                last_error = f"GitHub API returned HTTP {response.status_code}."
+    except Exception as exc:
+        status = "error"
+        last_error = str(exc)[:500] or "GitHub token test failed."
+    connection = await history_repository.upsert_github_connection(
+        user.uid,
+        token=token,
+        enabled=payload.enabled and status == "connected",
+        status=status,
+        last_error=last_error,
+    )
+    return _serialize_integration_connection(connection)
+
+
+@app.patch("/api/v1/integrations/{connection_id}", response_model=IntegrationConnection)
+async def update_integration_connection(
+    connection_id: str,
+    payload: UpdateIntegrationConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    updated = await history_repository.update_integration_connection(
+        user.uid,
+        connection_id,
+        enabled=payload.enabled,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Integration connection not found")
+    return _serialize_integration_connection(updated)
+
+
+@app.delete("/api/v1/integrations/{connection_id}", response_model=StatusMessage)
+async def delete_integration_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    deleted = await history_repository.delete_integration_connection(user.uid, connection_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Integration connection not found")
+    return StatusMessage(status="deleted")
+
+
 @app.get("/api/v1/user/quota")
 async def get_user_quota(user: AuthenticatedUser = Depends(require_current_user)):
     """Get the user's plan quota, with credit-first compatibility fields."""
@@ -1393,40 +1765,27 @@ def _gdrive_redirect_uri() -> str:
     return f"{settings.frontend_url}/auth/google-drive/callback"
 
 
-def _gdrive_flow():
-    """Build a google-auth-oauthlib Flow. Returns None if OAuth is not configured."""
+def _gdrive_oauth_configured() -> bool:
     if not (settings.google_oauth_client_id and settings.google_oauth_client_secret):
         logger.warning("Google Drive OAuth not configured: client_id=%r secret_set=%s",
                        settings.google_oauth_client_id[:8] if settings.google_oauth_client_id else "",
                        bool(settings.google_oauth_client_secret))
-        return None
-    try:
-        from google_auth_oauthlib.flow import Flow
+        return False
+    return True
 
-        client_config = {
-            "web": {
-                "client_id": settings.google_oauth_client_id,
-                "client_secret": settings.google_oauth_client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-        }
-        return Flow.from_client_config(
-            client_config,
-            scopes=_GDRIVE_SCOPES,
-            redirect_uri=_gdrive_redirect_uri(),
-        )
-    except Exception as exc:
-        logger.warning("_gdrive_flow failed: %s", exc, exc_info=True)
-        return None
+
+def _pkce_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 @app.get("/api/v1/auth/google-drive/url")
 async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a Google OAuth URL the frontend should open in a popup."""
-    flow = _gdrive_flow()
-    if flow is None:
+    if not _gdrive_oauth_configured():
         raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+
+    code_verifier = secrets.token_urlsafe(72)[:96]
 
     import jwt as pyjwt
     from datetime import timedelta
@@ -1434,15 +1793,24 @@ async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_cu
     state_payload = {
         "uid": user.uid,
         "purpose": "gdrive_oauth",
+        "cv": code_verifier,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
     state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
 
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",
-        state=state,
+    auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(
+        {
+            "client_id": settings.google_oauth_client_id,
+            "redirect_uri": _gdrive_redirect_uri(),
+            "response_type": "code",
+            "scope": " ".join(_GDRIVE_SCOPES),
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+            "prompt": "consent",
+            "state": state,
+            "code_challenge": _pkce_challenge(code_verifier),
+            "code_challenge_method": "S256",
+        }
     )
     return {"auth_url": auth_url}
 
@@ -1453,10 +1821,6 @@ async def exchange_google_drive_code(
     user: AuthenticatedUser = Depends(require_current_user),
 ):
     """Exchange an authorization code for a Drive refresh token and store it."""
-    flow = _gdrive_flow()
-    if flow is None:
-        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
-
     code = body.get("code", "")
     state = body.get("state", "")
     if not code:
@@ -1472,16 +1836,44 @@ async def exchange_google_drive_code(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
+    code_verifier = state_data.get("cv")
+    if not isinstance(code_verifier, str) or not code_verifier:
+        raise HTTPException(status_code=400, detail="Invalid OAuth code verifier")
+
+    if not _gdrive_oauth_configured():
+        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+
     try:
-        flow.fetch_token(code=code)
-        refresh_token = flow.credentials.refresh_token
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.google_oauth_client_id,
+                    "client_secret": settings.google_oauth_client_secret,
+                    "code": code,
+                    "code_verifier": code_verifier,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": _gdrive_redirect_uri(),
+                },
+            )
+        if token_response.status_code >= 400:
+            raise RuntimeError(token_response.text[:1000])
+        token_payload = token_response.json()
+        refresh_token = token_payload.get("refresh_token")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
 
     if not refresh_token:
-        raise HTTPException(status_code=400, detail="No refresh token returned. Ensure prompt=consent was set.")
+        existing_settings = await history_repository.get_user_settings(user.uid)
+        refresh_token = (existing_settings or {}).get("googleDriveRefreshToken")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=400,
+            detail="No refresh token returned. Remove prior app access from your Google Account, then reconnect.",
+        )
 
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": refresh_token})
+    await history_repository.upsert_google_drive_connection(user.uid)
     return {"status": "connected"}
 
 
@@ -1489,6 +1881,7 @@ async def exchange_google_drive_code(
 async def disconnect_google_drive(user: AuthenticatedUser = Depends(require_current_user)):
     """Remove the user's stored Google Drive refresh token."""
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})
+    await history_repository.delete_integration_connection(user.uid, "google_drive")
     return {"status": "disconnected"}
 
 

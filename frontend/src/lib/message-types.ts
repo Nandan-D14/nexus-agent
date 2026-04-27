@@ -111,7 +111,12 @@ export type WsMessage =
 // ── Client -> Server (Text frames) ─────────────────────────────────
 
 export type WsCommand =
-  | { type: "text_input"; text: string }
+  | {
+      type: "text_input";
+      text: string;
+      connector_ids?: string[];
+      uploaded_files?: UploadedInputFile[];
+    }
   | { type: "analyze_screen" }
   | { type: "stop_agent" }
   | { type: "start_voice" }
@@ -269,6 +274,18 @@ export type RunArtifact = {
   path?: string | null;
   url?: string | null;
   metadata: Record<string, unknown>;
+};
+
+export type UploadedInputFile = {
+  artifact_id?: string;
+  name: string;
+  path: string;
+  mime_type?: string | null;
+  size?: number | null;
+  drive_status?: string | null;
+  drive_file_id?: string | null;
+  drive_web_view_link?: string | null;
+  drive_folder_path?: string | null;
 };
 
 export type WorkflowTemplateInputField = {

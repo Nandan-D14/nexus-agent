@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { authenticatedFetch } from "@/lib/api-client";
+import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 
 export const dynamic = "force-dynamic";
 
@@ -82,11 +82,14 @@ export default function GoogleDriveCallbackPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, state }),
     })
-      .then(() => {
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(await parseApiError(response));
+        }
         setExchangeStatus("success");
         setExchangeMessage("Google Drive connected!");
         if (window.opener) {
-          window.opener.postMessage({ type: "google_drive_connected" }, window.location.origin);
+          window.opener.postMessage({ type: "google_drive_connected", connected: true }, window.location.origin);
           setTimeout(() => window.close(), 1200);
         }
       })
