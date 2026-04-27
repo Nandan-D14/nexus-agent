@@ -419,10 +419,19 @@ function EventRow({
       return (
         <TimelineRow
           isLast={isLast}
-          dotClass="bg-zinc-400"
+          dotClass="bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.5)]"
           time={time}
           label="Thinking"
-          labelClass="text-zinc-300"
+          labelClass="text-cyan-300"
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-cyan-400">
+              <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+              <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+              <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+              <path d="M17.599 6.5A3 3 0 0 0 13.6 4"/>
+              <path d="M6.401 6.5A3 3 0 0 1 10.4 4"/>
+            </svg>
+          }
           content={typeof item["content"] === "string" ? item["content"] : "Thinking\u2026"}
         />
       );
@@ -430,13 +439,18 @@ function EventRow({
       return (
         <TimelineRow
           isLast={isLast}
-          dotClass="bg-cyan-400"
+          dotClass="bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]"
           time={time}
           label="Tool Call"
-          labelClass="text-cyan-300"
+          labelClass="text-amber-300"
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-amber-400">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            </svg>
+          }
           content={
             <div className="space-y-2">
-              <div className="font-mono text-cyan-200">
+              <div className="font-mono text-amber-200">
                 {String(item["tool"] || "tool")}
               </div>
               {item["args"] ? (

@@ -14,6 +14,7 @@ from nexus.tools.bash import run_command
 from nexus.tools.screen import take_screenshot
 from nexus.tools.browser import open_browser
 from nexus.tools.bg_task import request_background_task
+from nexus.tools.monitor import schedule_monitoring_task
 from nexus.tools.workspace import (
     prepare_task_workspace,
     write_todo_list,
@@ -65,4 +66,5 @@ ALL_TOOLS = [
     drag,
     open_browser,
     request_background_task,
+    schedule_monitoring_task,
 ]

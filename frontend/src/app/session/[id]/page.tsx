@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -1457,6 +1458,25 @@ export default function SessionPage() {
   );
 
   /* ---- Render ---- */
+  const latestAnalysis = useMemo(() => {
+    // Hide vision overlay when the agent is not actively working
+    if (phase === "done" || phase === "idle") {
+      return null;
+    }
+
+    for (let i = chatItems.length - 1; i >= 0; i--) {
+      const item = chatItems[i];
+      // If we see a completion event before finding a screenshot, the task is done
+      if (item.kind === "event" && item.type === "agent_complete") {
+        return null;
+      }
+      if (item.kind === "event" && item.type === "agent_screenshot" && typeof item.analysis === "string") {
+        return item.analysis;
+      }
+    }
+    return null;
+  }, [chatItems, phase]);
+
   const hasConversationStarted =
     chatItems.length > 0 ||
     phase !== "idle" ||
@@ -2024,7 +2044,7 @@ export default function SessionPage() {
                 <div className="flex-[2] min-w-0 flex overflow-hidden transition-all duration-300 ease-in-out">
                   <div className="flex-1 flex flex-col overflow-hidden p-3 bg-zinc-50 dark:bg-[#151515]">
                     <div className="w-full h-full xl:max-w-7xl mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 shadow-2xl relative">
-                      <DesktopPanel streamUrl={streamUrl} />
+                      <DesktopPanel streamUrl={streamUrl} analysis={latestAnalysis} />
                       
                       {/* ── Overlay: blocks user interaction while agent is working ── */}
                       {(phase === "thinking" || phase === "acting") && (
