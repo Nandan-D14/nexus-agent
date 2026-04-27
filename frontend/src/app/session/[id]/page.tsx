@@ -453,11 +453,17 @@ export default function SessionPage() {
   }, []);
 
   useLayoutEffect(() => {
-    const el = landingInputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
     const maxHeight = 200;
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    const el1 = landingInputRef.current;
+    if (el1) {
+      el1.style.height = "auto";
+      el1.style.height = `${Math.min(el1.scrollHeight, maxHeight)}px`;
+    }
+    const el2 = inputRef.current;
+    if (el2) {
+      el2.style.height = "auto";
+      el2.style.height = `${Math.min(el2.scrollHeight, maxHeight)}px`;
+    }
   }, [textInput]);
 
   useEffect(() => {
@@ -1539,8 +1545,8 @@ export default function SessionPage() {
 
               {/* Floating Input Box */}
               <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
-                <div className="relative flex flex-col bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl shadow-sm focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all duration-300 p-2">
-                  <div className="relative min-h-[60px] flex items-center px-2">
+                <div className="relative flex flex-col bg-white/60 dark:bg-[#151515]/60 backdrop-blur-2xl border border-black/5 dark:border-white/5 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] focus-within:shadow-[0_8px_40px_rgb(0,0,0,0.08)] dark:focus-within:shadow-[0_8px_40px_rgb(0,0,0,0.3)] transition-all duration-500 p-2.5">
+                  <div className="relative min-h-[60px] flex items-start px-2 pt-2 pb-1">
                     <textarea
                       suppressHydrationWarning
                       ref={landingInputRef}
@@ -1554,7 +1560,7 @@ export default function SessionPage() {
                       }}
                       placeholder="Send message to CoComputer..."
                       rows={1}
-                      className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed"
+                      className="w-full bg-transparent border-none outline-none text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed"
                     />
                   </div>
                   {uploadedFiles.length > 0 ? (
@@ -1811,94 +1817,37 @@ export default function SessionPage() {
                   </div>
                 )}
 
-                <div className="shrink-0 border-b border-zinc-200/80 px-4 py-3 dark:border-white/5">
-                  <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {([
-                        { id: "conversation", label: "Conversation" },
-                        { id: "run_log", label: "Run Log" },
-                        { id: "outputs", label: "Outputs" },
-                        { id: "context", label: "Context" },
-                      ] as const).map((surface) => (
-                        <button
-                          key={surface.id}
-                          onClick={() => setActiveSurface(surface.id)}
-                          className={`rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] transition-colors ${
-                            activeSurface === surface.id
-                              ? "bg-zinc-900 text-white dark:bg-white dark:text-black"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-                          }`}
-                        >
-                          {surface.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="text-xs text-zinc-500">
-                      {runInfo?.status ? `Run ${runInfo.status}` : "Run queued"}
-                    </div>
-                  </div>
-                </div>
+                {/* Tabs removed to modernize UI */}
 
                 {/* Feed container */}
                 <div className="flex-1 overflow-hidden">
-                  {activeSurface === "conversation" ? (
-                    viewMode === "archived" && chatItems.length === 0 ? (
-                      <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
-                        <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                          Archived session
+                  {viewMode === "archived" && chatItems.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
+                      <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                        Archived session
+                      </p>
+                      <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
+                        The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
+                      </p>
+                      {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
+                        <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                          {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
                         </p>
-                        <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
-                          The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
-                        </p>
-                        {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
-                          <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-                            {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
-                          </p>
-                        )}
-                        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-                          <button
-                            onClick={handleContinueArchivedThread}
-                            className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
-                          >
-                            Continue Here
-                          </button>
-                        </div>
+                      )}
+                      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          onClick={handleContinueArchivedThread}
+                          className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
+                        >
+                          Continue Here
+                        </button>
                       </div>
-                    ) : (
-                      <UnifiedChatPanel
-                        items={chatItems}
-                        isThinking={phase === "thinking"}
-                        onPermissionRespond={handlePermissionRespond}
-                      />
-                    )
-                  ) : activeSurface === "run_log" ? (
-                    <RunLogPanel
-                      run={runInfo}
-                      steps={runSteps}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have a stored run log yet."
-                          : "Waiting for the first persisted run step."
-                      }
-                    />
-                  ) : activeSurface === "context" ? (
-                    <ContextPacketPanel
-                      packet={(sessionInfo?.context_packet as ContextPacket | null) ?? null}
-                      meta={contextMeta}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have compact resume memory stored yet."
-                          : "Compact context will appear here once the session builds or injects it."
-                      }
-                    />
+                    </div>
                   ) : (
-                    <OutputsPanel
-                      artifacts={runArtifacts}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have stored outputs yet."
-                          : "Outputs from this run will appear here."
-                      }
+                    <UnifiedChatPanel
+                      items={chatItems}
+                      isThinking={phase === "thinking"}
+                      onPermissionRespond={handlePermissionRespond}
                     />
                   )}
                 </div>
@@ -1927,107 +1876,115 @@ export default function SessionPage() {
                           ))}
                         </div>
                       ) : null}
-                      <div className="flex items-center gap-2 bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-full p-2 shadow-sm transition-all focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600">
-                        {/* Action buttons left */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={handleOpenFilePicker}
-                            disabled={uploadDisabled}
-                            title="Upload files"
-                            className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Paperclip className="w-4 h-4" />
-                          </button>
-                          <div ref={connectorMenuRef} className="relative">
-                            <button
-                              type="button"
-                              onClick={() => setIsConnectorMenuOpen((open) => !open)}
-                              className="h-8 rounded-full px-3 text-sm font-medium text-zinc-500 transition-colors hover:bg-zinc-200/50 hover:text-zinc-800 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-300"
-                            >
-                              <span className="inline-flex items-center gap-1.5">
-                                <Link2 className="h-4 w-4" />
-                                <span className="max-w-32 truncate">{selectedConnectorLabel}</span>
-                                <ChevronDown className="h-3.5 w-3.5" />
-                              </span>
-                            </button>
-                            {isConnectorMenuOpen ? (
-                              <div className="absolute bottom-full left-0 mb-2 w-72 rounded-2xl border border-zinc-200 bg-white p-2 shadow-xl dark:border-zinc-800 dark:bg-[#17171c]">
-                                <div className="px-2 pb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
-                                  Connected tools
-                                </div>
-                                <div className="space-y-1">
-                                  {availableConnectors.map((connector) => {
-                                    const checked = selectedConnectorIds.includes(connector.connection_id);
-                                    return (
-                                      <button
-                                        key={connector.connection_id}
-                                        type="button"
-                                        onClick={() => toggleConnectorSelection(connector.connection_id)}
-                                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
-                                      >
-                                        <div>
-                                          <div className="font-medium text-zinc-900 dark:text-zinc-100">
-                                            {connector.name}
-                                          </div>
-                                          <div className="text-xs uppercase tracking-[0.12em] text-zinc-500">
-                                            {connector.provider}
-                                          </div>
-                                        </div>
-                                        <span
-                                          className={`flex h-5 w-5 items-center justify-center rounded-full border ${
-                                            checked
-                                              ? "border-zinc-900 bg-zinc-900 text-white dark:border-white dark:bg-white dark:text-black"
-                                              : "border-zinc-300 text-transparent dark:border-zinc-700"
-                                          }`}
-                                        >
-                                          <Check className="h-3.5 w-3.5" />
-                                        </span>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                        
-                        {/* Text input */}
-                        <div className="flex-1 relative min-h-10 flex items-center">
-                          <input
+                      <div className="flex flex-col gap-2 bg-white/60 dark:bg-[#151515]/60 backdrop-blur-2xl border border-black/5 dark:border-white/5 rounded-3xl p-3 shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] focus-within:shadow-[0_8px_40px_rgb(0,0,0,0.08)] dark:focus-within:shadow-[0_8px_40px_rgb(0,0,0,0.3)] transition-all duration-500">
+                        {/* Text input (Top) */}
+                        <div className="relative flex w-full items-start px-2 pt-1">
+                          <textarea
                             suppressHydrationWarning
                             ref={inputRef}
-                            type="text"
                             value={textInput}
                             onChange={(e) => setTextInput(e.target.value)}
-                            onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                handleTextSubmit();
+                              }
+                            }}
                             placeholder="Send message to CoComputer..."
-                            className="w-full bg-transparent border-none px-2 py-2.5 text-[15px] text-foreground dark:text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                            rows={1}
+                            className="w-full bg-transparent border-none p-0 text-sm text-foreground dark:text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 resize-none overflow-y-auto max-h-40 leading-relaxed"
                           />
                         </div>
-                        
-                        {/* Action buttons right */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          <MicButton
-                            isRecording={isRecording}
-                            onStart={toggleMic}
-                            onStop={toggleMic}
-                            disabled={voiceStatus !== "connected"}
-                          />
-                          <button
-                            onClick={handleTextSubmit}
-                            disabled={!textInput.trim() || isLoading || isUploadingFile}
-                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
-                              textInput.trim() && !isLoading && !isUploadingFile
-                                ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-white' 
-                                : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
-                            }`}
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-                              <line x1="12" y1="19" x2="12" y2="5"></line>
-                              <polyline points="5 12 12 5 19 12"></polyline>
-                            </svg>
-                          </button>
+
+                        {/* Action buttons (Bottom) */}
+                        <div className="flex items-center justify-between w-full">
+                          {/* Action buttons left */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={handleOpenFilePicker}
+                              disabled={uploadDisabled}
+                              title="Upload files"
+                              className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <Paperclip className="w-4 h-4" />
+                            </button>
+                            <div ref={connectorMenuRef} className="relative">
+                              <button
+                                type="button"
+                                onClick={() => setIsConnectorMenuOpen((open) => !open)}
+                                className="h-8 rounded-full px-3 text-sm font-medium text-zinc-500 transition-colors hover:bg-zinc-200/50 hover:text-zinc-800 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-300"
+                              >
+                                <span className="inline-flex items-center gap-1.5">
+                                  <Link2 className="h-4 w-4" />
+                                  <span className="max-w-32 truncate">{selectedConnectorLabel}</span>
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                </span>
+                              </button>
+                              {isConnectorMenuOpen ? (
+                                <div className="absolute bottom-full left-0 mb-2 w-72 rounded-2xl border border-zinc-200 bg-white p-2 shadow-xl dark:border-zinc-800 dark:bg-[#17171c]">
+                                  <div className="px-2 pb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+                                    Connected tools
+                                  </div>
+                                  <div className="space-y-1">
+                                    {availableConnectors.map((connector) => {
+                                      const checked = selectedConnectorIds.includes(connector.connection_id);
+                                      return (
+                                        <button
+                                          key={connector.connection_id}
+                                          type="button"
+                                          onClick={() => toggleConnectorSelection(connector.connection_id)}
+                                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
+                                        >
+                                          <div>
+                                            <div className="font-medium text-zinc-900 dark:text-zinc-100">
+                                              {connector.name}
+                                            </div>
+                                            <div className="text-xs uppercase tracking-[0.12em] text-zinc-500">
+                                              {connector.provider}
+                                            </div>
+                                          </div>
+                                          <span
+                                            className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                              checked
+                                                ? "border-zinc-900 bg-zinc-900 text-white dark:border-white dark:bg-white dark:text-black"
+                                                : "border-zinc-300 text-transparent dark:border-zinc-700"
+                                            }`}
+                                          >
+                                            <Check className="h-3.5 w-3.5" />
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                          
+                          {/* Action buttons right */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            <MicButton
+                              isRecording={isRecording}
+                              onStart={toggleMic}
+                              onStop={toggleMic}
+                              disabled={voiceStatus !== "connected"}
+                            />
+                            <button
+                              onClick={handleTextSubmit}
+                              disabled={!textInput.trim() || isLoading || isUploadingFile}
+                              className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
+                                textInput.trim() && !isLoading && !isUploadingFile
+                                  ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-white' 
+                                  : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
+                              }`}
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                                <line x1="12" y1="19" x2="12" y2="5"></line>
+                                <polyline points="5 12 12 5 19 12"></polyline>
+                              </svg>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
