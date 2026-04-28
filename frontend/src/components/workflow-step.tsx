@@ -63,15 +63,15 @@ function formatTime(isoString: string): string {
 }
 
 function getStepIcon(type: StepType, status: StepStatus) {
-  if (status === "failed") return <X className="w-3 h-3 text-red-400" />;
-  if (type === "thinking") return <Brain className="w-3 h-3 text-zinc-400" />;
-  if (type === "terminal") return <Terminal className="w-3 h-3 text-zinc-400" />;
-  if (type === "browser") return <Globe className="w-3 h-3 text-zinc-400" />;
-  if (type === "tool_call") return <Code2 className="w-3 h-3 text-zinc-400" />;
-  if (type === "observation") return <Search className="w-3 h-3 text-zinc-400" />;
-  if (type === "file_created") return <FileText className="w-3 h-3 text-zinc-400" />;
-  if (type === "completion" || status === "completed") return <Check className="w-3 h-3 text-zinc-400" />;
-  return <Bot className="w-3 h-3 text-zinc-400" />;
+  if (status === "failed") return <X className="w-[11px] h-[11px] text-red-400" />;
+  if (type === "thinking") return <Brain className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "terminal") return <Terminal className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "browser") return <Globe className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "tool_call") return <Code2 className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "observation") return <Search className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "file_created") return <FileText className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "completion" || status === "completed") return <Check className="w-[11px] h-[11px] text-emerald-400" />;
+  return <Bot className="w-[11px] h-[11px] text-zinc-400" />;
 }
 
 export function WorkflowStep({ step, isLast = false }: Props) {
@@ -88,15 +88,15 @@ export function WorkflowStep({ step, isLast = false }: Props) {
   return (
     <div className="relative group">
       <div className="flex items-start gap-4">
-        {/* Timeline node */}
-        <div className="relative flex flex-col items-center pt-[6px] shrink-0 ml-[11px]">
+        {/* Minimal Timeline Node */}
+        <div className="relative flex flex-col items-center pt-[6px] shrink-0 ml-[6px]">
           <div 
-            className={`w-5 h-5 rounded-full flex items-center justify-center z-10 transition-colors duration-300 ${
+            className={`w-6 h-6 rounded-full flex items-center justify-center z-10 transition-colors duration-300 ${
               isFailed 
-                ? "bg-red-500/10 border border-red-500/20 text-red-400" 
+                ? "bg-red-500/10 border border-red-500/20" 
                 : isInProgress
-                  ? "bg-zinc-800 border border-zinc-600 text-zinc-200"
-                  : "bg-[#111114] border border-zinc-800 group-hover:border-zinc-700 text-zinc-400"
+                  ? "bg-[#1c1c1f] border border-zinc-700 shadow-sm"
+                  : "bg-[#0e0e10] border border-zinc-800"
             }`}
           >
             {getStepIcon(step.step_type, step.status)}
@@ -104,69 +104,69 @@ export function WorkflowStep({ step, isLast = false }: Props) {
         </div>
 
         {/* Content */}
-        <div className="flex-1 min-w-0 pt-1 pb-3">
+        <div className="flex-1 min-w-0 pt-1 pb-2">
           <div 
-            className={`flex items-start justify-between gap-4 ${hasDetails ? "cursor-pointer" : ""}`}
+            className={`flex items-start justify-between gap-4 rounded-md transition-colors ${hasDetails ? "cursor-pointer hover:bg-white/[0.02] -ml-2 -mt-1 p-2" : ""}`}
             onClick={() => hasDetails && setExpanded(!expanded)}
           >
             <div className="flex-1 min-w-0">
-              <div className={`text-[13px] leading-relaxed tracking-tight ${isFailed ? "text-red-400" : isInProgress ? "text-zinc-200" : "text-zinc-400"}`}>
+              <div className={`text-[13.5px] leading-snug tracking-tight font-medium ${isFailed ? "text-red-400" : isInProgress ? "text-zinc-200" : "text-zinc-300"}`}>
                 {step.title}
               </div>
             </div>
             
             <div className="flex items-center gap-3 shrink-0 mt-0.5">
-              <span className="text-[10px] text-zinc-600 font-mono tracking-tighter">
+              <span className="text-[10px] text-zinc-500/70 font-mono tracking-tighter">
                 {formatTime(step.created_at)}
               </span>
               {hasDetails && (
-                <div className={`w-4 h-4 flex items-center justify-center transition-colors ${expanded ? "text-zinc-300" : "text-zinc-600 group-hover:text-zinc-400"}`}>
+                <div className={`w-4 h-4 flex items-center justify-center transition-colors ${expanded ? "text-zinc-400" : "text-zinc-600"}`}>
                   {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                 </div>
               )}
             </div>
           </div>
 
-          {/* Details Panel */}
+          {/* Collapsible Details Panel (Terminal style) */}
           <AnimatePresence>
             {expanded && hasDetails && (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.2, ease: "easeInOut" }}
+                transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
                 className="overflow-hidden"
               >
-                <div className="pt-3 space-y-3 pb-2 pr-2">
+                <div className="pt-2 space-y-2 pb-1">
                   {/* Detailed Description */}
                   {step.detail && (
-                    <div className="text-[12px] text-zinc-400 leading-relaxed">
+                    <div className="text-[12.5px] text-zinc-400 leading-relaxed pl-1">
                       {step.detail}
                     </div>
                   )}
 
                   {/* Terminal / Command */}
                   {step.command && (
-                    <div className="rounded border border-zinc-800/60 overflow-hidden bg-[#0a0a0c]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/60 bg-zinc-900/30 flex items-center gap-2">
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
+                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
                         <Terminal className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-widest">Command</span>
+                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Command</span>
                       </div>
                       <div className="p-3 overflow-x-auto custom-scrollbar">
-                        <code className="text-[11px] text-zinc-300 font-mono whitespace-pre">{step.command}</code>
+                        <code className="text-[11.5px] text-zinc-300 font-mono whitespace-pre">{step.command}</code>
                       </div>
                     </div>
                   )}
 
                   {/* JSON Args */}
                   {step.args && Object.keys(step.args).length > 0 && (
-                    <div className="rounded border border-zinc-800/60 overflow-hidden bg-[#0a0a0c]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/60 bg-zinc-900/30 flex items-center gap-2">
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
+                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
                         <Code2 className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-widest">Parameters</span>
+                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Parameters</span>
                       </div>
                       <div className="p-3 overflow-x-auto custom-scrollbar">
-                        <pre className="text-[11px] text-zinc-400 font-mono">
+                        <pre className="text-[11.5px] text-zinc-400 font-mono">
                           {JSON.stringify(step.args, null, 2)}
                         </pre>
                       </div>
@@ -175,15 +175,15 @@ export function WorkflowStep({ step, isLast = false }: Props) {
 
                   {/* Output */}
                   {step.output && (
-                    <div className="rounded border border-zinc-800/60 overflow-hidden bg-[#0a0a0c]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/60 bg-zinc-900/30 flex items-center gap-2">
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
+                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
                         <Terminal className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-widest">Output</span>
+                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Output</span>
                       </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-60">
-                        <pre className="text-[11px] text-zinc-400 font-mono whitespace-pre-wrap break-all">
+                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-64">
+                        <pre className="text-[11.5px] text-zinc-400 font-mono whitespace-pre-wrap break-all leading-relaxed">
                           {step.output.length > 2000
-                            ? step.output.slice(0, 2000) + "\n... [Output truncated]"
+                            ? step.output.slice(0, 2000) + "\n\n... [Output truncated]"
                             : step.output}
                         </pre>
                       </div>
@@ -192,13 +192,13 @@ export function WorkflowStep({ step, isLast = false }: Props) {
 
                   {/* Error */}
                   {step.error && (
-                    <div className="rounded border border-red-500/20 overflow-hidden bg-red-500/5">
+                    <div className="rounded border border-red-500/20 bg-red-500/[0.03]">
                       <div className="px-3 py-1.5 border-b border-red-500/20 bg-red-500/10 flex items-center gap-2">
                         <X className="w-3 h-3 text-red-400" />
-                        <span className="text-[10px] font-medium text-red-400 uppercase tracking-widest">Error</span>
+                        <span className="text-[9.5px] font-bold text-red-400 uppercase tracking-widest">Error</span>
                       </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-60">
-                        <p className="text-[11px] text-red-300 font-mono whitespace-pre-wrap break-all">
+                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-64">
+                        <p className="text-[11.5px] text-red-300 font-mono whitespace-pre-wrap break-all leading-relaxed">
                           {step.error}
                         </p>
                       </div>
@@ -207,31 +207,31 @@ export function WorkflowStep({ step, isLast = false }: Props) {
 
                   {/* Screenshot */}
                   {step.image_b64 && (
-                    <div className="rounded border border-zinc-800/60 overflow-hidden bg-[#0a0a0c]">
-                       <div className="px-3 py-1.5 border-b border-zinc-800/60 bg-zinc-900/30 flex items-center justify-between">
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
+                       <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Eye className="w-3 h-3 text-zinc-500" />
-                          <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-widest">Vision</span>
+                          <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Vision</span>
                         </div>
                         <button 
                           onClick={(e) => {
                             e.stopPropagation();
                             setImageExpanded(!imageExpanded);
                           }}
-                          className="text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
+                          className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
                         >
                           {imageExpanded ? "Collapse" : "Expand"}
                         </button>
                       </div>
-                      <div className={`p-2 transition-all duration-300 ${imageExpanded ? "" : "max-h-40 overflow-hidden relative"}`}>
+                      <div className={`p-1.5 transition-all duration-500 ${imageExpanded ? "" : "max-h-48 overflow-hidden relative"}`}>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={`data:image/png;base64,${step.image_b64}`}
                           alt="Screenshot"
-                          className="w-full rounded border border-zinc-800/50"
+                          className="w-full rounded-[4px] border border-zinc-800/30"
                         />
                         {!imageExpanded && (
-                          <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-[#0a0a0c] to-transparent pointer-events-none" />
+                          <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-[#09090b] to-transparent pointer-events-none" />
                         )}
                       </div>
                     </div>
