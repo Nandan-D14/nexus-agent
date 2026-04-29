@@ -246,7 +246,7 @@ function HistoryContent() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.04 }}
               key={session.session_id}
-              className="group bg-zinc-50 dark:bg-white/[0.02] border border-zinc-200 dark:border-white/5 rounded-2xl p-5 hover:bg-zinc-100 dark:hover:bg-white/[0.04] transition-colors shadow-sm dark:shadow-none"
+              className="group bg-zinc-50 dark:bg-white/[0.02] border border-zinc-200 dark:border-white/5 rounded-[28px] p-5 hover:bg-zinc-100 dark:hover:bg-white/[0.04] transition-colors shadow-sm dark:shadow-none"
             >
               <div className="flex flex-col gap-4">
                 <div className="flex flex-col md:flex-row md:items-start gap-4 justify-between">

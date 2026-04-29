@@ -88,7 +88,7 @@ export default function SettingsPage() {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto bg-[#16181a]">
+    <div className="flex-1 overflow-y-auto bg-[#1a1a1c]">
       <div className="max-w-2xl mx-auto px-6 py-8">
         {/* Header */}
         <div className="mb-8">

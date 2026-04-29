@@ -14,6 +14,7 @@ export const NAV_LINKS = [
   { name: "Chat Console", href: "/dashboard", icon: MessageSquare },
   { name: "History", href: "/history", icon: History },
   { name: "Agent Workflow", href: "/templates", icon: Workflow },
+  { name: "Agent Skills", href: "/skills", icon: Bot },
   { name: "Connectors", href: "/connectors", icon: Cable },
   { name: "Settings", href: "/settings", icon: Settings },
 ] as const;

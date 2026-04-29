@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Caveat } from "next/font/google";
 import "./globals.css";
 
 import { LiveDesktopProvider } from "@/components/live-desktop-provider";
@@ -17,6 +17,11 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const cursive = Caveat({
+  variable: "--font-cursive",
+  subsets: ["latin"],
+});
+
 export const metadata: Metadata = {
   title: "CoComputer — AI Desktop Agent",
   description: "Voice-controlled AI agent with full Linux desktop access",
@@ -30,7 +35,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen`}
+        className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} antialiased min-h-screen`}
       >
         <ThemeProvider
           attribute="class"

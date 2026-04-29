@@ -1622,17 +1622,40 @@ export default function SessionPage() {
               </button>
             </div>
 
-            <div className="max-w-3xl w-full flex flex-col items-center gap-8 mb-20 mt-10">
-              <div className="text-center space-y-4">
-                <h1 className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
-                  Welcome to CoComputer
-                </h1>
-                <p className="text-[15px] text-zinc-500">What can I help you with?</p>
+            <div className="max-w-3xl w-full flex flex-col items-center gap-2 mb-14 mt-12">
+              <div className="text-center relative py-2">
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="flex flex-col items-center"
+                >
+                  <span className="text-zinc-500 dark:text-zinc-500 text-[10px] font-medium tracking-[0.2em] uppercase mb-0.5">Welcome to</span>
+                  <h1 className="text-4xl md:text-5xl font-cursive text-indigo-500 dark:text-indigo-400 relative">
+                    CoComputer
+                    <motion.svg 
+                      viewBox="0 0 100 20" 
+                      className="absolute -bottom-2 left-0 w-full h-4 text-cyan-500/40 dark:text-cyan-400/30"
+                      initial={{ pathLength: 0 }}
+                      animate={{ pathLength: 1 }}
+                      transition={{ duration: 1, delay: 0.5 }}
+                    >
+                      <path d="M5 15 Q 50 5 95 15" fill="transparent" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </motion.svg>
+                  </h1>
+                </motion.div>
+                <motion.p 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.3 }}
+                  className="mt-8 text-base md:text-lg text-zinc-400 dark:text-zinc-500 font-cursive italic"
+                >
+                  "the art of automation"
+                </motion.p>
               </div>
 
               {/* Redesigned Landing Input Box */}
               <div className="w-full max-w-2xl mx-auto mt-4 px-4">
-                <div className="relative flex flex-col bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
+                <div className="relative flex flex-col bg-white/80 dark:bg-white/[0.04] backdrop-blur-md border border-zinc-200/80 dark:border-white/8 rounded-[24px] p-1 shadow-2xl transition-all focus-within:border-indigo-500/30">
                   <div className="relative min-h-[60px] flex items-start px-4 py-3">
                     <textarea
                       suppressHydrationWarning
@@ -1828,7 +1851,7 @@ export default function SessionPage() {
 
               {/* Demo picker */}
               {viewMode === "live" && (
-                <div className="w-full max-w-4xl mx-auto mt-4 relative">
+                <div className="w-full max-w-4xl mx-auto mt-10 relative">
                   <DemoPicker onSelect={handleDemo} disabled={false} />
                 </div>
               )}
@@ -2016,9 +2039,9 @@ export default function SessionPage() {
                           ))}
                         </div>
                       ) : null}
-                      <div className="relative flex flex-col bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
+                      <div className="relative flex flex-col bg-white/80 dark:bg-white/[0.04] backdrop-blur-md border border-zinc-200/80 dark:border-white/8 rounded-[24px] p-1 shadow-2xl transition-all focus-within:border-indigo-500/30">
                         {/* Text input (Top) */}
-                        <div className="relative flex w-full items-start px-4 py-3">
+                        <div className="relative flex w-full items-start min-h-[80px] px-4 py-4">
                           <textarea
                             suppressHydrationWarning
                             ref={inputRef}
