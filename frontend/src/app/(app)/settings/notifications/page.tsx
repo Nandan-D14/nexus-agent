@@ -22,7 +22,7 @@ function NotificationToggle({
   colorClass,
 }: ToggleProps) {
   return (
-    <div className="flex items-start justify-between rounded-3xl border border-zinc-200 bg-white p-4 transition-colors dark:border-[#2f2f35] dark:bg-[#111114]">
+    <div className="flex items-start justify-between rounded-3xl border border-zinc-200 bg-white p-4 transition-colors dark:border-[#2f2f35] dark:bg-[#1a1a1c]">
       <div className="flex gap-4">
         <div className={`mt-1 ${colorClass}`}>
           <Icon className="w-5 h-5" />
@@ -37,7 +37,7 @@ function NotificationToggle({
         onClick={onChange}
         className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-zinc-900 dark:bg-zinc-100" : "bg-zinc-200 dark:bg-zinc-800"}`}
       >
-        <div className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-all dark:bg-[#111114] ${checked ? "left-6" : "left-1"}`} />
+        <div className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-all dark:bg-[#1a1a1c] ${checked ? "left-6" : "left-1"}`} />
       </button>
     </div>
   );

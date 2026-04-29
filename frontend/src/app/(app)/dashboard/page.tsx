@@ -482,7 +482,7 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,1fr)]">
         <div className="space-y-6">
-          <section className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-[#2f2f35] dark:bg-[#111114]">
+          <section className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-[#2f2f35] dark:bg-[#1a1a1c]">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">

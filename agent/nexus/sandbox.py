@@ -419,6 +419,35 @@ class SandboxManager:
         if _coerce_exit_code(result.get("exit_code", -1)) != 0:
             raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
 
+    def write_binary_file(self, path: str, content: bytes) -> None:
+        """Write binary content into a sandbox file."""
+        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
+        data_b64 = base64.b64encode(content).decode("ascii")
+        script = (
+            "import base64, pathlib; "
+            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
+            f"data = base64.b64decode('{data_b64}'); "
+            "target = pathlib.Path(path); "
+            "target.parent.mkdir(parents=True, exist_ok=True); "
+            "target.write_bytes(data)"
+        )
+        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
+        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
+            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
+
+    def read_binary_file(self, path: str) -> bytes:
+        """Read binary content from a sandbox file."""
+        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
+        script = (
+            "import base64, pathlib, sys; "
+            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
+            "sys.stdout.write(base64.b64encode(pathlib.Path(path).read_bytes()).decode('ascii'))"
+        )
+        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
+        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
+            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
+        return base64.b64decode(str(result.get("stdout") or ""))
+
     def read_text_file(self, path: str) -> str:
         """Read UTF-8 text from a sandbox file."""
         path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")

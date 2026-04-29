@@ -147,15 +147,20 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     shared_access_code_is_configured = shared_access_code_configured()
     server_e2b_is_configured = server_e2b_configured()
 
+    can_fallback_to_api_key = gemini_key_set or (
+        not settings.require_byok and bool(settings.google_api_key) and shared_access_enabled
+    )
+
     missing: list[str] = []
     if not (e2b_key_set or (shared_access_enabled and server_e2b_is_configured)):
         missing.append("e2b")
 
     if gemini_provider == "vertex":
-        if not shared_access_enabled:
-            missing.append("accessCode" if shared_access_code_is_configured else "vertex")
-        elif not vertex_configured:
-            missing.append("vertex")
+        if not (shared_access_enabled and vertex_configured) and not can_fallback_to_api_key:
+            if not shared_access_enabled:
+                missing.append("accessCode" if shared_access_code_is_configured else "vertex")
+            else:
+                missing.append("vertex")
     elif not gemini_key_set:
         missing.append("gemini")
 
@@ -260,6 +265,12 @@ def resolve_session_runtime_config(
     if gemini_provider == "vertex":
         if status.shared_vertex_available:
             resolved_project_id = settings.google_project_id
+        elif user_gemini_api_key:
+            resolved_provider = "apiKey"
+            resolved_api_key = user_gemini_api_key
+        elif not settings.require_byok and settings.google_api_key and status.shared_access_enabled:
+            resolved_provider = "apiKey"
+            resolved_api_key = settings.google_api_key
     elif user_gemini_api_key:
         resolved_provider = "apiKey"
         resolved_api_key = user_gemini_api_key
@@ -359,6 +370,13 @@ def ensure_selected_gemini_provider_available(
 ) -> None:
     status = get_byok_status(user_settings)
     if status.gemini_provider != "vertex" or status.shared_vertex_available:
+        return
+
+    payload = get_byok_payload(user_settings)
+    user_gemini_api_key = _decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD))
+    if user_gemini_api_key:
+        return
+    if not settings.require_byok and settings.google_api_key and status.shared_access_enabled:
         return
 
     if not status.vertex_configured:

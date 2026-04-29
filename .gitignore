@@ -67,10 +67,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+pglite-debug.log
 
 # ── IDE ───────────────────────────────────────────────────────
 .idea/
 .vscode/
+*.code-workspace
 
 # ── Deployment ────────────────────────────────────────────────
 .vercel

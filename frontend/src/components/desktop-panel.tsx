@@ -1,10 +1,16 @@
 "use client";
 
+import { useRef } from "react";
+import { VisionOverlay } from "@/components/vision-overlay";
+
 type Props = {
   streamUrl: string | null;
+  analysis?: string | null;
 };
 
-export function DesktopPanel({ streamUrl }: Props) {
+export function DesktopPanel({ streamUrl, analysis }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
   if (!streamUrl) {
     return (
       <div className="relative flex flex-col items-center justify-center h-full rounded-2xl border border-zinc-800 bg-zinc-950 overflow-hidden group">
@@ -46,7 +52,7 @@ export function DesktopPanel({ streamUrl }: Props) {
   }
 
   return (
-    <div className="relative h-full rounded-2xl border border-zinc-800 overflow-hidden bg-black shadow-inner shadow-black/80 group">
+    <div ref={containerRef} className="relative h-full rounded-2xl border border-zinc-800 overflow-hidden bg-black shadow-inner shadow-black/80 group">
       {/* LIVE indicator */}
       <div className="absolute top-4 right-4 z-10 flex items-center gap-2.5 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/5 transition-transform group-hover:scale-105">
         <span className="relative flex h-2 w-2">
@@ -64,6 +70,8 @@ export function DesktopPanel({ streamUrl }: Props) {
         allow="clipboard-read; clipboard-write"
         title="CoComputer Desktop"
       />
+      
+      <VisionOverlay analysis={analysis || null} containerRef={containerRef} />
       
       {/* Subtle Overlay Border */}
       <div className="absolute inset-0 border border-white/5 pointer-events-none rounded-2xl" />

@@ -17,7 +17,7 @@ export async function listRecentSessions(
 ): Promise<RecentSession[]> {
   const sessionsQuery = query(
     collection(db, "sessions"),
-    where("ownerId", "==", ownerId),
+    where("memberIds", "array-contains", ownerId),
   );
 
   const snapshot = await getDocs(sessionsQuery);

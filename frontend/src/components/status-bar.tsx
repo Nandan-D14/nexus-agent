@@ -42,7 +42,7 @@ export function StatusBar({ phase, isConnected, tokenQuota }: Props) {
   const isWarning = pct >= 80;
   const isExceeded = tokenQuota ? tokenQuota.remaining <= 0 : false;
   return (
-    <div className="flex items-center justify-between px-6 py-2 bg-white dark:bg-[#111114] border-t border-zinc-200 dark:border-[#2f2f35] text-[10px] font-medium uppercase tracking-wider relative z-30">
+    <div className="flex items-center justify-between px-6 py-2 bg-white dark:bg-[#1a1a1c] border-t border-zinc-200 dark:border-[#2f2f35] text-[10px] font-medium uppercase tracking-wider relative z-30">
       {/* Phase steps */}
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-2 text-zinc-500 mr-2">

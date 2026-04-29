@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoComputer - Chat Interface</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body {
+      background-color: #1a1a1c;
+      color: #e4e4e7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #3f3f46; border-radius: 10px; }
+  </style>
+</head>
+<body class="h-screen w-screen flex overflow-hidden selection:bg-zinc-700 font-sans text-[14px]">
+
+  <!-- Sidebar -->
+  <aside class="w-[260px] h-full flex flex-col bg-[#161618] border-r border-zinc-800/50 flex-shrink-0">
+    <!-- Header Logo -->
+    <div class="p-4 flex items-center justify-between mt-1">
+      <div class="flex items-center gap-2 font-bold text-zinc-100">
+        <i data-lucide="cpu" class="w-5 h-5 text-indigo-400"></i>
+        <span class="text-[15px] tracking-wide">CoComputer</span>
+      </div>
+      <button class="text-zinc-500 hover:text-zinc-300"><i data-lucide="panel-left" class="w-4 h-4"></i></button>
+    </div>
+
+    <!-- Top Nav -->
+    <div class="px-3 space-y-0.5 mt-2">
+      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-200 bg-zinc-800/50 transition-colors">
+        <i data-lucide="message-square" class="w-4 h-4 text-indigo-400"></i> Chat Console
+      </button>
+      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
+        <i data-lucide="monitor" class="w-4 h-4"></i> Live Desktop
+      </button>
+      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
+        <i data-lucide="git-merge" class="w-4 h-4"></i> Agent Workflow
+      </button>
+      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
+        <i data-lucide="folder-code" class="w-4 h-4"></i> Context Packets
+      </button>
+    </div>
+
+    <!-- Projects -->
+    <div class="px-3 mt-6 border-b border-zinc-800/50 pb-4">
+      <div class="flex items-center justify-between px-3 text-[11px] font-semibold text-zinc-500 mb-1">
+        Projects
+        <button class="hover:text-zinc-300"><i data-lucide="plus" class="w-3.5 h-3.5"></i></button>
+      </div>
+      <button class="w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
+        <i data-lucide="folder" class="w-4 h-4"></i> workspace
+      </button>
+    </div>
+
+    <!-- All Tasks -->
+    <div class="px-3 mt-4 flex-1 overflow-y-auto custom-scrollbar">
+      <div class="flex items-center justify-between px-3 text-[11px] font-semibold text-zinc-500 mb-1">
+        All tasks
+        <button class="hover:text-zinc-300"><i data-lucide="list-filter" class="w-3.5 h-3.5"></i></button>
+      </div>
+      <div class="space-y-0.5 mt-2">
+        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
+          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
+          <span class="truncate">Is the API key responding?</span>
+        </button>
+        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
+          <i data-lucide="cpu" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
+          <span class="truncate">Check if OpenAI API Key is Working</span>
+        </button>
+        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] bg-zinc-800/40 text-zinc-200 hover:bg-zinc-800/60 transition-colors text-left leading-snug">
+          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-400"></i>
+          <span class="truncate">Does the CoComputer API Work and...</span>
+        </button>
+        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
+          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
+          <span class="truncate">Check Vertex API Functionality for...</span>
+        </button>
+        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
+          <i data-lucide="terminal-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
+          <span class="truncate">Where to Watch IPL or Cricket for...</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Bottom Settings Profile -->
+    <div class="p-4 flex items-center justify-between text-zinc-500 border-t border-zinc-800/50">
+      <div class="flex items-center gap-2">
+        <i data-lucide="settings" class="w-4 h-4"></i>
+        <i data-lucide="grid-2x2" class="w-4 h-4"></i>
+        <i data-lucide="monitor" class="w-4 h-4"></i>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Area -->
+  <main class="flex-1 flex flex-col min-w-0 relative bg-[#1a1a1c]">
+    <!-- Topbar -->
+    <header class="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-800/30">
+      <div class="flex items-center">
+        <button class="flex items-center gap-2 text-[14px] font-medium text-zinc-200 hover:text-zinc-100 transition-colors">
+          CoComputer <span class="text-[10px] uppercase font-bold text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 bg-zinc-800/30">Beta</span> <i data-lucide="chevron-down" class="w-4 h-4 text-zinc-500 ml-1"></i>
+        </button>
+      </div>
+      <div class="flex items-center gap-4 text-[13px] font-medium">
+        <button class="flex items-center gap-2 text-zinc-400 hover:text-zinc-300 transition-colors">
+          <i data-lucide="globe" class="w-4 h-4"></i> Sandbox E2B
+        </button>
+        <button class="flex items-center gap-2 text-emerald-400 hover:text-emerald-300 transition-colors">
+          <i data-lucide="signal" class="w-4 h-4"></i> Connected
+        </button>
+        <button class="text-zinc-400 hover:text-zinc-300 ml-2">
+          <i data-lucide="settings" class="w-4 h-4"></i>
+        </button>
+        <button class="text-zinc-400 hover:text-zinc-300">
+          <i data-lucide="user" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Chat Area -->
+    <div class="flex-1 overflow-y-auto px-6 pb-40 flex flex-col items-center custom-scrollbar">
+      
+      <div class="w-full max-w-3xl flex flex-col gap-8 mt-4 leading-relaxed">
+        <!-- User bubble -->
+        <div class="self-end max-w-[85%]">
+          <div class="bg-[#2a2a2c] rounded-2xl px-5 py-4 text-[15px] text-zinc-200 shadow-sm">
+            check this cocomputer api work or not if yes what are models it avalible with and what is the use of it<br/>
+            TOKEN_STRING_EXAMPLE_12345<br/>
+            <a href="#" class="text-indigo-400 underline decoration-indigo-400/30 underline-offset-2">https://developers.cocomputer.com/api</a>
+          </div>
+        </div>
+
+        <!-- Agent Response -->
+        <div class="w-full flex flex-col gap-4">
+          <div class="flex items-center gap-2">
+            <i data-lucide="cpu" class="w-6 h-6 text-zinc-200"></i>
+            <span class="font-bold text-[16px] tracking-tight">CoComputer</span>
+            <span class="text-[10px] text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 ml-1 bg-zinc-800/30">Lite</span>
+          </div>
+
+          <div class="text-[15px] text-zinc-300 pl-1">
+            I will check the status of the CoComputer API, identify the available models, and determine its primary use cases for you.
+          </div>
+
+          <!-- Workflow component -->
+          <div class="mt-2 text-[14px]">
+            <!-- Header -->
+            <div class="flex items-center gap-2 cursor-pointer transition-colors pt-2 pb-3">
+              <i data-lucide="check-circle-2" class="w-4 h-4 text-zinc-500"></i>
+              <span class="font-semibold text-zinc-200">Research CoComputer API documentation and capabilities</span>
+              <i data-lucide="chevron-up" class="w-4 h-4 text-zinc-500 ml-1"></i>
+            </div>
+            
+            <!-- Steps styling similar to image -->
+            <div class="pl-2.5 pb-2">
+              <div class="border-l border-zinc-800/80 pl-5 space-y-4 relative pb-2 min-h-[50px]">
+                
+                <!-- Subtask 1 -->
+                <div class="flex flex-col gap-2 relative">
+                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
+                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                  </div>
+                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Access the CoComputer API developer documentation to understand its purpose and available models.
+                  </div>
+                  <p class="text-zinc-300 text-[14px] mt-1 pr-4">
+                    The CoComputer API enables automation of development workflows, supports sources, sessions, and activities, and offers models for code and task generation. Next, I'll review specific endpoints.
+                  </p>
+                </div>
+                
+                <!-- Subtask 2 -->
+                <div class="flex flex-col gap-2 relative mt-4">
+                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
+                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                  </div>
+                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Check the REST Reference for CoComputer API to find specific endpoints and model information.
+                  </div>
+                </div>
+
+                <!-- Subtask 3 -->
+                <div class="flex flex-col gap-2 relative mt-3">
+                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
+                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                  </div>
+                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Check the '\alpha.sources' list endpoint to see how to authenticate and list sources.
+                  </div>
+                </div>
+
+                <!-- Subtask 4 -->
+                <div class="flex flex-col gap-2 relative mt-3">
+                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
+                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                  </div>
+                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+                    <i data-lucide="terminal" class="w-3.5 h-3.5"></i> Create a Python script to test the CoComputer API with the provided key.
+                  </div>
+                  <p class="text-zinc-300 text-[14px] mt-1 pr-4">
+                    I confirmed the CoComputer API supports listing sources with optional filters and pagination. A test script was created and executed to verify API functionality.
+                  </p>
+                </div>
+                
+                <!-- Subtask 5 -->
+                <div class="flex flex-col gap-2 relative mt-4">
+                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
+                    <i data-lucide="terminal-square" class="w-[14px] h-[14px] text-zinc-400"></i>
+                  </div>
+                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+                    <i data-lucide="play" class="w-3.5 h-3.5"></i> Execute the Python script to test the API.
+                  </div>
+                </div>
+                
+                <!-- Final Step Output snippet visual -->
+                <div class="mt-4 flex items-center gap-4">
+                  <div class="relative w-[120px] h-[80px] rounded overflow-hidden border border-zinc-700/80 brightness-75 hover:brightness-100 transition">
+                    <img src="https://images.unsplash.com/photo-1618401471353-b98afee0b2eb?q=80&w=400&auto=format&fit=crop" class="object-cover w-full h-full opacity-60" />
+                  </div>
+                  
+                  <div class="flex items-center gap-2 text-[14px] font-medium text-emerald-500">
+                    <i data-lucide="check" class="w-4 h-4"></i> Provide a final feasibility report and architectural recommendation
+                  </div>
+                  
+                  <div class="ml-auto text-zinc-500 text-[12px] flex items-center gap-2">
+                    3 / 3 <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+            
+          </div>
+        </div>
+      </div>
+      
+    </div>
+
+    <!-- Input Area Fixed -->
+    <div class="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none px-6">
+      <div class="w-full max-w-3xl pointer-events-auto">
+        <div class="relative bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
+          <textarea rows="1" class="w-full min-h-[48px] bg-transparent text-[15px] text-zinc-200 placeholder-zinc-500 resize-none outline-none px-4 py-3 placeholder:font-medium" placeholder="Send message to CoComputer"></textarea>
+          
+          <div class="flex items-center justify-between mt-1 px-2 pb-2">
+            <div class="flex items-center gap-2 focus-within:text-zinc-300">
+              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-full transition-colors flex items-center justify-center border border-zinc-700/50" title="Attach">
+                <i data-lucide="plus" class="w-4 h-4"></i>
+              </button>
+              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Links">
+                <i data-lucide="link-2" class="w-4 h-4"></i>
+              </button>
+              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Workspace Context">
+                <i data-lucide="monitor" class="w-4 h-4"></i>
+              </button>
+            </div>
+            
+            <div class="flex items-center gap-2">
+               <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Voice Input">
+                <i data-lucide="mic" class="w-4 h-4"></i>
+              </button>
+              <button class="p-1.5 bg-[#3a3a3c] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-600 rounded-full transition-colors disabled:opacity-50 border border-zinc-700/50" title="Send">
+                <i data-lucide="arrow-up" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    lucide.createIcons();
+  </script>
+</body>
+</html>

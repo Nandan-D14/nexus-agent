@@ -15,8 +15,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(
-            str(WORKSPACE_DIR / ".env"),
             str(AGENT_DIR / ".env"),
+            str(WORKSPACE_DIR / ".env"),
         ),
         env_file_encoding="utf-8",
         extra="ignore",
@@ -43,14 +43,14 @@ class Settings(BaseSettings):
     google_cloud_region: str = "global"  # For Gemini 3 vision/agent (must be "global")
 
     # Gemini models
-    gemini_agent_model: str = "gemini-3-flash-preview"
-    gemini_api_key_agent_model: str = "gemini-3.1-pro-preview"
+    # Note: Gemini 3 models require the "global" endpoint, not regional endpoints
+    gemini_agent_model: str = "gemini-3-flash-preview"  # Gemini 3 Flash (Vertex AI)
+    gemini_api_key_agent_model: str = "gemini-3-flash-preview"
     gemini_api_key_agent_fallback_models: str = (
-        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,"
-        "gemini-2.5-pro,gemini-2.5-flash"
+        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
     )
     gemini_light_model: str = "gemini-3.1-flash-lite-preview"
-    gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
+    gemini_live_model: str = "gemini-live-2.5-flash-native-audio"  # Live API still uses 2.5 series
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors

@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
     from nexus.background_tasks import BackgroundTaskManager
+    from nexus.history_repository import FirestoreHistoryRepository
     from nexus.runtime_config import SessionRuntimeConfig
     from nexus.sandbox import SandboxManager
 
 ArtifactCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+SendJsonCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 _current_sandbox: contextvars.ContextVar["SandboxManager"] = contextvars.ContextVar(
     "_current_sandbox"
@@ -33,6 +35,15 @@ _current_workspace_path: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _current_artifact_callback: contextvars.ContextVar[Optional["ArtifactCallback"]] = (
     contextvars.ContextVar("_current_artifact_callback", default=None)
+)
+_current_owner_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_owner_id", default=""
+)
+_current_history_repository: contextvars.ContextVar[Optional["FirestoreHistoryRepository"]] = (
+    contextvars.ContextVar("_current_history_repository", default=None)
+)
+_current_send_json: contextvars.ContextVar[Optional["SendJsonCallback"]] = (
+    contextvars.ContextVar("_current_send_json", default=None)
 )
 
 
@@ -123,3 +134,35 @@ def set_artifact_callback(callback: "ArtifactCallback" | None) -> contextvars.To
 def get_artifact_callback() -> Optional["ArtifactCallback"]:
     """Retrieve the output-artifact callback, if one is bound."""
     return _current_artifact_callback.get()
+
+
+def set_owner_id(owner_id: str) -> contextvars.Token:
+    """Set the authenticated owner ID for the current execution context."""
+    return _current_owner_id.set(owner_id)
+
+
+def get_owner_id() -> str:
+    """Retrieve the authenticated owner ID for integration tools."""
+    return _current_owner_id.get()
+
+
+def set_history_repository(
+    repository: Optional["FirestoreHistoryRepository"],
+) -> contextvars.Token:
+    """Set the Firestore repository for connector tools."""
+    return _current_history_repository.set(repository)
+
+
+def get_history_repository() -> Optional["FirestoreHistoryRepository"]:
+    """Retrieve the Firestore repository for connector tools."""
+    return _current_history_repository.get()
+
+
+def set_send_json(callback: Optional["SendJsonCallback"]) -> contextvars.Token:
+    """Set the WebSocket send_json callback for UI control tools."""
+    return _current_send_json.set(callback)
+
+
+def get_send_json() -> Optional["SendJsonCallback"]:
+    """Retrieve the WebSocket send_json callback for UI control tools."""
+    return _current_send_json.get()

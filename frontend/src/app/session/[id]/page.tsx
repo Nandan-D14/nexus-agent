@@ -2,12 +2,17 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
+  type ChangeEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
+
+import { Check, ChevronDown, Link2, Paperclip, X, Plus, Monitor, Mic, ArrowUp, Signal, Globe, User, Settings, Search } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 
 import { DemoPicker } from "@/components/demo-picker";
 import { DesktopPanel } from "@/components/desktop-panel";
@@ -18,7 +23,10 @@ import { RunLogPanel } from "@/components/run-log-panel";
 import { SessionNavSidebar } from "@/components/session-nav-sidebar";
 import { WorkflowTemplateEditorModal } from "@/components/workflow-template-editor-modal";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
+import { TodoList } from "@/components/todo-list";
 import { useLiveDesktop } from "@/components/live-desktop-provider";
+import { WorkflowDesktopContainer } from "@/components/workflow-desktop-container";
+import type { WorkflowRun } from "@/components/agent-workflow-panel";
 import { useAuth } from "@/lib/auth-context";
 import { AudioPlayer } from "@/lib/audio-playback";
 import type {
@@ -30,9 +38,11 @@ import type {
   SessionData,
   SessionInfo,
   SessionPhase,
+  UploadedInputFile,
   WsMessage,
   WorkflowTemplateInputField,
 } from "@/lib/message-types";
+import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useWorkflowTemplates } from "@/lib/use-workflow-templates";
@@ -57,8 +67,8 @@ type ChatItem =
   | { kind: "delegation"; from: string; to: string; ts: number };
 
 type PendingSessionAction =
-  | { type: "demo"; text: string }
-  | { type: "prompt"; text: string }
+  | { type: "demo"; payload: PendingTurnInput }
+  | { type: "prompt"; payload: PendingTurnInput }
   | { type: "openDesktop" }
   | { type: "startMic" };
 
@@ -71,6 +81,75 @@ type ContextPacketMeta = {
   reasoning_model: string;
   vision_model: string;
 };
+
+type PendingTurnInput = {
+  text: string;
+  connectorIds?: string[];
+  uploadedFiles?: UploadedInputFile[];
+};
+
+type SessionConnector = {
+  connection_id: string;
+  connector_type: string;
+  provider: string;
+  name: string;
+  enabled: boolean;
+  status: string;
+};
+
+type SessionUploadResponse = {
+  path: string;
+  artifact: RunArtifact;
+  drive_status?: string | null;
+  drive_file_id?: string | null;
+  drive_web_view_link?: string | null;
+  drive_folder_path?: string | null;
+};
+
+const SYSTEM_CONNECTOR: SessionConnector = {
+  connection_id: "system",
+  connector_type: "system",
+  provider: "system",
+  name: "Cloud Desktop Tools",
+  enabled: true,
+  status: "connected",
+};
+
+function upsertRunArtifact(prev: RunArtifact[], nextArtifact: RunArtifact): RunArtifact[] {
+  const existingIndex = prev.findIndex((artifact) => artifact.artifact_id === nextArtifact.artifact_id);
+  if (existingIndex === -1) {
+    return [nextArtifact, ...prev];
+  }
+  const updated = [...prev];
+  updated[existingIndex] = nextArtifact;
+  return updated;
+}
+
+function normalizePendingTurnInput(value: unknown): PendingTurnInput | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const text = typeof record.text === "string" ? record.text.trim() : "";
+  if (!text) {
+    return null;
+  }
+  const connectorIds = Array.isArray(record.connectorIds)
+    ? record.connectorIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const uploadedFiles = Array.isArray(record.uploadedFiles)
+    ? record.uploadedFiles.filter((item): item is UploadedInputFile => Boolean(item && typeof item === "object"))
+    : [];
+  return { text, connectorIds, uploadedFiles };
+}
+
+function connectorButtonLabel(connectors: SessionConnector[], selectedIds: string[]): string {
+  if (selectedIds.length === 0) return "Connectors";
+  if (selectedIds.length === 1) {
+    return connectors.find((connector) => connector.connection_id === selectedIds[0])?.name ?? "1 connector";
+  }
+  return `${selectedIds.length} connectors`;
+}
 
 function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
   const existingIndex = prev.findIndex((step) => step.step_id === nextStep.step_id);
@@ -231,6 +310,8 @@ export default function SessionPage() {
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
   const [runSteps, setRunSteps] = useState<RunStep[]>([]);
+  const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null);
+  const [forcedTab, setForcedTab] = useState<"workflow" | "desktop" | null>(null);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
   const [viewMode, setViewMode] = useState<"live" | "archived">("live");
   const [activeSurface, setActiveSurface] = useState<SessionSurface>("conversation");
@@ -240,11 +321,18 @@ export default function SessionPage() {
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [contextMeta, setContextMeta] = useState<ContextPacketMeta | null>(null);
   const [textInput, setTextInput] = useState("");
+  const [availableConnectors, setAvailableConnectors] = useState<SessionConnector[]>([SYSTEM_CONNECTOR]);
+  const [selectedConnectorIds, setSelectedConnectorIds] = useState<string[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedInputFile[]>([]);
+  const [todoItems, setTodoItems] = useState<Array<{ title: string; status: "pending" | "in_progress" | "done"; note?: string }>>([]);
+  const [isConnectorMenuOpen, setIsConnectorMenuOpen] = useState(false);
+  const [connectorSearch, setConnectorSearch] = useState("");
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [hasActivatedSession, setHasActivatedSession] = useState(false);
   const [isContinuingThread, setIsContinuingThread] = useState(false);
   const [isDesktopVisible, setIsDesktopVisible] = useState(false);
   const [isDesktopFullscreen, setIsDesktopFullscreen] = useState(false);
-  const [pendingText, setPendingText] = useState<string | null>(null);
+  const [pendingText, setPendingText] = useState<PendingTurnInput | null>(null);
   const [pendingMicStart, setPendingMicStart] = useState(false);
   const [activeAgent, setActiveAgent] = useState<string>("nexus");
   const [agentStatus, setAgentStatus] = useState("");
@@ -256,6 +344,8 @@ export default function SessionPage() {
   >("disconnected");
   const audioPlayer = useRef(new AudioPlayer());
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const connectorMenuRef = useRef<HTMLDivElement>(null);
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
   const streamUrlRef = useRef<string | null>(null);
   const viewModeRef = useRef<"live" | "archived">("live");
@@ -291,6 +381,60 @@ export default function SessionPage() {
   const { start: startMic, stop: stopMic, isRecording } =
     useMicrophone(sendBinary, handleSpeechStart);
 
+  useEffect(() => {
+    if (authLoading || !user) {
+      setAvailableConnectors([SYSTEM_CONNECTOR]);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadAvailableConnectors() {
+      try {
+        const response = await authenticatedFetch("/v1/integrations/connections");
+        if (!response.ok) {
+          throw new Error(await parseApiError(response));
+        }
+        const body = (await response.json()) as { connections?: SessionConnector[] };
+        const usable = (body.connections ?? []).filter(
+          (connection) => connection.enabled && connection.status === "connected",
+        );
+        const nextConnectors = [SYSTEM_CONNECTOR, ...usable];
+        if (!cancelled) {
+          setAvailableConnectors(nextConnectors);
+          setSelectedConnectorIds((prev) =>
+            prev.filter((id) => nextConnectors.some((connector) => connector.connection_id === id)),
+          );
+        }
+      } catch (error) {
+        console.warn("[session] Failed to load connectors", error);
+        if (!cancelled) {
+          setAvailableConnectors([SYSTEM_CONNECTOR]);
+          setSelectedConnectorIds((prev) => prev.filter((id) => id === SYSTEM_CONNECTOR.connection_id));
+        }
+      }
+    }
+
+    void loadAvailableConnectors();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, user]);
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!connectorMenuRef.current?.contains(event.target as Node)) {
+        setIsConnectorMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, []);
+
   /* ---- Audio playback ---- */
   useEffect(() => {
     onBinaryMessageRef.current = (data: ArrayBuffer) => {
@@ -317,11 +461,17 @@ export default function SessionPage() {
   }, []);
 
   useLayoutEffect(() => {
-    const el = landingInputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
     const maxHeight = 200;
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    const el1 = landingInputRef.current;
+    if (el1) {
+      el1.style.height = "auto";
+      el1.style.height = `${Math.min(el1.scrollHeight, maxHeight)}px`;
+    }
+    const el2 = inputRef.current;
+    if (el2) {
+      el2.style.height = "auto";
+      el2.style.height = `${Math.min(el2.scrollHeight, maxHeight)}px`;
+    }
   }, [textInput]);
 
   useEffect(() => {
@@ -583,6 +733,10 @@ export default function SessionPage() {
         ]);
         break;
 
+      case "todo_list_updated":
+        setTodoItems(msg.items);
+        break;
+
       case "error":
         setPageError(msg.detail || msg.message);
         setAgentStatus("");
@@ -603,6 +757,12 @@ export default function SessionPage() {
         break;
 
       case "pong":
+        break;
+
+      case "ui_action":
+        if (msg.action === "switch_tab") {
+          setForcedTab(msg.target);
+        }
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -641,6 +801,42 @@ export default function SessionPage() {
       stopMic();
     }
   }, [isRecording, stopMic, voiceStatus]);
+
+  /* ---- Convert runInfo/runSteps to workflowRun ---- */
+  useEffect(() => {
+    if (!runInfo) {
+      setWorkflowRun(null);
+      return;
+    }
+
+    const statusMap: Record<string, "pending" | "running" | "completed" | "failed"> = {
+      "pending": "pending",
+      "running": "running",
+      "completed": "completed",
+      "failed": "failed",
+      "success": "completed",
+      "error": "failed",
+    };
+
+    setWorkflowRun({
+      run_id: runInfo.run_id,
+      title: runInfo.title || "Agent Workflow",
+      status: statusMap[runInfo.status] || "running",
+      steps: runSteps.map((step) => ({
+        step_id: step.step_id,
+        type: step.type as "thinking" | "tool_call" | "tool_result" | "observation" | "screenshot" | "error" | "completion",
+        status: statusMap[step.status] || "pending",
+        title: step.title || `${step.type} step`,
+        detail: step.detail || "",
+        created_at: step.created_at,
+        command: step.command,
+        args: step.args,
+        output: step.output,
+        error: step.error,
+        image_b64: step.image_b64,
+      })),
+    });
+  }, [runInfo, runSteps]);
 
   /* ---- Session lifecycle ---- */
   useEffect(() => {
@@ -771,7 +967,12 @@ export default function SessionPage() {
     }
 
     if (pendingText) {
-      sendJson({ type: "text_input", text: pendingText });
+      sendJson({
+        type: "text_input",
+        text: pendingText.text,
+        connector_ids: pendingText.connectorIds,
+        uploaded_files: pendingText.uploadedFiles,
+      });
       setPendingText(null);
     }
 
@@ -816,8 +1017,8 @@ export default function SessionPage() {
 
   const continueCurrentThread = useCallback(
     async (options?: {
-      prompt?: string;
-      demo?: string;
+      prompt?: PendingTurnInput;
+      demo?: PendingTurnInput;
       openDesktop?: boolean;
       startMic?: boolean;
     }) => {
@@ -902,11 +1103,12 @@ export default function SessionPage() {
         return;
       }
 
-      if (
-        (action.type === "prompt" || action.type === "demo") &&
-        !action.text.trim()
-      ) {
-        return;
+      if (action.type === "prompt" || action.type === "demo") {
+        const payload = normalizePendingTurnInput(action.payload);
+        if (!payload) {
+          return;
+        }
+        action = { ...action, payload };
       }
 
       setPageError(null);
@@ -935,24 +1137,28 @@ export default function SessionPage() {
   );
 
   const createThreadFromPrompt = useCallback(
-    async (text: string) => {
-      const prompt = text.trim();
-      if (!prompt) {
+    async (payload: PendingTurnInput) => {
+      const nextPayload = normalizePendingTurnInput(payload);
+      if (!nextPayload) {
         return;
       }
 
-      await createThreadFromAction({ type: "prompt", text: prompt });
+      await createThreadFromAction({ type: "prompt", payload: nextPayload });
     },
     [createThreadFromAction],
   );
 
   const sendTextOrQueue = useCallback(
-    (text: string) => {
+    (payload: PendingTurnInput) => {
+      const nextPayload = normalizePendingTurnInput(payload);
+      if (!nextPayload) {
+        return;
+      }
       if (isNewSession) {
         return;
       }
       if (viewMode === "archived") {
-        void continueCurrentThread({ prompt: text });
+        void continueCurrentThread({ prompt: nextPayload });
         return;
       }
 
@@ -960,16 +1166,21 @@ export default function SessionPage() {
 
       if (!hasActivatedSession) {
         setHasActivatedSession(true);
-        setPendingText(text);
+        setPendingText(nextPayload);
         return;
       }
 
       if (!isConnected) {
-        setPendingText(text);
+        setPendingText(nextPayload);
         return;
       }
 
-      sendJson({ type: "text_input", text });
+      sendJson({
+        type: "text_input",
+        text: nextPayload.text,
+        connector_ids: nextPayload.connectorIds,
+        uploaded_files: nextPayload.uploadedFiles,
+      });
     },
     [continueCurrentThread, hasActivatedSession, isConnected, isNewSession, sendJson, viewMode],
   );
@@ -1032,16 +1243,98 @@ export default function SessionPage() {
     voiceStatus,
   ]);
 
+  const toggleConnectorSelection = useCallback((connectionId: string) => {
+    setSelectedConnectorIds((prev) =>
+      prev.includes(connectionId)
+        ? prev.filter((id) => id !== connectionId)
+        : [...prev, connectionId],
+    );
+  }, []);
+
+  const handleOpenFilePicker = useCallback(() => {
+    if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
+      toast("File upload is available in a live session.", "error");
+      return;
+    }
+    fileInputRef.current?.click();
+  }, [isNewSession, sessionData?.session_id, toast, viewMode]);
+
+  const handleFileUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      event.target.value = "";
+      if (files.length === 0) {
+        return;
+      }
+      if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
+        toast("Create or resume a live session before uploading files.", "error");
+        return;
+      }
+
+      setIsUploadingFile(true);
+      try {
+        for (const file of files) {
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("relative_path", `sources/uploads/${file.name}`);
+          formData.append("mirror_to_drive", "true");
+          const response = await authenticatedFetch(
+            `/api/v1/sessions/${encodeURIComponent(sessionData.session_id)}/files/upload`,
+            {
+              method: "POST",
+              body: formData,
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await parseApiError(response));
+          }
+          const body = (await response.json()) as SessionUploadResponse;
+          setRunArtifacts((prev) => upsertRunArtifact(prev, body.artifact));
+          setUploadedFiles((prev) => [
+            ...prev,
+            {
+              artifact_id: body.artifact.artifact_id,
+              name: body.artifact.title || file.name,
+              path: body.path,
+              mime_type: (body.artifact.metadata?.content_type as string | undefined) ?? file.type ?? null,
+              size: (body.artifact.metadata?.size as number | undefined) ?? file.size,
+              drive_status: body.drive_status ?? null,
+              drive_file_id: body.drive_file_id ?? null,
+              drive_web_view_link: body.drive_web_view_link ?? null,
+              drive_folder_path: body.drive_folder_path ?? null,
+            },
+          ]);
+        }
+      } catch (error) {
+        toast(error instanceof Error ? error.message : "File upload failed.", "error");
+      } finally {
+        setIsUploadingFile(false);
+      }
+    },
+    [isNewSession, sessionData?.session_id, toast, viewMode],
+  );
+
+  const handleRemoveUploadedFile = useCallback((path: string) => {
+    setUploadedFiles((prev) => prev.filter((file) => file.path !== path));
+  }, []);
+
   const handleTextSubmit = useCallback(() => {
     const text = textInput.trim();
     if (!text) return;
+    const payload: PendingTurnInput = {
+      text,
+      connectorIds: selectedConnectorIds,
+      uploadedFiles,
+    };
     if (isNewSession) {
-      void createThreadFromPrompt(text);
+      void createThreadFromPrompt(payload);
+      setTextInput("");
       return;
     }
-    sendTextOrQueue(text);
+    sendTextOrQueue(payload);
     setTextInput("");
-  }, [createThreadFromPrompt, isNewSession, sendTextOrQueue, textInput]);
+    setUploadedFiles([]);
+  }, [createThreadFromPrompt, isNewSession, selectedConnectorIds, sendTextOrQueue, textInput, uploadedFiles]);
 
   const handleShowDesktop = useCallback(() => {
     if (isNewSession) {
@@ -1077,15 +1370,16 @@ export default function SessionPage() {
 
   const handleDemo = useCallback(
     (text: string) => {
+      const payload: PendingTurnInput = { text };
       if (isNewSession) {
-        void createThreadFromAction({ type: "demo", text });
+        void createThreadFromAction({ type: "demo", payload });
         return;
       }
       if (viewMode === "archived") {
-        void continueCurrentThread({ demo: text });
+        void continueCurrentThread({ demo: payload });
         return;
       }
-      sendTextOrQueue(text);
+      sendTextOrQueue(payload);
     },
     [continueCurrentThread, createThreadFromAction, isNewSession, sendTextOrQueue, viewMode],
   );
@@ -1119,7 +1413,7 @@ export default function SessionPage() {
       }
       sessionStorage.removeItem(key);
 
-      const action = JSON.parse(raw) as PendingSessionAction;
+      const action = JSON.parse(raw) as PendingSessionAction | { type: "demo" | "prompt"; text?: string };
 
       autoActionHandledRef.current = true;
       setActiveSurface("conversation");
@@ -1132,8 +1426,14 @@ export default function SessionPage() {
         setPendingMicStart(true);
         setPhase("listening");
       } else if (action.type === "demo" || action.type === "prompt") {
+        const payload = normalizePendingTurnInput(
+          "payload" in action ? action.payload : { text: action.text ?? "" },
+        );
+        if (!payload) {
+          return;
+        }
         setHasActivatedSession(true);
-        setPendingText(action.text);
+        setPendingText(payload);
         setPhase("thinking");
       }
     } catch {
@@ -1218,6 +1518,25 @@ export default function SessionPage() {
   );
 
   /* ---- Render ---- */
+  const latestAnalysis = useMemo(() => {
+    // Hide vision overlay when the agent is not actively working
+    if (phase === "done" || phase === "idle") {
+      return null;
+    }
+
+    for (let i = chatItems.length - 1; i >= 0; i--) {
+      const item = chatItems[i];
+      // If we see a completion event before finding a screenshot, the task is done
+      if (item.kind === "event" && item.type === "agent_complete") {
+        return null;
+      }
+      if (item.kind === "event" && item.type === "agent_screenshot" && typeof item.analysis === "string") {
+        return item.analysis;
+      }
+    }
+    return null;
+  }, [chatItems, phase]);
+
   const hasConversationStarted =
     chatItems.length > 0 ||
     phase !== "idle" ||
@@ -1225,9 +1544,18 @@ export default function SessionPage() {
     pendingMicStart ||
     viewMode === "archived";
   const hasStarted = hasConversationStarted || isDesktopVisible;
+  const selectedConnectorLabel = connectorButtonLabel(availableConnectors, selectedConnectorIds);
+  const uploadDisabled = isNewSession || viewMode !== "live" || isUploadingFile;
 
   return (
-    <div className="h-screen flex overflow-hidden bg-[#fafafa] dark:bg-[#111114]">
+    <div className="h-screen flex overflow-hidden bg-[#fafafa] dark:bg-[#1a1a1c]">
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileUpload}
+      />
       {/* ─── Left nav sidebar ─── */}
       <SessionNavSidebar />
 
@@ -1269,10 +1597,10 @@ export default function SessionPage() {
                 <p className="text-[15px] text-zinc-500">What can I help you with?</p>
               </div>
 
-              {/* Floating Input Box */}
-              <div className="w-full relative group max-w-2xl mx-auto mt-4 px-4">
-                <div className="relative flex flex-col bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-3xl shadow-sm focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all duration-300 p-2">
-                  <div className="relative min-h-[60px] flex items-center px-2">
+              {/* Redesigned Landing Input Box */}
+              <div className="w-full max-w-2xl mx-auto mt-4 px-4">
+                <div className="relative flex flex-col bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
+                  <div className="relative min-h-[60px] flex items-start px-4 py-3">
                     <textarea
                       suppressHydrationWarning
                       ref={landingInputRef}
@@ -1284,52 +1612,181 @@ export default function SessionPage() {
                           handleTextSubmit();
                         }
                       }}
-                      placeholder="Send message to CoComputer..."
+                      placeholder="Send message to CoComputer"
                       rows={1}
-                      className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed"
+                      className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-200 placeholder-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed placeholder:font-medium"
                     />
                   </div>
-                  <div className="flex items-center justify-between mt-2 px-2">
-                    <div className="flex items-center gap-3 text-zinc-400">
-                      {/* Paperclip */}
-                      <button className="hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                        </svg>
+                  {uploadedFiles.length > 0 ? (
+                    <div className="flex flex-wrap gap-2 px-3 pb-1 mb-2">
+                      {uploadedFiles.map((file) => (
+                        <span
+                          key={file.path}
+                          className="inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-200"
+                        >
+                          <Paperclip className="h-3.5 w-3.5" />
+                          <span className="max-w-44 truncate">{file.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveUploadedFile(file.path)}
+                            className="text-zinc-400 transition-colors hover:text-zinc-200"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  
+                  <div className="flex items-center justify-between mt-1 px-2 pb-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleOpenFilePicker}
+                        disabled={uploadDisabled}
+                        className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-full transition-colors flex items-center justify-center border border-zinc-700/50 disabled:opacity-40"
+                        title="Attach"
+                      >
+                        <Plus className="w-4 h-4" />
                       </button>
                       
-                      {/* Model Selector */}
-                      <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors text-sm font-medium">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                          <circle cx="12" cy="12" r="10" />
-                          <circle cx="12" cy="12" r="2" fill="currentColor" />
-                        </svg>
-                        Gemini
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                        </svg>
+                      <div ref={connectorMenuRef} className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setIsConnectorMenuOpen((open) => !open)}
+                          className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors flex items-center gap-1.5"
+                          title="Links"
+                        >
+                          <Link2 className="w-4 h-4" />
+                          {selectedConnectorIds.length > 0 && (
+                            <span className="text-[10px] bg-indigo-500 text-white rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                              {selectedConnectorIds.length}
+                            </span>
+                          )}
+                        </button>
+                        <AnimatePresence>
+                          {isConnectorMenuOpen && (
+                            <motion.div 
+                              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                              animate={{ opacity: 1, scale: 1, y: 0 }}
+                              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                              className="absolute left-0 bottom-full mb-3 w-80 rounded-2xl border border-zinc-800 bg-[#161618] p-1.5 shadow-2xl z-50 overflow-hidden"
+                            >
+                              {/* Search & Actions Header */}
+                              <div className="p-2 flex flex-col gap-2 border-b border-zinc-800/50 mb-1">
+                                <div className="relative flex items-center">
+                                  <Search className="absolute left-2.5 w-3.5 h-3.5 text-zinc-500" />
+                                  <input 
+                                    autoFocus
+                                    type="text"
+                                    value={connectorSearch}
+                                    onChange={(e) => setConnectorSearch(e.target.value)}
+                                    placeholder="Search tools..."
+                                    className="w-full bg-zinc-900/50 border border-zinc-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 transition-all"
+                                  />
+                                </div>
+                                <div className="flex items-center justify-between px-1">
+                                  <span className="text-[10px] uppercase tracking-widest font-bold text-zinc-500">Connectors</span>
+                                  <button 
+                                    onClick={() => {
+                                      const allIds = availableConnectors.map(c => c.connection_id);
+                                      const filteredIds = availableConnectors
+                                        .filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase()))
+                                        .map(c => c.connection_id);
+                                      
+                                      if (filteredIds.every(id => selectedConnectorIds.includes(id))) {
+                                        setSelectedConnectorIds(prev => prev.filter(id => !filteredIds.includes(id)));
+                                      } else {
+                                        setSelectedConnectorIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+                                      }
+                                    }}
+                                    className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
+                                  >
+                                    Toggle All
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Scrollable List */}
+                              <div className="max-h-64 overflow-y-auto custom-scrollbar space-y-0.5 px-0.5">
+                                {availableConnectors
+                                  .filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase()))
+                                  .map((connector) => {
+                                    const checked = selectedConnectorIds.includes(connector.connection_id);
+                                    return (
+                                      <button
+                                        key={connector.connection_id}
+                                        type="button"
+                                        onClick={() => toggleConnectorSelection(connector.connection_id)}
+                                        className={`flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-all ${
+                                          checked ? "bg-indigo-500/5" : "hover:bg-zinc-800/60"
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-3">
+                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center border ${checked ? "border-indigo-500/30 bg-indigo-500/10" : "border-zinc-800 bg-zinc-900/50"}`}>
+                                            <Globe className={`w-4 h-4 ${checked ? "text-indigo-400" : "text-zinc-500"}`} />
+                                          </div>
+                                          <div className="flex flex-col">
+                                            <div className={`text-[13px] font-medium leading-tight ${checked ? "text-zinc-100" : "text-zinc-300"}`}>
+                                              {connector.name}
+                                            </div>
+                                            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mt-0.5 font-semibold">
+                                              {connector.provider}
+                                            </div>
+                                          </div>
+                                        </div>
+                                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                                          checked ? "border-indigo-500 bg-indigo-500 text-white" : "border-zinc-700 bg-transparent text-transparent"
+                                        }`}>
+                                          <Check className="w-3 h-3 stroke-[3]" />
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                
+                                {availableConnectors.filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase())).length === 0 && (
+                                  <div className="py-8 text-center text-xs text-zinc-600 font-medium">
+                                    No tools found for "{connectorSearch}"
+                                  </div>
+                                )}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleShowDesktop}
+                        className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
+                        title="Workspace Context"
+                      >
+                        <Monitor className="w-4 h-4" />
                       </button>
                     </div>
 
-                    <div className="flex items-center gap-2 pr-1">
-                      <MicButton
-                        isRecording={isRecording}
-                        onStart={toggleMic}
-                        onStop={toggleMic}
+                    <div className="flex items-center gap-2">
+                       <button
+                        onClick={toggleMic}
                         disabled={voiceStatus !== "connected"}
-                      />
+                        className={`p-1.5 rounded transition-colors ${
+                          isRecording ? "text-red-400 bg-red-500/10" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                        } disabled:opacity-40`}
+                        title="Voice Input"
+                      >
+                        <Mic className="w-4 h-4" />
+                      </button>
                       <button
                         onClick={handleTextSubmit}
-                        disabled={!textInput.trim() || isLoading}
-                        className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
-                          textInput.trim() && !isLoading
-                            ? "bg-zinc-900 text-white dark:bg-white dark:text-black hover:scale-105" 
-                            : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
+                        disabled={!textInput.trim() || isLoading || isUploadingFile}
+                        className={`p-1.5 rounded-full transition-colors border border-zinc-700/50 ${
+                          textInput.trim() && !isLoading && !isUploadingFile
+                            ? "bg-[#3a3a3c] text-zinc-200 hover:bg-zinc-600" 
+                            : "bg-zinc-800 text-zinc-500 cursor-not-allowed opacity-50"
                         }`}
+                        title="Send"
                       >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} className="w-4 h-4">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" />
-                        </svg>
+                        <ArrowUp className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
@@ -1358,17 +1815,16 @@ export default function SessionPage() {
         ) : (
           <>
             {/* ─── Header ─── */}
-            <header className="relative flex items-center justify-between px-5 py-3">
+            <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-800/30">
               <div className="flex items-center gap-4">
-                <h1 className="text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                  CoComputer
-                </h1>
+                <button className="flex items-center gap-2 text-[14px] font-medium text-zinc-200 hover:text-zinc-100 transition-colors">
+                  CoComputer <span className="text-[10px] uppercase font-bold text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 bg-zinc-800/30">Beta</span> <ChevronDown className="w-4 h-4 text-zinc-500 ml-1" />
+                </button>
 
                 {viewMode === "live" && isConnected && (
-                  <span className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    LIVE
-                  </span>
+                  <div className="flex items-center gap-2 text-emerald-400 text-[13px] font-medium">
+                    <Signal className="w-4 h-4" /> Connected
+                  </div>
                 )}
 
                 {viewMode === "archived" && (
@@ -1376,53 +1832,20 @@ export default function SessionPage() {
                     Archived
                   </span>
                 )}
-
-                {viewMode === "live" && activeAgent && activeAgent !== "nexus" && (
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#f4f4f5] dark:bg-[#212126] text-[10px] uppercase tracking-widest font-bold text-zinc-600 dark:text-zinc-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
-                    {activeAgent.replace(/_/g, " ")}
-                  </div>
-                )}
               </div>
 
-              <div className="flex items-center gap-2">
-                {!isNewSession && (
-                  <button
-                    suppressHydrationWarning
-                    onClick={handleOpenSaveTemplate}
-                    className="text-xs px-3 py-1.5 rounded-lg bg-zinc-100 text-zinc-700 border border-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-all duration-200"
-                  >
-                    Save as Template
-                  </button>
-                )}
-                {viewMode === "archived" && (
-                  <button
-                    suppressHydrationWarning
-                    onClick={handleContinueArchivedThread}
-                    className="text-xs px-3 py-1.5 rounded-lg bg-cyan-600 text-white border border-cyan-700 hover:bg-cyan-700 transition-all duration-200"
-                  >
-                    Continue Here
-                  </button>
-                )}
+              <div className="flex items-center gap-4 text-[13px] font-medium">
                 {viewMode === "live" && (
                   <button
                     suppressHydrationWarning
                     onClick={handleToggleDesktopFullscreen}
-                    className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white border border-blue-700 dark:bg-blue-500 dark:border-blue-400 hover:bg-blue-700 dark:hover:bg-blue-600 transition-all duration-200 flex items-center gap-1.5"
+                    className="flex items-center gap-2 text-zinc-400 hover:text-zinc-200 transition-colors"
                   >
-                    <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
-                      {isDesktopFullscreen ? (
-                        <path d="M2.75 5A2.25 2.25 0 0 1 5 2.75h2a.75.75 0 0 1 0 1.5H5A.75.75 0 0 0 4.25 5v2a.75.75 0 0 1-1.5 0V5Zm10.25-2.25A.75.75 0 0 1 13.75 2h2A2.25 2.25 0 0 1 18 4.25v2a.75.75 0 0 1-1.5 0v-2a.75.75 0 0 0-.75-.75h-2a.75.75 0 0 1-.75-.75ZM3.5 12.75a.75.75 0 0 1 .75.75v2a.75.75 0 0 0 .75.75h2a.75.75 0 0 1 0 1.5H5a2.25 2.25 0 0 1-2.25-2.25v-2a.75.75 0 0 1 .75-.75Zm13.75 0a.75.75 0 0 1 .75.75v2A2.25 2.25 0 0 1 15.75 18h-2a.75.75 0 0 1 0-1.5h2a.75.75 0 0 0 .75-.75v-2a.75.75 0 0 1 .75-.75Z" />
-                      ) : isDesktopVisible ? (
-                        <path d="M3.5 2.75A.75.75 0 0 1 4.25 2h3a.75.75 0 0 1 0 1.5H5.53l3.69 3.72a.75.75 0 1 1-1.06 1.06L4.5 4.6v1.65a.75.75 0 0 1-1.5 0v-3.5Zm13 0a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V4.6l-3.69 3.68A.75.75 0 0 1 11 7.22l3.72-3.72h-1.97a.75.75 0 0 1 0-1.5h3a.75.75 0 0 1 .75.75ZM8.16 11.72a.75.75 0 0 1 1.06 1.06L5.53 16.5h1.72a.75.75 0 0 1 0 1.5h-3A.75.75 0 0 1 3.5 17.25v-3.5a.75.75 0 0 1 1.5 0v1.65l3.16-3.68Zm3.9 1.06a.75.75 0 1 1 1.06-1.06l3.16 3.68v-1.65a.75.75 0 0 1 1.5 0v3.5a.75.75 0 0 1-.75.75h-3a.75.75 0 0 1 0-1.5h1.72l-3.69-3.72Z" />
-                      ) : (
-                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm5.25 1.75a.75.75 0 011.5 0V9h3.25a.75.75 0 010 1.5H10.75v3.25a.75.75 0 01-1.5 0V10.5H6a.75.75 0 010-1.5h3.25V5.75z" />
-                      )}
-                    </svg>
+                    <Monitor className="w-4 h-4" />
                     {isDesktopFullscreen
-                      ? "Show Chat"
+                      ? "Exit Fullscreen"
                       : isDesktopVisible
-                        ? "Fullscreen Desktop"
+                        ? "Fullscreen"
                         : "Open Desktop"}
                   </button>
                 )}
@@ -1431,25 +1854,44 @@ export default function SessionPage() {
                   <button
                     suppressHydrationWarning
                     onClick={handleHideDesktop}
-                    className="text-xs px-3 py-1.5 rounded-lg bg-zinc-100 text-zinc-700 border border-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-all duration-200"
+                    className="text-zinc-400 hover:text-zinc-200 transition-colors"
                   >
-                    Hide Desktop
+                    Hide
                   </button>
                 )}
 
-                <button
-                  suppressHydrationWarning
-                  onClick={() => router.push("/settings/api")}
-                  className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-400 hover:bg-blue-100 dark:hover:bg-blue-600/20 transition-all duration-200"
-                >
-                  Settings
+                {!isNewSession && (
+                  <button
+                    suppressHydrationWarning
+                    onClick={handleOpenSaveTemplate}
+                    className="text-zinc-400 hover:text-zinc-200 transition-colors ml-1"
+                  >
+                    Save Template
+                  </button>
+                )}
+                {viewMode === "archived" && (
+                  <button
+                    suppressHydrationWarning
+                    onClick={handleContinueArchivedThread}
+                    className="text-emerald-400 hover:text-emerald-300 transition-colors"
+                  >
+                    Continue
+                  </button>
+                )}
+                
+                <button className="text-zinc-400 hover:text-zinc-300 ml-2" onClick={() => router.push("/settings/api")}>
+                  <Settings className="w-4 h-4" />
                 </button>
+                <button className="text-zinc-400 hover:text-zinc-300">
+                  <User className="w-4 h-4" />
+                </button>
+
                 <button
                   suppressHydrationWarning
                   onClick={handleEnd}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 hover:border-red-500/30 transition-all duration-200"
+                  className="text-red-400 hover:text-red-300 transition-colors ml-2"
                 >
-                  {viewMode === "live" ? "End Session" : "Dashboard"}
+                  {viewMode === "live" ? "End" : "Exit"}
                 </button>
               </div>
             </header>
@@ -1458,7 +1900,7 @@ export default function SessionPage() {
             <div className="flex-1 flex overflow-hidden">
               {/* Left/Middle: Chat Sidebar */}
               <div
-                className={`bg-[#fafafa] dark:bg-[#111114] overflow-hidden transition-all duration-300 ease-in-out ${
+                className={`bg-[#fafafa] dark:bg-[#1a1a1c] overflow-hidden transition-all duration-300 ease-in-out ${
                   isDesktopVisible && isDesktopFullscreen
                     ? "hidden"
                     : isDesktopVisible
@@ -1481,94 +1923,37 @@ export default function SessionPage() {
                   </div>
                 )}
 
-                <div className="shrink-0 border-b border-zinc-200/80 px-4 py-3 dark:border-white/5">
-                  <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {([
-                        { id: "conversation", label: "Conversation" },
-                        { id: "run_log", label: "Run Log" },
-                        { id: "outputs", label: "Outputs" },
-                        { id: "context", label: "Context" },
-                      ] as const).map((surface) => (
-                        <button
-                          key={surface.id}
-                          onClick={() => setActiveSurface(surface.id)}
-                          className={`rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] transition-colors ${
-                            activeSurface === surface.id
-                              ? "bg-zinc-900 text-white dark:bg-white dark:text-black"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-                          }`}
-                        >
-                          {surface.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="text-xs text-zinc-500">
-                      {runInfo?.status ? `Run ${runInfo.status}` : "Run queued"}
-                    </div>
-                  </div>
-                </div>
+                {/* Tabs removed to modernize UI */}
 
                 {/* Feed container */}
                 <div className="flex-1 overflow-hidden">
-                  {activeSurface === "conversation" ? (
-                    viewMode === "archived" && chatItems.length === 0 ? (
-                      <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
-                        <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                          Archived session
+                  {viewMode === "archived" && chatItems.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
+                      <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                        Archived session
+                      </p>
+                      <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
+                        The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
+                      </p>
+                      {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
+                        <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                          {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
                         </p>
-                        <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
-                          The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
-                        </p>
-                        {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
-                          <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-                            {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
-                          </p>
-                        )}
-                        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-                          <button
-                            onClick={handleContinueArchivedThread}
-                            className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
-                          >
-                            Continue Here
-                          </button>
-                        </div>
+                      )}
+                      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          onClick={handleContinueArchivedThread}
+                          className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
+                        >
+                          Continue Here
+                        </button>
                       </div>
-                    ) : (
-                      <UnifiedChatPanel
-                        items={chatItems}
-                        isThinking={phase === "thinking"}
-                        onPermissionRespond={handlePermissionRespond}
-                      />
-                    )
-                  ) : activeSurface === "run_log" ? (
-                    <RunLogPanel
-                      run={runInfo}
-                      steps={runSteps}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have a stored run log yet."
-                          : "Waiting for the first persisted run step."
-                      }
-                    />
-                  ) : activeSurface === "context" ? (
-                    <ContextPacketPanel
-                      packet={(sessionInfo?.context_packet as ContextPacket | null) ?? null}
-                      meta={contextMeta}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have compact resume memory stored yet."
-                          : "Compact context will appear here once the session builds or injects it."
-                      }
-                    />
+                    </div>
                   ) : (
-                    <OutputsPanel
-                      artifacts={runArtifacts}
-                      emptyState={
-                        viewMode === "archived"
-                          ? "This archived session does not have stored outputs yet."
-                          : "Outputs from this run will appear here."
-                      }
+                    <UnifiedChatPanel
+                      items={chatItems}
+                      isThinking={phase === "thinking"}
+                      onPermissionRespond={handlePermissionRespond}
                     />
                   )}
                 </div>
@@ -1576,60 +1961,201 @@ export default function SessionPage() {
                 {/* Input area */}
                 {viewMode === "live" ? (
                   <div className="px-4 pb-6 pt-2 shrink-0">
-                    <div className="mx-auto w-full max-w-4xl relative">
-                      <div className="flex items-center gap-2 bg-[#f4f4f5] dark:bg-[#212126] border border-zinc-200 dark:border-[#2f2f35] rounded-full p-2 shadow-sm transition-all focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600">
-                        {/* Action buttons left */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-                              <line x1="12" y1="5" x2="12" y2="19"></line>
-                              <line x1="5" y1="12" x2="19" y2="12"></line>
-                            </svg>
-                          </button>
-                          <button className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-                              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                            </svg>
-                          </button>
+                    <div className="mx-auto w-full max-w-2xl relative">
+                      <TodoList items={todoItems} />
+                      {uploadedFiles.length > 0 ? (
+                        <div className="mb-3 flex flex-wrap gap-2">
+                          {uploadedFiles.map((file) => (
+                            <span
+                              key={file.path}
+                              className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                            >
+                              <Paperclip className="h-3.5 w-3.5" />
+                              <span className="max-w-52 truncate">{file.name}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveUploadedFile(file.path)}
+                                className="text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          ))}
                         </div>
-                        
-                        {/* Text input */}
-                        <div className="flex-1 relative min-h-10 flex items-center">
-                          <input
+                      ) : null}
+                      <div className="relative flex flex-col bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
+                        {/* Text input (Top) */}
+                        <div className="relative flex w-full items-start px-4 py-3">
+                          <textarea
                             suppressHydrationWarning
                             ref={inputRef}
-                            type="text"
                             value={textInput}
                             onChange={(e) => setTextInput(e.target.value)}
-                            onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
-                            placeholder="Send message to CoComputer..."
-                            className="w-full bg-transparent border-none px-2 py-2.5 text-[15px] text-foreground dark:text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                handleTextSubmit();
+                              }
+                            }}
+                            placeholder="Send message to CoComputer"
+                            rows={1}
+                            className="w-full bg-transparent border-none p-0 text-[15px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-0 resize-none overflow-y-auto max-h-40 leading-relaxed placeholder:font-medium"
                           />
                         </div>
-                        
-                        {/* Action buttons right */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          <MicButton
-                            isRecording={isRecording}
-                            onStart={toggleMic}
-                            onStop={toggleMic}
-                            disabled={voiceStatus !== "connected"}
-                          />
-                          <button
-                            onClick={handleTextSubmit}
-                            disabled={!textInput.trim() || isLoading}
-                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
-                              textInput.trim() && !isLoading
-                                ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-white' 
-                                : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
-                            }`}
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-                              <line x1="12" y1="19" x2="12" y2="5"></line>
-                              <polyline points="5 12 12 5 19 12"></polyline>
-                            </svg>
-                          </button>
+
+                        {/* Action buttons (Bottom) */}
+                        <div className="flex items-center justify-between mt-1 px-2 pb-2">
+                          {/* Action buttons left */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleOpenFilePicker}
+                              disabled={uploadDisabled}
+                              title="Attach"
+                              className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-full transition-colors flex items-center justify-center border border-zinc-700/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                            
+                            <div ref={connectorMenuRef} className="relative">
+                              <button
+                                type="button"
+                                onClick={() => setIsConnectorMenuOpen((open) => !open)}
+                                className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors flex items-center gap-1.5"
+                                title="Links"
+                              >
+                                <Link2 className="w-4 h-4" />
+                                {selectedConnectorIds.length > 0 && (
+                                  <span className="text-[10px] bg-indigo-500 text-white rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                                    {selectedConnectorIds.length}
+                                  </span>
+                                )}
+                              </button>
+                              <AnimatePresence>
+                                {isConnectorMenuOpen && (
+                                  <motion.div 
+                                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                                    exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                                    className="absolute left-0 bottom-full mb-3 w-80 rounded-2xl border border-zinc-800 bg-[#161618] p-1.5 shadow-2xl z-50 overflow-hidden"
+                                  >
+                                    {/* Search & Actions Header */}
+                                    <div className="p-2 flex flex-col gap-2 border-b border-zinc-800/50 mb-1">
+                                      <div className="relative flex items-center">
+                                        <Search className="absolute left-2.5 w-3.5 h-3.5 text-zinc-500" />
+                                        <input 
+                                          autoFocus
+                                          type="text"
+                                          value={connectorSearch}
+                                          onChange={(e) => setConnectorSearch(e.target.value)}
+                                          placeholder="Search tools..."
+                                          className="w-full bg-zinc-900/50 border border-zinc-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 transition-all"
+                                        />
+                                      </div>
+                                      <div className="flex items-center justify-between px-1">
+                                        <span className="text-[10px] uppercase tracking-widest font-bold text-zinc-500">Connectors</span>
+                                        <button 
+                                          onClick={() => {
+                                            const filteredIds = availableConnectors
+                                              .filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase()))
+                                              .map(c => c.connection_id);
+                                            
+                                            if (filteredIds.every(id => selectedConnectorIds.includes(id))) {
+                                              setSelectedConnectorIds(prev => prev.filter(id => !filteredIds.includes(id)));
+                                            } else {
+                                              setSelectedConnectorIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+                                            }
+                                          }}
+                                          className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
+                                        >
+                                          Toggle All
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {/* Scrollable List */}
+                                    <div className="max-h-64 overflow-y-auto custom-scrollbar space-y-0.5 px-0.5">
+                                      {availableConnectors
+                                        .filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase()))
+                                        .map((connector) => {
+                                          const checked = selectedConnectorIds.includes(connector.connection_id);
+                                          return (
+                                            <button
+                                              key={connector.connection_id}
+                                              type="button"
+                                              onClick={() => toggleConnectorSelection(connector.connection_id)}
+                                              className={`flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-all ${
+                                                checked ? "bg-indigo-500/5" : "hover:bg-zinc-800/60"
+                                              }`}
+                                            >
+                                              <div className="flex items-center gap-3">
+                                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center border ${checked ? "border-indigo-500/30 bg-indigo-500/10" : "border-zinc-800 bg-zinc-900/50"}`}>
+                                                  <Globe className={`w-4 h-4 ${checked ? "text-indigo-400" : "text-zinc-500"}`} />
+                                                </div>
+                                                <div className="flex flex-col">
+                                                  <div className={`text-[13px] font-medium leading-tight ${checked ? "text-zinc-100" : "text-zinc-300"}`}>
+                                                    {connector.name}
+                                                  </div>
+                                                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 mt-0.5 font-semibold">
+                                                    {connector.provider}
+                                                  </div>
+                                                </div>
+                                              </div>
+                                              <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                                                checked ? "border-indigo-500 bg-indigo-500 text-white" : "border-zinc-700 bg-transparent text-transparent"
+                                              }`}>
+                                                <Check className="w-3 h-3 stroke-[3]" />
+                                              </div>
+                                            </button>
+                                          );
+                                        })}
+                                      
+                                      {availableConnectors.filter(c => c.name.toLowerCase().includes(connectorSearch.toLowerCase())).length === 0 && (
+                                        <div className="py-8 text-center text-xs text-zinc-600 font-medium">
+                                          No tools found for "{connectorSearch}"
+                                        </div>
+                                      )}
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={handleShowDesktop}
+                              title="Workspace Context"
+                              className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
+                            >
+                              <Monitor className="w-4 h-4" />
+                            </button>
+                          </div>
+                          
+                          {/* Action buttons right */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={toggleMic}
+                              disabled={voiceStatus !== "connected"}
+                              title="Voice Input"
+                              className={`p-1.5 rounded transition-colors ${
+                                isRecording ? "text-red-400 bg-red-500/10" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+                              } disabled:opacity-40`}
+                            >
+                              <Mic className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={handleTextSubmit}
+                              disabled={!textInput.trim() || isLoading || isUploadingFile}
+                              title="Send"
+                              className={`p-1.5 rounded-full transition-colors border border-zinc-700/50 ${
+                                textInput.trim() && !isLoading && !isUploadingFile
+                                  ? 'bg-[#3a3a3c] text-zinc-200 hover:bg-zinc-600' 
+                                  : 'bg-zinc-800 text-zinc-500 cursor-not-allowed opacity-50'
+                              }`}
+                            >
+                              <ArrowUp className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1646,29 +2172,16 @@ export default function SessionPage() {
                 <div className="flex-[2] min-w-0 flex overflow-hidden transition-all duration-300 ease-in-out">
                   <div className="flex-1 flex flex-col overflow-hidden p-3 bg-zinc-50 dark:bg-[#151515]">
                     <div className="w-full h-full xl:max-w-7xl mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 shadow-2xl relative">
-                      <DesktopPanel streamUrl={streamUrl} />
-                      
-                      {/* ── Overlay: blocks user interaction while agent is working ── */}
-                      {(phase === "thinking" || phase === "acting") && (
-                        <>
-                          <div className="absolute inset-0 z-10 cursor-not-allowed" />
-                          <div className="absolute top-4 right-4 z-20 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-white/85 dark:bg-black/85 border border-black/10 dark:border-white/10 backdrop-blur-sm shadow-2xl">
-                            <span className="text-xs font-medium text-foreground dark:text-zinc-300 flex items-center gap-2">
-                              <span className={`w-2 h-2 rounded-full shrink-0 animate-pulse ${
-                                phase === "thinking" ? "bg-cyan-400" : "bg-amber-400"
-                              }`} />
-                              {agentStatus || (phase === "thinking" ? "Thinking..." : "Acting...")}
-                            </span>
-                            <div className="w-px h-4 bg-black/10 dark:bg-white/10 mx-1" />
-                            <button
-                              onClick={handleStopAgent}
-                              className="text-xs font-bold text-red-500 hover:text-red-400 uppercase tracking-widest transition-colors"
-                            >
-                              Stop
-                            </button>
-                          </div>
-                        </>
-                      )}
+                      <WorkflowDesktopContainer
+                        workflowRun={workflowRun}
+                        streamUrl={streamUrl}
+                        analysis={latestAnalysis}
+                        forcedTab={forcedTab}
+                        onForcedTabAck={() => setForcedTab(null)}
+                        phase={phase}
+                        agentStatus={agentStatus}
+                        onStopAgent={handleStopAgent}
+                      />
                     </div>
                   </div>
                 </div>

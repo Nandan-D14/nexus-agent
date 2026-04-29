@@ -14,13 +14,17 @@ from nexus.agent import AgentTurnResult, create_agent, create_multi_agent, creat
 from nexus.background_tasks import BackgroundTask, BackgroundTaskManager
 from nexus.billing import calculate_screenshot_credits
 from nexus.history_repository import FirestoreHistoryRepository
+from nexus.mcp_client import build_mcp_adk_tools, redact_sensitive
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxDeadError
 from nexus.tools._context import (
     set_bg_task_manager,
+    set_history_repository,
+    set_owner_id,
     set_run_id,
     set_runtime_config,
     set_sandbox,
+    set_send_json,
     set_session_id,
     set_workspace_path,
 )
@@ -75,6 +79,7 @@ class NexusOrchestrator:
             self._voice_connection_error_cls = VoiceConnectionError
 
         # ADK agent + runner (multi-agent or single-agent based on config)
+        self._integration_tools: list = []
         if settings.use_multi_agent:
             self._agent = create_multi_agent(self.runtime_config)
             logger.info("Using multi-agent orchestrator mode")
@@ -124,6 +129,9 @@ class NexusOrchestrator:
         set_bg_task_manager(self.bg_task_manager)
         set_runtime_config(self.runtime_config)
         set_session_id(self.session.id)
+        set_owner_id(self.session.owner_id)
+        set_history_repository(self.history_repository)
+        set_send_json(self._send_json)
         self._bind_workspace_context()
         workspace_root_ready = await self._ensure_session_workspace_root()
         if not workspace_root_ready:
@@ -131,6 +139,8 @@ class NexusOrchestrator:
                 "Continuing session %s initialization without a prepared workspace root",
                 self.session.id,
             )
+
+        await self._load_integration_tools()
 
         # Voice is NOT connected here — deferred until start_voice() is called
         if self.voice:
@@ -197,6 +207,39 @@ class NexusOrchestrator:
                 "run": self._run_payload(status=self.session.run_status),
             })
 
+    async def _load_integration_tools(self) -> None:
+        """Load enabled per-user MCP tools into the ADK runner."""
+        if not self.history_repository:
+            return
+        try:
+            connections = await self.history_repository.list_enabled_integration_connections(
+                self.session.owner_id
+            )
+            self._integration_tools = build_mcp_adk_tools(connections)
+        except Exception:
+            logger.warning("Failed to load integration tools for session %s", self.session.id, exc_info=True)
+            self._integration_tools = []
+
+        self._rebuild_runner()
+        if self._integration_tools:
+            logger.info(
+                "Loaded %d MCP integration tools for session %s",
+                len(self._integration_tools),
+                self.session.id,
+            )
+
+    def _rebuild_runner(self) -> None:
+        if settings.use_multi_agent:
+            kwargs = {"integration_tools": self._integration_tools} if self._integration_tools else {}
+            self._agent = create_multi_agent(self.runtime_config, **kwargs)
+        else:
+            kwargs = {"integration_tools": self._integration_tools} if self._integration_tools else {}
+            self._agent = create_agent(self.runtime_config, **kwargs)
+        self._runner, self._session_service = create_runner(
+            self._agent,
+            session_service=self._session_service,
+        )
+
     async def handle_user_audio(self, pcm_data: bytes) -> None:
         """Forward mic audio to Gemini Live."""
         self.session.touch()
@@ -256,11 +299,23 @@ class NexusOrchestrator:
                 "message": "Voice connection failed. Text input still works.",
             })
 
-    async def handle_text_input(self, text: str) -> None:
+    async def handle_text_input(
+        self,
+        text: str,
+        connector_ids: list[str] | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Handle direct text input (bypass voice)."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="typed", text=text)
-        await self._run_agent_tracked(await self._build_turn_input(text), source="typed")
+        await self._run_agent_tracked(
+            await self._build_turn_input(
+                text,
+                connector_ids=connector_ids,
+                uploaded_files=uploaded_files,
+            ),
+            source="typed",
+        )
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
         """Route a permission_response from the frontend to the bg task manager."""
@@ -486,9 +541,19 @@ class NexusOrchestrator:
         set_runtime_config(self.runtime_config)
 
         if settings.use_multi_agent:
-            self._agent = create_multi_agent(self.runtime_config, task_model_override=task_model)
+            kwargs = {"integration_tools": self._integration_tools} if self._integration_tools else {}
+            self._agent = create_multi_agent(
+                self.runtime_config,
+                task_model_override=task_model,
+                **kwargs,
+            )
         else:
-            self._agent = create_agent(self.runtime_config, task_model_override=task_model)
+            kwargs = {"integration_tools": self._integration_tools} if self._integration_tools else {}
+            self._agent = create_agent(
+                self.runtime_config,
+                task_model_override=task_model,
+                **kwargs,
+            )
         self._runner, self._session_service = create_runner(
             self._agent,
             session_service=self._session_service,
@@ -588,7 +653,55 @@ class NexusOrchestrator:
             f"{', '.join(model_candidates)}: {last_exc}"
         )
 
-    async def _build_turn_input(self, text: str) -> str:
+    def _format_uploaded_files_context(self, uploaded_files: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for raw in uploaded_files[:8]:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or raw.get("title") or raw.get("path") or "uploaded file").strip()
+            path = str(raw.get("path") or "").strip()
+            mime_type = str(raw.get("mime_type") or raw.get("content_type") or "").strip()
+            drive_link = str(raw.get("drive_web_view_link") or "").strip()
+            detail_parts = [part for part in [f"path={path}" if path else "", f"type={mime_type}" if mime_type else ""] if part]
+            line = f"- {name}"
+            if detail_parts:
+                line += f" ({', '.join(detail_parts)})"
+            if drive_link:
+                line += f" drive={drive_link}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _format_turn_context(
+        self,
+        connector_ids: list[str] | None,
+        uploaded_files: list[dict[str, Any]] | None,
+    ) -> str:
+        sections: list[str] = []
+        normalized_connectors = [
+            str(item).strip()
+            for item in (connector_ids or [])
+            if str(item).strip()
+        ]
+        if normalized_connectors:
+            sections.append(
+                "[USER-SELECTED CONNECTORS]\n"
+                f"{', '.join(normalized_connectors[:12])}"
+            )
+        uploaded_block = self._format_uploaded_files_context(uploaded_files or [])
+        if uploaded_block:
+            sections.append(
+                "[UPLOADED FILES]\n"
+                f"{uploaded_block}\n"
+                "Use these workspace paths directly when relevant."
+            )
+        return "\n\n".join(section for section in sections if section.strip())
+
+    async def _build_turn_input(
+        self,
+        text: str,
+        connector_ids: list[str] | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Build the next turn input with compact resume context injected once."""
         self._last_user_message = text.strip()
         parts: list[str] = []
@@ -626,6 +739,10 @@ class NexusOrchestrator:
             self._seed_context = ""
         elif self._seed_context:
             self._seed_context = ""
+
+        turn_context = self._format_turn_context(connector_ids, uploaded_files)
+        if turn_context:
+            parts.append(turn_context)
 
         if parts:
             joined = "\n\n".join(part for part in parts if part.strip())
@@ -836,6 +953,8 @@ class NexusOrchestrator:
             self.session.stream_url = info["stream_url"]
             # Re-bind the new sandbox to the tool context
             set_sandbox(self.session.sandbox)
+            set_owner_id(self.session.owner_id)
+            set_history_repository(self.history_repository)
             self._bind_workspace_context()
             workspace_root_ready = await self._ensure_session_workspace_root()
             if not workspace_root_ready:
@@ -1156,16 +1275,16 @@ class NexusOrchestrator:
                 step_id = await self._create_step(
                     step_type="tool_call",
                     title=f"Tool: {tool_name}",
-                    detail=self._clip_text(self._coerce_mapping(tool_args), 320),
+                    detail=self._clip_text(self._redact_mapping(self._coerce_mapping(tool_args)), 320),
                     source=self._active_agent,
-                    metadata={"tool": tool_name, "args": self._coerce_mapping(tool_args)},
+                    metadata={"tool": tool_name, "args": self._redact_mapping(self._coerce_mapping(tool_args))},
                 )
                 if step_id:
                     self._tool_step_ids.setdefault(tool_name, []).append(step_id)
                 await self._send_json({
                     "type": "agent_tool_call",
                     "tool": tool_name,
-                    "args": self._coerce_mapping(tool_args),
+                    "args": self._redact_mapping(self._coerce_mapping(tool_args)),
                 })
 
             content = getattr(event, "content", None)
@@ -1430,6 +1549,10 @@ class NexusOrchestrator:
                 if not key.startswith("_")
             }
         return {"value": str(value)}
+
+    def _redact_mapping(self, value: dict[str, Any]) -> dict[str, Any]:
+        redacted = redact_sensitive(value)
+        return redacted if isinstance(redacted, dict) else {"value": redacted}
 
     def mark_ws_disconnected(self) -> None:
         self._ws_connected = False

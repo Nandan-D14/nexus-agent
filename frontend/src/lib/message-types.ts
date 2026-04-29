@@ -79,6 +79,7 @@ export type WsMessage =
   | { type: "permission_request"; task_id: string; description: string; estimated_seconds: number; agent: string }
   | { type: "bg_task_progress"; task_id: string; progress: number; message: string }
   | { type: "bg_task_complete"; task_id: string; success: boolean; result: string }
+  | { type: "todo_list_updated"; items: Array<{ title: string; status: "pending" | "in_progress" | "done"; note?: string }> }
   | { type: "voice_status"; status: string; message: string }
   | ({ type: "quota_update" } & PlanQuota)
   | {
@@ -106,12 +107,18 @@ export type WsMessage =
       packet: ContextPacket;
     }
   | { type: "error"; code: string; message: string; detail?: string }
-  | { type: "pong" };
+  | { type: "pong" }
+  | { type: "ui_action"; action: "switch_tab"; target: "workflow" | "desktop"; reason?: string };
 
 // ── Client -> Server (Text frames) ─────────────────────────────────
 
 export type WsCommand =
-  | { type: "text_input"; text: string }
+  | {
+      type: "text_input";
+      text: string;
+      connector_ids?: string[];
+      uploaded_files?: UploadedInputFile[];
+    }
   | { type: "analyze_screen" }
   | { type: "stop_agent" }
   | { type: "start_voice" }
@@ -271,6 +278,18 @@ export type RunArtifact = {
   metadata: Record<string, unknown>;
 };
 
+export type UploadedInputFile = {
+  artifact_id?: string;
+  name: string;
+  path: string;
+  mime_type?: string | null;
+  size?: number | null;
+  drive_status?: string | null;
+  drive_file_id?: string | null;
+  drive_web_view_link?: string | null;
+  drive_folder_path?: string | null;
+};
+
 export type WorkflowTemplateInputField = {
   key: string;
   label: string;
@@ -330,6 +349,7 @@ export type AgentToolResultMessage = Extract<WsMessage, { type: "agent_tool_resu
 export type AgentScreenshotMessage = Extract<WsMessage, { type: "agent_screenshot" }>;
 export type AgentCompleteMessage = Extract<WsMessage, { type: "agent_complete" }>;
 export type AgentDelegationMessage = Extract<WsMessage, { type: "agent_delegation" }>;
+export type UiActionMessage = Extract<WsMessage, { type: "ui_action" }>;
 export type PermissionRequestMessage = Extract<WsMessage, { type: "permission_request" }>;
 export type BgTaskProgressMessage = Extract<WsMessage, { type: "bg_task_progress" }>;
 export type BgTaskCompleteMessage = Extract<WsMessage, { type: "bg_task_complete" }>;

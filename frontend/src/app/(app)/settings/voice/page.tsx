@@ -91,7 +91,7 @@ export default function VoiceSettingsPage() {
       </div>
 
       <div className="space-y-6">
-        <section className="p-6 rounded-3xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-[#2f2f35]">
+        <section className="p-6 rounded-3xl bg-white dark:bg-[#1a1a1c] border border-zinc-200 dark:border-[#2f2f35]">
           <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-4 flex items-center gap-2">
             <Volume2 className="w-4 h-4 text-zinc-500" />
             Synthesis Model
@@ -107,7 +107,7 @@ export default function VoiceSettingsPage() {
                   className={`flex items-center justify-between p-4 rounded-3xl border text-left transition-all ${
                     isSelected 
                       ? "border-zinc-900 bg-zinc-50 dark:border-zinc-100 dark:bg-zinc-800/50" 
-                      : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-[#2f2f35] dark:bg-[#111114] dark:hover:bg-zinc-800/30"
+                      : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-[#2f2f35] dark:bg-[#1a1a1c] dark:hover:bg-zinc-800/30"
                   }`}
                 >
                   <div>

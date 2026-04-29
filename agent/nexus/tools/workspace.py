@@ -11,6 +11,7 @@ from nexus.config import settings
 from nexus.tools._context import (
     get_run_id,
     get_sandbox,
+    get_send_json,
     get_session_id,
     get_workspace_path,
     set_workspace_path,
@@ -24,6 +25,21 @@ _TODO_LINE_RE = re.compile(
 
 def _tool_error(message: str) -> dict[str, Any]:
     return {"error": message}
+
+
+async def _emit_todo_update(items: list[dict[str, str]]) -> None:
+    send_json = get_send_json()
+    if not send_json:
+        return
+    await send_json(
+        {
+            "type": "todo_list_updated",
+            "items": [
+                {"title": item["title"], "status": item["status"], "note": item["note"]}
+                for item in items
+            ],
+        }
+    )
 
 
 def derive_workspace_path(session_id: str, run_id: str) -> str:
@@ -181,9 +197,14 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
         content = _build_todo_markdown(items)
         path = f"{workspace_path}/todo.md"
         get_sandbox().write_text_file(path, content)
+        
+        # Sync to frontend
+        todo_items = _parse_todo_markdown(content)
+        await _emit_todo_update(todo_items)
+
         return {
             "todo_file": path,
-            "item_count": len([item for item in items if item and item.strip()]),
+            "item_count": len(todo_items),
             "status": "success",
         }
     except Exception as exc:
@@ -218,6 +239,10 @@ async def update_todo_item(
         target["status"] = status
         target["note"] = note.strip()
         sandbox.write_text_file(path, _format_todo_items(items))
+
+        # Sync to frontend
+        await _emit_todo_update(items)
+
         return {
             "todo_file": path,
             "updated_item": item_index,

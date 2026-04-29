@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import {
   AlertCircle,
@@ -84,15 +85,36 @@ function buildTemplateSeed(session: HistorySession): TemplateFormValue {
 }
 
 export default function HistoryPage() {
+  return (
+    <Suspense fallback={
+      <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-6 pb-20 h-full flex flex-col items-center justify-center">
+        <div className="w-8 h-8 border-4 border-cyan-600 dark:border-cyan-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    }>
+      <HistoryContent />
+    </Suspense>
+  );
+}
+
+function HistoryContent() {
   const { user } = useAuth();
+  const searchParams = useSearchParams();
   const { saveSessionAsTemplate, isLoading: templateLoading, error: templateError } = useWorkflowTemplates();
   const [sessions, setSessions] = useState<HistorySession[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(searchParams.get("q") || "");
   const [statusFilter, setStatusFilter] = useState("all");
   const [templateSource, setTemplateSource] = useState<HistorySession | null>(null);
   const [templateSeed, setTemplateSeed] = useState<TemplateFormValue>(EMPTY_TEMPLATE);
+
+  // Sync searchQuery with URL parameters (for sidebar search reactivity)
+  useEffect(() => {
+    const q = searchParams.get("q");
+    if (q !== null) {
+      setSearchQuery(q);
+    }
+  }, [searchParams]);
 
   const fetchHistory = useCallback(async () => {
     if (!user) return;

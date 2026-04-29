@@ -41,21 +41,21 @@
 
 @layer base {
   .dark {
-    --color-background: #09090b;
-    --color-foreground: #fafafa;
+    --color-background: #1a1a1c;
+    --color-foreground: #e4e4e7;
     
-    --color-card: #111114;
-    --color-card-foreground: #fafafa;
-    --color-card-border: #1c1c1e;
+    --color-card: #161618;
+    --color-card-foreground: #e4e4e7;
+    --color-card-border: rgba(39, 39, 42, 0.4); /* zinc-800/40 */
     
-    --color-muted: #18181b;
+    --color-muted: #242426;
     --color-muted-foreground: #a1a1aa;
     
-    --color-accent: #0ea5e9;
+    --color-accent: #818cf8; /* indigo-400 */
     --color-accent-foreground: #ffffff;
     
     /*  Co-Computer Dark Mode specific Glows */
-    --color-nexus-glow: rgba(14, 165, 233, 0.15);
+    --color-nexus-glow: rgba(129, 140, 248, 0.1);
   }
 }
 
@@ -75,8 +75,8 @@
 
 /* Minimal Scrollbar */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -85,15 +85,58 @@
 
 ::-webkit-scrollbar-thumb {
   @apply bg-zinc-200 dark:bg-zinc-800 rounded-full;
+  transition: background-color 0.2s ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   @apply bg-zinc-300 dark:bg-zinc-700;
 }
 
+/* Custom Scrollbar for Workflow Panels */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(113, 113, 122, 0.5) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.3);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.5);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:active {
+  background: rgba(113, 113, 122, 0.7);
+}
+
+/* Dark mode custom scrollbar */
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.2);
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.4);
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:active {
+  background: rgba(113, 113, 122, 0.6);
+}
+
 /* Advanced Glassmorphism */
 .glass-panel {
-  @apply bg-white/70 dark:bg-[#111114]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
+  @apply bg-white/70 dark:bg-[#1a1a1c]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
 }
 
 .glass-card {
@@ -141,16 +184,33 @@
 
 /* Chat markdown */
 .markdown {
-  line-height: 1.6;
+  line-height: 1.7;
   word-break: break-word;
+  font-size: 15px;
 }
 
 .markdown > * {
-  margin: 0.45em 0;
+  margin: 0.8em 0;
 }
 
+.markdown > *:first-child {
+  margin-top: 0;
+}
+
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 {
+  @apply font-bold text-zinc-100 mt-6 mb-3 tracking-tight;
+}
+
+.markdown h1 { @apply text-xl; }
+.markdown h2 { @apply text-lg; }
+.markdown h3 { @apply text-[16px]; }
+
 .markdown a {
-  @apply text-accent hover:underline underline-offset-2;
+  @apply text-indigo-400 hover:text-indigo-300 hover:underline underline-offset-4 transition-colors;
 }
 
 .markdown code {
@@ -158,52 +218,61 @@
 }
 
 .markdown :not(pre) > code {
-  @apply px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700/50 text-[0.85em];
+  @apply px-1.5 py-0.5 rounded-md bg-zinc-800/80 border border-zinc-700/50 text-indigo-300 font-medium text-[0.9em];
 }
 
 .markdown pre {
-  @apply my-3 p-4 rounded-xl overflow-x-auto bg-[#0b0f14] border border-zinc-800;
+  @apply my-5 p-5 rounded-2xl overflow-x-auto bg-[#0d0d0f] border border-zinc-800/80 shadow-2xl;
 }
 
 .markdown pre code {
   background: transparent;
   padding: 0;
   border: none;
-  font-size: 0.85em;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e4e4e7;
 }
 
 .markdown ul,
 .markdown ol {
-  @apply my-2 ml-5 list-outside;
+  @apply my-4 ml-6 space-y-2;
 }
 
 .markdown ul { @apply list-disc; }
 .markdown ol { @apply list-decimal; }
 
+.markdown li {
+  @apply pl-1;
+}
+
 .markdown blockquote {
-  @apply my-3 pl-4 border-l-2 border-accent/40 text-muted-foreground italic;
+  @apply my-5 pl-5 border-l-4 border-indigo-500/50 text-zinc-400 italic bg-indigo-500/5 py-2 rounded-r-lg;
+}
+
+.markdown hr {
+  @apply my-8 border-zinc-800/80;
 }
 
 .markdown-table-wrapper {
-  @apply w-full overflow-x-auto my-3 rounded-lg border border-zinc-200 dark:border-zinc-800;
+  @apply w-full overflow-x-auto my-5 rounded-xl border border-zinc-800/80 bg-zinc-900/30;
 }
 
 .markdown table {
-  @apply w-full border-collapse text-sm;
+  @apply w-full border-collapse text-[13px] text-zinc-300;
 }
 
 .markdown th,
 .markdown td {
-  @apply border-b border-zinc-200 dark:border-zinc-800 px-4 py-2 text-left;
+  @apply border-b border-zinc-800/80 px-4 py-3 text-left;
 }
 
 .markdown th {
-  @apply bg-zinc-50 dark:bg-zinc-900/50 font-semibold;
+  @apply bg-zinc-800/50 font-bold text-zinc-100 uppercase tracking-wider text-[11px];
 }
 
 .markdown img {
-  @apply max-w-full h-auto rounded-xl border border-zinc-200 dark:border-zinc-800 my-3;
+  @apply max-w-full h-auto rounded-2xl border border-zinc-800/80 my-5 shadow-2xl;
 }
 
 .chat-code-block {
