@@ -41,21 +41,21 @@
 
 @layer base {
   .dark {
-    --color-background: #09090b;
-    --color-foreground: #fafafa;
+    --color-background: #1a1a1c;
+    --color-foreground: #e4e4e7;
     
-    --color-card: #111114;
-    --color-card-foreground: #fafafa;
-    --color-card-border: #1c1c1e;
+    --color-card: #161618;
+    --color-card-foreground: #e4e4e7;
+    --color-card-border: rgba(39, 39, 42, 0.4); /* zinc-800/40 */
     
-    --color-muted: #18181b;
+    --color-muted: #242426;
     --color-muted-foreground: #a1a1aa;
     
-    --color-accent: #0ea5e9;
+    --color-accent: #818cf8; /* indigo-400 */
     --color-accent-foreground: #ffffff;
     
     /*  Co-Computer Dark Mode specific Glows */
-    --color-nexus-glow: rgba(14, 165, 233, 0.15);
+    --color-nexus-glow: rgba(129, 140, 248, 0.1);
   }
 }
 
@@ -136,7 +136,7 @@
 
 /* Advanced Glassmorphism */
 .glass-panel {
-  @apply bg-white/70 dark:bg-[#111114]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
+  @apply bg-white/70 dark:bg-[#1a1a1c]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
 }
 
 .glass-card {

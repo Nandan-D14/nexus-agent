@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { LogOut, Menu, X, PlusCircle, LayoutDashboard, Settings, History, ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { LogOut, Menu, X, PlusCircle, LayoutDashboard, Settings, History, ChevronLeft, ChevronRight, Plus, PanelLeft, Cpu } from "lucide-react";
 import { SIDEBAR_ACTIONS, NAV_LINKS } from "@/lib/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch } from "@/lib/api-client";
@@ -68,24 +68,27 @@ export function SessionNavSidebar() {
       <button
         type="button"
         onClick={() => setIsSidebarOpen((prev) => !prev)}
-        className={`fixed top-4 left-4 z-50 p-2 rounded-xl bg-white/80 dark:bg-[#0a0a0a]/80 backdrop-blur-xl border border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 md:hidden shadow-lg`}
+        className={`fixed top-4 left-4 z-50 p-2 rounded-xl bg-white/80 dark:bg-[#161618]/80 backdrop-blur-xl border border-zinc-200 dark:border-zinc-800/50 text-zinc-600 dark:text-zinc-300 md:hidden shadow-lg`}
       >
         {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
       </button>
 
       {/* Sidebar Container */}
       <aside
-        className={`fixed top-0 left-0 z-40 h-screen bg-[#fafafa] dark:bg-[#0e0e10] border-r border-zinc-200 dark:border-white/[0.03] flex flex-col transition-all duration-300 ease-in-out shadow-2xl md:shadow-none ${
+        className={`fixed top-0 left-0 z-40 h-screen bg-[#fafafa] dark:bg-[#161618] border-r border-zinc-200 dark:border-zinc-800/50 flex flex-col transition-all duration-300 ease-in-out shadow-2xl md:shadow-none ${
           isMobileViewport() 
-            ? (isSidebarOpen ? "w-64 translate-x-0" : "w-64 -translate-x-full")
-            : (isCollapsed ? "w-[72px]" : "w-64")
+            ? (isSidebarOpen ? "w-[260px] translate-x-0" : "w-[260px] -translate-x-full")
+            : (isCollapsed ? "w-[72px]" : "w-[260px]")
         }`}
       >
         {/* Top Header / Toggle */}
-        <div className={`p-4 flex items-center ${isCollapsed ? "justify-center" : "justify-between"} border-b border-white/[0.03]`}>
+        <div className={`p-4 flex items-center ${isCollapsed ? "justify-center" : "justify-between"} mt-1`}>
           {!isCollapsed && (
-            <Link href="/" className="flex items-center gap-3 px-2">
-              <span className="text-lg font-bold tracking-tighter text-zinc-900 dark:text-zinc-100">
+            <Link href="/" className="flex items-center gap-2 px-1">
+              <span className="text-[15px] font-bold tracking-wide text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                <div className="w-5 h-5 text-indigo-500 dark:text-indigo-400">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+                </div>
                 CoComputer
               </span>
             </Link>
@@ -93,57 +96,58 @@ export function SessionNavSidebar() {
           <button
             type="button"
             onClick={() => isMobileViewport() ? setIsSidebarOpen(false) : setIsCollapsed(!isCollapsed)}
-            className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-200/50 dark:hover:bg-white/[0.05] transition-colors"
+            className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 transition-colors"
           >
-            {isMobileViewport() ? <X className="w-5 h-5" /> : isCollapsed ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />}
+            {isMobileViewport() ? <X className="w-4 h-4" /> : isCollapsed ? <ChevronRight className="w-4 h-4" /> : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>}
           </button>
         </div>
 
         {/* Actions (New Task) */}
-        <div className="px-3 py-4">
+        <div className="px-3 mt-2">
           <button
             onClick={handleNewSession}
-            className={`w-full flex items-center gap-3 transition-all duration-200 rounded-xl ${
+            className={`w-full flex items-center gap-3 transition-all duration-200 rounded-lg ${
               isCollapsed 
-                ? "justify-center p-3 bg-zinc-900 dark:bg-white text-white dark:text-black" 
-                : "px-4 py-3 bg-zinc-900 dark:bg-white text-white dark:text-black shadow-lg shadow-zinc-900/10 dark:shadow-white/5"
+                ? "justify-center p-2.5 bg-zinc-900 dark:bg-zinc-800/50 text-white dark:text-zinc-200" 
+                : "px-3 py-2 bg-zinc-900 dark:bg-zinc-800/50 text-white dark:text-zinc-200 border border-zinc-800/50 shadow-sm"
             }`}
           >
-            <Plus className="w-5 h-5" strokeWidth={3} />
-            {!isCollapsed && <span className="text-sm font-bold uppercase tracking-widest">New task</span>}
+            <Plus className="w-4 h-4" strokeWidth={2.5} />
+            {!isCollapsed && <span className="text-[13px] font-medium tracking-tight">New task</span>}
           </button>
         </div>
 
         {/* Navigation Links */}
-        <nav className="flex-1 px-3 py-2 space-y-1 overflow-y-auto custom-scrollbar">
-          {NAV_ITEMS.map(({ href, icon: Icon, label }) => {
+        <nav className="flex-1 px-3 mt-4 space-y-0.5 overflow-y-auto custom-scrollbar">
+          {NAV_ITEMS.map(({ href, icon: Icon, label, name }) => {
             const active = pathname.startsWith(href);
+            const displayName = label || name;
             return (
               <Link
                 key={href}
                 href={href}
-                className={`flex items-center gap-3 rounded-xl transition-all duration-200 ${
-                  isCollapsed ? "justify-center p-3" : "px-4 py-3"
+                className={`flex items-center gap-3 rounded-lg transition-all duration-200 ${
+                  isCollapsed ? "justify-center p-2.5" : "px-3 py-2"
                 } ${
                   active
-                    ? "bg-zinc-200/50 dark:bg-white/[0.08] text-zinc-900 dark:text-white font-semibold"
-                    : "text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/30 dark:hover:bg-white/[0.04] hover:text-zinc-900 dark:hover:text-zinc-200"
+                    ? "bg-zinc-200/50 dark:bg-zinc-800/50 text-zinc-900 dark:text-zinc-100 font-medium"
+                    : "text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/30 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-200"
                 }`}
-                title={isCollapsed ? label : ""}
+                title={isCollapsed ? displayName : ""}
                 onClick={() => isMobileViewport() && setIsSidebarOpen(false)}
               >
-                <Icon className={`w-5 h-5 ${active ? "text-zinc-900 dark:text-white" : ""}`} />
-                {!isCollapsed && <span className="text-[13.5px] tracking-tight">{label}</span>}
+                <Icon className={`w-4 h-4 ${active ? "text-indigo-500 dark:text-indigo-400" : ""}`} />
+                {!isCollapsed && <span className="text-[13px] tracking-tight">{displayName}</span>}
               </Link>
             );
           })}
         </nav>
 
         {/* User Profile & Quota */}
-        <div className="mt-auto p-3 border-t border-white/[0.03]">
+        <div className="mt-auto p-3 border-t border-zinc-200 dark:border-zinc-800/50">
           {!isCollapsed && quota && (
-             <div className="mb-4 p-3 rounded-xl bg-zinc-200/30 dark:bg-white/[0.03] border border-black/5 dark:border-white/5">
-                <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-zinc-500 mb-2">
+             <div className="mb-4 px-3 py-2 rounded-lg bg-zinc-200/30 dark:bg-zinc-800/30 border border-black/5 dark:border-zinc-800/50">
+                <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-2">
                   <span>Usage</span>
                   <span>{Math.min(100, Math.round((quota.used / quota.limit) * 100))}%</span>
                 </div>
@@ -151,23 +155,23 @@ export function SessionNavSidebar() {
                   <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
-                    className="h-full bg-zinc-600 dark:bg-zinc-400"
+                    className="h-full bg-zinc-600 dark:bg-indigo-500"
                   />
                 </div>
              </div>
           )}
 
-          <div className={`flex items-center gap-3 ${isCollapsed ? "justify-center" : "p-2 rounded-xl bg-zinc-200/30 dark:bg-white/[0.03] border border-black/5 dark:border-white/5"}`}>
-            <div className="w-9 h-9 rounded-full bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden shadow-inner">
+          <div className={`flex items-center gap-3 ${isCollapsed ? "justify-center" : "p-2 rounded-lg"}`}>
+            <div className="w-8 h-8 rounded-full bg-zinc-900 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden border border-zinc-200 dark:border-zinc-700">
                {user?.photoURL ? (
                  <img src={user.photoURL} alt={user.displayName || "U"} className="w-full h-full object-cover" />
                ) : (
-                 <span className="text-zinc-100 dark:text-zinc-900 font-black text-sm">{initial}</span>
+                 <span className="text-zinc-100 dark:text-zinc-400 font-bold text-xs">{initial}</span>
                )}
             </div>
             {!isCollapsed && (
               <div className="flex-1 min-w-0">
-                <p className="text-[12px] font-bold text-zinc-900 dark:text-zinc-200 truncate leading-none">
+                <p className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-200 truncate leading-none">
                   {user?.displayName || "User"}
                 </p>
                 <p className="text-[10px] text-zinc-500 truncate mt-1">{user?.email}</p>
@@ -189,7 +193,7 @@ export function SessionNavSidebar() {
       {/* Spacer for desktop */}
       <div
         className={`hidden md:block shrink-0 transition-all duration-300 ease-in-out ${
-          isCollapsed ? "w-[72px]" : "w-64"
+          isCollapsed ? "w-[72px]" : "w-[260px]"
         }`}
       />
 
