@@ -31,6 +31,7 @@ class RuntimeConfigModelSelectionTests(TestCase):
             patch.object(runtime_config_module, "server_e2b_configured", return_value=True),
             patch.object(runtime_config_module, "server_vertex_configured", return_value=True),
             patch.object(runtime_config_module.settings, "google_project_id", "vertex-project"),
+            patch.object(runtime_config_module.settings, "brain_model", ""),
             patch.object(runtime_config_module.settings, "gemini_agent_model", "vertex-default-model"),
             patch.object(runtime_config_module.settings, "gemini_api_key_agent_model", "api-key-primary"),
             patch.object(runtime_config_module.settings, "gemini_api_key_agent_fallback_models", "api-fallback-a,api-fallback-b"),
@@ -71,6 +72,7 @@ class RuntimeConfigModelSelectionTests(TestCase):
 
         with (
             patch.object(runtime_config_module, "_decrypt_or_empty", side_effect=fake_decrypt),
+            patch.object(runtime_config_module.settings, "brain_model", ""),
             patch.object(runtime_config_module.settings, "gemini_agent_model", "vertex-default-model"),
             patch.object(runtime_config_module.settings, "gemini_api_key_agent_model", "gemini-3.1-pro-preview"),
             patch.object(
@@ -124,6 +126,7 @@ class RuntimeConfigModelSelectionTests(TestCase):
             patch.object(runtime_config_module, "server_e2b_configured", return_value=True),
             patch.object(runtime_config_module, "server_vertex_configured", return_value=False),
             patch.object(runtime_config_module.settings, "require_byok", True),
+            patch.object(runtime_config_module.settings, "brain_model", ""),
             patch.object(runtime_config_module.settings, "gemini_agent_model", "vertex-default-model"),
             patch.object(runtime_config_module.settings, "gemini_api_key_agent_model", "api-key-primary"),
             patch.object(runtime_config_module.settings, "gemini_api_key_agent_fallback_models", "api-fallback-a,api-fallback-b"),

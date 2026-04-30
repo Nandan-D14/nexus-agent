@@ -1756,18 +1756,23 @@ async def get_user_quota(user: AuthenticatedUser = Depends(require_current_user)
     return quota
 
 
-# ── Google Drive OAuth ──────────────────────────────────────────
+# ── Google OAuth ──────────────────────────────────────────
 
-_GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/calendar",
+]
 
 
-def _gdrive_redirect_uri() -> str:
-    return f"{settings.frontend_url}/auth/google-drive/callback"
+def _google_redirect_uri() -> str:
+    return f"{settings.frontend_url}/auth/google/callback"
 
 
-def _gdrive_oauth_configured() -> bool:
+def _google_oauth_configured() -> bool:
     if not (settings.google_oauth_client_id and settings.google_oauth_client_secret):
-        logger.warning("Google Drive OAuth not configured: client_id=%r secret_set=%s",
+        logger.warning("Google OAuth not configured: client_id=%r secret_set=%s",
                        settings.google_oauth_client_id[:8] if settings.google_oauth_client_id else "",
                        bool(settings.google_oauth_client_secret))
         return False
@@ -1779,11 +1784,11 @@ def _pkce_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-@app.get("/api/v1/auth/google-drive/url")
-async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
+@app.get("/api/v1/auth/google/url")
+async def get_google_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a Google OAuth URL the frontend should open in a popup."""
-    if not _gdrive_oauth_configured():
-        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+    if not _google_oauth_configured():
+        raise HTTPException(status_code=501, detail="Google OAuth not configured.")
 
     code_verifier = secrets.token_urlsafe(72)[:96]
 
@@ -1792,7 +1797,7 @@ async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_cu
 
     state_payload = {
         "uid": user.uid,
-        "purpose": "gdrive_oauth",
+        "purpose": "google_oauth",
         "cv": code_verifier,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
@@ -1801,9 +1806,9 @@ async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_cu
     auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(
         {
             "client_id": settings.google_oauth_client_id,
-            "redirect_uri": _gdrive_redirect_uri(),
+            "redirect_uri": _google_redirect_uri(),
             "response_type": "code",
-            "scope": " ".join(_GDRIVE_SCOPES),
+            "scope": " ".join(GOOGLE_SCOPES),
             "access_type": "offline",
             "include_granted_scopes": "true",
             "prompt": "consent",
@@ -1815,12 +1820,12 @@ async def get_google_drive_auth_url(user: AuthenticatedUser = Depends(require_cu
     return {"auth_url": auth_url}
 
 
-@app.post("/api/v1/auth/google-drive/exchange")
-async def exchange_google_drive_code(
+@app.post("/api/v1/auth/google/exchange")
+async def exchange_google_code(
     body: dict[str, Any],
     user: AuthenticatedUser = Depends(require_current_user),
 ):
-    """Exchange an authorization code for a Drive refresh token and store it."""
+    """Exchange an authorization code for a Google refresh token and store it."""
     code = body.get("code", "")
     state = body.get("state", "")
     if not code:
@@ -1831,7 +1836,7 @@ async def exchange_google_drive_code(
 
     try:
         state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
-        if state_data.get("uid") != user.uid or state_data.get("purpose") != "gdrive_oauth":
+        if state_data.get("uid") != user.uid or state_data.get("purpose") != "google_oauth":
             raise ValueError("state mismatch")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -1840,8 +1845,8 @@ async def exchange_google_drive_code(
     if not isinstance(code_verifier, str) or not code_verifier:
         raise HTTPException(status_code=400, detail="Invalid OAuth code verifier")
 
-    if not _gdrive_oauth_configured():
-        raise HTTPException(status_code=501, detail="Google Drive OAuth not configured.")
+    if not _google_oauth_configured():
+        raise HTTPException(status_code=501, detail="Google OAuth not configured.")
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1853,7 +1858,7 @@ async def exchange_google_drive_code(
                     "code": code,
                     "code_verifier": code_verifier,
                     "grant_type": "authorization_code",
-                    "redirect_uri": _gdrive_redirect_uri(),
+                    "redirect_uri": _google_redirect_uri(),
                 },
             )
         if token_response.status_code >= 400:
@@ -1877,7 +1882,13 @@ async def exchange_google_drive_code(
     return {"status": "connected"}
 
 
-@app.delete("/api/v1/auth/google-drive")
+@app.delete("/api/v1/auth/google")
+async def disconnect_google(user: AuthenticatedUser = Depends(require_current_user)):
+    """Remove Google connection for the current user."""
+    await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})
+    await history_repository.delete_integration_connection(user.uid, "google_drive")
+    return {"status": "disconnected"}
+
 async def disconnect_google_drive(user: AuthenticatedUser = Depends(require_current_user)):
     """Remove the user's stored Google Drive refresh token."""
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})

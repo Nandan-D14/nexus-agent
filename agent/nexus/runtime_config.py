@@ -278,14 +278,15 @@ def resolve_session_runtime_config(
         resolved_provider = "apiKey"
         resolved_api_key = settings.google_api_key
 
+    brain_model = settings.brain_model.strip()
     if resolved_provider == "apiKey":
-        agent_model = settings.gemini_api_key_agent_model
+        agent_model = brain_model or settings.gemini_api_key_agent_model
         agent_fallback_models = _parse_model_list(
             settings.gemini_api_key_agent_fallback_models,
             exclude=agent_model,
         )
     else:
-        agent_model = settings.gemini_agent_model
+        agent_model = brain_model or settings.gemini_agent_model
         agent_fallback_models = _parse_model_list(
             settings.gemini_api_key_agent_fallback_models,
             exclude=agent_model,

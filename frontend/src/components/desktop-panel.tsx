@@ -1,14 +1,88 @@
 "use client";
 
 import { useRef } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { VisionOverlay } from "@/components/vision-overlay";
+
+export type AgentVisualAction = {
+  kind: "click" | "move" | "drag" | "typing" | "key" | "scroll" | "observe" | "browser" | "command";
+  label: string;
+  x?: number;
+  y?: number;
+  direction?: string;
+  ts: number;
+};
 
 type Props = {
   streamUrl: string | null;
   analysis?: string | null;
+  action?: AgentVisualAction | null;
 };
 
-export function DesktopPanel({ streamUrl, analysis }: Props) {
+const SCREEN_W = 1324;
+const SCREEN_H = 968;
+
+function clampPercent(value: number | undefined, max: number): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return 50;
+  return Math.min(100, Math.max(0, (value / max) * 100));
+}
+
+function AgentActionOverlay({ action }: { action?: AgentVisualAction | null }) {
+  if (!action) return null;
+
+  if (action.kind === "click" || action.kind === "move" || action.kind === "drag") {
+    const left = `${clampPercent(action.x, SCREEN_W)}%`;
+    const top = `${clampPercent(action.y, SCREEN_H)}%`;
+    return (
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={`${action.kind}-${action.ts}`}
+          className="absolute z-20 pointer-events-none"
+          style={{ left, top }}
+          initial={{ opacity: 0, scale: 0.6, x: "-50%", y: "-50%" }}
+          animate={{ opacity: 1, scale: 1, x: "-50%", y: "-50%" }}
+          exit={{ opacity: 0, scale: 1.35, x: "-50%", y: "-50%" }}
+          transition={{ duration: 0.28 }}
+        >
+          <div className="relative flex h-12 w-12 items-center justify-center">
+            <span className="absolute h-12 w-12 rounded-full border border-cyan-300/70 bg-cyan-300/10 animate-ping" />
+            <span className="h-3 w-3 rounded-full bg-cyan-300 shadow-[0_0_14px_rgba(103,232,249,0.9)]" />
+          </div>
+        </motion.div>
+      </AnimatePresence>
+    );
+  }
+
+  if (action.kind === "observe") {
+    return (
+      <motion.div
+        key={`observe-${action.ts}`}
+        className="absolute inset-x-0 top-0 z-20 h-16 pointer-events-none bg-gradient-to-b from-cyan-300/20 to-transparent"
+        initial={{ y: "-100%", opacity: 0 }}
+        animate={{ y: "620%", opacity: [0, 1, 0] }}
+        transition={{ duration: 1.2, ease: "easeInOut" }}
+      />
+    );
+  }
+
+  const label = action.label || "Working";
+  return (
+    <motion.div
+      key={`${action.kind}-${action.ts}`}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      className="absolute bottom-4 left-4 z-20 pointer-events-none rounded-md border border-white/10 bg-black/70 px-3 py-2 shadow-xl backdrop-blur"
+    >
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-300 animate-pulse" />
+        <span className="text-[11px] font-semibold text-zinc-200">{label}</span>
+      </div>
+    </motion.div>
+  );
+}
+
+export function DesktopPanel({ streamUrl, analysis, action }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   if (!streamUrl) {
@@ -70,6 +144,7 @@ export function DesktopPanel({ streamUrl, analysis }: Props) {
         allow="clipboard-read; clipboard-write"
         title="CoComputer Desktop"
       />
+      <AgentActionOverlay action={action} />
       
       <VisionOverlay analysis={analysis || null} containerRef={containerRef} />
       

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -30,8 +32,9 @@ from nexus.tools._context import (
     set_workspace_path,
 )
 from nexus.config import settings
+from nexus.fast_lookup import cache_key, get_cached_value, set_cached_value
 from nexus.prompts.system import SYSTEM_PROMPT, VOICE_SYSTEM_PROMPT
-from nexus.routing import classify_request, extract_search_query
+from nexus.routing import build_current_lookup_queries, classify_request, extract_search_query
 from nexus.runtime_config import build_genai_client
 from nexus.tools.web import parse_duckduckgo_results
 from nexus.tools.workspace import (
@@ -375,6 +378,9 @@ class NexusOrchestrator:
         if decision.mode == "search":
             await self._run_fast_search(text)
             return True
+        if decision.mode == "current":
+            await self._run_fast_current_lookup(text)
+            return True
         if decision.mode == "ask":
             return await self._run_fast_answer(text, source=source)
         return False
@@ -434,33 +440,56 @@ class NexusOrchestrator:
             logger.warning("Fast answer failed; falling back to normal agent flow", exc_info=True)
             return False
 
+    async def _fetch_fast_search_results(
+        self,
+        query: str,
+        *,
+        max_results: int = 4,
+        timeout: float = 15.0,
+    ) -> list[dict[str, str]]:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
+            timeout=timeout,
+        ) as client:
+            response = await client.get("https://duckduckgo.com/html/", params={"q": query})
+            response.raise_for_status()
+            return parse_duckduckgo_results(response.text, max_results=max_results)
+
     async def _run_fast_search(self, text: str) -> None:
         query = extract_search_query(text)
+        start = time.monotonic()
+        key = cache_key("fast_search", query)
+        cached = get_cached_value(key)
+        if cached:
+            answer, metadata = cached
+            logger.info(
+                "Fast route completed session=%s route=search cache=hit latency_ms=%d results=%s",
+                self.session.id,
+                int((time.monotonic() - start) * 1000),
+                metadata.get("result_count", "?"),
+            )
+            await self._send_agent_fast_response(str(answer), source="fast_search_cache")
+            return
         await self._send_json({"type": "agent_thinking", "content": "Searching web..."})
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-                timeout=15.0,
-            ) as client:
-                response = await client.get("https://duckduckgo.com/html/", params={"q": query})
-                response.raise_for_status()
-            results = parse_duckduckgo_results(response.text, max_results=4)
+            results = await self._fetch_fast_search_results(query, max_results=4)
             if not results:
                 answer = f"No clear web results found for: {query}"
             else:
-                lines = [f"Top results for: {query}"]
-                for index, result in enumerate(results, start=1):
-                    title = self._clip_text(str(result.get("title") or "Untitled"), 120)
-                    snippet = self._clip_text(str(result.get("snippet") or ""), 180)
-                    url = str(result.get("url") or "").strip()
-                    line = f"{index}. {title}"
-                    if snippet:
-                        line += f" - {snippet}"
-                    if url:
-                        line += f"\n{url}"
-                    lines.append(line)
-                answer = "\n\n".join(lines)
+                answer = self._format_fast_results(query, results)
+            set_cached_value(
+                key,
+                answer,
+                ttl_seconds=settings.fast_search_cache_ttl_seconds,
+                metadata={"result_count": len(results)},
+            )
+            logger.info(
+                "Fast route completed session=%s route=search cache=miss latency_ms=%d results=%d",
+                self.session.id,
+                int((time.monotonic() - start) * 1000),
+                len(results),
+            )
             await self._send_agent_fast_response(answer, source="fast_search")
         except Exception as exc:
             logger.warning("Fast web search failed", exc_info=True)
@@ -468,6 +497,147 @@ class NexusOrchestrator:
                 f"Web search failed: {self._clip_text(str(exc), 240)}",
                 source="fast_search_error",
             )
+
+    def _format_fast_results(self, query: str, results: list[dict[str, str]]) -> str:
+        lines = [f"Top results for: {query}"]
+        for index, result in enumerate(results, start=1):
+            title = self._clip_text(str(result.get("title") or "Untitled"), 120)
+            snippet = self._clip_text(str(result.get("snippet") or ""), 180)
+            url = str(result.get("url") or "").strip()
+            line = f"{index}. {title}"
+            if snippet:
+                line += f" - {snippet}"
+            if url:
+                line += f"\n{url}"
+            lines.append(line)
+        return "\n\n".join(lines)
+
+    async def _run_fast_current_lookup(self, text: str) -> None:
+        start = time.monotonic()
+        date_label = datetime.now(timezone.utc).date().isoformat()
+        queries = build_current_lookup_queries(text, date_label=date_label)
+        query = queries[0] if queries else extract_search_query(text)
+        key = cache_key("current_lookup", query, bucket=date_label)
+        cached = get_cached_value(key)
+        if cached:
+            answer, metadata = cached
+            logger.info(
+                "Fast route completed session=%s route=current cache=hit latency_ms=%d results=%s fallbacks=%s",
+                self.session.id,
+                int((time.monotonic() - start) * 1000),
+                metadata.get("result_count", "?"),
+                metadata.get("fallback_count", "?"),
+            )
+            await self._send_agent_fast_response(str(answer), source="fast_current_cache")
+            return
+
+        await self._send_json({"type": "agent_thinking", "content": "Checking current sources..."})
+        search_tasks = [
+            self._fetch_fast_search_results(item, max_results=4, timeout=12.0)
+            for item in queries
+        ]
+        raw_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+        merged: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        fallback_count = 0
+        failures = 0
+        for query_index, item in enumerate(raw_results):
+            if isinstance(item, Exception):
+                failures += 1
+                continue
+            if query_index > 0:
+                fallback_count += 1
+            for result in item:
+                url = str(result.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                merged.append(result)
+                if len(merged) >= 8:
+                    break
+            if len(merged) >= 8:
+                break
+
+        if merged:
+            answer = await self._synthesize_fast_current_answer(query, merged, date_label=date_label)
+        else:
+            answer = f"I could not find reliable current results for: {query}"
+
+        set_cached_value(
+            key,
+            answer,
+            ttl_seconds=settings.current_lookup_cache_ttl_seconds,
+            metadata={
+                "result_count": len(merged),
+                "fallback_count": fallback_count,
+                "failure_count": failures,
+            },
+        )
+        logger.info(
+            "Fast route completed session=%s route=current cache=miss latency_ms=%d results=%d fallbacks=%d failures=%d",
+            self.session.id,
+            int((time.monotonic() - start) * 1000),
+            len(merged),
+            fallback_count,
+            failures,
+        )
+        await self._send_agent_fast_response(answer, source="fast_current")
+
+    async def _synthesize_fast_current_answer(
+        self,
+        query: str,
+        results: list[dict[str, str]],
+        *,
+        date_label: str,
+    ) -> str:
+        fallback = self._format_fast_results(query, results[:4])
+        if not self.runtime_config.gemini_available:
+            return fallback
+
+        model = self.runtime_config.gemini_light_model or self.runtime_config.gemini_agent_model
+        evidence_lines: list[str] = []
+        for index, result in enumerate(results[:8], start=1):
+            title = self._clip_text(str(result.get("title") or "Untitled"), 160)
+            snippet = self._clip_text(str(result.get("snippet") or ""), 260)
+            url = self._clip_text(str(result.get("url") or ""), 220)
+            evidence_lines.append(f"{index}. {title}\nSnippet: {snippet}\nURL: {url}")
+        prompt = (
+            "Answer this current lookup using only the search evidence below. "
+            "Be concise. If the evidence is insufficient or conflicting, say so. "
+            "Include 1-3 source URLs. Do not mention browser, screenshots, workspace, or agent workflow.\n\n"
+            f"Date: {date_label}\n"
+            f"Question: {query}\n\n"
+            "Evidence:\n"
+            + "\n\n".join(evidence_lines)
+        )
+
+        def _generate() -> Any:
+            from google.genai import types
+
+            client = build_genai_client(self.runtime_config)
+            return client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=prompt)],
+                    )
+                ],
+            )
+
+        try:
+            response = await asyncio.to_thread(_generate)
+            for usage in extract_token_usage_records(
+                response,
+                default_source="agent.fast_current",
+                default_model=model,
+            ):
+                await self._persist_token_usage(usage)
+            answer = self._clip_text(getattr(response, "text", "") or "", 1400)
+            return answer or fallback
+        except Exception:
+            logger.warning("Fast current synthesis failed; returning raw search results", exc_info=True)
+            return fallback
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
@@ -1394,8 +1564,18 @@ class NexusOrchestrator:
                 self._raise_if_agent_should_stop()
                 tool_name = self._get_attr(fc, "name", "tool_name") or str(fc)
                 tool_args = self._get_attr(fc, "args", "tool_input") or {}
+                
+                # Map specific tools to specialized step types for rich visualizers
+                step_type = "tool_call"
+                if tool_name == "gmail_send":
+                    step_type = "gmail"
+                elif tool_name == "calendar_create":
+                    step_type = "calendar"
+                elif tool_name == "tasks_create":
+                    step_type = "tasks"
+
                 step_id = await self._create_step(
-                    step_type="tool_call",
+                    step_type=step_type,
                     title=f"Tool: {tool_name}",
                     detail=self._clip_text(self._redact_mapping(self._coerce_mapping(tool_args)), 320),
                     source=self._active_agent,

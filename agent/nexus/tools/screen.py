@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # to forward the image to the frontend without bloating the LLM context.
 _last_screenshot = threading.local()
 _last_analysis = threading.local()
+_last_screen_action = threading.local()
 
 _last_call_time = threading.local()
 _PROMPT_VERSION = "compact-v2"
@@ -36,6 +37,32 @@ def _clip_text(value: str, limit: int = _MAX_DESCRIPTION_CHARS) -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def mark_screen_changed(action: str = "ui_action") -> None:
+    """Mark cached visual understanding stale after an action changes the screen."""
+    current_seq = int(getattr(_last_screen_action, "seq", 0) or 0)
+    _last_screen_action.seq = current_seq + 1
+    _last_screen_action.action = action
+    _last_screen_action.changed_at = time.monotonic()
+
+
+def _wait_for_screen_settle(now: float) -> tuple[float, bool, str]:
+    changed_at = float(getattr(_last_screen_action, "changed_at", 0.0) or 0.0)
+    action = str(getattr(_last_screen_action, "action", "") or "")
+    if changed_at <= 0:
+        return now, False, action
+    try:
+        from nexus.config import settings
+
+        delay = max(float(settings.screenshot_after_action_delay_seconds), 0.0)
+    except Exception:
+        delay = 0.9
+    elapsed = now - changed_at
+    if delay > 0 and elapsed < delay:
+        time.sleep(delay - elapsed)
+        return time.monotonic(), True, action
+    return now, False, action
 
 
 def _average_hash(image: Image.Image, size: int = 8) -> int:
@@ -149,7 +176,9 @@ def get_last_screenshot_b64() -> str | None:
 def take_screenshot() -> dict:
     """Take a screenshot to see the current screen state.
 
-    Prefer this before acting, and again after acting to verify.
+    Use this only when visual state is required.
+    After UI-changing actions, the tool waits briefly so the screenshot reflects
+    the latest screen instead of the previous frame.
     If the screen has not meaningfully changed, the tool may reuse prior screen
     understanding instead of paying for another full vision analysis.
 
@@ -157,6 +186,7 @@ def take_screenshot() -> dict:
         dict with a text description of all visible elements and their (x, y) coordinates.
     """
     now = time.monotonic()
+    now, waited_for_settle, last_action = _wait_for_screen_settle(now)
     _last_call_time.t = now
 
     try:
@@ -179,6 +209,7 @@ def take_screenshot() -> dict:
         img = Image.open(io.BytesIO(img_bytes))
         img.thumbnail((1324, 968))
         perceptual_hash = _average_hash(img)
+        action_seq = int(getattr(_last_screen_action, "seq", 0) or 0)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         jpeg_bytes = buf.getvalue()
@@ -202,6 +233,7 @@ def take_screenshot() -> dict:
             cached_description = getattr(_last_analysis, "description", None)
             cached_perceptual_hash = getattr(_last_analysis, "perceptual_hash", None)
             cached_time = float(getattr(_last_analysis, "captured_at", 0.0) or 0.0)
+            cached_action_seq = int(getattr(_last_analysis, "action_seq", -1) or -1)
             model_id = runtime_config.gemini_vision_model or "vision"
             cache_doc_id = _vision_cache_doc_id(screenshot_hash, model_id)
             used_cache = False
@@ -219,6 +251,7 @@ def take_screenshot() -> dict:
                 and cached_description.strip()
                 and isinstance(cached_perceptual_hash, int)
                 and cached_time > 0
+                and cached_action_seq == action_seq
                 and now - cached_time <= _MINOR_DELTA_WINDOW_SECONDS
                 and _hamming_distance(perceptual_hash, cached_perceptual_hash) <= _MAX_PERCEPTUAL_DISTANCE
             ):
@@ -335,6 +368,7 @@ def take_screenshot() -> dict:
         _last_analysis.description = base_description or description
         _last_analysis.perceptual_hash = perceptual_hash
         _last_analysis.captured_at = now
+        _last_analysis.action_seq = action_seq
 
         # Store the full image for the frontend (orchestrator picks it up)
         _last_screenshot.image = img_b64
@@ -346,6 +380,8 @@ def take_screenshot() -> dict:
             "delta": delta,
             "analysis_mode": analysis_mode,
             "model": model_id,
+            "fresh_after_action": waited_for_settle,
+            "last_action": last_action,
         }
 
     except Exception as e:

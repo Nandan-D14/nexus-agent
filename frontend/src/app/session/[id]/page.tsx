@@ -1574,14 +1574,6 @@ export default function SessionPage() {
     router.push("/dashboard");
   };
 
-  const handleContinueArchivedThread = useCallback(() => {
-    if (isNewSession) {
-      return;
-    }
-    setActiveSurface("conversation");
-    void continueCurrentThread();
-  }, [continueCurrentThread, isNewSession]);
-
   const handleOpenSaveTemplate = useCallback(() => {
     if (isNewSession) {
       return;
@@ -1653,6 +1645,7 @@ export default function SessionPage() {
   const hasStarted = hasConversationStarted || isDesktopVisible;
   const selectedConnectorLabel = connectorButtonLabel(availableConnectors, selectedConnectorIds);
   const uploadDisabled = isNewSession || viewMode !== "live" || isUploadingFile;
+  const canShowComposer = !isNewSession;
 
   return (
     <div className="h-screen flex overflow-hidden bg-[#fafafa] dark:bg-[#1a1a1c]">
@@ -1957,26 +1950,23 @@ export default function SessionPage() {
                   </div>
                 )}
 
-                {viewMode === "archived" && (
-                  <span className="rounded-full bg-zinc-100 dark:bg-[#212126] px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                    Archived
-                  </span>
-                )}
               </div>
 
               <div className="flex items-center gap-4 text-[13px] font-medium">
-                {viewMode === "live" && (
+                {!isNewSession && (
                   <button
                     suppressHydrationWarning
-                    onClick={handleToggleDesktopFullscreen}
+                    onClick={viewMode === "live" ? handleToggleDesktopFullscreen : handleShowDesktop}
                     className="flex items-center gap-2 text-zinc-400 hover:text-zinc-200 transition-colors"
                   >
                     <Monitor className="w-4 h-4" />
-                    {isDesktopFullscreen
-                      ? "Exit Fullscreen"
-                      : isDesktopVisible
-                        ? "Fullscreen"
-                        : "Open Desktop"}
+                    {viewMode !== "live"
+                      ? "Open Desktop"
+                      : isDesktopFullscreen
+                        ? "Exit Fullscreen"
+                        : isDesktopVisible
+                          ? "Fullscreen"
+                          : "Open Desktop"}
                   </button>
                 )}
 
@@ -1997,15 +1987,6 @@ export default function SessionPage() {
                     className="text-zinc-400 hover:text-zinc-200 transition-colors ml-1"
                   >
                     Save Template
-                  </button>
-                )}
-                {viewMode === "archived" && (
-                  <button
-                    suppressHydrationWarning
-                    onClick={handleContinueArchivedThread}
-                    className="text-emerald-400 hover:text-emerald-300 transition-colors"
-                  >
-                    Continue
                   </button>
                 )}
                 
@@ -2060,24 +2041,16 @@ export default function SessionPage() {
                   {viewMode === "archived" && chatItems.length === 0 ? (
                     <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
                       <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                        Archived session
+                        Previous chat
                       </p>
                       <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
-                        The live desktop is no longer attached. Reuse the saved handoff or review the transcript below.
+                        Send a message or open desktop to continue.
                       </p>
                       {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
                         <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
                           {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
                         </p>
                       )}
-                      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-                        <button
-                          onClick={handleContinueArchivedThread}
-                          className="rounded-full bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700"
-                        >
-                          Continue Here
-                        </button>
-                      </div>
                     </div>
                   ) : (
                     <UnifiedChatPanel
@@ -2089,7 +2062,7 @@ export default function SessionPage() {
                 </div>
 
                 {/* Input area */}
-                {viewMode === "live" ? (
+                {canShowComposer ? (
                   <div className="px-4 pb-6 pt-2 shrink-0">
                     <div className="mx-auto w-full max-w-3xl relative">
                       <TodoList items={todoItems} />
@@ -2290,11 +2263,7 @@ export default function SessionPage() {
                       </div>
                     </div>
                   </div>
-                ) : (
-                  <div className="px-4 pb-6 pt-2 shrink-0 text-sm text-muted dark:text-zinc-500">
-                    <p className="mx-auto w-full max-w-3xl text-center">Archived sessions are read-only.</p>
-                  </div>
-                )}
+                ) : null}
               </div>
 
               {/* Right: Desktop panel */}

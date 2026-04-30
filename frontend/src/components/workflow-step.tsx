@@ -15,6 +15,12 @@ import {
   Brain,
   FileText,
   Search,
+  Mail,
+  Calendar,
+  ListTodo,
+  MapPin,
+  Clock,
+  User,
 } from "lucide-react";
 
 export type StepType =
@@ -27,7 +33,10 @@ export type StepType =
   | "error"
   | "terminal"
   | "observation"
-  | "completion";
+  | "completion"
+  | "gmail"
+  | "calendar"
+  | "tasks";
 
 export type StepStatus = "pending" | "in_progress" | "completed" | "failed";
 
@@ -74,9 +83,13 @@ function getStepIcon(type: StepType, status: StepStatus) {
   if (type === "tool_call") return <Code2 className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "observation") return <Search className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "file_created") return <FileText className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "gmail") return <Mail className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "calendar") return <Calendar className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "tasks") return <ListTodo className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "completion" || status === "completed") return <Check className="w-[11px] h-[11px] text-emerald-400" />;
   return <Bot className="w-[11px] h-[11px] text-zinc-400" />;
 }
+
 
 export function WorkflowStep({ step, isLast = false, disableDetails = false, onSelect }: Props) {
   const [expanded, setExpanded] = useState(false);
@@ -209,6 +222,89 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
                         <p className="text-[11.5px] text-red-300 font-mono whitespace-pre-wrap break-all leading-relaxed">
                           {step.error}
                         </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Gmail Visualizer */}
+                  {step.step_type === "gmail" && step.args && (
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
+                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
+                        <div className="flex items-center gap-2">
+                          <Mail className="w-3.5 h-3.5 text-zinc-500" />
+                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Gmail</span>
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[13px] font-semibold text-zinc-200">{step.args.subject as string}</div>
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                          <User className="w-3 h-3" />
+                          <span>{step.args.to as string}</span>
+                        </div>
+                        <div className="text-[12px] text-zinc-400 leading-relaxed whitespace-pre-wrap pt-1 border-t border-zinc-800/20">
+                          {step.args.body as string}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Calendar Visualizer */}
+                  {step.step_type === "calendar" && step.args && (
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
+                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
+                        <div className="flex items-center gap-2">
+                          <Calendar className="w-3.5 h-3.5 text-zinc-500" />
+                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Calendar</span>
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <div className="text-[13px] font-semibold text-zinc-200">{step.args.summary as string}</div>
+                        <div className="flex items-center gap-4 text-[11px] text-zinc-400">
+                          <div className="flex items-center gap-1.5">
+                            <Clock className="w-3 h-3 text-zinc-500" />
+                            <span>{new Date(step.args.start_time as string).toLocaleString()}</span>
+                          </div>
+                          {Boolean(step.args.location) && (
+                            <div className="flex items-center gap-1.5">
+                              <MapPin className="w-3 h-3 text-zinc-500" />
+                              <span>{step.args.location as string}</span>
+                            </div>
+                          )}
+                        </div>
+                        {Boolean(step.args.description) && (
+                          <div className="text-[12px] text-zinc-500 leading-relaxed pt-1">
+                            {step.args.description as string}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Tasks Visualizer */}
+                  {step.step_type === "tasks" && step.args && (
+                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
+                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
+                        <div className="flex items-center gap-2">
+                          <ListTodo className="w-3.5 h-3.5 text-zinc-500" />
+                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Task</span>
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <div className="flex items-start gap-2">
+                          <div className="w-4 h-4 rounded border border-zinc-700 mt-0.5 shrink-0" />
+                          <div className="text-[13px] font-semibold text-zinc-200">{step.args.title as string}</div>
+                        </div>
+                        {Boolean(step.args.notes) && (
+                          <div className="text-[12px] text-zinc-400 pl-6 leading-relaxed">
+                            {step.args.notes as string}
+                          </div>
+                        )}
+                        {Boolean(step.args.due) && (
+                          <div className="flex items-center gap-1.5 pl-6 text-[10px] text-zinc-500">
+                            <Clock className="w-3 h-3" />
+                            <span>Due: {new Date(step.args.due as string).toLocaleDateString()}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

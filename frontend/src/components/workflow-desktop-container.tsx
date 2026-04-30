@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
-import { DesktopPanel } from "./desktop-panel";
+import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
 import { Activity, Monitor, Loader2 } from "lucide-react";
 
 type Tab = "workflow" | "desktop";
@@ -25,6 +25,7 @@ type Props = {
   onForcedTabAck?: () => void;
   phase?: "idle" | "listening" | "thinking" | "acting" | "done";
   agentStatus?: string;
+  agentAction?: AgentVisualAction | null;
   onStopAgent?: () => void;
 };
 
@@ -38,6 +39,7 @@ export function WorkflowDesktopContainer({
   onForcedTabAck,
   phase = "idle",
   agentStatus,
+  agentAction,
   onStopAgent,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
@@ -155,7 +157,7 @@ export function WorkflowDesktopContainer({
               className="absolute inset-0"
             >
               <div className="relative w-full h-full rounded-lg overflow-hidden border border-zinc-800">
-                <DesktopPanel streamUrl={streamUrl} analysis={analysis} />
+                <DesktopPanel streamUrl={streamUrl} analysis={analysis} action={agentAction} />
                 {(phase === "thinking" || phase === "acting") && (
                   <>
                     <div className="absolute inset-0 z-10 bg-black/30 cursor-not-allowed" />

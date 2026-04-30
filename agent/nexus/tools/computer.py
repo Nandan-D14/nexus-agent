@@ -7,14 +7,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _reset_screenshot_cooldown() -> None:
-    """Reset the screenshot cooldown so the next take_screenshot works immediately.
+def _mark_screen_changed(action: str) -> None:
+    """Mark visual state as stale after a desktop action."""
+    from nexus.tools.screen import mark_screen_changed
 
-    Called after every action tool (click, type, scroll, etc.) so the agent
-    can screenshot right after acting without hitting the cooldown guard.
-    """
-    from nexus.tools.screen import _last_call_time
-    _last_call_time.t = 0.0
+    mark_screen_changed(action)
 
 
 def move_mouse(x: int, y: int) -> dict:
@@ -34,7 +31,7 @@ def move_mouse(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.move_mouse(x, y)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("move_mouse")
         return {"status": "success", "message": f"Moved mouse to ({x}, {y})"}
     except Exception as e:
         logger.error("move_mouse failed: %s", e)
@@ -58,7 +55,7 @@ def left_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.left_click(x, y)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("left_click")
         return {"status": "success", "message": f"Left clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("left_click failed: %s", e)
@@ -79,7 +76,7 @@ def right_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.right_click(x, y)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("right_click")
         return {"status": "success", "message": f"Right clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("right_click failed: %s", e)
@@ -100,7 +97,7 @@ def double_click(x: int, y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.double_click(x, y)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("double_click")
         return {"status": "success", "message": f"Double clicked at ({x}, {y})"}
     except Exception as e:
         logger.error("double_click failed: %s", e)
@@ -123,7 +120,7 @@ def type_text(text: str) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.type_text(text)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("type_text")
         return {"status": "success", "message": f"Typed {len(text)} characters"}
     except Exception as e:
         logger.error("type_text failed: %s", e)
@@ -154,7 +151,7 @@ def press_key(key: str) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.press_key(key)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("press_key")
         return {"status": "success", "message": f"Pressed {key}"}
     except Exception as e:
         logger.error("press_key failed: %s", e)
@@ -175,7 +172,7 @@ def scroll_screen(direction: str, amount: int = 3) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.scroll(direction, amount)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("scroll_screen")
         return {"status": "success", "message": f"Scrolled {direction} by {amount}"}
     except Exception as e:
         logger.error("scroll_screen failed: %s", e)
@@ -200,7 +197,7 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> dict:
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         sandbox.drag(from_x, from_y, to_x, to_y)
-        _reset_screenshot_cooldown()
+        _mark_screen_changed("drag")
         return {"status": "success", "message": f"Dragged from ({from_x},{from_y}) to ({to_x},{to_y})"}
     except Exception as e:
         logger.error("drag failed: %s", e)

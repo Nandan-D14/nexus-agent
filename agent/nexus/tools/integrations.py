@@ -8,12 +8,148 @@ from typing import Any
 import httpx
 
 from nexus.google_drive import decode_base64_upload, get_google_drive_client_from_context
+from nexus.google_services import (
+    GmailClient,
+    TasksClient,
+    CalendarClient,
+    get_google_services_token_from_context,
+)
 
 
 def _tool_error(message: str, **extra: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"status": "error", "error": message}
     payload.update(extra)
     return payload
+
+
+async def gmail_search(query: str, max_results: int = 10) -> dict[str, Any]:
+    """Search for emails in the user's Gmail account.
+
+    Args:
+        query: Search query (Gmail syntax like 'from:boss' or 'subject:report').
+        max_results: Maximum number of messages to return.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = GmailClient(token)
+    try:
+        results = await client.list_messages(query, max_results)
+        return {"status": "success", "messages": results.get("messages", [])}
+    except Exception as e:
+        return _tool_error(f"Gmail search failed: {e}")
+
+
+async def gmail_read(message_id: str) -> dict[str, Any]:
+    """Read a specific email message by ID.
+
+    Args:
+        message_id: The unique ID of the message to read.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = GmailClient(token)
+    try:
+        message = await client.get_message(message_id)
+        return {"status": "success", "message": message}
+    except Exception as e:
+        return _tool_error(f"Gmail read failed: {e}")
+
+
+async def gmail_send(to: str, subject: str, body: str) -> dict[str, Any]:
+    """Send a new email message.
+
+    Args:
+        to: Recipient email address.
+        subject: Subject line of the email.
+        body: Plain text body of the email.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = GmailClient(token)
+    try:
+        result = await client.send_message(to, subject, body)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return _tool_error(f"Gmail send failed: {e}")
+
+
+async def tasks_list(list_id: str = "@default") -> dict[str, Any]:
+    """List tasks from a specific Google Tasks list.
+
+    Args:
+        list_id: The ID of the task list (defaults to '@default').
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = TasksClient(token)
+    try:
+        tasks = await client.list_tasks(list_id)
+        return {"status": "success", "tasks": tasks.get("items", [])}
+    except Exception as e:
+        return _tool_error(f"Tasks list failed: {e}")
+
+
+async def tasks_create(title: str, notes: str = "", due: str | None = None) -> dict[str, Any]:
+    """Create a new task in the default Google Tasks list.
+
+    Args:
+        title: Title of the task.
+        notes: Optional description or notes for the task.
+        due: Optional due date in RFC 3339 format (e.g., '2026-05-01T12:00:00Z').
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = TasksClient(token)
+    try:
+        task = await client.create_task(title, notes, due)
+        return {"status": "success", "task": task}
+    except Exception as e:
+        return _tool_error(f"Tasks create failed: {e}")
+
+
+async def calendar_list(max_results: int = 10) -> dict[str, Any]:
+    """List upcoming events from the user's primary Google Calendar."""
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = CalendarClient(token)
+    try:
+        events = await client.list_events(max_results=max_results)
+        return {"status": "success", "events": events.get("items", [])}
+    except Exception as e:
+        return _tool_error(f"Calendar list failed: {e}")
+
+
+async def calendar_create(
+    summary: str,
+    start_time: str,
+    end_time: str,
+    description: str = "",
+    location: str = "",
+) -> dict[str, Any]:
+    """Create a new event in the user's primary Google Calendar.
+
+    Args:
+        summary: Title of the event.
+        start_time: Start time in RFC 3339 format.
+        end_time: End time in RFC 3339 format.
+        description: Optional detailed description.
+        location: Optional physical or virtual location.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return _tool_error("Google services are not connected.")
+    client = CalendarClient(token)
+    try:
+        event = await client.create_event(summary, start_time, end_time, description, location)
+        return {"status": "success", "event": event}
+    except Exception as e:
+        return _tool_error(f"Calendar create failed: {e}")
 
 
 def _slugify(value: str, *, fallback: str = "file") -> str:

@@ -61,7 +61,7 @@ function statusClasses(status: string) {
 
 function providerIcon(provider: string) {
   if (provider === "github") return Github;
-  if (provider === "google_drive") return Cloud;
+  if (provider === "google_drive" || provider === "google") return Cloud;
   if (provider === "mcp") return Cable;
   return Database;
 }
@@ -92,8 +92,8 @@ export default function ConnectorsPage() {
     setError("");
     try {
       const [catalogResponse, connectionsResponse] = await Promise.all([
-        authenticatedFetch("/v1/integrations/catalog"),
-        authenticatedFetch("/v1/integrations/connections"),
+        authenticatedFetch("/api/v1/integrations/catalog"),
+        authenticatedFetch("/api/v1/integrations/connections"),
       ]);
       if (!catalogResponse.ok) throw new Error(await parseApiError(catalogResponse));
       if (!connectionsResponse.ok) throw new Error(await parseApiError(connectionsResponse));
@@ -101,26 +101,13 @@ export default function ConnectorsPage() {
       const catalogBody = (await catalogResponse.json()) as { catalog?: CatalogItem[] };
       const connectionsBody = (await connectionsResponse.json()) as { connections?: IntegrationConnection[] };
       
-      const loadedCatalog = catalogBody.catalog ?? [];
+      let loadedCatalog = catalogBody.catalog ?? [];
       const loadedConnections = connectionsBody.connections ?? [];
       
       const driveCat = loadedCatalog.find((c) => c.provider === "google_drive");
-      if (
-        driveCat
-        && driveCat.status === "connected"
-        && !loadedConnections.some((connection: IntegrationConnection) => connection.provider === "google_drive")
-      ) {
-        loadedConnections.push({
-          connection_id: "google_drive",
-          connector_type: "native",
-          provider: "google_drive",
-          name: "Google Drive",
-          enabled: true,
-          status: "connected",
-          tools: [],
-          resources: [],
-          tool_count: 0,
-        });
+      if (driveCat) {
+        driveCat.name = "Google Services";
+        driveCat.description = "Connect Gmail, Calendar, Tasks, and Drive.";
       }
 
       setCatalog(loadedCatalog);
@@ -136,54 +123,23 @@ export default function ConnectorsPage() {
     void load();
   }, []);
 
-  async function startGoogleDriveConnect() {
+  async function startGoogleConnect() {
     setError("");
     try {
-      const response = await authenticatedFetch("/v1/auth/google-drive/url");
+      const response = await authenticatedFetch("/api/v1/auth/google/url");
       if (!response.ok) throw new Error(await parseApiError(response));
       const body = await response.json();
 
       let popupClosedPoll: number | null = null;
       const handleMessage = (event: MessageEvent) => {
         if (event.origin !== window.location.origin) return;
-        if (event.data?.type !== "google_drive_connected") return;
+        if (event.data?.type !== "google_connected") return;
 
         window.removeEventListener("message", handleMessage);
         if (popupClosedPoll !== null) {
           window.clearInterval(popupClosedPoll);
         }
 
-        setCatalog((current) =>
-          current.map((item) =>
-            item.provider === "google_drive"
-              ? { ...item, status: "connected" }
-              : item,
-          ),
-        );
-        setConnections((current) => {
-          const hasGoogleDrive = current.some((connection) => connection.provider === "google_drive");
-          if (hasGoogleDrive) {
-            return current.map((connection) =>
-              connection.provider === "google_drive"
-                ? { ...connection, enabled: true, status: "connected" }
-                : connection,
-            );
-          }
-          return [
-            ...current,
-            {
-              connection_id: "google_drive",
-              connector_type: "native",
-              provider: "google_drive",
-              name: "Google Drive",
-              enabled: true,
-              status: "connected",
-              tools: [],
-              resources: [],
-              tool_count: 0,
-            },
-          ];
-        });
         void load();
       };
 
@@ -196,7 +152,7 @@ export default function ConnectorsPage() {
       
       const popup = window.open(
         body.auth_url,
-        "GoogleDriveAuth",
+        "GoogleAuth",
         `width=${width},height=${height},top=${top},left=${left},scrollbars=yes`
       );
 
@@ -215,7 +171,7 @@ export default function ConnectorsPage() {
         }
       }, 500);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start Google Drive OAuth");
+      setError(err instanceof Error ? err.message : "Failed to start Google OAuth");
     }
   }
 
@@ -391,7 +347,7 @@ export default function ConnectorsPage() {
               <p className="mt-4 min-h-10 text-sm leading-6 text-zinc-500">{item.description}</p>
               <div className="mt-5 flex gap-2">
                 {item.provider === "google_drive" ? (
-                  <button onClick={startGoogleDriveConnect} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
+                  <button onClick={startGoogleConnect} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
                     {status === "connected" ? "Reconnect" : "Connect"}
                   </button>
                 ) : item.provider === "github" ? (

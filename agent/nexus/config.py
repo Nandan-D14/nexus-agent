@@ -44,8 +44,9 @@ class Settings(BaseSettings):
 
     # Gemini models
     # Note: Gemini 3 models require the "global" endpoint, not regional endpoints
-    gemini_agent_model: str = "gemini-3-flash-preview"  # Gemini 3 Flash (Vertex AI)
-    gemini_api_key_agent_model: str = "gemini-3-flash-preview"
+    brain_model: str = "gemini-3.1-pro-preview"
+    gemini_agent_model: str = "gemini-3.1-pro-preview"
+    gemini_api_key_agent_model: str = "gemini-3.1-pro-preview"
     gemini_api_key_agent_fallback_models: str = (
         "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
     )
@@ -55,6 +56,9 @@ class Settings(BaseSettings):
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
     gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
+
+    # Desktop observation
+    screenshot_after_action_delay_seconds: float = 0.9
 
     # Kilo Code (OpenAI-compatible gateway — can be used alongside Gemini)
     kilo_api_key: str = ""
@@ -100,6 +104,9 @@ class Settings(BaseSettings):
     # Multi-agent orchestration
     use_multi_agent: bool = True
     max_agent_turns: int = 30
+    simple_task_fast_path: bool = True
+    fast_search_cache_ttl_seconds: int = 600
+    current_lookup_cache_ttl_seconds: int = 120
 
     # Development-only starter entitlement
     default_plan_id: str = "starter_5"

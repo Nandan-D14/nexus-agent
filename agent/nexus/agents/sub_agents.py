@@ -55,13 +55,15 @@ Workflow:
 3. Mark the current GUI step in_progress with update_todo_item(...).
 4. Take a screenshot only when visual state is required to proceed.
 5. Perform the GUI action.
-6. Take another screenshot only when you need visual verification.
-7. Append a concise verification note to notes.md with write_workspace_file("notes.md", ..., append=True).
-8. Mark the step done with update_todo_item(...), then continue with the next GUI action.
+6. After any click, typing, scroll, drag, or browser-open action, treat prior screenshots as stale. Let the screen settle before observing again.
+7. Take another screenshot only when you need visual verification.
+8. Append a concise verification note to notes.md with write_workspace_file("notes.md", ..., append=True).
+9. Mark the step done with update_todo_item(...), then continue with the next GUI action.
 
 Rules:
 - Do not use screenshots just to explore. Assume another agent should prepare non-visual context first.
 - After taking a screenshot, act on it. Do not only describe the screen.
+- Do not reason from an old screenshot after any UI-changing action.
 - If coordinates seem slightly off, adjust and try again instead of blindly re-screenshoting.
 - If the task turns out to be better answered by terminal output or browser state, say so clearly.
 
@@ -104,7 +106,8 @@ Workflow:
 5. Use scrape_web_page(url) to capture readable content into the workspace before opening pages interactively.
 6. Open the site with open_browser(url), or inspect the already-open browser tab, only when interactive browser state matters or when you must show a finished report in the browser.
 7. Use take_screenshot() only when page state or visible content must be read and scrape_web_page is insufficient.
-8. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
+8. After opening, clicking, typing, or scrolling in the browser, treat previous screenshots as stale and let the page settle before observing.
+9. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
 
 Rules:
 - Prefer web_search and scrape_web_page for discovery and capture before interactive browsing.
@@ -117,6 +120,7 @@ Rules:
 - If the task asks for a generated HTML dashboard or report, gather sources and evidence here, then hand file creation to code_agent.
 - Do not compose the deliverable in browser UI unless the user explicitly asked for a browser-based editor workflow.
 - Prefer action between screenshots. If the page is unchanged, keep browsing or summarize instead of repeatedly observing.
+- Do not use vision for ordinary search results, article reading, or source capture when web_search/scrape_web_page worked.
 
 Tools:
 - prepare_task_workspace(task_summary), read_workspace_file(relative_path), list_workspace_files(relative_path)
@@ -160,7 +164,8 @@ Workflow:
 6. Use command output to solve the task whenever possible.
 7. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
 8. Use take_screenshot() only when you launched a GUI app/window, the task depends on visible desktop state, or terminal evidence is insufficient.
-9. Mark the step done with update_todo_item(...).
+9. If you did launch or affect a GUI, wait for the screen to settle before any screenshot and do not reuse old visual state.
+10. Mark the step done with update_todo_item(...).
 
 Rules:
 - take_screenshot() is a last resort, not the default workflow.

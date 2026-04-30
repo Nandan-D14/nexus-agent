@@ -189,8 +189,9 @@ class AgentRoutingPolicyTests(TestCase):
             ["research_browser_agent", "research_code_agent", "research_computer_agent"],
         )
 
-        self.assertIn("start every request by calling prepare_task_workspace", single_instruction)
+        self.assertIn("for clear non-simple work, call prepare_task_workspace", single_instruction)
         self.assertIn("write a fresh 3-7 step plan with write_todo_list", single_instruction)
         self.assertIn("prefer run_command", single_instruction)
         self.assertIn("prefer web_search(...) and scrape_web_page(...)", single_instruction)
         self.assertIn("research, summarization, report writing, and html dashboard generation are not gui tasks by themselves", single_instruction)
+        self.assertIn("do not reason from an old screenshot after a ui-changing action", single_instruction)

@@ -34,6 +34,13 @@ from nexus.tools.integrations import (
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    gmail_search,
+    gmail_read,
+    gmail_send,
+    tasks_list,
+    tasks_create,
+    calendar_list,
+    calendar_create,
 )
 from nexus.tools.ui_control import show_desktop_panel, show_workflow_panel
 
@@ -55,6 +62,13 @@ ALL_TOOLS = [
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    gmail_search,
+    gmail_read,
+    gmail_send,
+    tasks_list,
+    tasks_create,
+    calendar_list,
+    calendar_create,
     take_screenshot,
     run_command,
     move_mouse,
