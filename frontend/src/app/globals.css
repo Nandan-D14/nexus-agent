@@ -135,6 +135,14 @@
 }
 
 /* Advanced Glassmorphism */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 .glass-panel {
   @apply bg-white/70 dark:bg-[#1a1a1c]/70 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-xl;
 }

@@ -88,7 +88,7 @@ export default function SkillsPage() {
           </div>
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-              Expand your Agent's potential
+              Expand your Agent&apos;s potential
             </h2>
             <p className="mt-1 text-zinc-500 dark:text-zinc-400">
               New skills can be added via the MCP (Model Context Protocol) to give your agent access to more tools and data sources.

@@ -1649,14 +1649,14 @@ export default function SessionPage() {
                   transition={{ delay: 0.3 }}
                   className="mt-8 text-base md:text-lg text-zinc-400 dark:text-zinc-500 font-cursive italic"
                 >
-                  "the art of automation"
+                  &quot;the art of automation&quot;
                 </motion.p>
               </div>
 
               {/* Redesigned Landing Input Box */}
-              <div className="w-full max-w-2xl mx-auto mt-4 px-4">
+              <div className="w-full max-w-3xl mx-auto mt-4 px-4">
                 <div className="relative flex flex-col bg-white/80 dark:bg-white/[0.04] backdrop-blur-md border border-zinc-200/80 dark:border-white/8 rounded-[24px] p-1 shadow-2xl transition-all focus-within:border-indigo-500/30">
-                  <div className="relative min-h-[60px] flex items-start px-4 py-3">
+                  <div className="relative min-h-[80px] flex items-start px-4 py-3">
                     <textarea
                       suppressHydrationWarning
                       ref={landingInputRef}
@@ -1670,7 +1670,7 @@ export default function SessionPage() {
                       }}
                       placeholder="Send message to CoComputer"
                       rows={1}
-                      className="w-full bg-transparent border-none outline-none text-[15px] text-zinc-200 placeholder-zinc-500 resize-none overflow-y-auto max-h-50 focus:ring-0 leading-relaxed placeholder:font-medium"
+                      className="w-full bg-transparent border-none outline-none text-[18px] text-zinc-200 placeholder-zinc-500 resize-none overflow-y-auto no-scrollbar max-h-60 focus:ring-0 leading-relaxed placeholder:font-medium"
                     />
                   </div>
                   {uploadedFiles.length > 0 ? (
@@ -2017,7 +2017,7 @@ export default function SessionPage() {
                 {/* Input area */}
                 {viewMode === "live" ? (
                   <div className="px-4 pb-6 pt-2 shrink-0">
-                    <div className="mx-auto w-full max-w-2xl relative">
+                    <div className="mx-auto w-full max-w-3xl relative">
                       <TodoList items={todoItems} />
                       {uploadedFiles.length > 0 ? (
                         <div className="mb-3 flex flex-wrap gap-2">
@@ -2055,7 +2055,7 @@ export default function SessionPage() {
                             }}
                             placeholder="Send message to CoComputer"
                             rows={1}
-                            className="w-full bg-transparent border-none p-0 text-[15px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-0 resize-none overflow-y-auto max-h-40 leading-relaxed placeholder:font-medium"
+                            className="w-full bg-transparent border-none p-0 text-[18px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-0 resize-none overflow-y-auto no-scrollbar max-h-60 leading-relaxed placeholder:font-medium"
                           />
                         </div>
 
