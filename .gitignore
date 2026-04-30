@@ -68,6 +68,9 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 pglite-debug.log
+*.log
+agent/*.log
+frontend/*.log
 
 # ── IDE ───────────────────────────────────────────────────────
 .idea/
