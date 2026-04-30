@@ -1580,11 +1580,13 @@ async def update_user_settings(
 async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_current_user)):
     user_settings = await history_repository.get_user_settings(user.uid)
     google_drive_connection = await history_repository.get_integration_connection(user.uid, "google_drive")
-    google_drive_connected = bool((user_settings or {}).get("googleDriveRefreshToken")) or (
+    google_connected = bool((user_settings or {}).get("googleDriveRefreshToken")) or (
         bool(google_drive_connection)
         and google_drive_connection.status == "connected"
         and google_drive_connection.enabled
     )
+    status = "connected" if google_connected else "needs_setup"
+    
     return {
         "catalog": [
             IntegrationCatalogItem(
@@ -1592,7 +1594,28 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
                 connector_type="native",
                 name="Google Drive",
                 description="Search, read, create, and upload Drive files.",
-                status="connected" if google_drive_connected else "needs_setup",
+                status=status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="gmail",
+                connector_type="native",
+                name="Gmail",
+                description="Search, read, and send emails.",
+                status=status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="google_calendar",
+                connector_type="native",
+                name="Google Calendar",
+                description="List and create calendar events.",
+                status=status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="google_tasks",
+                connector_type="native",
+                name="Google Tasks",
+                description="Manage your task lists and todo items.",
+                status=status,
             ).model_dump(mode="json"),
             IntegrationCatalogItem(
                 provider="github",
@@ -1767,7 +1790,7 @@ GOOGLE_SCOPES = [
 
 
 def _google_redirect_uri() -> str:
-    return f"{settings.frontend_url}/auth/google/callback"
+    return f"{settings.frontend_url}/auth/google-drive/callback"
 
 
 def _google_oauth_configured() -> bool:
@@ -1836,7 +1859,7 @@ async def exchange_google_code(
 
     try:
         state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
-        if state_data.get("uid") != user.uid or state_data.get("purpose") != "google_oauth":
+        if state_data.get("uid") != user.uid or (state_data.get("purpose") not in ["google_oauth", "gdrive_oauth"]):
             raise ValueError("state mismatch")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -1880,6 +1903,15 @@ async def exchange_google_code(
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": refresh_token})
     await history_repository.upsert_google_drive_connection(user.uid)
     return {"status": "connected"}
+
+
+@app.post("/api/v1/auth/google-drive/exchange")
+async def exchange_google_drive_code_compat(
+    body: dict[str, Any],
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    """Compatibility endpoint for old frontend callback pages."""
+    return await exchange_google_code(body, user)
 
 
 @app.delete("/api/v1/auth/google")

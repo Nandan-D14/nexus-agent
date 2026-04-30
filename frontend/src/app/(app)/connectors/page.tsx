@@ -9,6 +9,9 @@ import {
   Database,
   Github,
   Loader2,
+  Mail,
+  Calendar,
+  ListTodo,
   Plus,
   RefreshCw,
   Shield,
@@ -62,6 +65,9 @@ function statusClasses(status: string) {
 function providerIcon(provider: string) {
   if (provider === "github") return Github;
   if (provider === "google_drive" || provider === "google") return Cloud;
+  if (provider === "gmail") return Mail;
+  if (provider === "google_calendar") return Calendar;
+  if (provider === "google_tasks") return ListTodo;
   if (provider === "mcp") return Cable;
   return Database;
 }
@@ -78,6 +84,9 @@ export default function ConnectorsPage() {
   const [mcpToken, setMcpToken] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  const isGoogleProvider = (provider: string) => 
+    ["google_drive", "gmail", "google_calendar", "google_tasks"].includes(provider);
 
   const connectionByProvider = useMemo(() => {
     const map = new Map<string, IntegrationConnection>();
@@ -101,17 +110,8 @@ export default function ConnectorsPage() {
       const catalogBody = (await catalogResponse.json()) as { catalog?: CatalogItem[] };
       const connectionsBody = (await connectionsResponse.json()) as { connections?: IntegrationConnection[] };
       
-      let loadedCatalog = catalogBody.catalog ?? [];
-      const loadedConnections = connectionsBody.connections ?? [];
-      
-      const driveCat = loadedCatalog.find((c) => c.provider === "google_drive");
-      if (driveCat) {
-        driveCat.name = "Google Services";
-        driveCat.description = "Connect Gmail, Calendar, Tasks, and Drive.";
-      }
-
-      setCatalog(loadedCatalog);
-      setConnections(loadedConnections);
+      setCatalog(catalogBody.catalog ?? []);
+      setConnections(connectionsBody.connections ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load integrations");
     } finally {
@@ -133,7 +133,7 @@ export default function ConnectorsPage() {
       let popupClosedPoll: number | null = null;
       const handleMessage = (event: MessageEvent) => {
         if (event.origin !== window.location.origin) return;
-        if (event.data?.type !== "google_connected") return;
+        if (event.data?.type !== "google_drive_connected" && event.data?.type !== "google_connected") return;
 
         window.removeEventListener("message", handleMessage);
         if (popupClosedPoll !== null) {
@@ -225,10 +225,10 @@ export default function ConnectorsPage() {
   }
 
   async function toggleConnection(connection: IntegrationConnection) {
-    if (connection.provider === "google_drive") return;
+    if (isGoogleProvider(connection.provider)) return;
 
     setError("");
-    const response = await authenticatedFetch(`/v1/integrations/${connection.connection_id}`, {
+    const response = await authenticatedFetch(`/api/v1/integrations/${connection.connection_id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: !connection.enabled }),
@@ -242,7 +242,7 @@ export default function ConnectorsPage() {
 
   async function testMcp(connection: IntegrationConnection) {
     setError("");
-    const response = await authenticatedFetch(`/v1/integrations/mcp/${connection.connection_id}/test`, {
+    const response = await authenticatedFetch(`/api/v1/integrations/mcp/${connection.connection_id}/test`, {
       method: "POST",
     });
     if (!response.ok) {
@@ -255,8 +255,8 @@ export default function ConnectorsPage() {
   async function deleteConnection(connection: IntegrationConnection) {
     setError("");
 
-    if (connection.provider === "google_drive") {
-      const response = await authenticatedFetch("/v1/auth/google-drive", {
+    if (isGoogleProvider(connection.provider)) {
+      const response = await authenticatedFetch("/api/v1/auth/google", {
         method: "DELETE",
       });
       if (!response.ok) {
@@ -267,7 +267,7 @@ export default function ConnectorsPage() {
       return;
     }
 
-    const response = await authenticatedFetch(`/v1/integrations/${connection.connection_id}`, {
+    const response = await authenticatedFetch(`/api/v1/integrations/${connection.connection_id}`, {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -346,7 +346,7 @@ export default function ConnectorsPage() {
               </div>
               <p className="mt-4 min-h-10 text-sm leading-6 text-zinc-500">{item.description}</p>
               <div className="mt-5 flex gap-2">
-                {item.provider === "google_drive" ? (
+                {isGoogleProvider(item.provider) ? (
                   <button onClick={startGoogleConnect} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
                     {status === "connected" ? "Reconnect" : "Connect"}
                   </button>
@@ -401,7 +401,7 @@ export default function ConnectorsPage() {
                         Test
                       </button>
                     ) : null}
-                    {connection.provider !== "google_drive" && (
+                    {!isGoogleProvider(connection.provider) && (
                       <button onClick={() => void toggleConnection(connection)} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
                         {connection.enabled ? "Disable" : "Enable"}
                       </button>
