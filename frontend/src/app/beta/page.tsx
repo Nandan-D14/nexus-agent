@@ -137,7 +137,9 @@ export default function BetaAccessPage() {
       setAccessCode("");
       toast("Beta access code accepted.", "success");
       if (nextStatus.requires_byok_setup) {
-        router.push("/settings/api?setup=1");
+        // Redirect to dashboard, which is wrapped by AppLayout/AppShell 
+        // that will automatically trigger the settings modal.
+        router.push("/dashboard");
         return;
       }
       if (nextStatus.can_access_app) {
@@ -309,7 +311,7 @@ export default function BetaAccessPage() {
               <h2 className="text-xl font-semibold tracking-tight">Your beta account is unlocked</h2>
               <p className="text-sm text-zinc-400">{status.message}</p>
               <div className="flex flex-col gap-3 sm:flex-row">
-                <Link href={status.requires_byok_setup ? "/settings/api?setup=1" : "/dashboard"} className="inline-flex flex-1 items-center justify-center rounded-full bg-cyan-500 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-400">
+                <Link href="/dashboard" className="inline-flex flex-1 items-center justify-center rounded-full bg-cyan-500 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-400">
                   {status.requires_byok_setup ? "Finish API & Keys Setup" : "Open Dashboard"}
                 </Link>
                 <Link href="/" className="inline-flex flex-1 items-center justify-center rounded-full border border-white/10 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/5">

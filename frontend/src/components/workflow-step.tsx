@@ -18,6 +18,7 @@ import {
   Mail,
   Calendar,
   ListTodo,
+  Plug,
   MapPin,
   Clock,
   User,
@@ -36,7 +37,8 @@ export type StepType =
   | "completion"
   | "gmail"
   | "calendar"
-  | "tasks";
+  | "tasks"
+  | "mcp";
 
 export type StepStatus = "pending" | "in_progress" | "completed" | "failed";
 
@@ -86,6 +88,7 @@ function getStepIcon(type: StepType, status: StepStatus) {
   if (type === "gmail") return <Mail className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "calendar") return <Calendar className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "tasks") return <ListTodo className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "mcp") return <Plug className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "completion" || status === "completed") return <Check className="w-[11px] h-[11px] text-emerald-400" />;
   return <Bot className="w-[11px] h-[11px] text-zinc-400" />;
 }

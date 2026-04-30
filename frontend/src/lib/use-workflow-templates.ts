@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useToast } from "@/components/toast-provider";
+import { useSettings } from "./settings-context";
 
 import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
 import type {
@@ -47,6 +48,7 @@ function buildTemplateBody(payload?: TemplatePayload) {
 export function useWorkflowTemplates(): UseWorkflowTemplatesReturn {
   const router = useRouter();
   const { toast } = useToast();
+  const { setIsSettingsOpen } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,11 +56,11 @@ export function useWorkflowTemplates(): UseWorkflowTemplatesReturn {
     const apiError = await readApiError(response);
     if (apiError.code === "BYOK_REQUIRED") {
       toast(apiError.message, "error");
-      router.push("/settings/api?setup=1");
+      setIsSettingsOpen(true);
       return apiError.message;
     }
     return apiError.message;
-  }, [router, toast]);
+  }, [toast, setIsSettingsOpen]);
 
   const listTemplates = useCallback(async (query?: string) => {
     setIsLoading(true);

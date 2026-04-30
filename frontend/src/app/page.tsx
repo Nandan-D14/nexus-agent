@@ -54,7 +54,7 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
-    async function maybeRedirectToSetup() {
+    async function maybeRedirectToBeta() {
       if (!user) return;
       try {
         const betaStatus = await fetchBetaStatus();
@@ -65,12 +65,11 @@ export default function HomePage() {
           router.replace("/beta");
           return;
         }
-        if (betaStatus.requires_byok_setup) {
-          router.replace("/settings/api?setup=1");
-        }
+        // Removed redirect to /settings/api as AppLayout or individual pages 
+        // will now handle showing the settings modal instead.
       } catch {}
     }
-    void maybeRedirectToSetup();
+    void maybeRedirectToBeta();
     return () => { cancelled = true; };
   }, [router, user]);
 
@@ -90,7 +89,7 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-white dark:bg-[#0A0A0A] text-zinc-900 dark:text-zinc-50 selection:bg-blue-500/30 overflow-x-hidden font-sans">
+    <div className="min-h-screen bg-background text-foreground selection:bg-blue-500/30 overflow-x-hidden font-sans">
       {/* Scroll Progress */}
       <motion.div
         className="fixed top-0 left-0 right-0 h-[2px] bg-blue-500 z-[60] origin-left"
@@ -98,7 +97,7 @@ export default function HomePage() {
       />
 
       {/* Navigation */}
-      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 border-b ${scrolled ? "bg-white/80 dark:bg-[#0A0A0A]/80 backdrop-blur-xl border-zinc-200 dark:border-white/10" : "bg-transparent border-transparent"}`}>
+      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 border-b ${scrolled ? "bg-white/80 dark:bg-background/80 backdrop-blur-xl border-zinc-200 dark:border-card-border" : "bg-transparent border-transparent"}`}>
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-8">
             <Link href="/" className="flex items-center gap-2 group">
@@ -108,16 +107,16 @@ export default function HomePage() {
               <span className="font-semibold text-lg tracking-tight">CoComputer</span>
             </Link>
             
-            <div className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-500 dark:text-zinc-400">
-              <a href="#features" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Features</a>
-              <a href="#how-it-works" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">How it Works</a>
+            <div className="hidden md:flex items-center gap-6 text-sm font-medium text-muted-foreground">
+              <a href="#features" className="hover:text-foreground transition-colors">Features</a>
+              <a href="#how-it-works" className="hover:text-foreground transition-colors">How it Works</a>
             </div>
           </div>
 
           <div className="flex items-center gap-4">
             {user ? (
               <>
-                <Link href="/dashboard" className="hidden sm:block text-sm font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
+                <Link href="/dashboard" className="hidden sm:block text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
                   Dashboard
                 </Link>
                 <button
@@ -129,7 +128,7 @@ export default function HomePage() {
                 </button>
                 <button
                   onClick={() => { void signOutUser().catch(() => {}); }}
-                  className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
+                  className="p-2 rounded-lg text-muted-foreground hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
                 >
                   Sign out
                 </button>
@@ -172,17 +171,17 @@ export default function HomePage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.1 }}
-            className="text-5xl md:text-7xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 leading-[1.1]"
+            className="text-5xl md:text-7xl font-bold tracking-tight text-foreground mb-6 leading-[1.1]"
           >
             The Agentic Desktop <br className="hidden md:block" />
-            <span className="text-zinc-400 dark:text-zinc-500">Operating System</span>
+            <span className="text-muted-foreground">Operating System</span>
           </motion.h1>
 
           <motion.p 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.2 }}
-            className="max-w-2xl mx-auto text-zinc-600 dark:text-zinc-400 mb-10 leading-relaxed"
+            className="max-w-2xl mx-auto text-muted-foreground mb-10 leading-relaxed"
           >
             CoComputer is a voice-controlled AI agent with full native Linux access. 
             Speak your intent, and watch it execute commands, browse the web, and build software in an isolated cloud sandbox.
@@ -330,15 +329,15 @@ export default function HomePage() {
       </section>
 
       {/* Features Grid */}
-      <section id="features" className="py-32 relative bg-white dark:bg-[#0A0A0A] overflow-hidden">
+      <section id="features" className="py-32 relative bg-background overflow-hidden">
         {/* Subtle grid background */}
         <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
 
         <div className="max-w-7xl mx-auto px-6 relative z-10">
           <div className="text-center max-w-2xl mx-auto mb-20">
             <h2 className="text-blue-600 dark:text-blue-500 font-semibold text-xs mb-3 uppercase tracking-widest">Capabilities</h2>
-            <h3 className="text-3xl md:text-5xl font-bold tracking-tight mb-6 text-zinc-900 dark:text-white leading-tight">Engineered for absolute autonomy</h3>
-            <p className="text-zinc-600 dark:text-zinc-400 text-lg">A fully integrated architecture bridging Google&apos;s Agent Developer Kit and secure, transient cloud environments.</p>
+            <h3 className="text-3xl md:text-5xl font-bold tracking-tight mb-6 text-foreground leading-tight">Engineered for absolute autonomy</h3>
+            <p className="text-muted-foreground text-lg">A fully integrated architecture bridging Google&apos;s Agent Developer Kit and secure, transient cloud environments.</p>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
@@ -389,7 +388,7 @@ export default function HomePage() {
               <motion.div 
                 key={i}
                 {...fadeInUp}
-                className={`group relative p-8 rounded-3xl bg-white dark:bg-[#0f0f0f] border border-zinc-200 dark:border-zinc-800 hover:shadow-xl transition-all duration-300 overflow-hidden ${f.border}`}
+                className={`group relative p-8 rounded-3xl bg-card border border-card-border hover:shadow-xl transition-all duration-300 overflow-hidden ${f.border}`}
               >
                 {/* Hover gradient effect inside card */}
                 <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 bg-gradient-to-br from-zinc-50 to-transparent dark:from-zinc-900 dark:to-transparent pointer-events-none" />
@@ -398,8 +397,8 @@ export default function HomePage() {
                   <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-6 shadow-sm ${f.bg}`}>
                     {f.icon}
                   </div>
-                  <h4 className="text-xl font-bold text-zinc-900 dark:text-white mb-3 tracking-tight">{f.title}</h4>
-                  <p className="text-zinc-600 dark:text-zinc-400 text-sm leading-relaxed">{f.desc}</p>
+                  <h4 className="text-xl font-bold text-foreground mb-3 tracking-tight">{f.title}</h4>
+                  <p className="text-muted-foreground text-sm leading-relaxed">{f.desc}</p>
                 </div>
               </motion.div>
             ))}
@@ -408,7 +407,7 @@ export default function HomePage() {
       </section>
 
       {/* Stats Section with simple fade-in */}
-      <section className="py-20 bg-white dark:bg-[#0A0A0A] border-b border-zinc-100 dark:border-zinc-800/30">
+      <section className="py-20 bg-background border-b border-zinc-100 dark:border-card-border">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
             {[
@@ -427,7 +426,7 @@ export default function HomePage() {
               >
                 <div className={`text-2xl md:text-3xl font-bold tracking-tight ${stat.color}`}>{stat.value}</div>
                 <div className="text-xs font-bold uppercase tracking-widest text-zinc-400">{stat.label}</div>
-                <div className="text-[10px] text-zinc-500 font-medium">{stat.desc}</div>
+                <div className="text-[10px] text-muted-foreground font-medium">{stat.desc}</div>
               </motion.div>
             ))}
           </div>
@@ -435,7 +434,7 @@ export default function HomePage() {
       </section>
 
       {/* New: Technical Deep-Dive (Company scale details) */}
-      <section id="how-it-works" className="py-32 bg-white dark:bg-[#0A0A0A] overflow-hidden">
+      <section id="how-it-works" className="py-32 bg-background overflow-hidden">
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex flex-col lg:flex-row gap-20 items-center">
             <motion.div 
@@ -446,10 +445,10 @@ export default function HomePage() {
               className="flex-1 space-y-8"
             >
               <h2 className="text-blue-600 font-semibold text-xs uppercase tracking-[0.2em]">The Core Protocol</h2>
-              <h3 className="text-4xl md:text-5xl font-bold tracking-tight text-zinc-900 dark:text-white leading-tight">
-                Designed for the <br /> <span className="text-zinc-500">Autonomous Era.</span>
+              <h3 className="text-4xl md:text-5xl font-bold tracking-tight text-foreground leading-tight">
+                Designed for the <br /> <span className="text-muted-foreground">Autonomous Era.</span>
               </h3>
-              <p className="text-zinc-600 dark:text-zinc-400 text-lg leading-relaxed">
+              <p className="text-muted-foreground text-lg leading-relaxed">
                 CoComputer isn&apos;t just a voice interface, it&apos;s a distributed neural network. We orchestrate the world&apos;s most advanced LLMs to drive real-time Linux kernels with near-zero latency, ensuring every command is precise, secure, and context-aware.
               </p>
               
@@ -461,11 +460,11 @@ export default function HomePage() {
                   { t: "Auto-Scale", d: "Global edge deployment for instant compute." }
                 ].map((item, i) => (
                   <div key={i} className="space-y-2">
-                    <h4 className="text-xs font-bold text-zinc-900 dark:text-white uppercase tracking-widest flex items-center gap-2">
+                    <h4 className="text-xs font-bold text-foreground uppercase tracking-widest flex items-center gap-2">
                       <div className="w-1 h-1 rounded-full bg-blue-500" />
                       {item.t}
                     </h4>
-                    <p className="text-xs text-zinc-500 leading-relaxed font-medium">{item.d}</p>
+                    <p className="text-xs text-muted-foreground leading-relaxed font-medium">{item.d}</p>
                   </div>
                 ))}
               </div>
@@ -479,15 +478,15 @@ export default function HomePage() {
               className="flex-1 relative"
             >
               <div className="absolute inset-0 bg-blue-500/5 blur-[100px] rounded-full" />
-              <div className="relative rounded-[2rem] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#0f0f0f] p-8 shadow-2xl">
+              <div className="relative rounded-[2rem] border border-card-border bg-card p-8 shadow-2xl">
                 <div className="space-y-6">
-                   <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-4">
+                   <div className="flex items-center justify-between border-b border-zinc-100 dark:border-card-border pb-4">
                       <div className="flex gap-1.5">
                          <div className="w-2.5 h-2.5 rounded-full bg-red-400/20" />
                          <div className="w-2.5 h-2.5 rounded-full bg-amber-400/20" />
                          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400/20" />
                       </div>
-                      <div className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Global_Status // OK</div>
+                      <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Global_Status // OK</div>
                    </div>
                    <div className="space-y-4 pt-2">
                       <motion.div 
@@ -496,20 +495,20 @@ export default function HomePage() {
                         transition={{ duration: 1, delay: 0.5 }}
                         className="h-1.5 bg-blue-500 rounded-full" 
                       />
-                      <div className="h-1.5 w-full bg-zinc-100 dark:bg-zinc-800 rounded-full" />
-                      <div className="h-1.5 w-2/3 bg-zinc-100 dark:bg-zinc-800 rounded-full" />
+                      <div className="h-1.5 w-full bg-zinc-100 dark:bg-muted rounded-full" />
+                      <div className="h-1.5 w-2/3 bg-zinc-100 dark:bg-muted rounded-full" />
                    </div>
                    <div className="pt-4 grid grid-cols-2 gap-4">
                       <div className="h-24 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-100 dark:border-zinc-800 flex items-end p-4">
                          <div className="w-full space-y-2">
                             <div className="h-1 w-1/2 bg-blue-500/30 rounded-full" />
-                            <div className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest">Compute Load</div>
+                            <div className="text-[8px] font-bold text-muted-foreground uppercase tracking-widest">Compute Load</div>
                          </div>
                       </div>
                       <div className="h-24 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-100 dark:border-zinc-800 flex items-end p-4">
                          <div className="w-full space-y-2">
                             <div className="h-1 w-2/3 bg-emerald-500/30 rounded-full" />
-                            <div className="text-[8px] font-bold text-zinc-400 uppercase tracking-widest">Neural Uplink</div>
+                            <div className="text-[8px] font-bold text-muted-foreground uppercase tracking-widest">Neural Uplink</div>
                          </div>
                       </div>
                    </div>
@@ -563,7 +562,7 @@ export default function HomePage() {
       </section>
 
       {/* Footer */}
-      <footer className="py-24 px-6 border-t border-zinc-100 dark:border-zinc-800/50 bg-white dark:bg-[#0A0A0A] relative z-20">
+      <footer className="py-24 px-6 border-t border-zinc-100 dark:border-card-border bg-background relative z-20">
         <div className="max-w-7xl mx-auto">
           <div className="grid grid-cols-2 md:grid-cols-12 gap-12 mb-16">
             <div className="col-span-2 md:col-span-4 space-y-6">
@@ -571,20 +570,20 @@ export default function HomePage() {
                 <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
                   <Terminal className="w-4 h-4" />
                 </div>
-                <span className="font-bold text-xl tracking-tighter">CoComputer</span>
+                <span className="font-bold text-xl tracking-tighter text-foreground">CoComputer</span>
               </Link>
-              <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed max-w-xs">
+              <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
                 Autonomous multimodal neural architecture bridging the gap between human language and native Linux environments.
               </p>
               <div className="flex items-center gap-4">
-                <a href="https://x.com" className="text-zinc-400 hover:text-blue-500 transition-colors"><svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
-                <a href="https://github.com" className="text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors"><Github className="w-5 h-5"/></a>
+                <a href="https://x.com" className="text-muted-foreground hover:text-blue-500 transition-colors"><svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
+                <a href="https://github.com" className="text-muted-foreground hover:text-foreground transition-colors"><Github className="w-5 h-5"/></a>
               </div>
             </div>
 
             <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Product</h5>
-              <ul className="space-y-3 text-sm text-zinc-500 dark:text-zinc-400 font-medium">
+              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Product</h5>
+              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
                 <li className="hover:text-blue-500 transition-colors"><a href="#features">Features</a></li>
                 <li className="hover:text-blue-500 transition-colors"><Link href="/pricing">Pricing</Link></li>
                 <li className="hover:text-blue-500 transition-colors"><a href="#">Cloud Run</a></li>
@@ -593,8 +592,8 @@ export default function HomePage() {
             </div>
 
             <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Resources</h5>
-              <ul className="space-y-3 text-sm text-zinc-500 dark:text-zinc-400 font-medium">
+              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Resources</h5>
+              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
                 <li className="hover:text-blue-500 transition-colors"><a href="#">Documentation</a></li>
                 <li className="hover:text-blue-500 transition-colors"><a href="#">Github</a></li>
                 <li className="hover:text-blue-500 transition-colors"><a href="#">Devpost</a></li>
@@ -603,8 +602,8 @@ export default function HomePage() {
             </div>
 
             <div className="col-span-2 md:col-span-4 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-zinc-900 dark:text-white">Subscribe</h5>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">Join 2,000+ developers building with CoComputer.</p>
+              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Subscribe</h5>
+              <p className="text-sm text-muted-foreground">Join 2,000+ developers building with CoComputer.</p>
               {mounted ? (
                 <form className="flex gap-2" onSubmit={(e) => e.preventDefault()}>
                   <input 

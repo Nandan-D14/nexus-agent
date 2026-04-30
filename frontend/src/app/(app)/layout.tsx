@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { useSettings } from "@/lib/settings-context";
 import { AppShell } from "@/components/app-shell";
 import { fetchBetaStatus } from "@/lib/beta-access";
 
@@ -12,6 +13,7 @@ export default function AppLayout({
   children: React.ReactNode;
 }) {
   const { user, isLoading } = useAuth();
+  const { setIsSettingsOpen } = useSettings();
   const router = useRouter();
   const pathname = usePathname();
   const [isCheckingAccess, setIsCheckingAccess] = useState(true);
@@ -46,15 +48,15 @@ export default function AppLayout({
           return;
         }
 
-        if (pathname.startsWith("/settings/api")) {
-          setIsCheckingAccess(false);
+        if (pathname.startsWith("/settings")) {
+          router.replace("/dashboard");
+          setIsSettingsOpen(true);
           return;
         }
 
-        if (betaStatus.requires_byok_setup) {
-          router.replace("/settings/api?setup=1");
-          return;
-        }
+        // Removed automatic setIsSettingsOpen(true) for requires_byok_setup 
+        // to prevent it from popping up on every navigation.
+        // It will now only pop up when the user enters a query.
       } catch {
         if (cancelled) {
           return;
@@ -71,7 +73,7 @@ export default function AppLayout({
     return () => {
       cancelled = true;
     };
-  }, [isLoading, pathname, router, user]);
+  }, [isLoading, pathname, router, user, setIsSettingsOpen]);
 
   if (isLoading || (user && isCheckingAccess)) {
     return (

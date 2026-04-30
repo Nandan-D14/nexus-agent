@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useToast } from "@/components/toast-provider";
+import { useSettings } from "./settings-context";
 
 import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
 import { isBetaBlockedCode } from "./beta-access";
@@ -43,6 +44,7 @@ export interface UseSessionReturn {
 export function useSession(): UseSessionReturn {
   const router = useRouter();
   const { toast } = useToast();
+  const { setIsSettingsOpen } = useSettings();
   const [isCreating, setIsCreating] = useState(false);
   const [isGetting, setIsGetting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -150,7 +152,7 @@ export function useSession(): UseSessionReturn {
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
-          router.push("/settings/api?setup=1");
+          setIsSettingsOpen(true);
           return null;
         }
         throw new Error(apiError.message);
@@ -190,7 +192,7 @@ export function useSession(): UseSessionReturn {
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
-          router.push("/settings/api?setup=1");
+          setIsSettingsOpen(true);
           return null;
         }
         throw new Error(apiError.message);
@@ -327,9 +329,8 @@ export function useSession(): UseSessionReturn {
           return null;
         }
         if (apiError.code === "BYOK_REQUIRED") {
-          setReuseError(apiError.message);
           toast(apiError.message, "error");
-          router.push("/settings/api?setup=1");
+          setIsSettingsOpen(true);
           return null;
         }
         throw new Error(apiError.message);
@@ -369,7 +370,7 @@ export function useSession(): UseSessionReturn {
         if (apiError.code === "BYOK_REQUIRED") {
           setRefreshError(apiError.message);
           toast(apiError.message, "error");
-          router.push("/settings/api?setup=1");
+          setIsSettingsOpen(true);
           return null;
         }
         throw new Error(apiError.message);

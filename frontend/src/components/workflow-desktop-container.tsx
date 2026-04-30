@@ -43,28 +43,39 @@ export function WorkflowDesktopContainer({
   onStopAgent,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
-
-  if (forcedTab && forcedTab !== activeTab) {
-    setActiveTab(forcedTab);
-  }
+  const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
 
   useEffect(() => {
-    if (forcedTab) {
+    if (!forcedTab) return;
+    const timeout = window.setTimeout(() => {
+      setActiveTab(forcedTab);
+      setAutoRouteTab(forcedTab);
+      onTabChange?.(forcedTab);
       onForcedTabAck?.();
-    }
-  }, [forcedTab, onForcedTabAck]);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [forcedTab, onForcedTabAck, onTabChange]);
+
+  useEffect(() => {
+    if (!autoRouteTab) return;
+    const timeout = window.setTimeout(() => setAutoRouteTab(null), 2400);
+    return () => window.clearTimeout(timeout);
+  }, [autoRouteTab]);
 
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab);
+    setAutoRouteTab(null);
     onTabChange?.(tab);
   };
 
   const isStreamActive = !!streamUrl;
   const activeSteps = workflowRun?.steps.filter(s => s.status === "in_progress").length || 0;
   const agentReason =
-    activeTab === "desktop" && forcedTab === "desktop" && workflowRun?.status === "running"
-      ? "Agent requested desktop view"
-      : null;
+    autoRouteTab === "desktop"
+      ? "Desktop action detected"
+      : autoRouteTab === "workflow"
+        ? "Workflow activity detected"
+        : null;
 
   return (
     <div className="h-full flex flex-col bg-[#0a0a0c] rounded-xl border border-zinc-800 overflow-hidden">
@@ -114,7 +125,7 @@ export function WorkflowDesktopContainer({
 
         {/* Agent Activity */}
         <AnimatePresence>
-          {agentReason && activeTab === "desktop" && (
+          {agentReason && (
             <motion.div
               initial={{ opacity: 0, x: 10 }}
               animate={{ opacity: 1, x: 0 }}

@@ -3,18 +3,11 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  Cable,
   CheckCircle2,
   Cloud,
-  Database,
-  Github,
   Loader2,
-  Mail,
-  Calendar,
-  ListTodo,
   Plus,
   RefreshCw,
-  Shield,
   Trash2,
 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -49,27 +42,21 @@ type CatalogItem = {
   status: string;
 };
 
-function statusClasses(status: string) {
-  switch (status) {
-    case "connected":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-    case "error":
-      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400";
-    case "disabled":
-      return "border-zinc-300 bg-zinc-100 text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400";
+function providerLogo(provider: string) {
+  switch (provider) {
+    case "google_drive":
+      return "https://www.gstatic.com/images/branding/product/2x/drive_2020q4_48dp.png";
+    case "gmail":
+      return "https://www.gstatic.com/images/branding/product/2x/gmail_2020q4_48dp.png";
+    case "google_calendar":
+      return "https://www.gstatic.com/images/branding/product/2x/calendar_2020q4_48dp.png";
+    case "google_tasks":
+      return "https://upload.wikimedia.org/wikipedia/commons/5/5f/Google_Tasks_2021.svg";
+    case "github":
+      return "https://upload.wikimedia.org/wikipedia/commons/9/91/Octicons-mark-github.svg";
     default:
-      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400";
+      return null;
   }
-}
-
-function providerIcon(provider: string) {
-  if (provider === "github") return Github;
-  if (provider === "google_drive" || provider === "google") return Cloud;
-  if (provider === "gmail") return Mail;
-  if (provider === "google_calendar") return Calendar;
-  if (provider === "google_tasks") return ListTodo;
-  if (provider === "mcp") return Cable;
-  return Database;
 }
 
 export default function ConnectorsPage() {
@@ -240,18 +227,6 @@ export default function ConnectorsPage() {
     await load();
   }
 
-  async function testMcp(connection: IntegrationConnection) {
-    setError("");
-    const response = await authenticatedFetch(`/api/v1/integrations/mcp/${connection.connection_id}/test`, {
-      method: "POST",
-    });
-    if (!response.ok) {
-      setError(await parseApiError(response));
-      return;
-    }
-    await load();
-  }
-
   async function deleteConnection(connection: IntegrationConnection) {
     setError("");
 
@@ -278,138 +253,141 @@ export default function ConnectorsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-4 pb-20 md:p-8">
-      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div className="space-y-2">
-          <div className="inline-flex items-center gap-2 rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-xs font-bold uppercase tracking-widest text-blue-500">
-            <Shield className="h-3.5 w-3.5" />
-            Enterprise Tool Layer
-          </div>
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-950 dark:text-zinc-100">
+    <div className="mx-auto max-w-6xl space-y-12 p-6 pb-24 md:p-12">
+      <div className="flex items-end justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-tight text-white">
             Connectors
           </h1>
-          <p className="max-w-2xl text-sm text-zinc-500">
-            Connect private tools, remote MCP servers, and native SaaS systems so the cloud computer can act with visible progress and scoped credentials.
+          <p className="text-sm text-zinc-500">
+            Link your accounts to expand agent capabilities.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => setShowMcp(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
-          >
-            <Plus className="h-4 w-4" />
-            Add MCP Server
-          </button>
-          <button
-            onClick={() => void load()}
-            className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-white/5"
-          >
-            <RefreshCw className="h-4 w-4" />
-            Refresh
-          </button>
-        </div>
+        <button
+          onClick={() => void load()}
+          className="p-2 text-zinc-500 hover:text-white transition-colors"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
       </div>
 
       {error ? (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-300">
+        <div className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-xs text-red-400">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           {error}
         </div>
       ) : null}
 
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        {catalog.map((item, index) => {
-          const Icon = providerIcon(item.provider);
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        {catalog.filter(item => item.provider !== "system").map((item) => {
+          const logo = providerLogo(item.provider);
           const connection = connectionByProvider.get(item.provider);
           const status = connection?.enabled === false ? "disabled" : connection?.status || item.status;
+          const isConnected = status === "connected";
+          
+          const handleClick = () => {
+            if (isGoogleProvider(item.provider)) {
+              startGoogleConnect();
+            } else if (item.provider === "github") {
+              setShowGithub(true);
+            } else if (item.provider === "mcp") {
+              setShowMcp(true);
+            }
+          };
+
           return (
-            <motion.div
+            <motion.button
               key={`${item.provider}-${item.connector_type}`}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.03 }}
-              className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-[#1a1a1c]"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleClick}
+              className={`group relative flex flex-col items-center justify-center rounded-2xl border aspect-square transition-all duration-200 ${
+                isConnected 
+                  ? "border-emerald-500/20 bg-emerald-500/[0.02]" 
+                  : "border-zinc-800 bg-[#0d0d0f] hover:border-zinc-700 hover:bg-[#121214]"
+              }`}
             >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-900">
-                    <Icon className="h-5 w-5 text-zinc-700 dark:text-zinc-200" />
+              <div className="relative mb-4 flex h-12 w-12 items-center justify-center">
+                {logo ? (
+                  <img 
+                    src={logo} 
+                    alt={item.name} 
+                    className={`h-10 w-10 object-contain transition-all duration-300 ${item.provider === "github" ? "dark:invert" : ""} ${isConnected ? "" : "grayscale opacity-40 group-hover:grayscale-0 group-hover:opacity-100"}`} 
+                  />
+                ) : (
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
+                    <Cloud className="h-5 w-5" />
                   </div>
-                  <div>
-                    <h2 className="font-semibold text-zinc-950 dark:text-white">{item.name}</h2>
-                    <p className="text-xs uppercase tracking-widest text-zinc-400">{item.connector_type}</p>
+                )}
+                {isConnected && (
+                  <div className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 shadow-lg shadow-emerald-500/20">
+                    <CheckCircle2 className="h-3 w-3 text-white" />
                   </div>
-                </div>
-                <span className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider ${statusClasses(status)}`}>
-                  {status.replace("_", " ")}
-                </span>
+                )}
               </div>
-              <p className="mt-4 min-h-10 text-sm leading-6 text-zinc-500">{item.description}</p>
-              <div className="mt-5 flex gap-2">
-                {isGoogleProvider(item.provider) ? (
-                  <button onClick={startGoogleConnect} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
-                    {status === "connected" ? "Reconnect" : "Connect"}
-                  </button>
-                ) : item.provider === "github" ? (
-                  <button onClick={() => setShowGithub(true)} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
-                    {connection ? "Update token" : "Connect"}
-                  </button>
-                ) : item.provider === "mcp" ? (
-                  <button onClick={() => setShowMcp(true)} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
-                    Add server
-                  </button>
-                ) : null}
-              </div>
-            </motion.div>
+              <span className={`text-[12px] font-bold ${isConnected ? "text-emerald-400" : "text-zinc-400 group-hover:text-white"}`}>
+                {item.name}
+              </span>
+            </motion.button>
           );
         })}
-      </section>
+        
+        <button
+          onClick={() => setShowMcp(true)}
+          className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-800 aspect-square transition-all hover:border-zinc-600 hover:bg-zinc-800/10"
+        >
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 border border-zinc-800">
+            <Plus className="h-5 w-5 text-zinc-600" />
+          </div>
+          <span className="text-[12px] font-bold text-zinc-500">Add MCP</span>
+        </button>
+      </div>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-zinc-950 dark:text-white">Active Connections</h2>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}
+      <section className="space-y-6 pt-8">
+        <div className="flex items-center gap-3">
+          <h2 className="text-[10px] font-bold uppercase tracking-widest text-zinc-600">Active Connections</h2>
+          <div className="h-px flex-1 bg-zinc-800/30" />
         </div>
-        <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#1a1a1c]">
+        
+        <div className="grid grid-cols-1 gap-2">
           {connections.length === 0 ? (
-            <div className="p-6 text-sm text-zinc-500">No user connectors are configured yet.</div>
+            <p className="py-4 text-[12px] text-zinc-600 italic text-center">No active connections.</p>
           ) : (
             connections.map((connection) => (
-              <div key={connection.connection_id} className="border-b border-zinc-100 p-4 last:border-b-0 dark:border-zinc-800">
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="min-w-0 space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="font-semibold text-zinc-950 dark:text-white">{connection.name}</h3>
-                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${statusClasses(connection.enabled ? connection.status : "disabled")}`}>
-                        {connection.enabled ? connection.status : "disabled"}
-                      </span>
-                      <span className="text-xs text-zinc-400">{connection.connector_type}</span>
-                    </div>
-                    {connection.last_error ? <p className="text-sm text-red-500">{connection.last_error}</p> : null}
-                    <div className="flex flex-wrap gap-2">
-                      {connection.tools.slice(0, 8).map((tool) => (
-                        <span key={tool.name} className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-600 dark:border-zinc-800 dark:text-zinc-300">
-                          {tool.name}
-                        </span>
-                      ))}
-                      {connection.tool_count > 8 ? <span className="px-2 py-1 text-xs text-zinc-400">+{connection.tool_count - 8} more</span> : null}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap gap-2">
-                    {connection.provider === "mcp" ? (
-                      <button onClick={() => void testMcp(connection)} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
-                        Test
-                      </button>
-                    ) : null}
-                    {!isGoogleProvider(connection.provider) && (
-                      <button onClick={() => void toggleConnection(connection)} className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold dark:border-zinc-800">
-                        {connection.enabled ? "Disable" : "Enable"}
-                      </button>
+              <div key={connection.connection_id} className="flex items-center justify-between rounded-xl border border-zinc-800/30 bg-[#070708] px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-zinc-900 border border-zinc-800/50">
+                    {providerLogo(connection.provider) ? (
+                      <img 
+                        src={providerLogo(connection.provider)!} 
+                        alt="" 
+                        className={`h-4 w-4 object-contain ${connection.provider === "github" ? "dark:invert" : ""}`} 
+                      />
+                    ) : (
+                      <Cloud className="h-4 w-4 text-zinc-600" />
                     )}
-                    <button onClick={() => void deleteConnection(connection)} className="rounded-lg border border-red-500/20 px-3 py-2 text-sm font-semibold text-red-500">
-                      <Trash2 className="h-4 w-4" />
-                    </button>
                   </div>
+                  <div>
+                    <h3 className="text-[13px] font-semibold text-zinc-300">{connection.name}</h3>
+                    <p className="text-[9px] text-zinc-600 uppercase font-bold">{connection.connector_type}</p>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-4">
+                  {!isGoogleProvider(connection.provider) && (
+                    <button 
+                      onClick={() => void toggleConnection(connection)} 
+                      className="text-[10px] font-bold text-zinc-600 hover:text-zinc-300"
+                    >
+                      {connection.enabled ? "Disable" : "Enable"}
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => void deleteConnection(connection)} 
+                    className="text-zinc-600 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
             ))
@@ -419,23 +397,23 @@ export default function ConnectorsPage() {
 
       {showMcp ? (
         <ConnectorModal title="Add Remote MCP Server" onClose={() => setShowMcp(false)}>
-          <form onSubmit={submitMcp} className="space-y-4">
-            <Field label="Server name" value={mcpName} onChange={setMcpName} placeholder="Production Postgres MCP" />
-            <Field label="Streamable HTTP URL" value={mcpUrl} onChange={setMcpUrl} placeholder="https://example.com/mcp" />
-            <Field label="Bearer token" value={mcpToken} onChange={setMcpToken} placeholder="Optional" type="password" />
-            <SubmitButton loading={submitting} label="Test and Add Server" />
+          <form onSubmit={submitMcp} className="space-y-4 pt-2">
+            <Field label="Server Name" value={mcpName} onChange={mcpName => setMcpName(mcpName)} placeholder="e.g. Postgres DB" />
+            <Field label="Endpoint URL" value={mcpUrl} onChange={mcpUrl => setMcpUrl(mcpUrl)} placeholder="https://..." />
+            <Field label="Bearer Token" value={mcpToken} onChange={mcpToken => setMcpToken(mcpToken)} placeholder="Optional" type="password" />
+            <SubmitButton loading={submitting} label="Link Server" />
           </form>
         </ConnectorModal>
       ) : null}
 
       {showGithub ? (
         <ConnectorModal title="Connect GitHub" onClose={() => setShowGithub(false)}>
-          <form onSubmit={submitGithub} className="space-y-4">
-            <Field label="Personal access token" value={githubToken} onChange={setGithubToken} placeholder="github_pat_..." type="password" />
-            <p className="text-xs leading-5 text-zinc-500">
-              The token is stored server-side in private user storage and is never returned to the browser.
+          <form onSubmit={submitGithub} className="space-y-4 pt-2">
+            <Field label="Personal Access Token" value={githubToken} onChange={githubToken => setGithubToken(githubToken)} placeholder="github_pat_..." type="password" />
+            <p className="text-[11px] leading-relaxed text-zinc-500 px-1">
+              Token is encrypted and stored securely server-side.
             </p>
-            <SubmitButton loading={submitting} label="Connect GitHub" />
+            <SubmitButton loading={submitting} label="Link GitHub" />
           </form>
         </ConnectorModal>
       ) : null}
@@ -453,14 +431,11 @@ function ConnectorModal({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-lg border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-[#1a1a1c]">
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-            <h2 className="text-lg font-semibold text-zinc-950 dark:text-white">{title}</h2>
-          </div>
-          <button onClick={onClose} className="rounded-lg px-3 py-1 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-3xl border border-zinc-800 bg-[#0d0d0f] p-6 shadow-2xl">
+        <div className="mb-6 flex items-center justify-between px-1">
+          <h2 className="text-lg font-bold text-white">{title}</h2>
+          <button onClick={onClose} className="text-zinc-500 hover:text-white transition-colors">
             Close
           </button>
         </div>
@@ -484,14 +459,14 @@ function Field({
   type?: string;
 }) {
   return (
-    <label className="block space-y-1.5">
-      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{label}</span>
+    <label className="block space-y-2 px-1">
+      <span className="text-[11px] font-bold uppercase tracking-widest text-zinc-500">{label}</span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         type={type}
-        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 dark:border-zinc-800 dark:bg-zinc-950"
+        className="w-full rounded-xl border border-zinc-800 bg-black px-4 py-2.5 text-sm text-white outline-none transition focus:border-zinc-600 placeholder:text-zinc-700"
       />
     </label>
   );
@@ -501,7 +476,7 @@ function SubmitButton({ loading, label }: { loading: boolean; label: string }) {
   return (
     <button
       disabled={loading}
-      className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950"
+      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-bold text-black transition-all hover:bg-zinc-200 disabled:opacity-50 active:scale-95 mt-2"
     >
       {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
       {label}

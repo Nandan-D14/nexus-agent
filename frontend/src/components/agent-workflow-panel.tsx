@@ -12,12 +12,21 @@ import {
   FileText,
   Globe,
   Loader2,
+  Mail,
   MonitorCog,
+  Plug,
   Search,
   Terminal,
+  Calendar,
+  ListTodo,
   X,
 } from "lucide-react";
 import { WorkflowStep, WorkflowStepData, StepStatus, StepType } from "./workflow-step";
+import {
+  classifyAgentTool,
+  displayAgentToolName,
+  providerLabel,
+} from "@/lib/agent-tool-classification";
 
 export type WorkflowRun = {
   run_id: string;
@@ -274,6 +283,10 @@ function DynamicStepOutput({
     return <ScreenshotOutput step={step} outputText={outputText} />;
   }
 
+  if (step.step_type === "gmail" || step.step_type === "calendar" || step.step_type === "tasks" || step.step_type === "mcp") {
+    return <IntegrationOutput step={step} outputText={outputText} />;
+  }
+
   if (!outputText) {
     return (
       <div className="flex h-full items-center justify-center text-[13px] font-medium text-zinc-500">
@@ -471,6 +484,73 @@ function ScreenshotOutput({
   );
 }
 
+function IntegrationOutput({
+  step,
+  outputText,
+}: {
+  step: WorkflowStepData;
+  outputText: string;
+}) {
+  const tool = toolName(step);
+  const provider =
+    step.step_type === "gmail" ||
+    step.step_type === "calendar" ||
+    step.step_type === "tasks" ||
+    step.step_type === "mcp"
+      ? step.step_type
+      : classifyAgentTool(tool);
+  const Icon =
+    provider === "gmail"
+      ? Mail
+      : provider === "calendar"
+        ? Calendar
+        : provider === "tasks"
+          ? ListTodo
+          : Plug;
+  const meta = step.metadata ?? {};
+  const result = objectValue(meta.result);
+  const title = tool ? displayAgentToolName(tool) : step.title || `${providerLabel(provider)} Tool`;
+  const args = step.args && Object.keys(step.args).length > 0 ? step.args : undefined;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-zinc-700 bg-[#1b1b1c] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon className="h-3.5 w-3.5 text-zinc-400" />
+            <span className="truncate text-[12px] font-medium text-zinc-300">{title}</span>
+          </div>
+          <span className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+            {providerLabel(provider)}
+          </span>
+        </div>
+      </div>
+
+      {args ? <JsonBlock label="Parameters" value={args} /> : null}
+      {result ? <JsonBlock label="Result" value={result} /> : null}
+      {outputText ? <PlainOutput text={outputText} /> : null}
+      {!args && !result && !outputText ? (
+        <div className="flex h-full items-center justify-center text-[13px] font-medium text-zinc-500">
+          {step.status === "in_progress" ? "Calling integration..." : "No integration output"}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function JsonBlock({ label, value }: { label: string; value: Record<string, unknown> }) {
+  return (
+    <div className="rounded-md border border-zinc-800 bg-black/20">
+      <div className="border-b border-zinc-800 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+        {label}
+      </div>
+      <pre className="whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-6 text-zinc-100">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
 function OutputBlock({
   label,
   text,
@@ -508,6 +588,10 @@ function stepIcon(type: StepType, status: StepStatus) {
   if (type === "browser") return <Globe className="h-3.5 w-3.5 text-zinc-400" />;
   if (type === "tool_call") return <Code2 className="h-3.5 w-3.5 text-zinc-400" />;
   if (type === "file_created") return <FileText className="h-3.5 w-3.5 text-zinc-400" />;
+  if (type === "gmail") return <Mail className="h-3.5 w-3.5 text-zinc-400" />;
+  if (type === "calendar") return <Calendar className="h-3.5 w-3.5 text-zinc-400" />;
+  if (type === "tasks") return <ListTodo className="h-3.5 w-3.5 text-zinc-400" />;
+  if (type === "mcp") return <Plug className="h-3.5 w-3.5 text-zinc-400" />;
   if (type === "observation" || type === "screenshot") return <Search className="h-3.5 w-3.5 text-zinc-400" />;
   return <Bot className="h-3.5 w-3.5 text-zinc-400" />;
 }

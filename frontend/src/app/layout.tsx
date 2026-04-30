@@ -4,6 +4,7 @@ import "./globals.css";
 
 import { LiveDesktopProvider } from "@/components/live-desktop-provider";
 import { AuthProvider } from "@/lib/auth-context";
+import { SettingsProvider } from "@/lib/settings-context";
 import { ToastProvider } from "@/components/toast-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 
@@ -45,7 +46,9 @@ export default function RootLayout({
         >
           <ToastProvider>
             <AuthProvider>
-              <LiveDesktopProvider>{children}</LiveDesktopProvider>
+              <SettingsProvider>
+                <LiveDesktopProvider>{children}</LiveDesktopProvider>
+              </SettingsProvider>
             </AuthProvider>
           </ToastProvider>
         </ThemeProvider>

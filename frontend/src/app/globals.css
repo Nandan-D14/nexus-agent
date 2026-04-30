@@ -4,32 +4,33 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  /* Base Colors */
-  --color-background: #ffffff;
+  /* Light Mode Colors */
+  --color-background: #fafafa;
   --color-foreground: #09090b;
   
-  /* Card & Surface Colors */
   --color-card: #ffffff;
   --color-card-foreground: #09090b;
   --color-card-border: #e4e4e7;
   
-  /* Muted & Zinc-based Colors */
   --color-muted: #f4f4f5;
   --color-muted-foreground: #71717a;
   
-  /* Primary Accents */
   --color-accent: #0ea5e9;
   --color-accent-foreground: #ffffff;
   
-  /* Status Colors */
   --color-success: #10b981;
   --color-warning: #f59e0b;
   --color-error: #ef4444;
   
-  /* Custom NEXUS Blue-Cyan Scale */
   --color-nexus-blue: #0ea5e9;
   --color-nexus-cyan: #22d3ee;
   --color-nexus-teal: #14b8a6;
+  
+  --color-sidebar-bg: #fafafa;
+  --color-sidebar-border: #e4e4e7;
+  
+  --color-input-bg: #ffffff;
+  --color-input-border: #e4e4e7;
   
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
@@ -41,21 +42,25 @@
 
 @layer base {
   .dark {
-    --color-background: #1a1a1c;
+    /* Dark Mode Colors */
+    --color-background: #0A0A0A;
     --color-foreground: #e4e4e7;
     
     --color-card: #161618;
     --color-card-foreground: #e4e4e7;
-    --color-card-border: rgba(39, 39, 42, 0.4); /* zinc-800/40 */
+    --color-card-border: rgba(39, 39, 42, 0.4);
     
     --color-muted: #242426;
     --color-muted-foreground: #a1a1aa;
     
-    --color-accent: #818cf8; /* indigo-400 */
+    --color-accent: #818cf8;
     --color-accent-foreground: #ffffff;
     
-    /*  Co-Computer Dark Mode specific Glows */
-    --color-nexus-glow: rgba(129, 140, 248, 0.1);
+    --color-sidebar-bg: #161618;
+    --color-sidebar-border: rgba(39, 39, 42, 0.4);
+    
+    --color-input-bg: #242426;
+    --color-input-border: rgba(39, 39, 42, 0.4);
   }
 }
 
@@ -210,7 +215,7 @@
 }
 
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 {
-  @apply font-bold text-zinc-100 mt-6 mb-3 tracking-tight;
+  @apply font-bold text-foreground mt-6 mb-3 tracking-tight;
 }
 
 .markdown h1 { @apply text-xl; }
@@ -218,7 +223,7 @@
 .markdown h3 { @apply text-[16px]; }
 
 .markdown a {
-  @apply text-indigo-400 hover:text-indigo-300 hover:underline underline-offset-4 transition-colors;
+  @apply text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 hover:underline underline-offset-4 transition-colors;
 }
 
 .markdown code {
@@ -226,11 +231,11 @@
 }
 
 .markdown :not(pre) > code {
-  @apply px-1.5 py-0.5 rounded-md bg-zinc-800/80 border border-zinc-700/50 text-indigo-300 font-medium text-[0.9em];
+  @apply px-1.5 py-0.5 rounded-md bg-zinc-200 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700/50 text-indigo-700 dark:text-indigo-300 font-medium text-[0.9em];
 }
 
 .markdown pre {
-  @apply my-5 p-5 rounded-2xl overflow-x-auto bg-[#0d0d0f] border border-zinc-800/80 shadow-2xl;
+  @apply my-5 p-5 rounded-2xl overflow-x-auto bg-zinc-100 dark:bg-[#0d0d0f] border border-zinc-300 dark:border-zinc-800/80 shadow-2xl;
 }
 
 .markdown pre code {
@@ -239,6 +244,10 @@
   border: none;
   font-size: 13px;
   line-height: 1.7;
+  color: #09090b;
+}
+
+.dark .markdown pre code {
   color: #e4e4e7;
 }
 
@@ -255,32 +264,32 @@
 }
 
 .markdown blockquote {
-  @apply my-5 pl-5 border-l-4 border-indigo-500/50 text-zinc-400 italic bg-indigo-500/5 py-2 rounded-r-lg;
+  @apply my-5 pl-5 border-l-4 border-indigo-500/50 text-muted-foreground italic bg-indigo-500/5 py-2 rounded-r-lg;
 }
 
 .markdown hr {
-  @apply my-8 border-zinc-800/80;
+  @apply my-8 border-zinc-300 dark:border-zinc-800/80;
 }
 
 .markdown-table-wrapper {
-  @apply w-full overflow-x-auto my-5 rounded-xl border border-zinc-800/80 bg-zinc-900/30;
+  @apply w-full overflow-x-auto my-5 rounded-xl border border-zinc-300 dark:border-zinc-800/80 bg-zinc-50 dark:bg-zinc-900/30;
 }
 
 .markdown table {
-  @apply w-full border-collapse text-[13px] text-zinc-300;
+  @apply w-full border-collapse text-[13px] text-foreground;
 }
 
 .markdown th,
 .markdown td {
-  @apply border-b border-zinc-800/80 px-4 py-3 text-left;
+  @apply border-b border-zinc-300 dark:border-zinc-800/80 px-4 py-3 text-left;
 }
 
 .markdown th {
-  @apply bg-zinc-800/50 font-bold text-zinc-100 uppercase tracking-wider text-[11px];
+  @apply bg-zinc-200 dark:bg-zinc-800/50 font-bold text-foreground uppercase tracking-wider text-[11px];
 }
 
 .markdown img {
-  @apply max-w-full h-auto rounded-2xl border border-zinc-800/80 my-5 shadow-2xl;
+  @apply max-w-full h-auto rounded-2xl border border-zinc-300 dark:border-zinc-800/80 my-5 shadow-2xl;
 }
 
 .chat-code-block {

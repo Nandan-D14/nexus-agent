@@ -2,6 +2,11 @@
 
 import { useRef, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  classifyAgentTool,
+  displayAgentToolName,
+  providerLabel,
+} from "@/lib/agent-tool-classification";
 
 type ActivityEvent = {
   type: string;
@@ -153,18 +158,21 @@ function ToolCallEntry({
   const argsStr = Object.entries(args)
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(", ");
+  const provider = classifyAgentTool(tool);
+  const label = providerLabel(provider);
+  const displayName = displayAgentToolName(tool);
 
   return (
     <div className="bg-cyan-500/5 border border-cyan-500/10 rounded-lg p-2.5 space-y-1">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <TimeStamp time={time} />
-          <span className="text-cyan-500 font-black uppercase tracking-widest">Call</span>
+          <span className="text-cyan-500 font-black uppercase tracking-widest">{label}</span>
         </div>
         <div className="w-1.5 h-1.5 rounded-full bg-cyan-500/40 animate-pulse" />
       </div>
       <div className="min-w-0">
-        <span className="text-zinc-100 font-bold">{tool}</span>
+        <span className="text-zinc-100 font-bold">{displayName}</span>
         <span className="text-zinc-500 ml-1.5 break-all">({argsStr})</span>
       </div>
     </div>
@@ -182,15 +190,18 @@ function ToolResultEntry({
   output: string;
 }) {
   const truncated = output.length > 200 ? output.slice(0, 200) + "..." : output;
+  const provider = classifyAgentTool(tool);
+  const label = providerLabel(provider);
+  const displayName = displayAgentToolName(tool);
 
   return (
     <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-lg p-2.5 space-y-1">
       <div className="flex items-center gap-2">
         <TimeStamp time={time} />
-        <span className="text-emerald-500 font-black uppercase tracking-widest">Return</span>
+        <span className="text-emerald-500 font-black uppercase tracking-widest">{label} Return</span>
       </div>
       <div className="min-w-0">
-        <span className="text-zinc-400 font-bold">{tool}</span>
+        <span className="text-zinc-400 font-bold">{displayName}</span>
         <span className="text-zinc-500 mx-2">→</span>
         <span className="text-zinc-300 break-all leading-relaxed font-light">{truncated}</span>
       </div>

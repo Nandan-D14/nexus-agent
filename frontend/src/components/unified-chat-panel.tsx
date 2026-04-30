@@ -135,8 +135,7 @@ export function UnifiedChatPanel({
                       <div className="w-6 h-6 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
                         <IconCpu className="w-4 h-4 text-indigo-400" />
                       </div>
-                      <span className="font-bold text-[15px] tracking-tight text-zinc-100">CoComputer</span>
-                      <span className="text-[9px] text-indigo-400/80 border border-indigo-500/20 rounded px-1.5 py-0.5 ml-1 bg-indigo-500/5 font-bold uppercase tracking-wider">Lite</span>
+                      <span className="font-bold text-[15px] tracking-tight text-foreground">CoComputer</span>
                     </div>
 
                     {turn.events.length > 0 && (
@@ -198,7 +197,7 @@ export function UnifiedChatPanel({
 function UserMessageCard({ text }: { text: string }) {
   return (
     <div className="flex w-full justify-end py-1">
-      <div className="max-w-[85%] rounded-2xl bg-[#27272a] px-5 py-4 text-[15px] leading-relaxed text-zinc-100 shadow-sm border border-zinc-700/30">
+      <div className="max-w-[85%] rounded-2xl bg-zinc-900 dark:bg-[#27272a] px-5 py-4 text-[15px] leading-relaxed text-white dark:text-zinc-100 shadow-sm border border-zinc-700/30">
         {text}
       </div>
     </div>
@@ -212,7 +211,7 @@ function UserMessageCard({ text }: { text: string }) {
 function AgentMessageCard({ text }: { text: string }) {
   return (
     <motion.div layout className="flex flex-col items-start px-0.5">
-      <div className="w-full text-[15px] leading-relaxed text-zinc-200 font-normal">
+      <div className="w-full text-[15px] leading-relaxed text-foreground font-normal">
         <ChatMarkdown content={text} />
       </div>
     </motion.div>
@@ -245,7 +244,7 @@ function AgentActionStream({ events, isWorking }: { events: Extract<ChatItem, { 
         onClick={() => setExpanded(!expanded)}
       >
         <IconCheckCircle className={`w-4 h-4 ${isWorking ? "text-cyan-500 animate-pulse" : "text-zinc-500"}`} />
-        <span className="font-semibold text-zinc-200">{isWorking ? currentAction : "Execution Log"}</span>
+        <span className="font-semibold text-foreground">{isWorking ? currentAction : "Execution Log"}</span>
         <IconChevronUp className={`w-4 h-4 text-zinc-500 ml-1 transition-transform ${expanded ? "" : "rotate-180"}`} />
       </div>
 
@@ -281,7 +280,7 @@ function WorkflowStyleRow({ item }: { item: Extract<ChatItem, { kind: "event" }>
         <div className="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
           <IconCompass className="w-[14px] h-[14px] text-zinc-500" />
         </div>
-        <p className="text-zinc-300 text-[14px] mt-1 pr-4 leading-relaxed">
+        <p className="text-foreground text-[14px] mt-1 pr-4 leading-relaxed">
           {String(item["content"] || "Thinking...")}
         </p>
       </div>
@@ -294,12 +293,12 @@ function WorkflowStyleRow({ item }: { item: Extract<ChatItem, { kind: "event" }>
         <div className="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
           <IconTerminal className="w-[14px] h-[14px] text-zinc-500" />
         </div>
-        <div className="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+        <div className="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-muted-foreground dark:text-zinc-400 flex items-center gap-2 inline-flex w-fit">
           <IconGlobe className="w-3.5 h-3.5" /> 
           <span>Using {String(item["tool"])}</span>
         </div>
         {item["args"] != null ? (
-          <div className="pl-1 text-[12px] font-mono text-zinc-500 dark:text-zinc-500 break-all bg-black/20 rounded p-2 mt-1">
+          <div className="pl-1 text-[12px] font-mono text-muted-foreground break-all bg-black/20 dark:bg-black/20 rounded p-2 mt-1">
             {JSON.stringify(item["args"])}
           </div>
         ) : null}
@@ -310,7 +309,7 @@ function WorkflowStyleRow({ item }: { item: Extract<ChatItem, { kind: "event" }>
   if (item.type === "agent_tool_result") {
     return (
       <div className="pl-1 py-1 w-full relative">
-        <div className="w-full max-h-32 overflow-y-auto custom-scrollbar bg-zinc-900/50 border border-zinc-800/50 rounded-lg p-2.5 text-[11px] font-mono text-zinc-500 whitespace-pre-wrap break-words">
+        <div className="w-full max-h-32 overflow-y-auto custom-scrollbar bg-zinc-900/50 dark:bg-zinc-900/50 border border-zinc-800/50 dark:border-zinc-800/50 rounded-lg p-2.5 text-[11px] font-mono text-muted-foreground dark:text-zinc-500 whitespace-pre-wrap break-words">
           {String(item["output"] || "Success")}
         </div>
       </div>
@@ -323,13 +322,13 @@ function WorkflowStyleRow({ item }: { item: Extract<ChatItem, { kind: "event" }>
         <div className="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
           <IconEye className="w-[14px] h-[14px] text-zinc-500" />
         </div>
-        <div className="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
+        <div className="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-muted-foreground dark:text-zinc-400 flex items-center gap-2 inline-flex w-fit">
           <IconEye className="w-3.5 h-3.5" /> 
           <span>Vision Analysis</span>
         </div>
         <div className="pl-1 space-y-2 mt-1">
           {typeof item["analysis"] === "string" && item["analysis"] && (
-            <p className="text-[14px] text-zinc-300 leading-relaxed pr-4">{item["analysis"]}</p>
+            <p className="text-[14px] text-foreground leading-relaxed pr-4">{item["analysis"]}</p>
           )}
           {typeof item["image_b64"] === "string" && item["image_b64"] && (
              <div className="relative w-[160px] h-[100px] rounded overflow-hidden border border-zinc-700/80 brightness-75 hover:brightness-100 transition">
@@ -376,7 +375,7 @@ function WorkflowStyleRow({ item }: { item: Extract<ChatItem, { kind: "event" }>
 function DelegationBadge({ from, to }: { from: string; to: string }) {
   return (
     <div className="flex justify-center py-4">
-      <span className="text-[12px] font-medium text-zinc-400 dark:text-zinc-500 italic">
+      <span className="text-[12px] font-medium text-muted-foreground italic">
         {from} handed off to {to}
       </span>
     </div>

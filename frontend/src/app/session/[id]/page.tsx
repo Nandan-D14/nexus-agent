@@ -375,6 +375,7 @@ export default function SessionPage() {
   const [pendingMicStart, setPendingMicStart] = useState(false);
   const [agentStatus, setAgentStatus] = useState("");
   const [agentAction, setAgentAction] = useState<AgentVisualAction | null>(null);
+  const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [isTemplateDialogOpen, setIsTemplateDialogOpen] = useState(false);
   const [templateDraft, setTemplateDraft] = useState<TemplateFormValue>(EMPTY_TEMPLATE);
   const [isSavingTemplate, setIsSavingTemplate] = useState(false);
