@@ -72,7 +72,7 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         first_runner = object()
         second_runner = object()
 
-        def fake_create_multi_agent(runtime_config, task_model_override=None):
+        def fake_create_multi_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
             created_models.append(runtime_config.gemini_agent_model)
             return MagicMock(name=f"agent-{runtime_config.gemini_agent_model}")
 
@@ -129,7 +129,7 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         first_runner = object()
         second_runner = object()
 
-        def fake_create_multi_agent(runtime_config, task_model_override=None):
+        def fake_create_multi_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
             created_models.append(runtime_config.gemini_agent_model)
             return MagicMock(name=f"agent-{runtime_config.gemini_agent_model}")
 
