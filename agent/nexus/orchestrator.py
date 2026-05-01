@@ -386,10 +386,12 @@ class NexusOrchestrator:
             )
             return True
         if decision.mode == "search":
-            await self._run_fast_search(text)
-            return True
+            return await self._run_fast_search(text)
         if decision.mode == "current":
             await self._run_fast_current_lookup(text)
+            return True
+        if decision.mode == "capability":
+            await self._send_capability_response()
             return True
         if decision.mode == "ask":
             return await self._run_fast_answer(text, source=source)
@@ -407,6 +409,15 @@ class NexusOrchestrator:
             except Exception:
                 logger.warning("Failed to send fast-path response to voice", exc_info=True)
         await self._send_json({"type": "agent_complete", "summary": answer[:200]})
+
+    async def _send_capability_response(self) -> None:
+        text = (
+            "Yes. CoComputer has native tools for Google Drive, Gmail, Google Calendar, "
+            "and Google Tasks when your Google connector is connected. I do not have a "
+            "personal Gmail account; I use your connected account through OAuth tools. "
+            "For those services I should use the native tools, not browser sign-in."
+        )
+        await self._send_agent_fast_response(text, source="capability")
 
     async def _run_fast_answer(self, text: str, *, source: str) -> bool:
         if not self.runtime_config.gemini_available:
@@ -466,13 +477,15 @@ class NexusOrchestrator:
             response.raise_for_status()
             return parse_duckduckgo_results(response.text, max_results=max_results)
 
-    async def _run_fast_search(self, text: str) -> None:
+    async def _run_fast_search(self, text: str) -> bool:
         query = extract_search_query(text)
         start = time.monotonic()
         key = cache_key("fast_search", query)
         cached = get_cached_value(key)
         if cached:
             answer, metadata = cached
+            if str(answer).startswith("No clear web results found for:"):
+                return False
             logger.info(
                 "Fast route completed session=%s route=search cache=hit latency_ms=%d results=%s",
                 self.session.id,
@@ -480,14 +493,18 @@ class NexusOrchestrator:
                 metadata.get("result_count", "?"),
             )
             await self._send_agent_fast_response(str(answer), source="fast_search_cache")
-            return
+            return True
         await self._send_json({"type": "agent_thinking", "content": "Searching web..."})
         try:
             results = await self._fetch_fast_search_results(query, max_results=4)
             if not results:
-                answer = f"No clear web results found for: {query}"
-            else:
-                answer = self._format_fast_results(query, results)
+                logger.info(
+                    "Fast route found no parsed web results for session=%s query=%s; falling back to normal agent",
+                    self.session.id,
+                    query,
+                )
+                return False
+            answer = self._format_fast_results(query, results)
             set_cached_value(
                 key,
                 answer,
@@ -501,12 +518,14 @@ class NexusOrchestrator:
                 len(results),
             )
             await self._send_agent_fast_response(answer, source="fast_search")
+            return True
         except Exception as exc:
             logger.warning("Fast web search failed", exc_info=True)
             await self._send_agent_fast_response(
                 f"Web search failed: {self._clip_text(str(exc), 240)}",
                 source="fast_search_error",
             )
+            return True
 
     def _format_fast_results(self, query: str, results: list[dict[str, str]]) -> str:
         lines = [f"Top results for: {query}"]

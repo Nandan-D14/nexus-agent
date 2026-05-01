@@ -58,6 +58,10 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("prepare_task_workspace", tool_names)
         self.assertIn("write_todo_list", tool_names)
         self.assertIn("list_workspace_files", tool_names)
+        self.assertIn("search_drive", tool_names)
+        self.assertIn("gmail_search", tool_names)
+        self.assertIn("calendar_list", tool_names)
+        self.assertIn("tasks_list", tool_names)
 
     def test_sub_agent_tool_surfaces_match_cli_first_policy(self) -> None:
         computer_tools = _tool_names(self.sub_agents["computer_agent"])
@@ -74,21 +78,34 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertNotIn("open_browser", computer_tools)
         self.assertIn("write_workspace_file", computer_tools)
         self.assertIn("write_todo_list", computer_tools)
+        self.assertIn("gmail_search", computer_tools)
+        self.assertIn("calendar_list", computer_tools)
+        self.assertIn("tasks_list", computer_tools)
 
         self.assertIn("open_browser", browser_tools)
         self.assertIn("run_command", browser_tools)
         self.assertIn("web_search", browser_tools)
         self.assertIn("scrape_web_page", browser_tools)
         self.assertIn("write_workspace_file", browser_tools)
+        self.assertIn("gmail_search", browser_tools)
+        self.assertIn("calendar_list", browser_tools)
+        self.assertIn("tasks_list", browser_tools)
 
         self.assertIn("run_command", code_tools)
         self.assertIn("take_screenshot", code_tools)
         self.assertIn("write_workspace_file", code_tools)
         self.assertIn("update_todo_item", code_tools)
+        self.assertIn("gmail_search", code_tools)
+        self.assertIn("calendar_list", code_tools)
+        self.assertIn("tasks_list", code_tools)
 
         self.assertIn("request_background_task", deepresearcher_tools)
         self.assertIn("prepare_task_workspace", deepresearcher_tools)
         self.assertIn("write_workspace_file", deepresearcher_tools)
+        self.assertIn("search_drive", deepresearcher_tools)
+        self.assertIn("gmail_search", deepresearcher_tools)
+        self.assertIn("calendar_list", deepresearcher_tools)
+        self.assertIn("tasks_list", deepresearcher_tools)
         self.assertNotIn("run_command", deepresearcher_tools)
         self.assertNotIn("take_screenshot", deepresearcher_tools)
         self.assertNotIn("open_browser", deepresearcher_tools)
@@ -97,15 +114,18 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertNotIn("run_command", research_computer_tools)
         self.assertNotIn("open_browser", research_computer_tools)
         self.assertIn("write_workspace_file", research_computer_tools)
+        self.assertIn("gmail_search", research_computer_tools)
 
         self.assertIn("open_browser", research_browser_tools)
         self.assertIn("run_command", research_browser_tools)
         self.assertIn("web_search", research_browser_tools)
         self.assertIn("scrape_web_page", research_browser_tools)
+        self.assertIn("gmail_search", research_browser_tools)
 
         self.assertIn("run_command", research_code_tools)
         self.assertIn("take_screenshot", research_code_tools)
         self.assertIn("write_workspace_file", research_code_tools)
+        self.assertIn("gmail_search", research_code_tools)
 
         self.assertIn("prepare_task_workspace", single_agent_tools)
         self.assertIn("write_todo_list", single_agent_tools)
@@ -113,11 +133,16 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("scrape_web_page", single_agent_tools)
         self.assertIn("run_command", single_agent_tools)
         self.assertIn("take_screenshot", single_agent_tools)
+        self.assertIn("gmail_search", single_agent_tools)
+        self.assertIn("calendar_list", single_agent_tools)
+        self.assertIn("tasks_list", single_agent_tools)
 
     def test_orchestrator_prompt_enforces_routing_order(self) -> None:
         instruction = self.agent.instruction.lower()
 
         self.assertIn("code_agent is the first choice for terminal and file-system tasks", instruction)
+        self.assertIn("native connector tools are the first choice for connected saas accounts", instruction)
+        self.assertIn("do not open google apps in the browser", instruction)
         self.assertIn("browser_agent is for web tasks", instruction)
         self.assertIn("computer_agent is only for gui or visual tasks", instruction)
         self.assertIn("deepresearcher is for explicit deep-research tasks", instruction)
@@ -142,6 +167,7 @@ class AgentRoutingPolicyTests(TestCase):
         single_instruction = self.single_agent.instruction.lower()
 
         self.assertIn("only for tasks that truly require gui or visual state", computer_instruction)
+        self.assertIn("use the native google workspace tools before browser or desktop sign-in", computer_instruction)
         self.assertIn("do not use screenshots just to explore", computer_instruction)
         self.assertIn("do not gather normal research sources or author the report in the gui", research_computer_instruction)
         self.assertIn("open or focus the finished file instead of re-authoring it in the gui", computer_instruction)
@@ -149,6 +175,7 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("write_workspace_file(\"notes.md\"", computer_instruction)
 
         self.assertIn("you are only for browser and website tasks", browser_instruction)
+        self.assertIn("use the native google workspace tools before opening google apps in firefox", browser_instruction)
         self.assertIn("local repo, file-system, and non-web terminal tasks; those belong to code_agent", browser_instruction)
         self.assertIn("use run_command only for narrow helper cases", browser_instruction)
         self.assertIn("use web_search(query) for discovery", browser_instruction)
@@ -159,6 +186,7 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("if a source blocks scraping, record that it was blocked and continue with alternative sources", research_browser_instruction)
 
         self.assertIn("start with shell and file inspection before any screenshot", code_instruction)
+        self.assertIn("use the native google workspace tools before browser or desktop sign-in", code_instruction)
         self.assertIn("take_screenshot() is a last resort", code_instruction)
         self.assertIn("if the task is actually web navigation or web reading, return control for browser_agent", code_instruction)
         self.assertIn("generating dashboards, reports, html files, and other workspace deliverables is code_agent work", code_instruction)
@@ -192,6 +220,23 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("for clear non-simple work, call prepare_task_workspace", single_instruction)
         self.assertIn("write a fresh 3-7 step plan with write_todo_list", single_instruction)
         self.assertIn("prefer run_command", single_instruction)
+        self.assertIn("prefer native google workspace tools", single_instruction)
         self.assertIn("prefer web_search(...) and scrape_web_page(...)", single_instruction)
         self.assertIn("research, summarization, report writing, and html dashboard generation are not gui tasks by themselves", single_instruction)
         self.assertIn("do not reason from an old screenshot after a ui-changing action", single_instruction)
+
+    def test_enabled_skill_instructions_reach_all_multi_agent_workers(self) -> None:
+        skill_instruction = "Enabled CoComputer skills:\n- Custom Skill: use the exact custom workflow."
+        agent = create_multi_agent(_runtime_config(), skill_instruction=skill_instruction)
+        sub_agents = {sub_agent.name: sub_agent for sub_agent in agent.sub_agents}
+        deepresearcher = sub_agents["deepresearcher"]
+        research_sub_agents = {sub_agent.name: sub_agent for sub_agent in deepresearcher.sub_agents}
+
+        self.assertIn("exact custom workflow", agent.instruction)
+        self.assertIn("exact custom workflow", sub_agents["computer_agent"].instruction)
+        self.assertIn("exact custom workflow", sub_agents["browser_agent"].instruction)
+        self.assertIn("exact custom workflow", sub_agents["code_agent"].instruction)
+        self.assertIn("exact custom workflow", deepresearcher.instruction)
+        self.assertIn("exact custom workflow", research_sub_agents["research_computer_agent"].instruction)
+        self.assertIn("exact custom workflow", research_sub_agents["research_browser_agent"].instruction)
+        self.assertIn("exact custom workflow", research_sub_agents["research_code_agent"].instruction)

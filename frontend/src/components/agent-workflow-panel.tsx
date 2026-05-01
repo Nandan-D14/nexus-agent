@@ -109,14 +109,14 @@ export function AgentWorkflowPanel({
 
   return (
     <div className="h-full flex flex-col bg-[#111113] text-zinc-100">
-      <div className="shrink-0 border-b border-zinc-800 bg-[#141416] px-5 py-4">
+      <div className="shrink-0 border-b border-zinc-800 bg-[#141416] px-4 py-2">
         <div className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-[#202023]">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-[#202023]">
               <MonitorCog className="h-5 w-5 text-zinc-300" />
             </div>
             <div className="min-w-0">
-              <div className="truncate text-[15px] font-semibold tracking-tight text-zinc-100">
+              <div className="truncate text-[14px] font-semibold tracking-tight text-zinc-100">
                 {run.title || "CoComputer"}
               </div>
               <div className="mt-1 flex min-w-0 items-center gap-2 text-[12px] text-zinc-400">
@@ -154,9 +154,9 @@ export function AgentWorkflowPanel({
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,36%)_1fr] gap-0 bg-[#111113] max-md:grid-cols-1">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(10px,14%)_1fr] gap-0 bg-[#111113] max-md:grid-cols-1">
         <div className="min-h-0 border-r border-zinc-800 bg-[#09090b] max-md:h-[38vh] max-md:border-b max-md:border-r-0">
-          <div ref={scrollRef} className="h-full overflow-y-auto px-6 py-8 relative scroll-smooth custom-scrollbar">
+          <div ref={scrollRef} className="h-full overflow-y-auto px-4 py-4 relative scroll-smooth custom-scrollbar">
             <div className="absolute left-[36px] top-10 bottom-10 w-[1px] bg-zinc-800/40" />
             <div className="space-y-1 relative z-10">
               <AnimatePresence initial={false} mode="popLayout">

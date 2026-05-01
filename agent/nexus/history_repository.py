@@ -2989,39 +2989,75 @@ class FirestoreHistoryRepository:
         last_error: str | None,
     ) -> StoredIntegrationConnection:
         now = utcnow()
-        connection_id = "google_drive"
-        existing = self._integration_private_ref(uid, connection_id).get()
-        existing_data = existing.to_dict() if existing.exists else {}
-        private_payload = {
-            "ownerId": uid,
-            "connectorType": "native",
-            "provider": "google_drive",
-            "name": "Google Drive",
-            "enabled": enabled,
-            "tools": [
-                {"name": "search_drive", "description": "Search Google Drive files."},
-                {"name": "read_drive_file", "description": "Read a Google Drive file."},
-                {"name": "create_drive_doc", "description": "Create a Google Docs document."},
-                {"name": "upload_drive_file", "description": "Upload a file to Google Drive."},
-            ],
-            "resources": [],
-            "status": status,
-            "lastError": last_error,
-            "lastCheckedAt": now,
-            "createdAt": existing_data.get("createdAt") or now,
-            "updatedAt": now,
+        specs = {
+            "google_drive": {
+                "provider": "google_drive",
+                "name": "Google Drive",
+                "tools": [
+                    {"name": "search_drive", "description": "Search Google Drive files."},
+                    {"name": "read_drive_file", "description": "Read a Google Drive file."},
+                    {"name": "create_drive_doc", "description": "Create a Google Docs document."},
+                    {"name": "upload_drive_file", "description": "Upload a file to Google Drive."},
+                ],
+            },
+            "gmail": {
+                "provider": "gmail",
+                "name": "Gmail",
+                "tools": [
+                    {"name": "gmail_search", "description": "Search Gmail messages."},
+                    {"name": "gmail_read", "description": "Read a Gmail message."},
+                    {"name": "gmail_send", "description": "Send a Gmail message."},
+                ],
+            },
+            "google_calendar": {
+                "provider": "google_calendar",
+                "name": "Google Calendar",
+                "tools": [
+                    {"name": "calendar_list", "description": "List Google Calendar events."},
+                    {"name": "calendar_create", "description": "Create a Google Calendar event."},
+                ],
+            },
+            "google_tasks": {
+                "provider": "google_tasks",
+                "name": "Google Tasks",
+                "tools": [
+                    {"name": "tasks_list", "description": "List Google Tasks."},
+                    {"name": "tasks_create", "description": "Create a Google Task."},
+                ],
+            },
         }
-        public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
-        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        private_by_id: dict[str, dict[str, Any]] = {}
+        public_by_id: dict[str, dict[str, Any]] = {}
+        for connection_id, spec in specs.items():
+            existing = self._integration_private_ref(uid, connection_id).get()
+            existing_data = existing.to_dict() if existing.exists else {}
+            private_payload = {
+                "ownerId": uid,
+                "connectorType": "native",
+                "provider": spec["provider"],
+                "name": spec["name"],
+                "enabled": enabled,
+                "tools": spec["tools"],
+                "resources": [],
+                "status": status,
+                "lastError": last_error,
+                "lastCheckedAt": now,
+                "createdAt": existing_data.get("createdAt") or now,
+                "updatedAt": now,
+            }
+            public_payload = self._public_integration_payload(private_payload)
+            private_by_id[connection_id] = private_payload
+            public_by_id[connection_id] = public_payload
+            batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+            batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
         return self._build_stored_integration_connection(
             uid,
-            connection_id,
-            public_payload,
-            private_payload,
+            "google_drive",
+            public_by_id["google_drive"],
+            private_by_id["google_drive"],
         )
 
     def _update_integration_connection_sync(

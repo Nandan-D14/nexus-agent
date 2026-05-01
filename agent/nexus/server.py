@@ -1809,9 +1809,7 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
 async def list_integration_connections(user: AuthenticatedUser = Depends(require_current_user)):
     user_settings = await history_repository.get_user_settings(user.uid)
     if (user_settings or {}).get("googleDriveRefreshToken"):
-        drive_connection = await history_repository.get_integration_connection(user.uid, "google_drive")
-        if not drive_connection:
-            await history_repository.upsert_google_drive_connection(user.uid)
+        await history_repository.upsert_google_drive_connection(user.uid)
     connections = await history_repository.list_integration_connections(user.uid)
     return {
         "connections": [
@@ -2081,13 +2079,15 @@ async def exchange_google_drive_code_compat(
 async def disconnect_google(user: AuthenticatedUser = Depends(require_current_user)):
     """Remove Google connection for the current user."""
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})
-    await history_repository.delete_integration_connection(user.uid, "google_drive")
+    for connection_id in ("google_drive", "gmail", "google_calendar", "google_tasks"):
+        await history_repository.delete_integration_connection(user.uid, connection_id)
     return {"status": "disconnected"}
 
 async def disconnect_google_drive(user: AuthenticatedUser = Depends(require_current_user)):
     """Remove the user's stored Google Drive refresh token."""
     await history_repository.update_user_settings(user.uid, {"googleDriveRefreshToken": None})
-    await history_repository.delete_integration_connection(user.uid, "google_drive")
+    for connection_id in ("google_drive", "gmail", "google_calendar", "google_tasks"):
+        await history_repository.delete_integration_connection(user.uid, connection_id)
     return {"status": "disconnected"}
 
 

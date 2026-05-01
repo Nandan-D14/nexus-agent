@@ -222,7 +222,9 @@ def build_enabled_skills_prompt(user_settings: dict[str, Any] | None, limit: int
         return ""
     lines = [
         "Enabled CoComputer skills:",
-        "Use these reusable skills when their trigger matches the user's request. A skill is instructions and routing guidance, not a connector by itself.",
+        "Before choosing an agent or tool, scan these skills and apply every skill whose trigger matches the user's request.",
+        "A skill is reusable instructions and routing guidance, not a connector by itself. Use the matching callable tools only when they are available.",
+        "If no skill matches, continue with the normal routing policy.",
     ]
     for skill in enabled[:limit]:
         trigger = skill.get("trigger") or skill.get("description") or ""

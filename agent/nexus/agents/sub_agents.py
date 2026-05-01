@@ -20,6 +20,19 @@ from nexus.tools.screen import take_screenshot
 from nexus.tools.bash import run_command
 from nexus.tools.browser import open_browser
 from nexus.tools.web import web_search, scrape_web_page
+from nexus.tools.integrations import (
+    search_drive,
+    read_drive_file,
+    create_drive_doc,
+    upload_drive_file,
+    gmail_search,
+    gmail_read,
+    gmail_send,
+    tasks_list,
+    tasks_create,
+    calendar_list,
+    calendar_create,
+)
 from nexus.tools.workspace import (
     prepare_task_workspace,
     write_todo_list,
@@ -28,6 +41,20 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
+
+GOOGLE_WORKSPACE_TOOLS = [
+    search_drive,
+    read_drive_file,
+    create_drive_doc,
+    upload_drive_file,
+    gmail_search,
+    gmail_read,
+    gmail_send,
+    tasks_list,
+    tasks_create,
+    calendar_list,
+    calendar_create,
+]
 
 # ---------------------------------------------------------------------------
 # Sub-agent system prompts
@@ -61,6 +88,7 @@ Workflow:
 9. Mark the step done with update_todo_item(...), then continue with the next GUI action.
 
 Rules:
+- For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before browser or desktop sign-in.
 - Do not use screenshots just to explore. Assume another agent should prepare non-visual context first.
 - After taking a screenshot, act on it. Do not only describe the screen.
 - Do not reason from an old screenshot after any UI-changing action.
@@ -110,6 +138,7 @@ Workflow:
 9. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
 
 Rules:
+- For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before opening Google apps in Firefox.
 - Prefer web_search and scrape_web_page for discovery and capture before interactive browsing.
 - For research, article summarization, or news gathering, stay in web_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
 - If scrape_web_page returns an error such as 401, 403, or 429, treat that source as blocked instead of failing the whole task.
@@ -168,6 +197,7 @@ Workflow:
 10. Mark the step done with update_todo_item(...).
 
 Rules:
+- For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before browser or desktop sign-in.
 - take_screenshot() is a last resort, not the default workflow.
 - Generating dashboards, reports, HTML files, and other workspace deliverables is code_agent work, even if the user will later view the result in a browser or app.
 - If the task is actually web navigation or web reading, return control for browser_agent.
@@ -248,6 +278,12 @@ Research context:
 # Sub-agent factories
 # ---------------------------------------------------------------------------
 
+def _with_skill_instruction(instruction: str, skill_instruction: str = "") -> str:
+    if not skill_instruction.strip():
+        return instruction
+    return f"{instruction}\n\n{skill_instruction.strip()}"
+
+
 def _get_model(runtime_config: SessionRuntimeConfig):
     """Return the model identifier for sub-agents."""
     if runtime_config.use_kilo:
@@ -280,6 +316,7 @@ def _create_computer_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            *GOOGLE_WORKSPACE_TOOLS,
             take_screenshot,
             move_mouse,
             left_click,
@@ -310,6 +347,7 @@ def _create_browser_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            *GOOGLE_WORKSPACE_TOOLS,
             web_search,
             scrape_web_page,
             open_browser,
@@ -340,6 +378,7 @@ def _create_code_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            *GOOGLE_WORKSPACE_TOOLS,
             run_command,
             take_screenshot,
             type_text,
@@ -348,36 +387,46 @@ def _create_code_agent(
     )
 
 
-def create_computer_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def create_computer_agent(
+    runtime_config: SessionRuntimeConfig,
+    skill_instruction: str = "",
+) -> Agent:
     """Create the Computer Agent for GUI interactions."""
     return _create_computer_agent(
         runtime_config,
         name="computer_agent",
-        instruction=COMPUTER_AGENT_PROMPT,
+        instruction=_with_skill_instruction(COMPUTER_AGENT_PROMPT, skill_instruction),
     )
 
 
-def create_browser_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def create_browser_agent(
+    runtime_config: SessionRuntimeConfig,
+    skill_instruction: str = "",
+) -> Agent:
     """Create the Browser Agent for web browsing and research."""
     return _create_browser_agent(
         runtime_config,
         name="browser_agent",
-        instruction=BROWSER_AGENT_PROMPT,
+        instruction=_with_skill_instruction(BROWSER_AGENT_PROMPT, skill_instruction),
     )
 
 
-def create_code_agent(runtime_config: SessionRuntimeConfig) -> Agent:
+def create_code_agent(
+    runtime_config: SessionRuntimeConfig,
+    skill_instruction: str = "",
+) -> Agent:
     """Create the Code Agent for terminal commands and code execution."""
     return _create_code_agent(
         runtime_config,
         name="code_agent",
-        instruction=CODE_AGENT_PROMPT,
+        instruction=_with_skill_instruction(CODE_AGENT_PROMPT, skill_instruction),
     )
 
 
 def create_deepresearcher_agent(
     runtime_config: SessionRuntimeConfig,
     extra_tools: list | None = None,
+    skill_instruction: str = "",
 ) -> Agent:
     """Create the DeepResearcher coordinator with research-specific workers."""
     tools: list = []
@@ -387,23 +436,23 @@ def create_deepresearcher_agent(
     research_computer = _create_computer_agent(
         runtime_config,
         name="research_computer_agent",
-        instruction=RESEARCH_COMPUTER_AGENT_PROMPT,
+        instruction=_with_skill_instruction(RESEARCH_COMPUTER_AGENT_PROMPT, skill_instruction),
     )
     research_browser = _create_browser_agent(
         runtime_config,
         name="research_browser_agent",
-        instruction=RESEARCH_BROWSER_AGENT_PROMPT,
+        instruction=_with_skill_instruction(RESEARCH_BROWSER_AGENT_PROMPT, skill_instruction),
     )
     research_code = _create_code_agent(
         runtime_config,
         name="research_code_agent",
-        instruction=RESEARCH_CODE_AGENT_PROMPT,
+        instruction=_with_skill_instruction(RESEARCH_CODE_AGENT_PROMPT, skill_instruction),
     )
 
     return Agent(
         name="deepresearcher",
         model=_get_model(runtime_config),
-        instruction=DEEPRESEARCHER_PROMPT,
+        instruction=_with_skill_instruction(DEEPRESEARCHER_PROMPT, skill_instruction),
         tools=tools,
         sub_agents=[research_browser, research_code, research_computer],
     )

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Literal
 
-RouteMode = Literal["ask", "search", "current", "work", "computer", "deep", "clarify"]
+RouteMode = Literal["ask", "search", "current", "work", "computer", "deep", "clarify", "capability"]
 
 
 @dataclass(frozen=True)
@@ -41,9 +41,16 @@ _WORK_RE = re.compile(
     r"\b(implement|fix|edit|change|update|refactor|build|create|generate|write file|run|test|install|deploy|repo|code|commit|push|open localhost)\b",
     re.IGNORECASE,
 )
-_QUESTION_RE = re.compile(r"^\s*(what|who|when|where|why|how|is|are|can|could|should|explain|define)\b", re.IGNORECASE)
+_QUESTION_RE = re.compile(r"^\s*(what|who|when|where|why|how|is|are|do|does|can|could|should|explain|define)\b", re.IGNORECASE)
 _DIRECT_QUESTION_RE = re.compile(r"^\s*(what|who|when|where|why|how|is|are|explain|define)\b", re.IGNORECASE)
 _AMBIGUOUS_RE = re.compile(r"^\s*(fix|do|make|change|update|improve|handle|continue)\s+(it|this|that|them)\s*\.?\s*$", re.IGNORECASE)
+_CAPABILITY_RE = re.compile(
+    r"\b("
+    r"do you have|can you use|can you access|are .*tools|what tools|which tools|"
+    r"gmail|google calendar|calendar|google tasks|tasks|google drive|drive|connector|connectors|mcp"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def classify_request(
@@ -71,6 +78,9 @@ def classify_request(
         )
 
     word_count = len(cleaned.split())
+    if _QUESTION_RE.match(cleaned) and word_count <= 80 and _CAPABILITY_RE.search(cleaned):
+        return RouteDecision("capability", False, "capability question")
+
     if _DIRECT_QUESTION_RE.match(cleaned) and word_count <= 80 and not _WEB_RE.search(cleaned):
         return RouteDecision("ask", False, "simple direct question")
 

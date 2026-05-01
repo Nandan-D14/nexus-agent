@@ -1668,7 +1668,7 @@ export default function SessionPage() {
       {/* ─── Main panel ─── */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {!hasStarted ? (
-          <div className="flex-1 flex flex-col items-center justify-center relative p-6">
+          <div className="flex-1 flex flex-col items-center relative p-6 pt-[25vh]">
             <div className="absolute top-4 right-4 flex gap-2">
               {viewMode === "live" && (
                 <button
@@ -1695,7 +1695,7 @@ export default function SessionPage() {
               </button>
             </div>
 
-            <div className="max-w-3xl w-full flex flex-col items-center gap-2 mb-14 mt-12">
+            <div className="max-w-3xl w-full flex flex-col items-center gap-2">
               <div className="text-center relative py-2">
                 <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
@@ -1899,14 +1899,14 @@ export default function SessionPage() {
                         </AnimatePresence>
                       </div>
 
-                      <button
+                      {/* <button
                         type="button"
                         onClick={handleShowDesktop}
                         className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
                         title="Workspace Context"
                       >
                         <Monitor className="w-4 h-4" />
-                      </button>
+                      </button> */}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -1925,7 +1925,7 @@ export default function SessionPage() {
                         disabled={!textInput.trim() || isLoading || isUploadingFile}
                         className={`p-1.5 rounded-full transition-colors border border-zinc-700/50 ${
                           textInput.trim() && !isLoading && !isUploadingFile
-                            ? "bg-[#3a3a3c] text-zinc-200 hover:bg-zinc-600" 
+                            ? "bg-[#3a3a3c] text-indigo-400 hover:bg-indigo-500" 
                             : "bg-zinc-800 text-zinc-500 cursor-not-allowed opacity-50"
                         }`}
                         title="Send"
@@ -1937,12 +1937,6 @@ export default function SessionPage() {
                 </div>
               </div>
 
-              {/* Demo picker */}
-              {viewMode === "live" && (
-                <div className="w-full max-w-4xl mx-auto mt-10 relative">
-                  <DemoPicker onSelect={handleDemo} disabled={false} />
-                </div>
-              )}
             </div>
             
             {(pageError || error) && (

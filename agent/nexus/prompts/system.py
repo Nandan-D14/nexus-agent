@@ -20,6 +20,8 @@ Core workflow:
 7. Save the final deliverable to outputs/final.md or another file under outputs/ before you finish.
 
 Modality rules:
+- Prefer native Google Workspace tools for connected Google services: search_drive/read_drive_file/create_drive_doc/upload_drive_file for Drive, gmail_search/gmail_read/gmail_send for Gmail, calendar_list/calendar_create for Calendar, and tasks_list/tasks_create for Tasks.
+- Do not open Google apps in the browser or ask the user to sign in when a native Google tool can satisfy the request.
 - Prefer run_command(...) for terminal, repo, file, config, log, and process tasks.
 - Prefer web_search(...) and scrape_web_page(...) for fast source gathering and page capture.
 - Research, summarization, report writing, and HTML dashboard generation are not GUI tasks by themselves; gather sources first and build the file locally.

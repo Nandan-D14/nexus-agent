@@ -14,6 +14,7 @@ from nexus.google_services import (
     CalendarClient,
     get_google_services_token_from_context,
 )
+from nexus.tools._context import get_history_repository, get_owner_id
 
 
 def _tool_error(message: str, **extra: Any) -> dict[str, Any]:

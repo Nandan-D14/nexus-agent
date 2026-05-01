@@ -107,6 +107,13 @@ def create_multi_agent(
         read_drive_file,
         create_drive_doc,
         upload_drive_file,
+        gmail_search,
+        gmail_read,
+        gmail_send,
+        tasks_list,
+        tasks_create,
+        calendar_list,
+        calendar_create,
         github_search_repos,
         github_read_file,
         github_list_issues,
@@ -133,6 +140,13 @@ def create_multi_agent(
         read_drive_file,
         create_drive_doc,
         upload_drive_file,
+        gmail_search,
+        gmail_read,
+        gmail_send,
+        tasks_list,
+        tasks_create,
+        calendar_list,
+        calendar_create,
         github_search_repos,
         github_read_file,
         github_list_issues,
@@ -152,6 +166,13 @@ def create_multi_agent(
         read_drive_file,
         create_drive_doc,
         upload_drive_file,
+        gmail_search,
+        gmail_read,
+        gmail_send,
+        tasks_list,
+        tasks_create,
+        calendar_list,
+        calendar_create,
         github_search_repos,
         github_read_file,
         github_list_issues,
@@ -160,12 +181,13 @@ def create_multi_agent(
         *(integration_tools or []),
     ]
 
-    computer = create_computer_agent(effective_runtime_config)
-    browser = create_browser_agent(effective_runtime_config)
-    code = create_code_agent(effective_runtime_config)
+    computer = create_computer_agent(effective_runtime_config, skill_instruction=skill_instruction)
+    browser = create_browser_agent(effective_runtime_config, skill_instruction=skill_instruction)
+    code = create_code_agent(effective_runtime_config, skill_instruction=skill_instruction)
     deepresearcher = create_deepresearcher_agent(
         effective_runtime_config,
         extra_tools=deepresearcher_tools,
+        skill_instruction=skill_instruction,
     )
 
     orchestrator = create_orchestrator_agent(

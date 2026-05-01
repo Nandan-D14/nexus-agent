@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest import TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nexus.orchestrator import NexusOrchestrator
 from nexus.routing import build_current_lookup_queries, classify_request, extract_search_query
 
 
@@ -14,6 +16,12 @@ class RequestRoutingTests(TestCase):
         decision = classify_request("What is Python?")
 
         self.assertEqual(decision.mode, "ask")
+        self.assertFalse(decision.needs_full_agent)
+
+    def test_google_tool_capability_question_uses_capability_answer(self) -> None:
+        decision = classify_request("do you have gmail and other tools?")
+
+        self.assertEqual(decision.mode, "capability")
         self.assertFalse(decision.needs_full_agent)
 
     def test_simple_question_with_code_words_stays_fast(self) -> None:
@@ -72,3 +80,18 @@ class RequestRoutingTests(TestCase):
         self.assertEqual(decision.mode, "clarify")
         self.assertFalse(decision.needs_full_agent)
         self.assertIn("What exactly", decision.clarification)
+
+
+class FastSearchRouteTests(IsolatedAsyncioTestCase):
+    async def test_fast_search_falls_back_when_no_results_parse(self) -> None:
+        orchestrator = NexusOrchestrator.__new__(NexusOrchestrator)
+        orchestrator.session = type("SessionStub", (), {"id": "session123"})()
+        orchestrator._send_json = AsyncMock()
+        orchestrator._send_agent_fast_response = AsyncMock()
+        orchestrator._fetch_fast_search_results = AsyncMock(return_value=[])
+
+        with patch("nexus.orchestrator.get_cached_value", return_value=None):
+            handled = await orchestrator._run_fast_search("search web for Gemini docs")
+
+        self.assertFalse(handled)
+        orchestrator._send_agent_fast_response.assert_not_awaited()
