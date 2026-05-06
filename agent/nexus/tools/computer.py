@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Mouse and keyboard tools for E2B desktop control."""
 
 from __future__ import annotations

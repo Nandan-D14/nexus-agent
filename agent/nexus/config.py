@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Application configuration via environment variables."""
 
 import os
@@ -45,17 +48,17 @@ class Settings(BaseSettings):
     # Gemini models
     # Note: Gemini 3 models require the "global" endpoint, not regional endpoints
     brain_model: str = "gemini-3.1-pro-preview"
-    gemini_agent_model: str = "gemini-3.1-pro-preview"
-    gemini_api_key_agent_model: str = "gemini-3.1-pro-preview"
+    gemini_agent_model: str = "gemini-3-flash-preview"
+    gemini_api_key_agent_model: str = "gemini-3-flash-preview"
     gemini_api_key_agent_fallback_models: str = (
-        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
+        "gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview"
     )
     gemini_light_model: str = "gemini-3.1-flash-lite-preview"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"  # Live API still uses 2.5 series
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
     gemini_vision_model: str = "gemini-3-flash-preview"
     # Fallback vision models tried in order when the primary hits quota/errors
-    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
+    gemini_vision_fallback_models: str = "gemini-3.1-flash-lite-preview"
 
     # Desktop observation
     screenshot_after_action_delay_seconds: float = 0.9
@@ -79,6 +82,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     strict_config_validation: bool = False
     frontend_url: str = "http://localhost:3000"
+    redis_url: str = ""
     host: str = "0.0.0.0"
     port: int = 8000
 
@@ -159,6 +163,8 @@ def validate_startup_settings() -> None:
         issues.append("BETA_ADMIN_EMAILS must include at least one admin email")
     if settings.beta_access_enabled and not settings.beta_google_sheet_id.strip():
         issues.append("BETA_GOOGLE_SHEET_ID must be configured for beta application sync")
+    if not settings.byok_encryption_key.strip():
+        issues.append("BYOK_ENCRYPTION_KEY must be configured for credential safety")
 
     if issues:
         joined = "; ".join(issues)
@@ -203,3 +209,24 @@ def apply_runtime_env_overrides() -> None:
     # Allow oauthlib to use HTTP (non-HTTPS) redirect URIs during local development
     if settings.frontend_url.startswith("http://"):
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
+
+def get_oauth_client_secret() -> str:
+    """Fetch the OAuth client secret from Secret Manager or fallback to settings."""
+    if settings.google_oauth_client_secret:
+        return settings.google_oauth_client_secret
+        
+    project_id = settings.google_project_id or settings.firebase_project_id
+    if not project_id:
+        return ""
+        
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project_id}/secrets/google-oauth-client-secret/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to load OAuth secret from Secret Manager: %s", e)
+        return ""

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """FastAPI authentication helpers backed by Firebase ID tokens."""
 
 from __future__ import annotations
@@ -129,9 +132,20 @@ async def require_current_user(
         ) from exc
     except Exception as exc:
         logger.error("Unexpected Firebase token verification failure", exc_info=exc)
+        detail = "Error verifying Firebase ID token"
+        if not settings.is_production:
+            reason = str(exc).strip()
+            observed = _describe_unverified_token(token)
+            parts = [detail]
+            if reason:
+                parts.append(reason)
+            if observed:
+                parts.append(f"token={observed}")
+            parts.append(f"expected_project={settings.firebase_project_id}")
+            detail = " | ".join(parts)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Error verifying Firebase ID token",
+            detail=detail,
         ) from exc
 
     uid = claims.get("uid")

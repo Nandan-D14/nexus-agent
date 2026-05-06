@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Background task permission tool — agent requests user approval for long tasks."""
 
 from __future__ import annotations

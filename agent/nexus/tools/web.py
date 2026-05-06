@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Fast web search and scraping tools for research workflows."""
 
 from __future__ import annotations
@@ -167,62 +170,65 @@ def extract_readable_markdown(html_text: str, *, url: str) -> str:
     return _fallback_extract_markdown(html_text, url=url)
 
 
-async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
-    """Search the web quickly and save normalized results into the workspace."""
-    try:
-        cleaned_query = " ".join((query or "").split()).strip()
-        if not cleaned_query:
-            return _tool_error("query is required")
-        if max_results < 1:
-            return _tool_error("max_results must be at least 1")
+# async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+#     """Search the web quickly and save normalized results into the workspace."""
+#     try:
+#         cleaned_query = " ".join((query or "").split()).strip()
+#         if not cleaned_query:
+#             return _tool_error("query is required")
+#         if max_results < 1:
+#             return _tool_error("max_results must be at least 1")
+#
+#         async with httpx.AsyncClient(
+#             follow_redirects=True,
+#             headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
+#             timeout=20.0,
+#         ) as client:
+#             response = await client.get("https://duckduckgo.com/html/", params={"q": cleaned_query})
+#             response.raise_for_status()
+#             html_text = response.text
+#
+#         results = parse_duckduckgo_results(html_text, max_results=max_results)
+#         payload = {
+#             "query": cleaned_query,
+#             "provider": "duckduckgo_html",
+#             "fetched_at": datetime.now(timezone.utc).isoformat(),
+#             "result_count": len(results),
+#             "results": results,
+#             "raw_html_excerpt": html_text[:4000],
+#             "workspace_path": get_active_workspace_path(),
+#         }
+#         filename = f"sources/search-{_slugify(cleaned_query, fallback='search')}.json"
+#         write_result = await write_workspace_file(
+#             filename,
+#             json.dumps(payload, indent=2, ensure_ascii=True),
+#         )
+#         if write_result.get("error"):
+#             return write_result
+#         return {
+#             "query": cleaned_query,
+#             "results": results,
+#             "saved_path": f"{get_active_workspace_path()}/{filename}",
+#         }
+#     except httpx.HTTPStatusError as exc:
+#         status_code = exc.response.status_code if exc.response is not None else None
+#         return _tool_error(
+#             f"Web search failed with HTTP {status_code or 'error'}. Please retry or try a narrower query.",
+#             status_code=status_code,
+#             query=" ".join((query or "").split()).strip(),
+#         )
+#     except httpx.RequestError as exc:
+#         return _tool_error(
+#             f"Web search failed: {exc}",
+#             query=" ".join((query or "").split()).strip(),
+#         )
+#     except Exception as exc:
+#         return _tool_error(str(exc) or "Web search failed unexpectedly.")
 
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-            timeout=20.0,
-        ) as client:
-            response = await client.get("https://duckduckgo.com/html/", params={"q": cleaned_query})
-            response.raise_for_status()
-            html_text = response.text
 
-        results = parse_duckduckgo_results(html_text, max_results=max_results)
-        payload = {
-            "query": cleaned_query,
-            "provider": "duckduckgo_html",
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "result_count": len(results),
-            "results": results,
-            "raw_html_excerpt": html_text[:4000],
-            "workspace_path": get_active_workspace_path(),
-        }
-        filename = f"sources/search-{_slugify(cleaned_query, fallback='search')}.json"
-        write_result = await write_workspace_file(
-            filename,
-            json.dumps(payload, indent=2, ensure_ascii=True),
-        )
-        if write_result.get("error"):
-            return write_result
-        return {
-            "query": cleaned_query,
-            "results": results,
-            "saved_path": f"{get_active_workspace_path()}/{filename}",
-        }
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code if exc.response is not None else None
-        return _tool_error(
-            f"Web search failed with HTTP {status_code or 'error'}. Please retry or try a narrower query.",
-            status_code=status_code,
-            query=" ".join((query or "").split()).strip(),
-        )
-    except httpx.RequestError as exc:
-        return _tool_error(
-            f"Web search failed: {exc}",
-            query=" ".join((query or "").split()).strip(),
-        )
-    except Exception as exc:
-        return _tool_error(str(exc) or "Web search failed unexpectedly.")
+from nexus.tools.base import normalized_tool
 
-
+@normalized_tool
 async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[str, Any]:
     """Fetch a page, extract readable text, and save it into the workspace."""
     try:

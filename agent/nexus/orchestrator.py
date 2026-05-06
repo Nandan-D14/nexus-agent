@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Orchestrator — wires voice → agent → sandbox → vision → response."""
 
 from __future__ import annotations
@@ -11,6 +14,8 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
+from google.adk.events import Event
+from google.genai import types
 from starlette.websockets import WebSocket, WebSocketState
 
 from nexus.agent import AgentTurnResult, create_agent, create_multi_agent, create_runner, run_agent_turn
@@ -97,7 +102,7 @@ class NexusOrchestrator:
             logger.info("Using single-agent mode")
         self._runner, self._session_service = create_runner(self._agent)
         self._adk_session_id: str | None = None
-        self._user_id = f"user-{session.id}"
+        self._user_id = session.owner_id
         self._active_agent: str = "nexus_orchestrator"
 
         # Background task manager
@@ -157,11 +162,7 @@ class NexusOrchestrator:
         else:
             logger.info("No Google credentials — voice disabled, text input works")
 
-        # Create ADK session
-        adk_session = await self._session_service.create_session(
-            app_name="nexus", user_id=self._user_id
-        )
-        self._adk_session_id = adk_session.id
+        await self._ensure_adk_session()
 
         # Load compact session memory so resume/continue turns stay cheap.
         if self.history_repository:
@@ -364,8 +365,9 @@ class NexusOrchestrator:
         if not settings.simple_task_fast_path:
             return False
 
-        decision = classify_request(
+        decision = await classify_request(
             text,
+            self.runtime_config,
             has_connectors=has_connectors,
             has_uploads=has_uploads,
         )
@@ -850,8 +852,105 @@ class NexusOrchestrator:
     _RATE_LIMIT_MAX_RETRIES = 4
     _RATE_LIMIT_BASE_WAIT = 10.0  # seconds; doubles each attempt: 10, 20, 40, 80
     _RATE_LIMIT_PATTERNS = ("429", "RESOURCE_EXHAUSTED", "quota", "rate limit", "too many requests")
+    _ADK_REPLAY_TURN_LIMIT = 15
     _RESUME_PACKET_SOFT_TOKENS = 2_000
     _RESUME_PACKET_HARD_TOKENS = 3_200
+
+    async def _ensure_adk_session(self) -> None:
+        """Reuse the stable ADK session, rebuilding it from Firestore history if absent."""
+        adk_session_id = self.session.id
+        adk_session = await self._session_service.get_session(
+            app_name="nexus",
+            user_id=self._user_id,
+            session_id=adk_session_id,
+        )
+        if adk_session is None:
+            adk_session = await self._session_service.create_session(
+                app_name="nexus",
+                user_id=self._user_id,
+                session_id=adk_session_id,
+            )
+            await self._replay_firestore_messages_into_adk(adk_session)
+
+        self._adk_session_id = adk_session.id
+
+    async def _replay_firestore_messages_into_adk(self, adk_session) -> None:
+        """Seed a newly-created ADK session with the last stored conversation turns."""
+        if not self.history_repository:
+            return
+        try:
+            messages = await self.history_repository.get_session_messages(self.session.id)
+        except Exception:
+            logger.warning("Failed to read Firestore messages for ADK replay", exc_info=True)
+            return
+
+        replay_messages = self._select_messages_for_adk_replay(
+            messages,
+            turn_limit=self._ADK_REPLAY_TURN_LIMIT,
+        )
+        for message in replay_messages:
+            event = self._message_to_adk_event(message)
+            if event is None:
+                continue
+            await self._session_service.append_event(adk_session, event)
+
+        if replay_messages:
+            logger.info(
+                "Replayed %d Firestore message(s) into ADK session %s for user %s",
+                len(replay_messages),
+                self.session.id,
+                self._user_id,
+            )
+
+    @staticmethod
+    def _select_messages_for_adk_replay(
+        messages: list[dict[str, Any]],
+        *,
+        turn_limit: int,
+    ) -> list[dict[str, Any]]:
+        normalized = [
+            message
+            for message in messages
+            if message.get("role") in {"user", "agent"} and str(message.get("text") or "").strip()
+        ]
+        if not normalized:
+            return []
+
+        selected_reversed: list[dict[str, Any]] = []
+        user_turns = 0
+        for message in reversed(normalized):
+            selected_reversed.append(message)
+            if message.get("role") == "user":
+                user_turns += 1
+                if user_turns >= turn_limit:
+                    break
+
+        return list(reversed(selected_reversed))
+
+    def _message_to_adk_event(self, message: dict[str, Any]) -> Event | None:
+        role = message.get("role")
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return None
+        if role == "user":
+            author = "user"
+            content_role = "user"
+        elif role == "agent":
+            author = getattr(self._agent, "name", None) or self._active_agent or "nexus"
+            content_role = "model"
+        else:
+            return None
+
+        event_id = str(message.get("id") or message.get("turnIndex") or "")
+        return Event(
+            author=author,
+            invocation_id=f"replay-{self.session.id}",
+            id=f"firestore-{event_id}" if event_id else "",
+            content=types.Content(
+                role=content_role,
+                parts=[types.Part(text=text)],
+            ),
+        )
 
     def _is_rate_limit_error(self, exc: BaseException) -> bool:
         msg = str(exc).lower()
@@ -1097,13 +1196,13 @@ class NexusOrchestrator:
     @staticmethod
     def _format_history_context(messages: list[dict]) -> str:
         """Fallback formatter when no cached context packet exists."""
-        recent = messages[-4:]
+        recent = messages[-15:]
         lines = []
         for msg in recent:
             role = (msg.get("role") or "user").upper()
             text = str(msg.get("text") or "").strip()
             if text:
-                lines.append(f"{role}: {text[:300]}")
+                lines.append(f"{role}: {text[:1200]}")
         if not lines:
             return ""
         history = "\n".join(lines)
@@ -1116,15 +1215,15 @@ class NexusOrchestrator:
 
     def _build_local_context_packet(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         recent_turns: list[str] = []
-        for message in messages[-4:]:
+        for message in messages[-15:]:
             role = "User" if message.get("role") == "user" else "Agent"
-            text = self._clip_text(message.get("text"), 180)
+            text = self._clip_text(message.get("text"), 1200)
             if text:
                 recent_turns.append(f"{role}: {text}")
 
         summary = ""
         for message in reversed(messages):
-            text = self._clip_text(message.get("text"), 320)
+            text = self._clip_text(message.get("text"), 1500)
             if text:
                 summary = text
                 break
@@ -1175,7 +1274,7 @@ class NexusOrchestrator:
                 compact = [str(item).strip() for item in values if str(item).strip()]
                 if compact:
                     lines.append(f"{label}:")
-                    lines.extend(f"- {item}" for item in compact[:4])
+                    lines.extend(f"- {item}" for item in compact)
         lines.append("[END CACHED SESSION CONTEXT]")
         lines.append("Continue naturally from where you left off.")
         return "\n".join(lines)
@@ -1618,6 +1717,14 @@ class NexusOrchestrator:
                 )
                 if step_id:
                     self._tool_step_ids.setdefault(tool_name, []).append(step_id)
+                
+                import json
+                await self._persist_message(
+                    role="tool_call",
+                    source=self._active_agent,
+                    text=f"Tool: {tool_name}\nArgs: {json.dumps(self._redact_mapping(self._coerce_mapping(tool_args)))}"
+                )
+
                 await self._send_json({
                     "type": "agent_tool_call",
                     "tool": tool_name,
@@ -1692,6 +1799,12 @@ class NexusOrchestrator:
                         output_mapping=output_mapping,
                         output_str=output_str,
                         step_id=step_id,
+                    )
+                    
+                    await self._persist_message(
+                        role="tool_result",
+                        source=tool_name,
+                        text=output_str
                     )
 
                     artifact_ref = self._extract_reference_artifact(tool_name, output_mapping, output_str)
@@ -2279,23 +2392,32 @@ class NexusOrchestrator:
         )
         try:
             result = await prepare_task_workspace(task_summary)
-            if result.get("error"):
-                raise RuntimeError(str(result["error"]))
-            detail = (
-                f"Workspace ready at {result['workspace_path']}."
-                if not result.get("created")
-                else f"Created workspace at {result['workspace_path']}."
+            result_detail = result.get("detail") if isinstance(result.get("detail"), dict) else result
+            result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            if result.get("status") == "error" or result.get("error"):
+                raise RuntimeError(str(result.get("summary") or result.get("error")))
+            workspace_path = (
+                result_detail.get("workspace_path")
+                or result_metadata.get("workspace_path")
+                or self._workspace_path
+                or derive_session_workspace_path(self.session.id)
             )
-            touched_files = result.get("touched_files") or []
+            touched_files = result_detail.get("touched_files") or result_metadata.get("touched_files") or []
+            created = bool(result_detail.get("created", result_metadata.get("created", False)))
+            detail = (
+                f"Created workspace at {workspace_path}."
+                if created
+                else f"Workspace ready at {workspace_path}."
+            )
             if touched_files:
                 detail += f" Updated: {', '.join(str(name) for name in touched_files)}."
             await self._complete_step(
                 step_id,
                 detail=detail,
                 metadata={
-                    "workspace_path": result.get("workspace_path"),
+                    "workspace_path": workspace_path,
                     "touched_files": touched_files,
-                    "created": bool(result.get("created")),
+                    "created": created,
                 },
             )
         except Exception as exc:

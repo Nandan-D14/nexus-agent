@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
@@ -15,7 +20,6 @@ import { Check, ChevronDown, Link2, Paperclip, X, Plus, Monitor, Mic, ArrowUp, S
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
 
-import { DemoPicker } from "@/components/demo-picker";
 import type { AgentVisualAction } from "@/components/desktop-panel";
 import { SessionNavSidebar } from "@/components/session-nav-sidebar";
 import { WorkflowTemplateEditorModal } from "@/components/workflow-template-editor-modal";
@@ -1899,14 +1903,14 @@ export default function SessionPage() {
                         </AnimatePresence>
                       </div>
 
-                      {/* <button
+                      <button
                         type="button"
                         onClick={handleShowDesktop}
                         className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
                         title="Workspace Context"
                       >
                         <Monitor className="w-4 h-4" />
-                      </button> */}
+                      </button>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -2304,6 +2308,7 @@ export default function SessionPage() {
                       <WorkflowDesktopContainer
                         workflowRun={workflowRun}
                         streamUrl={streamUrl}
+                        artifacts={runArtifacts}
                         analysis={latestAnalysis}
                         forcedTab={forcedTab}
                         onForcedTabAck={() => setForcedTab(null)}

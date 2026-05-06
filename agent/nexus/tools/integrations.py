@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Native SaaS connector tools for Google Drive and GitHub."""
 
 from __future__ import annotations
@@ -385,3 +388,106 @@ async def github_summarize_pr(owner: str, repo: str, pull_number: int) -> dict[s
             for item in file_data[:50]
         ],
     }
+
+
+async def _tavily_api_key() -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, "tavily")
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+async def tavily_search(query: str, search_depth: str = "basic", max_results: int = 5, include_answer: bool = True) -> dict[str, Any]:
+    """Search the web using Tavily AI search engine.
+
+    Args:
+        query: The search query.
+        search_depth: Search depth — "basic" or "advanced".
+        max_results: Maximum number of search results to return.
+        include_answer: Whether to include an AI-generated answer.
+    """
+    api_key = await _tavily_api_key()
+    if not api_key:
+        return _tool_error("Tavily is not connected for this user.")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "search_depth": search_depth,
+                    "max_results": max(1, min(int(max_results or 5), 20)),
+                    "include_answer": include_answer,
+                },
+            )
+            if response.status_code >= 400:
+                return _tool_error(
+                    f"Tavily API returned HTTP {response.status_code}.",
+                    detail=response.text[:500],
+                )
+            data = response.json()
+            return {
+                "status": "success",
+                "answer": data.get("answer"),
+                "results": [
+                    {
+                        "title": item.get("title"),
+                        "url": item.get("url"),
+                        "content": item.get("content"),
+                        "score": item.get("score"),
+                    }
+                    for item in data.get("results", [])
+                ],
+            }
+    except Exception as exc:
+        return _tool_error(f"Tavily search failed: {exc}")
+
+
+async def _tinyfish_api_key() -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, "tinyfish")
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+async def tinyfish_web_agent(url: str, goal: str) -> dict[str, Any]:
+    """Use TinyFish to automate a browser task on a real website using a natural language goal.
+
+    Args:
+        url: The starting URL of the website.
+        goal: A natural language description of what to accomplish.
+    """
+    api_key = await _tinyfish_api_key()
+    if not api_key:
+        return _tool_error("Tinyfish is not connected for this user.")
+    try:
+        async with httpx.AsyncClient(
+            timeout=120.0,
+            headers={"X-API-Key": api_key},
+        ) as client:
+            response = await client.post(
+                "https://agent.tinyfish.ai/v1/automation/run",
+                json={"url": url, "goal": goal},
+            )
+            if response.status_code >= 400:
+                return _tool_error(
+                    f"Tinyfish API returned HTTP {response.status_code}.",
+                    detail=response.text[:500],
+                )
+            data = response.json()
+            return {
+                "status": "success",
+                "run_id": data.get("run_id"),
+                "task_status": data.get("status"),
+                "result": data.get("result"),
+                "error": data.get("error"),
+            }
+    except Exception as exc:
+        return _tool_error(f"Tinyfish web agent failed: {exc}")

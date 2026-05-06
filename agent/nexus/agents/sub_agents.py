@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Specialist sub-agents — each focused on a specific domain."""
 
 from __future__ import annotations
@@ -19,7 +22,15 @@ from nexus.tools.computer import (
 from nexus.tools.screen import take_screenshot
 from nexus.tools.bash import run_command
 from nexus.tools.browser import open_browser
-from nexus.tools.web import web_search, scrape_web_page
+from nexus.tools.browser_playwright import (
+    playwright_navigate,
+    playwright_click,
+    playwright_type,
+    playwright_get_text,
+    playwright_wait_for,
+)
+from google.adk.tools import google_search
+from nexus.tools.web import scrape_web_page
 from nexus.tools.integrations import (
     search_drive,
     read_drive_file,
@@ -41,6 +52,7 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
+from nexus.tools.docs import generate_pdf_report, save_as_artifact
 
 GOOGLE_WORKSPACE_TOOLS = [
     search_drive,
@@ -130,36 +142,37 @@ Workflow:
 1. Ensure the shared workspace exists with prepare_task_workspace(...) if needed.
 2. Read task.md and todo.md. If todo.md is still empty, create a short todo list with write_todo_list(...).
 3. Mark the current web step in_progress with update_todo_item(...).
-4. Use web_search(query) for discovery whenever you need sources or candidate pages.
+4. Use google_search(queries) for discovery whenever you need sources or candidate pages.
 5. Use scrape_web_page(url) to capture readable content into the workspace before opening pages interactively.
 6. Open the site with open_browser(url), or inspect the already-open browser tab, only when interactive browser state matters or when you must show a finished report in the browser.
 7. Use take_screenshot() only when page state or visible content must be read and scrape_web_page is insufficient.
-8. After opening, clicking, typing, or scrolling in the browser, treat previous screenshots as stale and let the page settle before observing.
-9. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
+8. Use Playwright tools (playwright_navigate, playwright_click, playwright_type, playwright_get_text, playwright_wait_for) for programmatic, reliable DOM interaction via CDP instead of vision-based clicks whenever possible.
+9. After opening, clicking, typing, or scrolling in the browser, treat previous screenshots as stale and let the page settle before observing.
+10. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
 
 Rules:
 - For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before opening Google apps in Firefox.
-- Prefer web_search and scrape_web_page for discovery and capture before interactive browsing.
-- For research, article summarization, or news gathering, stay in web_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
+- Prefer google_search and scrape_web_page for discovery and capture before interactive browsing.
+- For research, article summarization, or news gathering, stay in google_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
 - If scrape_web_page returns an error such as 401, 403, or 429, treat that source as blocked instead of failing the whole task.
 - When a source blocks scraping, continue with other sources or use open_browser only if that specific page is essential.
+- Prefer Playwright CDP tools over physical mouse clicks and vision when interacting with web forms or specific DOM elements.
 - Prefer browsing over curl for genuine web workflows.
-- Use run_command only for narrow helper cases, such as a quick fetch or network check when the browser is overkill.
 - Do not take ownership of local terminal or file-inspection work unless a web fetch is actually required.
 - If the task asks for a generated HTML dashboard or report, gather sources and evidence here, then hand file creation to code_agent.
 - Do not compose the deliverable in browser UI unless the user explicitly asked for a browser-based editor workflow.
 - Prefer action between screenshots. If the page is unchanged, keep browsing or summarize instead of repeatedly observing.
-- Do not use vision for ordinary search results, article reading, or source capture when web_search/scrape_web_page worked.
+- Do not use vision for ordinary search results, article reading, or source capture when google_search/scrape_web_page worked.
 
 Tools:
 - prepare_task_workspace(task_summary), read_workspace_file(relative_path), list_workspace_files(relative_path)
 - write_todo_list(items), update_todo_item(item_index, status, note)
 - write_workspace_file(relative_path, content, append)
-- web_search(query), scrape_web_page(url)
+- google_search(queries), scrape_web_page(url)
 - open_browser(url)
 - take_screenshot()
 - left_click(x, y), type_text(text), press_key(key), scroll_screen(direction, amount)
-- run_command(command) for narrow helper cases only
+- playwright_navigate(url), playwright_click(selector), playwright_type(selector, text), playwright_get_text(selector), playwright_wait_for(selector, timeout_ms)
 
 Actually browse the web. Do not drift into local repo or desktop tasks."""
 
@@ -171,6 +184,7 @@ Use this agent for:
 - package installs, scripts, process checks, and path discovery
 - file operations and local exports
 - local deliverables such as HTML dashboards, Markdown reports, JSON, CSV, and generated files
+- generating professional PDF reports from data or analysis
 
 Do not use this agent for:
 - visible GUI workflows that require clicking, dialogs, or drag/drop
@@ -181,7 +195,8 @@ Tools:
 - write_todo_list(items), update_todo_item(item_index, status, note)
 - write_workspace_file(relative_path, content, append)
 - run_command(command, background=False) for terminal work
-- take_screenshot() as a last resort
+- generate_pdf_report(title, markdown_content, filename) for creating professional PDF documents
+- save_as_artifact(path, title) to promote any file (CSV, PNG, etc.) to the UI panel
 - type_text(text) and press_key(key) for terminal interaction
 
 Workflow:
@@ -191,15 +206,17 @@ Workflow:
 4. Start with shell and file inspection before any screenshot.
 5. Prefer commands such as pwd, ls, find, cat, grep, ps, and log inspection to gather evidence.
 6. Use command output to solve the task whenever possible.
-7. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
-8. Use take_screenshot() only when you launched a GUI app/window, the task depends on visible desktop state, or terminal evidence is insufficient.
-9. If you did launch or affect a GUI, wait for the screen to settle before any screenshot and do not reuse old visual state.
-10. Mark the step done with update_todo_item(...).
+7. Use generate_pdf_report(...) to create high-quality documents instead of writing complex Python PDF code.
+8. Use save_as_artifact(...) to show important files (like charts or data exports) in the user's dashboard.
+9. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
+10. Use run_command(...) to affect or inspect terminal state.
+11. If you did launch or affect a GUI app in the background, hand off to computer_agent for visual verification.
+12. Mark the step done with update_todo_item(...).
 
 Rules:
 - For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before browser or desktop sign-in.
-- take_screenshot() is a last resort, not the default workflow.
 - Generating dashboards, reports, HTML files, and other workspace deliverables is code_agent work, even if the user will later view the result in a browser or app.
+- Prefer generate_pdf_report for all PDF creation tasks.
 - If the task is actually web navigation or web reading, return control for browser_agent.
 - If the task requires on-screen clicking, dialogs, or visible native app interaction, return control for computer_agent.
 - If the user asks to open a generated local file, create the file first. Use browser_agent or computer_agent only for the final open or visual confirmation step.
@@ -223,7 +240,7 @@ Workflow:
 2. Read task.md and todo.md, then write or refresh a 3-7 step master todo list with write_todo_list(...).
 3. Break the task into concrete sub-questions.
 4. Mark the active research step in_progress with update_todo_item(...).
-5. Delegate web and source gathering to research_browser_agent, primarily with web_search(...) and scrape_web_page(...).
+5. Delegate web and source gathering to research_browser_agent, primarily with google_search(...) and scrape_web_page(...).
 6. Delegate local repo, log, file, config, CLI evidence-gathering, and final report or dashboard generation to research_code_agent.
 7. Delegate GUI-only verification to research_computer_agent only after the deliverable exists or when another worker truly cannot proceed without visible state.
 8. Append synthesized findings to notes.md, save the final report to outputs/final.md or another file under outputs/ with write_workspace_file(...), then mark the step done.
@@ -259,7 +276,7 @@ RESEARCH_BROWSER_AGENT_PROMPT = f"""{BROWSER_AGENT_PROMPT}
 Research context:
 - You are research_browser_agent working under deepresearcher.
 - Focus on source gathering, comparison, and verifying web claims for the assigned sub-question.
-- Prefer web_search and scrape_web_page over interactive browsing for normal research collection.
+- Prefer google_search and scrape_web_page over interactive browsing for normal research collection.
 - If a source blocks scraping, record that it was blocked and continue with alternative sources unless deepresearcher specifically says the page is essential.
 - Do not open the final local report unless deepresearcher explicitly asks for final presentation or visual confirmation.
 - Return concise findings and relevant evidence back to deepresearcher."""
@@ -348,15 +365,19 @@ def _create_browser_agent(
             read_workspace_file,
             list_workspace_files,
             *GOOGLE_WORKSPACE_TOOLS,
-            web_search,
+            google_search,
             scrape_web_page,
             open_browser,
             take_screenshot,
-            run_command,
             left_click,
             type_text,
             press_key,
             scroll_screen,
+            playwright_navigate,
+            playwright_click,
+            playwright_type,
+            playwright_get_text,
+            playwright_wait_for,
         ],
     )
 
@@ -380,7 +401,8 @@ def _create_code_agent(
             list_workspace_files,
             *GOOGLE_WORKSPACE_TOOLS,
             run_command,
-            take_screenshot,
+            generate_pdf_report,
+            save_as_artifact,
             type_text,
             press_key,
         ],

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Multi-agent subsystem — hierarchical orchestration."""
 
 from nexus.agents.sub_agents import (

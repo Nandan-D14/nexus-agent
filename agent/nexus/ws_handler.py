@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """WebSocket handler — routes binary (audio) and JSON (commands) frames."""
 
 from __future__ import annotations
@@ -16,13 +19,37 @@ from nexus.session import Session, SessionManager
 logger = logging.getLogger(__name__)
 
 
+import redis
+from nexus.config import settings
+
 class _ActionRateLimiter:
-    def __init__(self, max_requests: int, window_seconds: int) -> None:
+    def __init__(self, max_requests: int, window_seconds: int, name: str = "ws_action") -> None:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self.name = name
+        self._redis: Optional[redis.Redis] = None
+        if settings.redis_url:
+            try:
+                self._redis = redis.from_url(settings.redis_url)
+            except Exception:
+                logger.warning("Failed to connect to Redis for _ActionRateLimiter '%s'; falling back to in-memory.", name)
+        
+        # Fallback
         self._hits: dict[str, list[float]] = defaultdict(list)
 
     def is_allowed(self, key: str) -> bool:
+        if self._redis:
+            try:
+                redis_key = f"{self.name}:{key}"
+                pipe = self._redis.pipeline()
+                pipe.incr(redis_key)
+                pipe.expire(redis_key, self.window_seconds)
+                results = pipe.execute()
+                current_count = results[0]
+                return current_count <= self.max_requests
+            except Exception:
+                logger.warning("Redis WS RateLimiter error; falling back to in-memory.", exc_info=True)
+
         now = time.time()
         recent = [hit for hit in self._hits[key] if now - hit < self.window_seconds]
         if len(recent) >= self.max_requests:
@@ -33,13 +60,14 @@ class _ActionRateLimiter:
         return True
 
 
-action_rate_limiter = _ActionRateLimiter(max_requests=25, window_seconds=60)
+action_rate_limiter = _ActionRateLimiter(max_requests=25, window_seconds=60, name="ws_action")
 
 
 async def handle_websocket(
     ws: WebSocket,
     session: Session,
     session_manager: SessionManager,
+    subprotocol: str | None = None,
 ) -> None:
     """Main WebSocket handler for a connected client.
 
@@ -50,7 +78,7 @@ async def handle_websocket(
     4. Process incoming frames from browser
     5. Clean up on disconnect
     """
-    await ws.accept()
+    await ws.accept(subprotocol=subprotocol)
     send_lock = asyncio.Lock()
     setattr(ws, "_cocomputer_send_lock", send_lock)
 

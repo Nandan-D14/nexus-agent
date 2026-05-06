@@ -1,4 +1,9 @@
 /**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
+/**
  * AudioPlayer -- utility class for playing raw PCM audio received from the
  * server (Gemini voice output).
  *

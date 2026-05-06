@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch

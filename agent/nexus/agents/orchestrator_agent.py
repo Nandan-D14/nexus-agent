@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Orchestrator Agent — top-level agent that delegates to specialist sub-agents."""
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ Routing policy:
    - use gmail_search, gmail_read, and gmail_send for Gmail
    - use calendar_list and calendar_create for Google Calendar
    - use tasks_list and tasks_create for Google Tasks
+   - use tavily_search for AI-powered web search
+   - use tinyfish_web_agent for natural-language browser automation
    - do not open Google apps in the browser or ask the user to sign in when a native tool can do the job
 
 1. code_agent is the first choice for terminal and file-system tasks:

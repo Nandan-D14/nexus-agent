@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Quick test: run the ADK agent with a text command (no voice)."""
 
 import asyncio

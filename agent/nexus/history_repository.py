@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Firestore-backed persistence for users, sessions, and message history."""
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ class StoredSession:
     continuation_mode: str | None = None
     context_packet: dict[str, Any] | None = None
     context_packet_inputs_digest: str | None = None
+    sandbox_id: str | None = None
 
 
 @dataclass
@@ -178,6 +182,131 @@ class FirestoreHistoryRepository:
 
     def _task_run_ref(self, uid: str, task_id: str, run_id: str):
         return self._task_ref(uid, task_id).collection("runs").document(run_id)
+
+    def _create_audit_log_sync(self, actor_uid: str, action: str, target_uid: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> None:
+        import hashlib
+        import json
+        
+        def hash_dict(d: dict[str, Any] | None) -> str | None:
+            if d is None:
+                return None
+            s = json.dumps(d, sort_keys=True, default=str)
+            return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+        log_ref = self._db.collection("audit_logs").document()
+        log_ref.set({
+            "actorUid": actor_uid,
+            "action": action,
+            "targetUid": target_uid,
+            "before": hash_dict(before),
+            "after": hash_dict(after),
+            "timestamp": utcnow(),
+        })
+
+    async def create_audit_log(self, actor_uid: str, action: str, target_uid: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> None:
+        await asyncio.to_thread(self._create_audit_log_sync, actor_uid, action, target_uid, before, after)
+
+    async def export_user_data(self, uid: str) -> dict[str, Any]:
+        def _export_sync():
+            db = self._db
+            data = {}
+            
+            # Users
+            user_doc = db.collection("users").document(uid).get()
+            if user_doc.exists:
+                data["user"] = user_doc.to_dict()
+                
+            # User Private
+            private_doc = db.collection("userPrivate").document(uid).get()
+            if private_doc.exists:
+                data["userPrivate"] = private_doc.to_dict()
+                
+            # Beta Application
+            beta_doc = db.collection("betaApplications").document(uid).get()
+            if beta_doc.exists:
+                data["betaApplication"] = beta_doc.to_dict()
+
+            # Sessions
+            sessions = []
+            sessions_query = db.collection("sessions").where("ownerId", "==", uid).stream()
+            for s_doc in sessions_query:
+                s_data = s_doc.to_dict()
+                s_data["id"] = s_doc.id
+                
+                # Messages
+                messages = []
+                for m_doc in s_doc.reference.collection("messages").stream():
+                    m_data = m_doc.to_dict()
+                    m_data["id"] = m_doc.id
+                    messages.append(m_data)
+                s_data["messages"] = messages
+                
+                # Artifacts and runs
+                runs = []
+                for r_doc in s_doc.reference.collection("runs").stream():
+                    r_data = r_doc.to_dict()
+                    r_data["id"] = r_doc.id
+                    artifacts = []
+                    for a_doc in r_doc.reference.collection("artifacts").stream():
+                        a_data = a_doc.to_dict()
+                        a_data["id"] = a_doc.id
+                        artifacts.append(a_data)
+                    r_data["artifacts"] = artifacts
+                    runs.append(r_data)
+                s_data["runs"] = runs
+                sessions.append(s_data)
+                
+            data["sessions"] = sessions
+            return data
+            
+        return await asyncio.to_thread(_export_sync)
+
+    async def delete_user_data(self, uid: str) -> list[str]:
+        def _delete_sync():
+            db = self._db
+            session_ids = []
+            
+            # Get sessions to delete artifacts in GCS later
+            sessions_query = db.collection("sessions").where("ownerId", "==", uid).stream()
+            for s_doc in sessions_query:
+                session_ids.append(s_doc.id)
+                # We won't recursively delete all subcollections here perfectly,
+                # but we'll try to delete the session document. 
+                # (Firestore requires a recursive delete which isn't natively supported in python client easily 
+                # without iterating, but we'll do a simple delete for now, or just the main ones).
+                # Actually, the user asked to delete user doc, sessions, messages, artifacts.
+                for m_doc in s_doc.reference.collection("messages").stream():
+                    m_doc.reference.delete()
+                for r_doc in s_doc.reference.collection("runs").stream():
+                    for a_doc in r_doc.reference.collection("artifacts").stream():
+                        a_doc.reference.delete()
+                    for st_doc in r_doc.reference.collection("steps").stream():
+                        st_doc.reference.delete()
+                    r_doc.reference.delete()
+                for u_doc in s_doc.reference.collection("usage_events").stream():
+                    u_doc.reference.delete()
+                for c_doc in s_doc.reference.collection("credit_events").stream():
+                    c_doc.reference.delete()
+                s_doc.reference.delete()
+
+            # Delete templates
+            for t_doc in db.collection("users").document(uid).collection("workflowTemplates").stream():
+                t_doc.reference.delete()
+                
+            # Delete integrations
+            for i_doc in db.collection("users").document(uid).collection("integrations").stream():
+                i_doc.reference.delete()
+            for i_doc in db.collection("userPrivate").document(uid).collection("integrations").stream():
+                i_doc.reference.delete()
+                
+            # Delete user docs
+            db.collection("users").document(uid).delete()
+            db.collection("userPrivate").document(uid).delete()
+            db.collection("betaApplications").document(uid).delete()
+            
+            return session_ids
+
+        return await asyncio.to_thread(_delete_sync)
 
     def _task_id_for_session_sync(self, session_id: str) -> str:
         data = self._db.collection("sessions").document(session_id).get().to_dict() or {}
@@ -370,6 +499,7 @@ class FirestoreHistoryRepository:
                 if isinstance(data.get("contextPacketInputsDigest"), str)
                 else None
             ),
+            sandbox_id=data.get("sandboxId") if isinstance(data.get("sandboxId"), str) else None,
         )
 
     def _build_stored_run(self, session_id: str, run_id: str, data: dict[str, Any]) -> StoredRun:
@@ -897,8 +1027,12 @@ class FirestoreHistoryRepository:
     async def list_recent_session_usage(self, owner_id: str, limit: int = 10) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_recent_session_usage_sync, owner_id, limit)
 
-    async def list_active_sessions(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_active_sessions_sync, owner_id, live_sessions)
+    async def list_active_sessions(self, owner_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_active_sessions_sync, owner_id)
+
+    async def list_all_active_sandbox_ids(self) -> list[str]:
+        """Return a list of all sandbox IDs associated with active sessions across all users."""
+        return await asyncio.to_thread(self._list_all_active_sandbox_ids_sync)
 
     async def get_session_messages(self, session_id: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._get_session_messages_sync, session_id)
@@ -970,16 +1104,52 @@ class FirestoreHistoryRepository:
             last_error,
         )
 
-    async def upsert_google_drive_connection(
+    async def upsert_tavily_connection(
+        self,
+        uid: str,
+        *,
+        api_key: str,
+        enabled: bool = True,
+        status: str = "connected",
+        last_error: str | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_tavily_connection_sync,
+            uid,
+            api_key,
+            enabled,
+            status,
+            last_error,
+        )
+
+    async def upsert_tinyfish_connection(
+        self,
+        uid: str,
+        *,
+        api_key: str,
+        enabled: bool = True,
+        status: str = "connected",
+        last_error: str | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_tinyfish_connection_sync,
+            uid,
+            api_key,
+            enabled,
+            status,
+            last_error,
+        )
+
+    async def upsert_google_connections(
         self,
         uid: str,
         *,
         enabled: bool = True,
         status: str = "connected",
         last_error: str | None = None,
-    ) -> StoredIntegrationConnection:
+    ) -> list[StoredIntegrationConnection]:
         return await asyncio.to_thread(
-            self._upsert_google_drive_connection_sync,
+            self._upsert_google_connections_sync,
             uid,
             enabled,
             status,
@@ -1128,6 +1298,9 @@ class FirestoreHistoryRepository:
         status: str,
     ) -> StoredRun | None:
         return await asyncio.to_thread(self._set_run_status_sync, session_id, run_id, status)
+
+    async def mark_session_deleted(self, session_id: str) -> None:
+        await asyncio.to_thread(self._mark_session_deleted_sync, session_id)
 
     async def create_step(
         self,
@@ -1593,6 +1766,24 @@ class FirestoreHistoryRepository:
         batch.commit()
         merged = {**current, **updates}
         return self._build_stored_run(session_id, run_id, merged)
+
+    def _mark_session_deleted_sync(self, session_id: str) -> None:
+        now = utcnow()
+        ref = self._db.collection("sessions").document(session_id)
+        doc = ref.get()
+        if doc.exists:
+            data = doc.to_dict() or {}
+            task_id = data.get("taskId") if isinstance(data.get("taskId"), str) else session_id
+            owner_id = data.get("ownerId")
+            
+            batch = self._db.batch()
+            batch.set(ref, {"status": "deleted", "updatedAt": now}, merge=True)
+            
+            if owner_id:
+                task_ref = self._task_ref(owner_id, task_id)
+                # Note: we only update the session, not the whole task unless needed
+            
+            batch.commit()
 
     def _create_step_sync(
         self,
@@ -2073,7 +2264,15 @@ class FirestoreHistoryRepository:
         doc = ref.get()
         if not doc.exists:
             return False
+        before_data = doc.to_dict()
         ref.delete()
+        self._create_audit_log_sync(
+            actor_uid=owner_id,
+            action="template_delete",
+            target_uid=owner_id,
+            before=before_data,
+            after=None
+        )
         return True
 
     def _mark_workflow_template_used_sync(
@@ -2653,44 +2852,54 @@ class FirestoreHistoryRepository:
             )
         return results
 
-    def _list_active_sessions_sync(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _list_active_sessions_sync(self, owner_id: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        for live in live_sessions:
-            if live.get("owner_id") != owner_id:
-                continue
-            session_id = str(live.get("session_id", ""))
-            stored_session = self._get_session_sync(session_id) if session_id else None
-            token_totals = (
-                stored_session.token_totals
-                if stored_session and stored_session.token_totals
-                else self._empty_token_totals()
-            )
-            results.append(
-                {
+        try:
+            from google.cloud import firestore
+            docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("ownerId", "==", owner_id)).where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
+            for doc in docs:
+                session_id = doc.id
+                stored_session = self._build_stored_session(session_id, doc.to_dict() or {})
+                results.append({
                     "session_id": session_id,
-                    "title": stored_session.title if stored_session else "New session",
-                    "status": live.get("status", "active"),
-                    "created_at": live.get("created_at"),
-                    "last_active_at": live.get("last_active_at"),
-                    "stream_url": live.get("stream_url"),
-                    "message_count": stored_session.message_count if stored_session else 0,
-                    "token_totals": token_totals,
-                    "token_tracking_started_at": (
-                        stored_session.token_tracking_started_at if stored_session else None
-                    ),
-                    "token_coverage": (
-                        "tracked"
-                        if stored_session and stored_session.token_tracking_started_at
-                        else "no_data"
-                    ),
-                }
-            )
-
-        results.sort(
-            key=lambda item: self._coerce_datetime(item.get("last_active_at")) or utcnow(),
-            reverse=True,
-        )
+                    "title": stored_session.title,
+                    "status": stored_session.status,
+                    "created_at": stored_session.created_at,
+                    "last_active_at": (doc.to_dict() or {}).get("lastActiveAt") or stored_session.created_at,
+                    "stream_url": None,
+                    "message_count": stored_session.message_count,
+                    "token_totals": stored_session.token_totals,
+                    "token_tracking_started_at": stored_session.token_tracking_started_at,
+                    "token_coverage": 1.0,
+                    "current_run_id": stored_session.current_run_id,
+                    "run_status": stored_session.run_status,
+                    "artifact_count": stored_session.artifact_count,
+                })
+        except Exception:
+            pass
         return results
+
+    def _list_all_active_sandbox_ids_sync(self) -> list[str]:
+        """Return a list of all sandbox IDs associated with active sessions across all users."""
+        sandbox_ids = set()
+        try:
+            from google.cloud import firestore
+            # Check active sessions
+            docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
+            for doc in docs:
+                sid = doc.to_dict().get("sandboxId")
+                if sid:
+                    sandbox_ids.add(sid)
+
+            # Check users with paused sandboxes
+            users = self._db.collection("userPublic").where(filter=firestore.FieldFilter("pausedSandboxId", "!=", None)).get()
+            for user in users:
+                sid = user.to_dict().get("pausedSandboxId")
+                if sid:
+                    sandbox_ids.add(sid)
+        except Exception:
+            pass
+        return list(sandbox_ids)
 
     def _get_session_messages_sync(self, session_id: str) -> list[dict[str, Any]]:
         messages_docs = self._db.collection("sessions").document(session_id).collection("messages").order_by("turnIndex").stream()
@@ -2757,6 +2966,8 @@ class FirestoreHistoryRepository:
         return merged
 
     def _update_user_settings_sync(self, uid: str, updates: dict[str, Any]) -> None:
+        before_settings = self._get_user_settings_sync(uid)
+        
         public_updates, private_updates = self._partition_user_settings_updates(updates)
         now = utcnow()
 
@@ -2776,6 +2987,15 @@ class FirestoreHistoryRepository:
                 ),
                 delete_google_drive_tokens="googleDriveRefreshToken" in private_updates,
             )
+
+        after_settings = self._get_user_settings_sync(uid)
+        self._create_audit_log_sync(
+            actor_uid=uid,
+            action="settings_change",
+            target_uid=uid,
+            before=before_settings,
+            after=after_settings
+        )
 
     def _integration_public_ref(self, uid: str, connection_id: str):
         return (
@@ -2981,13 +3201,97 @@ class FirestoreHistoryRepository:
             private_payload,
         )
 
-    def _upsert_google_drive_connection_sync(
+    def _upsert_tavily_connection_sync(
+        self,
+        uid: str,
+        api_key: str,
+        enabled: bool,
+        status: str,
+        last_error: str | None,
+    ) -> StoredIntegrationConnection:
+        now = utcnow()
+        connection_id = "tavily"
+        private_payload = {
+            "ownerId": uid,
+            "connectorType": "native",
+            "provider": "tavily",
+            "name": "Tavily",
+            "apiKey": api_key,
+            "enabled": enabled,
+            "tools": [
+                {"name": "tavily_search", "description": "Search the web using Tavily AI search engine."},
+            ],
+            "resources": [],
+            "status": status,
+            "lastError": last_error,
+            "lastCheckedAt": now,
+            "updatedAt": now,
+        }
+        existing = self._integration_private_ref(uid, connection_id).get()
+        existing_data = existing.to_dict() if existing.exists else {}
+        private_payload["createdAt"] = existing_data.get("createdAt") or now
+        public_payload = self._public_integration_payload(private_payload)
+        batch = self._db.batch()
+        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        batch.commit()
+        self._sync_integration_summary_sync(uid)
+        return self._build_stored_integration_connection(
+            uid,
+            connection_id,
+            public_payload,
+            private_payload,
+        )
+
+    def _upsert_tinyfish_connection_sync(
+        self,
+        uid: str,
+        api_key: str,
+        enabled: bool,
+        status: str,
+        last_error: str | None,
+    ) -> StoredIntegrationConnection:
+        now = utcnow()
+        connection_id = "tinyfish"
+        private_payload = {
+            "ownerId": uid,
+            "connectorType": "native",
+            "provider": "tinyfish",
+            "name": "Tinyfish",
+            "apiKey": api_key,
+            "enabled": enabled,
+            "tools": [
+                {"name": "tinyfish_web_agent", "description": "Use TinyFish to automate browser tasks on a website using natural language goals."},
+            ],
+            "resources": [],
+            "status": status,
+            "lastError": last_error,
+            "lastCheckedAt": now,
+            "updatedAt": now,
+        }
+        existing = self._integration_private_ref(uid, connection_id).get()
+        existing_data = existing.to_dict() if existing.exists else {}
+        private_payload["createdAt"] = existing_data.get("createdAt") or now
+        public_payload = self._public_integration_payload(private_payload)
+        batch = self._db.batch()
+        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        batch.commit()
+        self._sync_integration_summary_sync(uid)
+        return self._build_stored_integration_connection(
+            uid,
+            connection_id,
+            public_payload,
+            private_payload,
+        )
+
+    def _upsert_google_connections_sync(
         self,
         uid: str,
         enabled: bool,
         status: str,
         last_error: str | None,
-    ) -> StoredIntegrationConnection:
+    ) -> list[StoredIntegrationConnection]:
         now = utcnow()
         specs = {
             "google_drive": {
@@ -3053,12 +3357,16 @@ class FirestoreHistoryRepository:
             batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
-        return self._build_stored_integration_connection(
-            uid,
-            "google_drive",
-            public_by_id["google_drive"],
-            private_by_id["google_drive"],
-        )
+        
+        return [
+            self._build_stored_integration_connection(
+                uid,
+                cid,
+                public_by_id[cid],
+                private_by_id[cid],
+            )
+            for cid in specs.keys()
+        ]
 
     def _update_integration_connection_sync(
         self,
@@ -3234,6 +3542,15 @@ class FirestoreHistoryRepository:
         )
         batch.commit()
 
+        after_user_data = user_ref.get().to_dict() or {}
+        self._create_audit_log_sync(
+            actor_uid=admin_email,
+            action="beta_approve",
+            target_uid=uid,
+            before={"betaProfile": current_profile},
+            after={"betaProfile": after_user_data.get("betaProfile")}
+        )
+
     def _reject_beta_application_sync(self, uid: str, admin_email: str, reason: str | None = None) -> None:
         now = utcnow()
         user_ref = self._db.collection("users").document(uid)
@@ -3277,6 +3594,15 @@ class FirestoreHistoryRepository:
             merge=True,
         )
         batch.commit()
+
+        after_user_data = user_ref.get().to_dict() or {}
+        self._create_audit_log_sync(
+            actor_uid=admin_email,
+            action="beta_reject",
+            target_uid=uid,
+            before={"betaProfile": current_profile},
+            after={"betaProfile": after_user_data.get("betaProfile")}
+        )
 
     def _revoke_beta_access_sync(self, uid: str, admin_email: str, reason: str | None = None) -> None:
         now = utcnow()
@@ -3330,6 +3656,15 @@ class FirestoreHistoryRepository:
                 merge=True,
             )
         batch.commit()
+
+        after_user_data = user_ref.get().to_dict() or {}
+        self._create_audit_log_sync(
+            actor_uid=admin_email,
+            action="beta_revoke",
+            target_uid=uid,
+            before={"betaProfile": current_profile},
+            after={"betaProfile": after_user_data.get("betaProfile")}
+        )
 
     def _redeem_beta_access_code_sync(self, uid: str, code_hash: str) -> None:
         transaction = self._db.transaction()

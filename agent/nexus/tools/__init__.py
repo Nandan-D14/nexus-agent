@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """CoComputer agent tools — computer control primitives for ADK."""
 
 from nexus.tools.computer import (
@@ -23,7 +26,8 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
-from nexus.tools.web import web_search, scrape_web_page
+from nexus.tools.docs import generate_pdf_report, save_as_artifact
+from nexus.tools.web import scrape_web_page # web_search commented out
 from nexus.tools.integrations import (
     search_drive,
     read_drive_file,
@@ -34,6 +38,8 @@ from nexus.tools.integrations import (
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    tavily_search,
+    tinyfish_web_agent,
     gmail_search,
     gmail_read,
     gmail_send,
@@ -51,8 +57,9 @@ ALL_TOOLS = [
     write_workspace_file,
     read_workspace_file,
     list_workspace_files,
-    web_search,
     scrape_web_page,
+    generate_pdf_report,
+    save_as_artifact,
     search_drive,
     read_drive_file,
     create_drive_doc,
@@ -62,6 +69,8 @@ ALL_TOOLS = [
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    tavily_search,
+    tinyfish_web_agent,
     gmail_search,
     gmail_read,
     gmail_send,

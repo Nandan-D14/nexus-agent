@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
@@ -66,10 +71,14 @@ export default function ConnectorsPage() {
   const [error, setError] = useState("");
   const [showMcp, setShowMcp] = useState(false);
   const [showGithub, setShowGithub] = useState(false);
+  const [showTavily, setShowTavily] = useState(false);
+  const [showTinyfish, setShowTinyfish] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpToken, setMcpToken] = useState("");
   const [githubToken, setGithubToken] = useState("");
+  const [tavilyKey, setTavilyKey] = useState("");
+  const [tinyfishKey, setTinyfishKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const isGoogleProvider = (provider: string) => 
@@ -211,6 +220,48 @@ export default function ConnectorsPage() {
     }
   }
 
+  async function submitTavily(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await authenticatedFetch("/api/v1/integrations/tavily", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: tavilyKey, enabled: true }),
+      });
+      if (!response.ok) throw new Error(await parseApiError(response));
+      setShowTavily(false);
+      setTavilyKey("");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect Tavily");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function submitTinyfish(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await authenticatedFetch("/api/v1/integrations/tinyfish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: tinyfishKey, enabled: true }),
+      });
+      if (!response.ok) throw new Error(await parseApiError(response));
+      setShowTinyfish(false);
+      setTinyfishKey("");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect Tinyfish");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function toggleConnection(connection: IntegrationConnection) {
     if (isGoogleProvider(connection.provider)) return;
 
@@ -290,6 +341,10 @@ export default function ConnectorsPage() {
               startGoogleConnect();
             } else if (item.provider === "github") {
               setShowGithub(true);
+            } else if (item.provider === "tavily") {
+              setShowTavily(true);
+            } else if (item.provider === "tinyfish") {
+              setShowTinyfish(true);
             } else if (item.provider === "mcp") {
               setShowMcp(true);
             }
@@ -414,6 +469,30 @@ export default function ConnectorsPage() {
               Token is encrypted and stored securely server-side.
             </p>
             <SubmitButton loading={submitting} label="Link GitHub" />
+          </form>
+        </ConnectorModal>
+      ) : null}
+
+      {showTavily ? (
+        <ConnectorModal title="Connect Tavily" onClose={() => setShowTavily(false)}>
+          <form onSubmit={submitTavily} className="space-y-4 pt-2">
+            <Field label="API Key" value={tavilyKey} onChange={tavilyKey => setTavilyKey(tavilyKey)} placeholder="tvly-..." type="password" />
+            <p className="text-[11px] leading-relaxed text-zinc-500 px-1">
+              Get your key at tavily.com. It is encrypted and stored securely server-side.
+            </p>
+            <SubmitButton loading={submitting} label="Link Tavily" />
+          </form>
+        </ConnectorModal>
+      ) : null}
+
+      {showTinyfish ? (
+        <ConnectorModal title="Connect Tinyfish" onClose={() => setShowTinyfish(false)}>
+          <form onSubmit={submitTinyfish} className="space-y-4 pt-2">
+            <Field label="API Key" value={tinyfishKey} onChange={tinyfishKey => setTinyfishKey(tinyfishKey)} placeholder="..." type="password" />
+            <p className="text-[11px] leading-relaxed text-zinc-500 px-1">
+              Get your key at agent.tinyfish.ai/api-keys. It is encrypted and stored securely server-side.
+            </p>
+            <SubmitButton loading={submitting} label="Link Tinyfish" />
           </form>
         </ConnectorModal>
       ) : null}

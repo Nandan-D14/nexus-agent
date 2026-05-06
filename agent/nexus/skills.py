@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Agent skill registry and prompt helpers."""
 
 from __future__ import annotations

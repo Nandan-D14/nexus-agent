@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Monitoring tool for proactive background tasks using the E2B Sandbox."""
 
 from __future__ import annotations

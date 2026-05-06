@@ -114,7 +114,11 @@ jobs:
 
       - name: 'Deploy Agent to Cloud Run'
         run: |-
-          SECRET_FLAGS=("--set-secrets=E2B_API_KEY=e2b-api-key:latest")
+          SECRET_FLAGS=(
+            "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
+            "--set-secrets=JWT_SECRET=jwt-secret:latest"
+            "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+          )
           if [[ -n "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" ]]; then
             SECRET_FLAGS+=("--set-secrets=BYOK_ENCRYPTION_KEY=${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}:latest")
           fi
@@ -128,14 +132,12 @@ jobs:
             "GOOGLE_CLOUD_LOCATION=${{ env.GEMINI_REGION }}"
             "GOOGLE_GENAI_USE_VERTEXAI=true"
             "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
-            "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
             "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'false' }}"
             "SHARED_ACCESS_CODE=${{ secrets.SHARED_ACCESS_CODE }}"
             "BETA_ENFORCE_BYOK=${{ secrets.BETA_ENFORCE_BYOK || 'true' }}"
             "BETA_ADMIN_EMAILS=${{ secrets.BETA_ADMIN_EMAILS }}"
             "BETA_GOOGLE_SHEET_ID=${{ secrets.BETA_GOOGLE_SHEET_ID }}"
             "BETA_GOOGLE_SHEET_NAME=${{ secrets.BETA_GOOGLE_SHEET_NAME || 'beta_applications' }}"
-            "JWT_SECRET=${{ secrets.JWT_SECRET }}"
           )
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 

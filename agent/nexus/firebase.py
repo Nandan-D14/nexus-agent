@@ -1,8 +1,12 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Firebase Admin app and Firestore client helpers."""
 
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 from pathlib import Path
 
 import firebase_admin
@@ -11,6 +15,8 @@ from firebase_admin import credentials as firebase_credentials
 from firebase_admin import firestore
 
 from nexus.config import AGENT_DIR, WORKSPACE_DIR, apply_runtime_env_overrides, settings
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_credentials_path(raw_path: str) -> Path:
@@ -59,8 +65,17 @@ def get_firebase_app():
     # Build credential: explicit key file if available, otherwise ADC
     cred = None
     if settings.google_application_credentials:
-        cred_path = _resolve_credentials_path(settings.google_application_credentials)
-        cred = firebase_credentials.Certificate(str(cred_path))
+        try:
+            cred_path = _resolve_credentials_path(settings.google_application_credentials)
+            cred = firebase_credentials.Certificate(str(cred_path))
+        except RuntimeError:
+            if settings.is_production:
+                raise
+            logger.warning(
+                "Firebase Admin credential path is configured but missing; "
+                "falling back to default Firebase Admin initialization.",
+                exc_info=True,
+            )
 
     try:
         return firebase_admin.initialize_app(

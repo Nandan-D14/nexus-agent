@@ -1,12 +1,19 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2 } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText } from "lucide-react";
+import { OutputsPanel } from "./outputs-panel";
+import { RunArtifact } from "@/lib/message-types";
 
-type Tab = "workflow" | "desktop";
+type Tab = "workflow" | "desktop" | "artifacts";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -18,6 +25,7 @@ export type UiActionMessage = {
 type Props = {
   workflowRun: WorkflowRun | null;
   streamUrl: string | null;
+  artifacts?: RunArtifact[];
   analysis?: string | null;
   defaultTab?: Tab;
   onTabChange?: (tab: Tab) => void;
@@ -32,6 +40,7 @@ type Props = {
 export function WorkflowDesktopContainer({
   workflowRun,
   streamUrl,
+  artifacts = [],
   analysis,
   defaultTab = "workflow",
   onTabChange,
@@ -121,6 +130,24 @@ export function WorkflowDesktopContainer({
               </span>
             )}
           </button>
+
+          {/* Artifacts Tab */}
+          <button
+            onClick={() => handleTabChange("artifacts")}
+            className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === "artifacts"
+                ? "bg-zinc-800 text-white"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+            }`}
+          >
+            <FileText className={`w-4 h-4 ${activeTab === "artifacts" ? "text-amber-400" : "text-zinc-600"}`} />
+            <span>Artifacts</span>
+            {artifacts.length > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-zinc-700 text-zinc-300 text-[11px] font-semibold">
+                {artifacts.length}
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Agent Activity */}
@@ -194,6 +221,19 @@ export function WorkflowDesktopContainer({
                   </>
                 )}
               </div>
+            </motion.div>
+          )}
+
+          {activeTab === "artifacts" && (
+            <motion.div
+              key="artifacts"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <OutputsPanel artifacts={artifacts} />
             </motion.div>
           )}
         </AnimatePresence>

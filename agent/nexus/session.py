@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Session management — maps session IDs to sandbox + agent state."""
 
 from __future__ import annotations
@@ -93,17 +96,33 @@ class Session:
         self.last_active = datetime.now(timezone.utc)
 
 
+import redis
+import json
+
 class SessionManager:
     """Creates, tracks, and cleans up CoComputer sessions."""
 
     def __init__(self, history_repository: Optional["FirestoreHistoryRepository"] = None) -> None:
-        self._sessions: dict[str, Session] = {}
+        self._in_memory_locks: dict[str, asyncio.Lock] = {}
+        self._local_sessions: dict[str, Session] = {}
+        self._redis: Optional[redis.Redis] = None
+        if settings.redis_url:
+            try:
+                self._redis = redis.from_url(settings.redis_url)
+                logger.info("SessionManager connected to Redis for distributed state.")
+            except Exception:
+                logger.warning("Failed to connect to Redis for SessionManager; using local state only.")
         self._cleanup_task: Optional[asyncio.Task] = None
         self.history_repository = history_repository
 
     @property
     def active_count(self) -> int:
-        return len(self._sessions)
+        if self._redis:
+            try:
+                return self._redis.hlen("nexus:sessions")
+            except Exception:
+                pass
+        return len(self._local_sessions)
 
     # ── CRUD ───────────────────────────────────────────────────
 
@@ -142,7 +161,21 @@ class SessionManager:
             continuation_mode=continuation_mode,
         )
 
-        self._sessions[session_id] = session
+        self._local_sessions[session_id] = session
+        if self._redis:
+            try:
+                metadata = {
+                    "id": session.id,
+                    "owner_id": session.owner_id,
+                    "status": session.status,
+                    "created_at": session.created_at.isoformat(),
+                    "task_id": session.task_id,
+                }
+                self._redis.hset("nexus:sessions", session_id, json.dumps(metadata))
+                self._redis.expire("nexus:sessions", 7200)
+            except Exception:
+                logger.warning("Failed to sync session %s to Redis", session_id, exc_info=True)
+
         await self._sync_session(session)
         if self.history_repository:
             try:
@@ -177,7 +210,7 @@ class SessionManager:
         continuation_mode: str | None = None,
     ) -> Session:
         """Rehydrate an existing stored thread into a live session with the same ID."""
-        existing = self._sessions.get(session_id)
+        existing = self._local_sessions.get(session_id)
         if existing:
             if existing.owner_id != owner_id:
                 raise PermissionError("Not the session owner")
@@ -201,7 +234,7 @@ class SessionManager:
 
     async def ensure_session_ready(self, session_id: str) -> Session:
         """Boot (or resume) the sandbox for a session on first use."""
-        session = self._sessions.get(session_id)
+        session = self._local_sessions.get(session_id)
         if session is None:
             raise KeyError(session_id)
 
@@ -276,65 +309,66 @@ class SessionManager:
             )
             return session
 
-    def get_session(self, session_id: str) -> Optional[Session]:
-        return self._sessions.get(session_id)
+    async def get_session(self, session_id: str) -> Optional[Session]:
+        # Check local first (active handles)
+        local = self._local_sessions.get(session_id)
+        if local:
+            return local
+
+        if not self.history_repository:
+            return None
+        stored = await self.history_repository.get_session(session_id)
+        if not stored:
+            return None
+        # We return a dummy session with just the ID, owner, etc since we can't reconstruct runtime_config here
+        # The true reconstruction happens in endpoints that receive the user object or WS ticket validation
+        # Wait, for the websocket reconnect, SandboxManager only needs the sandbox_id.
+        session = Session(
+            id=session_id,
+            owner_id=stored.owner_id,
+            runtime_config=None, # type: ignore
+            sandbox=SandboxManager(),
+            task_id=stored.task_id,
+            status=stored.status,
+            sandbox_id=stored.sandbox_id or "",
+            resume_mode="fresh"
+        )
+        # Note: this dummy session is NOT added to _local_sessions until activation
+        return session
+
+
 
     def list_sessions_for_owner(self, owner_id: str) -> list[Session]:
-        sessions = [session for session in self._sessions.values() if session.owner_id == owner_id]
+        sessions = [session for session in self._local_sessions.values() if session.owner_id == owner_id]
         sessions.sort(key=lambda session: session.last_active, reverse=True)
         return sessions
 
     async def destroy_if_owned(
         self, session_id: str, owner_id: str, status: str = "ended"
     ) -> None:
-        """Atomically check ownership and end the session.
-
-        Pauses the E2B sandbox (preserving state) instead of destroying it, so
-        the next session for this user can resume instantly.
-
-        Raises KeyError if the session is not found (already destroyed).
-        Raises PermissionError if the session exists but is owned by someone else.
-        """
-        # No await before the pop, so this is atomic within the asyncio event loop.
-        session = self._sessions.get(session_id)
+        """Atomically check ownership and end the session."""
+        session = self._local_sessions.get(session_id)
         if session is None:
+            # Check if it exists in history to provide better errors
+            if self.history_repository:
+                stored = await self.history_repository.get_session(session_id)
+                if stored and stored.owner_id != owner_id:
+                    raise PermissionError("Not the session owner")
             raise KeyError(session_id)
+            
         if session.owner_id != owner_id:
             raise PermissionError("Not the session owner")
-        self._sessions.pop(session_id, None)
-        paused_id: str | None = None
-        if session.sandbox.is_alive:
-            loop = asyncio.get_event_loop()
-            paused_id = await loop.run_in_executor(None, session.sandbox.pause)
-            if paused_id and self.history_repository:
-                try:
-                    await self.history_repository.save_paused_sandbox(session.owner_id, paused_id, session.id)
-                    logger.info("Session %s sandbox paused (sandbox_id=%s)", session_id, paused_id)
-                except Exception:
-                    logger.warning("Failed to save paused sandbox ID for session %s", session_id)
-            elif not paused_id:
-                # pause() failed — sandbox is gone, nothing to preserve
-                pass
-        session.status = "ended"
-        await self._sync_session(
-            session,
-            status=status,
-            ended_at=datetime.now(timezone.utc),
-        )
-        if self.history_repository:
-            try:
-                await self.history_repository.refresh_session_handoff(
-                    session.id,
-                    owner_id=session.owner_id,
-                    resume_state="paused" if paused_id else "ended",
-                    workspace_owner_session_id=session.id if paused_id else None,
-                    can_continue_workspace=bool(paused_id),
-                )
-            except Exception:
-                logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
+        
+        await self.destroy_session(session_id, status=status)
 
     async def destroy_session(self, session_id: str, status: str = "ended", error_code: str | None = None) -> None:
-        session = self._sessions.pop(session_id, None)
+        session = self._local_sessions.pop(session_id, None)
+        if self._redis:
+            try:
+                self._redis.hdel("nexus:sessions", session_id)
+            except Exception:
+                pass
+
         paused_id: str | None = None
         if session and session.sandbox.is_alive:
             loop = asyncio.get_event_loop()
@@ -351,6 +385,7 @@ class SessionManager:
                 await loop.run_in_executor(None, session.sandbox.destroy)
             session.status = "ended" if status == "ended" else "destroyed"
             logger.info("Session %s %s", session_id, session.status)
+        
         if session:
             await self._sync_session(session, status=status, ended_at=datetime.now(timezone.utc), error_code=error_code)
             if self.history_repository:
@@ -402,12 +437,15 @@ class SessionManager:
 
     def start_cleanup(self) -> None:
         """Start the background cleanup task."""
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            logger.info("Session cleanup loop started")
 
     def stop_cleanup(self) -> None:
         if self._cleanup_task:
             self._cleanup_task.cancel()
-
+            self._cleanup_task = None
+            logger.info("Session cleanup loop stopped")
     async def _cleanup_loop(self) -> None:
         """Destroy sessions that have been idle too long."""
         timeout = settings.session_timeout_minutes * 60
@@ -416,7 +454,7 @@ class SessionManager:
             now = datetime.now(timezone.utc)
             stale = [
                 sid
-                for sid, s in self._sessions.items()
+                for sid, s in self._local_sessions.items()
                 if (now - s.last_active).total_seconds() > timeout
             ]
             for sid in stale:
@@ -425,7 +463,7 @@ class SessionManager:
 
     async def destroy_all(self) -> None:
         """Destroy every active session (used on shutdown)."""
-        for sid in list(self._sessions.keys()):
+        for sid in list(self._local_sessions.keys()):
             await self.destroy_session(sid, status="ended")
 
     async def _sync_session(

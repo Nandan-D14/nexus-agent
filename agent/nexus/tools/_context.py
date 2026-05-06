@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Tool context — provides access to the current sandbox and BG task manager.
 
 Stored per-session via contextvars so that tool functions can retrieve

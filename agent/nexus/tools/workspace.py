@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Workspace tools for task-scoped files inside the sandbox."""
 
 from __future__ import annotations
@@ -8,6 +11,7 @@ import re
 from typing import Any, Literal
 
 from nexus.config import settings
+from nexus.storage import upload_artifact
 from nexus.tools._context import (
     get_run_id,
     get_sandbox,
@@ -56,7 +60,7 @@ def get_active_workspace_path() -> str:
     try:
         return get_workspace_path()
     except RuntimeError:
-        workspace_path = derive_workspace_path(get_session_id(), get_run_id())
+        workspace_path = derive_session_workspace_path(get_session_id())
         set_workspace_path(workspace_path)
         return workspace_path
 
@@ -147,11 +151,14 @@ def _append_task_summary(existing: str, task_summary: str) -> str:
     return existing.rstrip() + section
 
 
+from nexus.tools.base import normalized_tool
+
+@normalized_tool
 async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
     """Create or reuse the per-run workspace scaffold inside the sandbox."""
     try:
         sandbox = get_sandbox()
-        workspace_path = derive_workspace_path(get_session_id(), get_run_id())
+        workspace_path = derive_session_workspace_path(get_session_id())
         set_workspace_path(workspace_path)
 
         created = not sandbox.path_exists(workspace_path)
@@ -165,6 +172,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             absolute_path = f"{workspace_path}/{relative_name}"
             if not sandbox.path_exists(absolute_path):
                 sandbox.write_text_file(absolute_path, default_content)
+                upload_artifact(get_session_id(), get_run_id(), relative_name, default_content)
                 touched_files.append(relative_name)
                 continue
             if relative_name == "task.md" and task_summary.strip():
@@ -172,6 +180,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
                 updated = _append_task_summary(existing, task_summary)
                 if updated != existing:
                     sandbox.write_text_file(absolute_path, updated)
+                    upload_artifact(get_session_id(), get_run_id(), relative_name, updated)
                     touched_files.append(relative_name)
 
         return {
@@ -197,6 +206,9 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
         content = _build_todo_markdown(items)
         path = f"{workspace_path}/todo.md"
         get_sandbox().write_text_file(path, content)
+        
+        # Mirror to GCS
+        upload_artifact(get_session_id(), get_run_id(), "todo.md", content)
         
         # Sync to frontend
         todo_items = _parse_todo_markdown(content)
@@ -238,7 +250,11 @@ async def update_todo_item(
         target = items[item_index - 1]
         target["status"] = status
         target["note"] = note.strip()
-        sandbox.write_text_file(path, _format_todo_items(items))
+        formatted = _format_todo_items(items)
+        sandbox.write_text_file(path, formatted)
+
+        # Mirror to GCS
+        upload_artifact(get_session_id(), get_run_id(), "todo.md", formatted)
 
         # Sync to frontend
         await _emit_todo_update(items)
@@ -262,25 +278,42 @@ async def write_workspace_file(
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
         content_text = content if isinstance(content, str) else str(content)
-        get_sandbox().write_text_file(absolute_path, content_text, append=append)
+        sandbox = get_sandbox()
+        sandbox.write_text_file(absolute_path, content_text, append=append)
+        
         normalized_relative = _normalize_relative_path(relative_path)
+        
+        # Mirror to GCS
+        # If appending, we need the full content for the signed URL to be useful
+        full_content = content_text
+        if append:
+            try:
+                full_content = sandbox.read_text_file(absolute_path)
+            except Exception:
+                pass
+                
+        gcs_url = upload_artifact(get_session_id(), get_run_id(), normalized_relative, full_content)
+
         preview = " ".join(content_text.split())
         if len(preview) > 240:
             preview = preview[:239].rstrip() + "…"
+            
         response = {
             "workspace_path": workspace_path,
-            "workspace_file": absolute_path,
+            "workspace_file": gcs_url or absolute_path,
             "relative_path": normalized_relative,
             "bytes_written": len(content_text.encode("utf-8")),
             "append": append,
             "status": "success",
             "summary": preview or f"Saved {normalized_relative}",
         }
+        if gcs_url:
+            response["gcs_url"] = gcs_url
+            
         if normalized_relative.startswith("outputs/"):
-            response["output_path"] = absolute_path
-        return {
-            **response,
-        }
+            response["output_path"] = gcs_url or absolute_path
+            
+        return response
     except Exception as exc:
         return _tool_error(str(exc) or "Failed to write the workspace file.")
 

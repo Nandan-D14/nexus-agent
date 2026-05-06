@@ -1,4 +1,9 @@
 /**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
+/**
  * Discriminated union types for all WebSocket messages.
  *
  * Binary frames (audio) are handled separately by the WebSocket hook.

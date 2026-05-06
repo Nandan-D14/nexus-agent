@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Per-user runtime configuration and BYOK helpers."""
 
 from __future__ import annotations

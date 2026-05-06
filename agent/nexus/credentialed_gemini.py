@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """ADK Gemini model wrapper with explicit per-session credentials."""
 
 from __future__ import annotations

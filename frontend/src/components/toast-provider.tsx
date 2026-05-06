@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";

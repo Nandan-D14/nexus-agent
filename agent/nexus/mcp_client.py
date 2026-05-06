@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Remote MCP client support for user-configured Streamable HTTP servers."""
 
 from __future__ import annotations

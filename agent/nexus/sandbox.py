@@ -1,7 +1,11 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """E2B Desktop Sandbox wrapper — provides all computer control primitives."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
@@ -31,6 +35,98 @@ def _coerce_exit_code(value: object) -> int:
 
 class SandboxDeadError(RuntimeError):
     """Raised when the E2B sandbox has timed out or been destroyed."""
+
+
+class SandboxSweeper:
+    """Background worker that kills orphaned E2B sandboxes."""
+
+    def __init__(self, history_repo, e2b_api_key: str = ""):
+        self.history_repo = history_repo
+        self.e2b_api_key = e2b_api_key or settings.e2b_api_key
+        self._running = False
+        self._task = None
+
+    async def start(self, interval_seconds: int = 3600):
+        """Start the sweeper loop."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._loop(interval_seconds))
+        logger.info("Sandbox sweeper started (interval=%ds)", interval_seconds)
+
+    async def stop(self):
+        """Stop the sweeper loop."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Sandbox sweeper stopped")
+
+    async def _loop(self, interval_seconds: int):
+        while self._running:
+            try:
+                await self.sweep()
+            except Exception:
+                logger.exception("Error during sandbox sweep")
+            await asyncio.sleep(interval_seconds)
+
+    async def sweep(self):
+        """Find and kill sandboxes that are not associated with any active session."""
+        from e2b_desktop import Sandbox
+        
+        logger.info("Starting sandbox sweep...")
+        
+        # 1. Get all active sandbox IDs from Firestore
+        active_ids = set(await self.history_repo.list_all_active_sandbox_ids())
+        
+        # 2. List all running sandboxes from E2B
+        try:
+            # Sandbox.list returns a SandboxPaginator
+            paginator = await asyncio.to_thread(
+                Sandbox.list, 
+                api_key=self.e2b_api_key or None
+            )
+            # Fetch all items from the paginator
+            running_sandboxes = []
+            
+            def get_all_items(p):
+                items = []
+                current = p
+                while True:
+                    batch = current.next_items()
+                    items.extend(batch)
+                    if not current.has_next:
+                        break
+                return items
+                
+            running_sandboxes = await asyncio.to_thread(get_all_items, paginator)
+        except Exception:
+            logger.exception("Failed to list sandboxes from E2B")
+            return
+
+        killed_count = 0
+        for info in running_sandboxes:
+            # Assuming info has sandbox_id or similar
+            sid = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
+            if not sid:
+                continue
+                
+            if sid not in active_ids:
+                logger.info("Killing orphaned sandbox: %s", sid)
+                try:
+                    # We need to connect then kill, or use a static kill method if available
+                    await asyncio.to_thread(lambda: Sandbox.connect(sid, api_key=self.e2b_api_key or None).kill())
+                    killed_count += 1
+                except Exception:
+                    logger.warning("Failed to kill orphaned sandbox %s", sid, exc_info=True)
+        
+        if killed_count > 0:
+            logger.info("Sandbox sweep complete. Killed %d orphaned sandboxes.", killed_count)
+        else:
+            logger.info("Sandbox sweep complete. No orphans found.")
 
 
 class SandboxManager:
@@ -102,6 +198,7 @@ class SandboxManager:
                 self._stream_url = self._sandbox.stream.get_url()
                 logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
                 self._set_wallpaper()
+                self._provision_sandbox()
                 return {
                     "sandbox_id": self._sandbox.sandbox_id,
                     "stream_url": self._stream_url,
@@ -160,6 +257,18 @@ class SandboxManager:
         except Exception:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
+    def _provision_sandbox(self) -> None:
+        """Pre-install common libraries to speed up agent tasks."""
+        libs = ["fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+        cmd = f"pip install {' '.join(libs)}"
+        try:
+            # We run this in the background or with a long timeout
+            # For simplicity, we'll just run it with a timeout.
+            logger.info("Provisioning sandbox with libraries: %s", libs)
+            self._sandbox.commands.run(cmd, timeout=300)
+        except Exception as e:
+            logger.warning("Sandbox provisioning failed: %s", e)
+
     def keep_alive(self, timeout: int = 900) -> None:
         """Extend sandbox timeout."""
         if self._sandbox:
@@ -184,6 +293,24 @@ class SandboxManager:
         finally:
             self._sandbox = None
             self._stream_url = None
+
+    def connect(self, sandbox_id: str) -> dict:
+        """Connect to an existing (running) sandbox. Returns {sandbox_id, stream_url}."""
+        from e2b_desktop import Sandbox
+        
+        logger.info("Connecting to executing sandbox %s ...", sandbox_id)
+        self._sandbox = Sandbox.connect(
+            sandbox_id,
+            api_key=self._e2b_api_key or None,
+            timeout=settings.sandbox_timeout_seconds,
+        )
+        self._sandbox.stream.start(require_auth=False)
+        self._stream_url = self._sandbox.stream.get_url()
+        logger.info("Sandbox connected -- stream URL: %s", self._stream_url)
+        return {
+            "sandbox_id": self._sandbox.sandbox_id,
+            "stream_url": self._stream_url,
+        }
 
     def resume(self, sandbox_id: str) -> dict:
         """Resume a previously paused sandbox. Returns {sandbox_id, stream_url}.

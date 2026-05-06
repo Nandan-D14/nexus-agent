@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -38,6 +43,22 @@ export interface UseWebSocketReturn {
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
+const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
+
+function resolveWebSocketTarget(target: string): { url: string; protocols?: string[] } {
+  try {
+    const parsed = new URL(target);
+    const ticket = parsed.searchParams.get("ticket");
+    if (!ticket) {
+      return { url: target };
+    }
+    parsed.searchParams.delete("ticket");
+    const cleanUrl = parsed.toString();
+    return { url: cleanUrl, protocols: [ticket] };
+  } catch {
+    return { url: target };
+  }
+}
 
 /**
  * React hook for WebSocket connection management.
@@ -80,7 +101,10 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
       wsRef.current = null;
     }
 
-    const ws = new WebSocket(target);
+    const wsTarget = resolveWebSocketTarget(target);
+    const ws = wsTarget.protocols
+      ? new WebSocket(wsTarget.url, wsTarget.protocols)
+      : new WebSocket(wsTarget.url);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     setReadyState(ReadyState.CONNECTING);
@@ -101,8 +125,18 @@ export function useWebSocket(url: string | null): UseWebSocketReturn {
       ws.addEventListener("close", () => clearInterval(pingInterval), { once: true });
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setReadyState(ReadyState.CLOSED);
+
+      if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
+        setLastMessage({
+          type: "error",
+          code: `WS_CLOSED_${event.code}`,
+          message: event.reason || "WebSocket connection was closed.",
+        });
+        reconnectAttempts.current = MAX_RECONNECT_ATTEMPTS;
+        return;
+      }
 
       if (
         reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS &&

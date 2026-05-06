@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """ADK agent definition — the CoComputer brain.
 
 Supports two modes:
@@ -13,13 +16,15 @@ from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import BaseSessionService
+from nexus.session_service import FirestoreSessionService
 from google.genai import types
 
 from nexus.credentialed_gemini import CredentialedGemini
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 from nexus.runtime_config import SessionRuntimeConfig
+from google.adk.tools import google_search
 from nexus.tools import ALL_TOOLS
 from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
 
@@ -119,6 +124,8 @@ def create_multi_agent(
         github_list_issues,
         github_create_issue,
         github_summarize_pr,
+        tavily_search,
+        tinyfish_web_agent,
     )
     from nexus.tools.workspace import (
         prepare_task_workspace,
@@ -136,6 +143,7 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
+        google_search,
         search_drive,
         read_drive_file,
         create_drive_doc,
@@ -152,6 +160,8 @@ def create_multi_agent(
         github_list_issues,
         github_create_issue,
         github_summarize_pr,
+        tavily_search,
+        tinyfish_web_agent,
         *(integration_tools or []),
     ]
     deepresearcher_tools = [
@@ -162,6 +172,7 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
+        google_search,
         search_drive,
         read_drive_file,
         create_drive_doc,
@@ -178,6 +189,8 @@ def create_multi_agent(
         github_list_issues,
         github_create_issue,
         github_summarize_pr,
+        tavily_search,
+        tinyfish_web_agent,
         *(integration_tools or []),
     ]
 
@@ -207,10 +220,10 @@ def create_multi_agent(
 
 def create_runner(
     agent: Agent,
-    session_service: InMemorySessionService | None = None,
-) -> tuple[Runner, InMemorySessionService]:
+    session_service: BaseSessionService | None = None,
+) -> tuple[Runner, BaseSessionService]:
     """Create a Runner for executing agent turns."""
-    session_service = session_service or InMemorySessionService()
+    session_service = session_service or FirestoreSessionService()
     runner = Runner(
         agent=agent,
         app_name="nexus",
@@ -221,7 +234,7 @@ def create_runner(
 
 async def run_agent_turn(
     runner: Runner,
-    session_service: InMemorySessionService,
+    session_service: BaseSessionService,
     session_id: str,
     user_id: str,
     message: str,

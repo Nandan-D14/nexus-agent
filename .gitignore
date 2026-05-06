@@ -26,6 +26,8 @@ next-env.d.ts
 !.env.example
 *.pem
 temp_setup_secrets.sh
+*-adminsdk-*.json
+service-account.json
 
 # Firebase service-account keys & emulator data
 *-service-account.json
@@ -85,15 +87,32 @@ frontend/*.log
 test_screenshot.png
 
 # ── Plan / draft files (dev only) ────────────────────────────
-nexus_plan.md
-codex-plan.md
-phase2-plan.md
-producation-plan.md
+*_plan.md
+*-plan.md
 next-step.md
 cloudflare-gcp.md
 integrations-plans.md
+integrations_plan.md
+*-fix.md
+*_fix.md
+
+# ── Temporary Scripts & Patches ─────────────────────────────
+patch_*.py
+split_server.py
+refactor.py
+generate_routers*.py
+scripts/debug_*.py
+agent/scripts/debug_*.py
+preview-ui.html
 
 # ── Tool configs ──────────────────────────────────────────────
 .zencoder/
 .zenflow/
 .playwright-mcp/
+.agents/
+.codex/
+.kilo/
+.opencode/
+
+# ── Graphify ──────────────────────────────────────────────────
+graphify-out/

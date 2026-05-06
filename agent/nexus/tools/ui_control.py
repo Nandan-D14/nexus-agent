@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """UI control tools for agent to interact with the frontend interface."""
 
 from __future__ import annotations

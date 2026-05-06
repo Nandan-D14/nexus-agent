@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """CoComputer agent system prompt."""
 
 # The orchestrator prompt lives in agents/orchestrator_agent.py.

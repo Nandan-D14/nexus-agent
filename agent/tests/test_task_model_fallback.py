@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 from __future__ import annotations
 
 import asyncio
@@ -56,6 +59,125 @@ def _session(runtime_config: SessionRuntimeConfig):
 
 
 class TaskModelFallbackTests(IsolatedAsyncioTestCase):
+    async def test_orchestrator_uses_firebase_uid_for_adk_user(self) -> None:
+        config = _runtime_config(provider="apiKey", primary="gemini-2.5-flash")
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+        fake_session_service = object()
+
+        with (
+            patch.object(orchestrator_module, "create_multi_agent", return_value=MagicMock(name="agent")),
+            patch.object(orchestrator_module, "create_runner", return_value=(object(), fake_session_service)),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
+
+        self.assertEqual(orchestrator._user_id, "user-123")
+
+    async def test_missing_adk_session_replays_last_15_firestore_turns(self) -> None:
+        config = _runtime_config(provider="apiKey", primary="gemini-2.5-flash")
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+
+        messages: list[dict[str, object]] = []
+        for index in range(1, 17):
+            messages.append({"id": f"u{index}", "role": "user", "text": f"user {index}"})
+            messages.append({"id": f"a{index}", "role": "agent", "text": f"agent {index}"})
+
+        history_repository = SimpleNamespace(
+            get_session_messages=AsyncMock(return_value=messages),
+        )
+
+        class FakeSessionService:
+            def __init__(self) -> None:
+                self.created_with: dict[str, str] | None = None
+                self.events = []
+
+            async def get_session(self, **kwargs):
+                return None
+
+            async def create_session(self, **kwargs):
+                self.created_with = kwargs
+                return SimpleNamespace(
+                    app_name=kwargs["app_name"],
+                    user_id=kwargs["user_id"],
+                    id=kwargs["session_id"],
+                    events=[],
+                )
+
+            async def append_event(self, adk_session, event):
+                adk_session.events.append(event)
+                self.events.append(event)
+                return event
+
+        fake_session_service = FakeSessionService()
+        fake_agent = SimpleNamespace(name="nexus_orchestrator")
+
+        with (
+            patch.object(orchestrator_module, "create_multi_agent", return_value=fake_agent),
+            patch.object(orchestrator_module, "create_runner", return_value=(object(), fake_session_service)),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(
+                session=session,
+                ws=ws,
+                history_repository=history_repository,
+            )
+            await orchestrator._ensure_adk_session()
+
+        self.assertEqual(
+            fake_session_service.created_with,
+            {
+                "app_name": "nexus",
+                "user_id": "user-123",
+                "session_id": "session-123",
+            },
+        )
+        self.assertEqual(orchestrator._adk_session_id, "session-123")
+        self.assertEqual(len(fake_session_service.events), 30)
+        self.assertEqual(fake_session_service.events[0].content.parts[0].text, "user 2")
+        self.assertEqual(fake_session_service.events[0].content.role, "user")
+        self.assertEqual(fake_session_service.events[1].content.parts[0].text, "agent 2")
+        self.assertEqual(fake_session_service.events[1].content.role, "model")
+
+    async def test_prepare_workspace_for_turn_accepts_normalized_tool_result(self) -> None:
+        orchestrator = orchestrator_module.NexusOrchestrator.__new__(orchestrator_module.NexusOrchestrator)
+        orchestrator.session = SimpleNamespace(id="session-123")
+        orchestrator._current_run_id = "run-123"
+        orchestrator._workspace_path = "/home/user/CoComputer/Workspaces/session-123/run-123"
+        orchestrator._bind_workspace_context = lambda: None
+        orchestrator._ensure_session_workspace_root = AsyncMock(return_value=True)
+        orchestrator._create_step = AsyncMock(return_value="step-1")
+        orchestrator._complete_step = AsyncMock()
+        orchestrator._fail_step = AsyncMock()
+
+        with patch.object(
+            orchestrator_module,
+            "prepare_task_workspace",
+            new=AsyncMock(
+                return_value={
+                    "status": "success",
+                    "summary": "Executed prepare_task_workspace",
+                    "detail": {
+                        "workspace_path": "/home/user/CoComputer/Workspaces/session-123",
+                        "created": True,
+                        "touched_files": ["task.md"],
+                    },
+                    "metadata": {
+                        "workspace_path": "/home/user/CoComputer/Workspaces/session-123",
+                        "created": True,
+                        "touched_files": ["task.md"],
+                    },
+                }
+            ),
+        ):
+            await orchestrator._prepare_workspace_for_turn("write code")
+
+        orchestrator._fail_step.assert_not_awaited()
+        orchestrator._complete_step.assert_awaited_once()
+        self.assertEqual(
+            orchestrator._complete_step.await_args.kwargs["metadata"]["workspace_path"],
+            "/home/user/CoComputer/Workspaces/session-123",
+        )
+
     async def test_api_key_session_switches_to_fallback_model(self) -> None:
         config = _runtime_config(
             provider="apiKey",

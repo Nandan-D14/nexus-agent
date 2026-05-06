@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Pydantic models for API request / response schemas."""
 
 from __future__ import annotations
@@ -259,6 +262,16 @@ class UpdateIntegrationConnectionRequest(BaseModel):
 
 class UpsertGithubConnectionRequest(BaseModel):
     token: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertTavilyConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertTinyfishConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
     enabled: bool = True
 
 

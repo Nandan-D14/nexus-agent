@@ -1,10 +1,21 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Cheap request routing before the full agent workflow starts."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import json
+import logging
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from nexus.runtime_config import SessionRuntimeConfig
+
+logger = logging.getLogger(__name__)
 
 RouteMode = Literal["ask", "search", "current", "work", "computer", "deep", "clarify", "capability"]
 
@@ -47,19 +58,101 @@ _AMBIGUOUS_RE = re.compile(r"^\s*(fix|do|make|change|update|improve|handle|conti
 _CAPABILITY_RE = re.compile(
     r"\b("
     r"do you have|can you use|can you access|are .*tools|what tools|which tools|"
-    r"gmail|google calendar|calendar|google tasks|tasks|google drive|drive|connector|connectors|mcp"
+    r"capabilities|features|integrations|connectors|mcp"
     r")\b",
     re.IGNORECASE,
 )
 
+_ROUTING_PROMPT = """You are the request router for CoComputer, an agentic system with full desktop control and specialized sub-agents.
+Your goal is to choose the most efficient execution route for the user's request.
 
-def classify_request(
+Available Routes:
+- ask: Simple direct questions or conversational turns (hi, thanks) that don't need tools.
+- search: Simple web lookups for static facts (who is, what is).
+- current: Real-time queries like sports scores, news, or weather that need fresh web data.
+- work: Local file-system tasks, coding, implementing features, or multi-step workflows.
+- computer: GUI actions, clicking, typing into apps, screenshots, or visual navigation.
+- deep: Complex research tasks requiring multiple sources, analysis, or long reports.
+- capability: Questions about your own tools, features, connectors, or what you "can" do.
+- clarify: Empty, nonsense, or extremely ambiguous requests (e.g. "fix it" with no context).
+
+Decision Logic:
+1. If the request mentions "click", "desktop", "screen", "screenshot", or visual apps -> "computer" (needs_full_agent=true).
+2. If it asks to "implement", "fix code", "write file", or "run" -> "work" (needs_full_agent=true).
+3. If it requires complex research or "deep dive" -> "deep" (needs_full_agent=true).
+4. If it's a simple fact question -> "search" (needs_full_agent=false).
+5. If it's a current event/score -> "current" (needs_full_agent=false).
+6. If it's just "hi" or a direct question about a general concept -> "ask" (needs_full_agent=false).
+7. If it asks "can you use Gmail?" or "what tools do you have?" -> "capability" (needs_full_agent=false).
+
+Output your decision as JSON:
+{{
+  "mode": "route_name",
+  "needs_full_agent": true/false,
+  "reason": "short explanation",
+  "clarification": "optional message if mode is clarify"
+}}
+
+User Request: {text}
+Context: has_connectors={has_connectors}, has_uploads={has_uploads}"""
+
+
+async def classify_request_llm(
+    text: str,
+    runtime_config: SessionRuntimeConfig | None = None,
+    *,
+    has_connectors: bool = False,
+    has_uploads: bool = False,
+) -> RouteDecision:
+    """Classify the request using Gemini Flash for improved accuracy."""
+    if runtime_config is None or not runtime_config.gemini_available:
+        # Fallback to simple logic if LLM is unavailable
+        return classify_request_simple(text, has_connectors=has_connectors, has_uploads=has_uploads)
+
+    prompt = _ROUTING_PROMPT.format(
+        text=text.strip(),
+        has_connectors=has_connectors,
+        has_uploads=has_uploads,
+    )
+
+    try:
+        from google.genai import types
+        from nexus.runtime_config import build_genai_client
+
+        model = runtime_config.gemini_light_model or "gemini-2.0-flash-exp"
+        client = build_genai_client(runtime_config)
+
+        def _generate():
+            return client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+
+        response = await asyncio.to_thread(_generate)
+        data = json.loads(response.text)
+        
+        return RouteDecision(
+            mode=data.get("mode", "work"),
+            needs_full_agent=bool(data.get("needs_full_agent", True)),
+            reason=data.get("reason", "llm classification"),
+            clarification=data.get("clarification", ""),
+        )
+    except Exception as exc:
+        logger.warning("LLM routing failed, falling back to simple logic: %s", exc)
+        return classify_request_simple(text, has_connectors=has_connectors, has_uploads=has_uploads)
+
+
+def classify_request_simple(
     text: str,
     *,
     has_connectors: bool = False,
     has_uploads: bool = False,
 ) -> RouteDecision:
-    """Return the cheapest safe execution route for a user request."""
+    """Legacy regex-based routing used as a fallback."""
     cleaned = " ".join((text or "").split()).strip()
     lowered = cleaned.lower()
 
@@ -107,6 +200,23 @@ def classify_request(
         return RouteDecision("ask", False, "simple conversational turn")
 
     return RouteDecision("work", True, "default to normal agent flow")
+
+
+async def classify_request(
+    text: str,
+    runtime_config: SessionRuntimeConfig | None = None,
+    *,
+    has_connectors: bool = False,
+    has_uploads: bool = False,
+) -> RouteDecision:
+    """Return the cheapest safe execution route for a user request."""
+    # Always prefer the LLM classifier for better accuracy
+    return await classify_request_llm(
+        text,
+        runtime_config,
+        has_connectors=has_connectors,
+        has_uploads=has_uploads,
+    )
 
 
 def extract_search_query(text: str) -> str:
