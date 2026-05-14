@@ -15,7 +15,9 @@ from starlette.websockets import WebSocket
 
 from nexus.config import settings
 from nexus.history_repository import FirestoreHistoryRepository
+from nexus.production_tasks import ProductionTaskRepository
 from nexus.session import SessionManager
+from nexus.task_queue import task_queue, TaskQueue
 import redis
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class RateLimiter:
 
 
 history_repository = FirestoreHistoryRepository()
+production_task_repository = ProductionTaskRepository()
 session_manager = SessionManager(history_repository=history_repository)
 
 session_create_limiter = RateLimiter(max_requests=5, window_seconds=60, name="session_create")
@@ -76,6 +79,12 @@ def get_history_repository() -> FirestoreHistoryRepository:
 
 def get_session_manager() -> SessionManager:
     return session_manager
+
+def get_production_task_repository() -> ProductionTaskRepository:
+    return production_task_repository
+
+def get_task_queue() -> TaskQueue:
+    return task_queue
 
 def get_session_create_limiter() -> RateLimiter:
     return session_create_limiter

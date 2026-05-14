@@ -8,6 +8,8 @@ from .files import router as files_router
 from .templates import router as templates_router
 from .sessions import router as sessions_router
 from .users import router as users_router
+from .tasks import router as tasks_router
+from .worker import router as worker_router
 
 __all__ = [
     "health_router",
@@ -20,4 +22,6 @@ __all__ = [
     "templates_router",
     "sessions_router",
     "users_router",
+    "tasks_router",
+    "worker_router",
 ]

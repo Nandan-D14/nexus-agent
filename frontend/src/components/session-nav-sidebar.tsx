@@ -7,16 +7,18 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import { LogOut, Menu, X, ChevronRight, Plus, Search, type LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useState, memo } from "react";
+import { LogOut, Menu, X, ChevronRight, Plus, Search, MessageSquare, Trash2, MoreVertical, type LucideIcon } from "lucide-react";
 import { NAV_LINKS } from "@/lib/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch } from "@/lib/api-client";
-import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "@/lib/message-types";
+import { DEFAULT_PLAN_QUOTA, type PlanQuota, type RecentSession } from "@/lib/message-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { SearchModal } from "./search-modal";
 import { SettingsModal } from "./settings-modal";
 import { useSettings } from "@/lib/settings-context";
+import { useSession } from "@/lib/use-session";
+import { useToast } from "./toast-provider";
 
 /* ------------------------------------------------------------------ */
 /*  Nav items                                                          */
@@ -28,20 +30,41 @@ const NAV_ITEMS = NAV_LINKS as ReadonlyArray<{ href: string; icon: LucideIcon; l
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
-export function SessionNavSidebar() {
+export const SessionNavSidebar = memo(function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const { isSettingsOpen, setIsSettingsOpen } = useSettings();
+  const { listSessions, destroySession } = useSession();
+  const { toast } = useToast();
   const pathname = usePathname();
   const router = useRouter();
   const [quota, setQuota] = useState<PlanQuota | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // For mobile
   const [isCollapsed, setIsCollapsed] = useState(false); // For desktop
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [sessions, setSessions] = useState<RecentSession[]>([]);
+  const [isSessionsLoading, setIsSessionsLoading] = useState(false);
+  const [activeMenuSessionId, setActiveMenuSessionId] = useState<string | null>(null);
 
   const isMobileViewport = () => typeof window !== "undefined" && window.innerWidth < 768;
 
   useEffect(() => {
+    const handleClickOutside = () => setActiveMenuSessionId(null);
+    window.addEventListener("click", handleClickOutside);
+    return () => window.removeEventListener("click", handleClickOutside);
+  }, []);
+
+  const fetchSessions = useCallback(() => {
+    setIsSessionsLoading(true);
+    listSessions(15).then(data => {
+      setSessions(data);
+      setIsSessionsLoading(false);
+    });
+  }, [listSessions]);
+
+  useEffect(() => {
     if (!user) return;
+    
+    // Fetch Quota
     authenticatedFetch("/api/v1/user/quota")
       .then(async (res) => {
         if (res.ok) {
@@ -53,7 +76,10 @@ export function SessionNavSidebar() {
       .catch(() => {
         setQuota(DEFAULT_PLAN_QUOTA);
       });
-  }, [user]);
+
+    // Fetch Recent Sessions
+    fetchSessions();
+  }, [user, fetchSessions]);
 
   const handleSignOut = async () => {
     await signOutUser();
@@ -70,7 +96,42 @@ export function SessionNavSidebar() {
     router.push("/session/new");
   }, [router, user]);
 
+  const handleDeleteSession = async (e: React.MouseEvent, sid: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!confirm("Are you sure you want to delete this conversation?")) return;
+
+    const success = await destroySession(sid);
+    if (success) {
+      setSessions(prev => prev.filter(s => s.session_id !== sid));
+      toast("Conversation deleted", "success");
+      if (pathname.includes(sid)) {
+        router.push("/dashboard");
+      }
+    } else {
+      toast("Failed to delete conversation", "error");
+    }
+  };
+
   const initial = user?.displayName?.[0]?.toUpperCase() ?? user?.email?.[0]?.toUpperCase() ?? "U";
+
+  const formatRelativeTime = (dateStr: string | null) => {
+    if (!dateStr) return "";
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return "Just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays === 1) return "Yesterday";
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
 
   return (
     <>
@@ -142,7 +203,7 @@ export function SessionNavSidebar() {
         </div>
 
         {/* Navigation Links */}
-        <nav className="flex-1 px-3 mt-4 space-y-0.5 overflow-y-auto custom-scrollbar">
+        <nav className="px-3 mt-4 space-y-0.5 shrink-0">
           {NAV_ITEMS.map(({ href, icon: Icon, label, name }) => {
             const active = pathname.startsWith(href);
             const displayName = label || name;
@@ -192,6 +253,95 @@ export function SessionNavSidebar() {
             );
           })}
         </nav>
+
+        {/* Recent Sessions History */}
+        {!isCollapsed && (
+          <div className="flex-1 flex flex-col min-h-0 mt-6 px-3 mb-2 overflow-hidden">
+            <h3 className="px-3 mb-2 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500 dark:text-zinc-500">
+              Recent Conversations
+            </h3>
+            <div className="flex-1 overflow-y-auto custom-scrollbar space-y-0.5 pr-1">
+              {isSessionsLoading && sessions.length === 0 ? (
+                <div className="px-3 py-4 space-y-3">
+                  {[1, 2, 3].map(i => (
+                    <div key={i} className="h-3 w-full bg-zinc-200 dark:bg-zinc-800/50 rounded-full animate-pulse" />
+                  ))}
+                </div>
+              ) : sessions.length === 0 ? (
+                <div className="px-3 py-6 text-center">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-600 font-medium italic">No recent chat history</p>
+                </div>
+              ) : (
+                sessions.map((s) => {
+                  const active = pathname.includes(s.session_id);
+                  const menuOpen = activeMenuSessionId === s.session_id;
+
+                  return (
+                    <div key={s.session_id} className="relative group">
+                      <Link
+                        href={`/session/${s.session_id}`}
+                        className={`flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all duration-200 border ${
+                          active
+                            ? "bg-white dark:bg-white/[0.05] border-zinc-200 dark:border-white/10 text-indigo-500 dark:text-indigo-400 shadow-sm"
+                            : "border-transparent text-muted-foreground hover:bg-zinc-200/50 dark:hover:bg-white/5 hover:text-foreground"
+                        }`}
+                        onClick={() => isMobileViewport() && setIsSidebarOpen(false)}
+                      >
+                        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                          <span className="text-[12.5px] font-medium truncate leading-tight">
+                            {s.title || "New Chat"}
+                          </span>
+                          <span className="text-[9px] uppercase tracking-wider text-zinc-400 dark:text-zinc-600 font-bold">
+                            {formatRelativeTime(s.updated_at)}
+                          </span>
+                        </div>
+                      </Link>
+
+                      {/* Hover/Menu Actions */}
+                      <div className={`flex items-center absolute right-2 top-1/2 -translate-y-1/2 transition-opacity ${menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setActiveMenuSessionId(menuOpen ? null : s.session_id);
+                          }}
+                          className={`p-1 rounded-md transition-colors ${menuOpen ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-300" : "hover:bg-zinc-500/10 hover:text-zinc-300"}`}
+                          title="More options"
+                        >
+                          <MoreVertical className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {/* Dropdown Menu */}
+                      <AnimatePresence>
+                        {menuOpen && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                            className="absolute right-0 top-full mt-1 z-50 w-36 rounded-xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-zinc-900 shadow-xl overflow-hidden py-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              onClick={(e) => {
+                                handleDeleteSession(e, s.session_id);
+                                setActiveMenuSessionId(null);
+                              }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete chat</span>
+                            </button>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
 
         {/* User Profile & Quota */}
         <div className="mt-auto p-3 border-t border-sidebar-border">
@@ -265,5 +415,4 @@ export function SessionNavSidebar() {
       </AnimatePresence>
     </>
   );
-}
-
+});

@@ -1400,6 +1400,9 @@ class FirestoreHistoryRepository:
     async def list_run_artifacts(self, session_id: str, run_id: str, limit: int = 100) -> list[StoredArtifact]:
         return await asyncio.to_thread(self._list_run_artifacts_sync, session_id, run_id, limit)
 
+    async def get_artifact_for_owner(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
+        return await asyncio.to_thread(self._get_artifact_for_owner_sync, owner_id, artifact_id)
+
     async def create_workflow_template(
         self,
         *,
@@ -1777,7 +1780,19 @@ class FirestoreHistoryRepository:
             owner_id = data.get("ownerId")
             
             batch = self._db.batch()
-            batch.set(ref, {"status": "deleted", "updatedAt": now}, merge=True)
+            batch.set(
+                ref,
+                {
+                    "status": "deleted",
+                    "updatedAt": now,
+                    "endedAt": now,
+                    "sandboxId": None,
+                    "resumeState": "deleted",
+                    "canContinueWorkspace": False,
+                    "exactWorkspaceResumeAvailable": False,
+                },
+                merge=True,
+            )
             
             if owner_id:
                 task_ref = self._task_ref(owner_id, task_id)
@@ -2078,9 +2093,11 @@ class FirestoreHistoryRepository:
             session_artifact_count = int(session_data.get("artifactCount", 0) or 0) + 1
 
             payload: dict[str, Any] = {
+                "artifactId": artifact_id,
                 "sessionId": session_id,
                 "taskId": task_id,
                 "runId": run_id,
+                "ownerId": owner_id,
                 "kind": kind,
                 "title": title,
                 "preview": preview,
@@ -2140,6 +2157,22 @@ class FirestoreHistoryRepository:
 
         payload = transactional_create(transaction)
         return self._build_stored_artifact(session_id, run_id, artifact_id, payload)
+
+    def _get_artifact_for_owner_sync(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
+        docs = (
+            self._db.collection_group("artifacts")
+            .where(filter=FieldFilter("ownerId", "==", owner_id))
+            .where(filter=FieldFilter("artifactId", "==", artifact_id))
+            .limit(1)
+            .stream()
+        )
+        for doc in docs:
+            data = doc.to_dict() or {}
+            session_id = str(data.get("sessionId") or "")
+            run_id = str(data.get("runId") or "")
+            if session_id and run_id:
+                return self._build_stored_artifact(session_id, run_id, doc.id, data)
+        return None
 
     def _list_run_artifacts_sync(self, session_id: str, run_id: str, limit: int) -> list[StoredArtifact]:
         docs = (
@@ -2859,14 +2892,19 @@ class FirestoreHistoryRepository:
             docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("ownerId", "==", owner_id)).where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
             for doc in docs:
                 session_id = doc.id
-                stored_session = self._build_stored_session(session_id, doc.to_dict() or {})
+                data = doc.to_dict() or {}
+                sandbox_id = data.get("sandboxId") if isinstance(data.get("sandboxId"), str) else ""
+                if not sandbox_id:
+                    continue
+                stored_session = self._build_stored_session(session_id, data)
                 results.append({
                     "session_id": session_id,
                     "title": stored_session.title,
                     "status": stored_session.status,
                     "created_at": stored_session.created_at,
-                    "last_active_at": (doc.to_dict() or {}).get("lastActiveAt") or stored_session.created_at,
+                    "last_active_at": data.get("lastActiveAt") or stored_session.created_at,
                     "stream_url": None,
+                    "sandbox_id": sandbox_id,
                     "message_count": stored_session.message_count,
                     "token_totals": stored_session.token_totals,
                     "token_tracking_started_at": stored_session.token_tracking_started_at,

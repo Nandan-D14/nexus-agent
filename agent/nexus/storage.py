@@ -14,6 +14,7 @@ from nexus.config import settings
 logger = logging.getLogger(__name__)
 
 _storage_client: Optional[storage.Client] = None
+_SIGNED_URL_EXPIRATION_SECONDS = 900
 
 def get_storage_client() -> storage.Client:
     """Initialize and return the GCS client."""
@@ -33,6 +34,41 @@ def get_artifact_bucket_name() -> str:
     env = settings.app_env.lower() if settings.app_env else "development"
     return f"nexus-artifacts-{env}"
 
+def artifact_blob_name(session_id: str, run_id: str, relative_path: str) -> str:
+    """Return the canonical object name for a run artifact."""
+    cleaned = (relative_path or "artifact.bin").strip().replace("\\", "/")
+    cleaned = "/".join(part for part in cleaned.split("/") if part and part != ".")
+    return f"{session_id}/{run_id}/{cleaned or 'artifact.bin'}"
+
+def artifact_storage_metadata(session_id: str, run_id: str, relative_path: str) -> dict[str, str]:
+    """Metadata needed to regenerate signed URLs later."""
+    return {
+        "gcs_bucket": get_artifact_bucket_name(),
+        "gcs_blob": artifact_blob_name(session_id, run_id, relative_path),
+    }
+
+def generate_artifact_signed_url(
+    *,
+    bucket_name: str,
+    blob_name: str,
+    expiration_seconds: int = _SIGNED_URL_EXPIRATION_SECONDS,
+) -> Optional[str]:
+    """Generate a fresh signed URL for an existing artifact object."""
+    try:
+        client = get_storage_client()
+        bucket = client.get_bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        if not blob.exists():
+            return None
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=expiration_seconds),
+            method="GET",
+        )
+    except Exception as e:
+        logger.error("Failed to generate signed URL for %s/%s: %s", bucket_name, blob_name, e)
+        return None
+
 def upload_artifact(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:
     """Uploads a file to GCS and returns a signed URL."""
     try:
@@ -41,7 +77,15 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
         
         try:
             bucket = client.get_bucket(bucket_name)
-        except Exception:
+        except Exception as bucket_exc:
+            if settings.is_production:
+                logger.error(
+                    "Artifact bucket %s was not found or is not accessible. "
+                    "Provision the bucket before running production uploads: %s",
+                    bucket_name,
+                    bucket_exc,
+                )
+                return None
             logger.info("Bucket %s not found, attempting to create it", bucket_name)
             try:
                 bucket = client.create_bucket(bucket_name, location="US")
@@ -49,7 +93,7 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
                 logger.error("Failed to create bucket %s: %s", bucket_name, create_exc)
                 return None
 
-        blob_name = f"{session_id}/{run_id}/{relative_path}"
+        blob_name = artifact_blob_name(session_id, run_id, relative_path)
         blob = bucket.blob(blob_name)
         
         if isinstance(content, str):
@@ -57,7 +101,11 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
         else:
             blob.upload_from_string(content)
 
-        url = blob.generate_signed_url(version="v4", expiration=timedelta(days=7), method="GET")
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=_SIGNED_URL_EXPIRATION_SECONDS),
+            method="GET",
+        )
         return url
     except Exception as e:
         logger.error("Failed to upload artifact %s to GCS: %s", relative_path, e)

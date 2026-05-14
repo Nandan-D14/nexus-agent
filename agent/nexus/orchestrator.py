@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import httpx
 from google.adk.events import Event
@@ -73,6 +73,7 @@ class NexusOrchestrator:
         session: "Session",
         ws: WebSocket,
         history_repository: FirestoreHistoryRepository | None = None,
+        ensure_sandbox_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.session = session
         self.ws = ws
@@ -84,6 +85,8 @@ class NexusOrchestrator:
         self._voice_reconnect_task: asyncio.Task | None = None
         self._voice_connection_error_cls: type[Exception] | None = None
         self.history_repository = history_repository
+        self._ensure_sandbox_ready_callback = ensure_sandbox_ready
+        self._sandbox_ready_reported = bool(session.stream_url)
 
         # Only create voice manager when Gemini credentials are available
         if self.runtime_config.gemini_available:
@@ -136,7 +139,7 @@ class NexusOrchestrator:
         self._budget_stop_reason: str = ""
         self._workspace_path: str | None = None
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, lazy_sandbox: bool = False) -> None:
         """Set up ADK session. Voice connection is deferred until user starts mic."""
         # Bind sandbox and bg task manager to tool context
         set_sandbox(self.session.sandbox)
@@ -147,12 +150,13 @@ class NexusOrchestrator:
         set_history_repository(self.history_repository)
         set_send_json(self._send_json)
         self._bind_workspace_context()
-        workspace_root_ready = await self._ensure_session_workspace_root()
-        if not workspace_root_ready:
-            logger.warning(
-                "Continuing session %s initialization without a prepared workspace root",
-                self.session.id,
-            )
+        if not lazy_sandbox:
+            workspace_root_ready = await self._ensure_session_workspace_root()
+            if not workspace_root_ready:
+                logger.warning(
+                    "Continuing session %s initialization without a prepared workspace root",
+                    self.session.id,
+                )
 
         await self._load_integration_tools()
 
@@ -198,7 +202,7 @@ class NexusOrchestrator:
         # Notify frontend
         await self._send_json({
             "type": "sandbox_status",
-            "status": "ready",
+            "status": "ready" if self.session.sandbox.is_alive else "idle",
         })
         if self.session.stream_url:
             await self._send_json({
@@ -216,6 +220,10 @@ class NexusOrchestrator:
                 "type": "run_status",
                 "run": self._run_payload(status=self.session.run_status),
             })
+
+    async def start_desktop(self) -> None:
+        """Start or resume the sandbox because the user opened the desktop."""
+        await self._ensure_sandbox_ready("desktop")
 
     async def _load_integration_tools(self) -> None:
         """Load enabled per-user skills and MCP tools into the ADK runner."""
@@ -392,10 +400,7 @@ class NexusOrchestrator:
         if decision.mode == "current":
             await self._run_fast_current_lookup(text)
             return True
-        if decision.mode == "capability":
-            await self._send_capability_response()
-            return True
-        if decision.mode == "ask":
+        if decision.mode == "capability" or decision.mode == "ask":
             return await self._run_fast_answer(text, source=source)
         return False
 
@@ -412,23 +417,39 @@ class NexusOrchestrator:
                 logger.warning("Failed to send fast-path response to voice", exc_info=True)
         await self._send_json({"type": "agent_complete", "summary": answer[:200]})
 
-    async def _send_capability_response(self) -> None:
-        text = (
-            "Yes. CoComputer has native tools for Google Drive, Gmail, Google Calendar, "
-            "and Google Tasks when your Google connector is connected. I do not have a "
-            "personal Gmail account; I use your connected account through OAuth tools. "
-            "For those services I should use the native tools, not browser sign-in."
-        )
-        await self._send_agent_fast_response(text, source="capability")
-
     async def _run_fast_answer(self, text: str, *, source: str) -> bool:
         if not self.runtime_config.gemini_available:
             return False
         await self._send_json({"type": "agent_thinking", "content": "Answering directly..."})
         model = self.runtime_config.gemini_light_model or self.runtime_config.gemini_agent_model
+        
+        # Load up to 6 previous messages to give context to simple queries
+        history_text = ""
+        try:
+            from nexus.server import get_history_repository
+            history_repo = get_history_repository()
+            messages = await history_repo.get_session_messages(self.session.id)
+            if messages:
+                # Include the last 6 messages
+                recent_messages = messages[-6:]
+                history_text = "Previous conversation context:\n"
+                for msg in recent_messages:
+                    role = "User" if msg.get("role") == "user" else "Assistant"
+                    history_text += f"{role}: {msg.get('text', '')}\n"
+                history_text += "\n"
+        except Exception:
+            logger.warning("Could not load history for fast answer context", exc_info=True)
+
         prompt = (
-            "Answer the user directly and concisely. Do not use tools. "
+            "You are CoComputer, a highly capable AI agent. Answer the user directly and concisely. Do not use tools.\n\n"
+            "COCOMPUTER KNOWLEDGE:\n"
+            "- You have native tools for Google Drive, Gmail, Google Calendar, and Google Tasks.\n"
+            "- These tools are used via OAuth when the Google connector is connected.\n"
+            "- You do not have a personal account; you use the user's connected account.\n"
+            "- You have full Linux desktop control (clicking, typing, screenshots, terminal).\n"
+            "- You can write code, run commands, and create artifacts in a sandbox.\n\n"
             "If the answer needs current web information, say that a web search is needed.\n\n"
+            f"{history_text}"
             f"User: {text.strip()}"
         )
 
@@ -672,6 +693,12 @@ class NexusOrchestrator:
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
+        if not await self._ensure_sandbox_ready("screen_analysis"):
+            await self._send_json({
+                "type": "agent_screenshot",
+                "error": "Sandbox is not running and could not be started.",
+            })
+            return
         sandbox = self.session.sandbox
         screen_step_id = await self._create_step(
             step_type="system_event",
@@ -846,6 +873,10 @@ class NexusOrchestrator:
                 pass
         if self.voice:
             await self.voice.close()
+
+    def has_active_agent_turn(self) -> bool:
+        """Return True while a user task is still executing."""
+        return bool(self._agent_task and not self._agent_task.done())
 
     # ── Private ────────────────────────────────────────────────
 
@@ -1112,6 +1143,8 @@ class NexusOrchestrator:
                 line += f" ({', '.join(detail_parts)})"
             if drive_link:
                 line += f" drive={drive_link}"
+            if mime_type == "application/pdf" or name.lower().endswith(".pdf") or path.lower().endswith(".pdf"):
+                line += " [PDF: use extract_pdf_text(path=...) before reading; do not cat/base64 dump it]"
             lines.append(line)
         return "\n".join(lines)
 
@@ -1439,6 +1472,51 @@ class NexusOrchestrator:
             })
             return False
 
+    async def _ensure_sandbox_ready(self, reason: str) -> bool:
+        """Create/resume sandbox only when a user action actually needs it."""
+        if self.session.sandbox.is_alive and self.session.stream_url:
+            if not self._sandbox_ready_reported:
+                await self._send_json({"type": "sandbox_status", "status": "ready"})
+                await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
+                self._sandbox_ready_reported = True
+            return True
+
+        await self._send_json({"type": "sandbox_status", "status": "connecting", "reason": reason})
+        try:
+            if self._ensure_sandbox_ready_callback:
+                await self._ensure_sandbox_ready_callback()
+            elif not await self._reconnect_sandbox():
+                return False
+
+            set_sandbox(self.session.sandbox)
+            set_owner_id(self.session.owner_id)
+            set_history_repository(self.history_repository)
+            self._bind_workspace_context()
+            workspace_root_ready = await self._ensure_session_workspace_root()
+            if not workspace_root_ready:
+                logger.warning(
+                    "Sandbox became ready for session %s without a prepared workspace root",
+                    self.session.id,
+                )
+            await self._send_json({"type": "sandbox_status", "status": "ready"})
+            if self.session.stream_url:
+                await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
+            self._sandbox_ready_reported = True
+            return True
+        except Exception as exc:
+            logger.exception("Sandbox activation failed for session %s", self.session.id)
+            await self._send_json({
+                "type": "error",
+                "code": "SANDBOX_INIT_ERROR",
+                "message": str(exc),
+            })
+            await self._send_json({
+                "type": "sandbox_status",
+                "status": "error",
+                "message": str(exc),
+            })
+            return False
+
     async def _run_agent_tracked(self, message: str, *, source: str) -> None:
         """Wrap _run_agent in a cancellable task and await it."""
         if not self._ws_connected:
@@ -1449,6 +1527,9 @@ class NexusOrchestrator:
         self._turn_tool_summaries = []
         self._budget_stop_requested = False
         self._budget_stop_reason = ""
+        if not await self._ensure_sandbox_ready("agent_turn"):
+            await self._set_run_status("failed")
+            return
         await self._prepare_workspace_for_turn(message)
         self._current_turn_step_id = await self._create_step(
             step_type="agent_turn",
@@ -2710,6 +2791,25 @@ class NexusOrchestrator:
                     "url": value if "url" in key else None,
                     "metadata": {"tool": tool_name, "ref_key": key},
                 }
+        for container_key in ("detail", "metadata"):
+            nested = output_mapping.get(container_key)
+            if not isinstance(nested, dict):
+                continue
+            for key in ("path", "file_path", "output_path", "url", "download_url"):
+                value = nested.get(key)
+                if isinstance(value, str) and value.strip():
+                    return {
+                        "kind": "export_reference",
+                        "title": tool_name.replace("_", " "),
+                        "preview": self._clip_text(output_str or value, 280),
+                        "path": value if "path" in key else None,
+                        "url": value if "url" in key else None,
+                        "metadata": {
+                            "tool": tool_name,
+                            "ref_key": key,
+                            "ref_container": container_key,
+                        },
+                    }
         return None
 
     def _build_tool_result_metadata(

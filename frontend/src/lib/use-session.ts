@@ -16,6 +16,7 @@ import { isBetaBlockedCode } from "./beta-access";
 import type {
   ArchivedMessage,
   HistoryReuseMode,
+  RecentSession,
   RunArtifact,
   RunInfo,
   RunStep,
@@ -39,6 +40,7 @@ export interface UseSessionReturn {
   getSessionRunSteps: (sessionId: string) => Promise<RunStep[]>;
   getSessionArtifacts: (sessionId: string) => Promise<RunArtifact[]>;
   getResumeWorkspace: () => Promise<WorkspaceResumeState | null>;
+  listSessions: (limit?: number) => Promise<RecentSession[]>;
   reuseHistorySession: (sessionId: string, mode: HistoryReuseMode) => Promise<SessionData | null>;
   refreshTicket: (sessionId: string) => Promise<string | null>;
   destroySession: (sessionId: string) => Promise<boolean>;
@@ -123,6 +125,29 @@ export function useSession(): UseSessionReturn {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to load session artifacts";
+      setGetError(msg);
+      return [];
+    } finally {
+      setIsGetting(false);
+    }
+  }, []);
+
+  const listSessions = useCallback(async (limit: number = 20) => {
+    setIsGetting(true);
+    setGetError(null);
+
+    try {
+      const res = await authenticatedFetch(
+        `/api/v1/dashboard/sessions?limit=${limit}`,
+      );
+      if (!res.ok) {
+        throw new Error(await parseApiError(res));
+      }
+      const body = (await res.json()) as { sessions: RecentSession[] };
+      return body.sessions || [];
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to load session list";
       setGetError(msg);
       return [];
     } finally {
@@ -420,7 +445,7 @@ export function useSession(): UseSessionReturn {
     }
   }, []);
 
-  return {
+  const result = {
     createSession,
     continueSession,
     getSession,
@@ -429,10 +454,13 @@ export function useSession(): UseSessionReturn {
     getSessionRunSteps,
     getSessionArtifacts,
     getResumeWorkspace,
+    listSessions,
     reuseHistorySession,
     refreshTicket,
     destroySession,
     isLoading: isCreating || isGetting || isRefreshing || isDestroying,
     error: createError ?? getError ?? resumeError ?? reuseError ?? refreshError ?? destroyError,
   };
+  console.log("[useSession] returning keys:", Object.keys(result));
+  return result;
 }

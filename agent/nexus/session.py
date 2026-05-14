@@ -113,6 +113,7 @@ class SessionManager:
             except Exception:
                 logger.warning("Failed to connect to Redis for SessionManager; using local state only.")
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._idle_pause_tasks: dict[str, asyncio.Task] = {}
         self.history_repository = history_repository
 
     @property
@@ -238,6 +239,8 @@ class SessionManager:
         if session is None:
             raise KeyError(session_id)
 
+        self.cancel_idle_pause(session_id)
+
         async with session.activation_lock:
             if session.sandbox.is_alive and session.stream_url:
                 if session.status not in {"ready", "active"}:
@@ -362,6 +365,11 @@ class SessionManager:
         await self.destroy_session(session_id, status=status)
 
     async def destroy_session(self, session_id: str, status: str = "ended", error_code: str | None = None) -> None:
+        scheduled_pause = self._idle_pause_tasks.pop(session_id, None)
+        current_task = asyncio.current_task()
+        if scheduled_pause and scheduled_pause is not current_task and not scheduled_pause.done():
+            scheduled_pause.cancel()
+
         session = self._local_sessions.pop(session_id, None)
         if self._redis:
             try:
@@ -401,11 +409,48 @@ class SessionManager:
                     logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
     async def activate_session(self, session_id: str) -> Session:
+        self.cancel_idle_pause(session_id)
         session = await self.ensure_session_ready(session_id)
         session.status = "active"
         session.touch()
         await self._sync_session(session, status="active")
         return session
+
+    def cancel_idle_pause(self, session_id: str) -> None:
+        """Cancel a delayed idle pause, usually because the browser reconnected."""
+        task = self._idle_pause_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def schedule_idle_pause(self, session_id: str, *, delay_seconds: int | None = None) -> None:
+        """Pause an idle sandbox after a reconnect grace period."""
+        self.cancel_idle_pause(session_id)
+        delay = settings.idle_sandbox_pause_seconds if delay_seconds is None else delay_seconds
+        delay = max(int(delay), 0)
+        task = asyncio.create_task(self._idle_pause_after_delay(session_id, delay))
+        self._idle_pause_tasks[session_id] = task
+
+    async def _idle_pause_after_delay(self, session_id: str, delay_seconds: int) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            session = self._local_sessions.get(session_id)
+            if not session or session.status in {"destroyed", "ended", "error"}:
+                return
+            if not session.sandbox.is_alive:
+                return
+            idle_for = (datetime.now(timezone.utc) - session.last_active).total_seconds()
+            if idle_for < delay_seconds:
+                return
+            logger.info("Pausing idle sandbox after reconnect grace for session %s", session_id)
+            await self.destroy_session(session_id, status="ended")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Failed to pause idle sandbox for session %s", session_id, exc_info=True)
+        finally:
+            current_task = asyncio.current_task()
+            if self._idle_pause_tasks.get(session_id) is current_task:
+                self._idle_pause_tasks.pop(session_id, None)
 
     # ── Auth ───────────────────────────────────────────────────
 
@@ -446,6 +491,10 @@ class SessionManager:
             self._cleanup_task.cancel()
             self._cleanup_task = None
             logger.info("Session cleanup loop stopped")
+        for task in self._idle_pause_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._idle_pause_tasks.clear()
     async def _cleanup_loop(self) -> None:
         """Destroy sessions that have been idle too long."""
         timeout = settings.session_timeout_minutes * 60

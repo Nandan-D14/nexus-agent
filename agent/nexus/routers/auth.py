@@ -121,6 +121,8 @@ async def exchange_google_code(
                 },
             )
         if token_response.status_code >= 400:
+            logger.error("Google token exchange failed: status=%d response=%s", 
+                         token_response.status_code, token_response.text)
             raise RuntimeError(token_response.text[:1000])
         token_payload = token_response.json()
         refresh_token = token_payload.get("refresh_token")

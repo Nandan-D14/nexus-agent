@@ -48,6 +48,7 @@ Routing policy:
    - shell commands, repo inspection, file inspection, logs, env/config checks
    - package installs, scripts, process checks, path discovery
    - export and file operations
+   - reading uploaded PDFs with extract_pdf_text, never by dumping PDF/base64 bytes
 
 2. browser_agent is for web tasks:
    - opening websites, search, reading docs/articles, downloads from the web

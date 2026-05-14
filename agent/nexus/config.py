@@ -96,6 +96,24 @@ class Settings(BaseSettings):
     session_timeout_minutes: int = 120
     jwt_secret: str = "dev-secret-change-in-production"
 
+    # Durable production task runtime
+    task_worker_enabled: bool = False
+    task_worker_auth_token: str = ""
+    task_worker_lease_seconds: int = 600
+    task_event_replay_limit: int = 200
+    default_autonomy_mode: str = "manual"  # manual | auto
+    default_task_budget_credits: int = 1_000
+    default_task_max_runtime_minutes: int = 60
+    default_task_max_tool_calls: int = 80
+    idle_sandbox_pause_seconds: int = 300
+
+    # GCP Cloud Tasks
+    gcp_tasks_project_id: str = ""
+    gcp_tasks_location: str = "us-central1"
+    gcp_tasks_queue: str = "cocomputer-tasks"
+    gcp_tasks_worker_url: str = ""
+    gcp_tasks_oidc_service_account: str = ""
+
     # E2B Sandbox defaults
     sandbox_resolution_w: int = 1324
     sandbox_resolution_h: int = 968

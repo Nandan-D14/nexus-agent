@@ -152,7 +152,7 @@ function StatCard({
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-[28px] border border-zinc-200/80 bg-white/80 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-white/8 dark:bg-white/[0.04] dark:shadow-none"
+      className="rounded-[28px] border border-zinc-200 bg-white p-6 shadow-sm dark:border-white/5 dark:bg-white/[0.02] dark:shadow-none"
     >
       <div className="flex items-center justify-between text-zinc-500 dark:text-zinc-400">
         <span className="text-[11px] font-semibold uppercase tracking-[0.22em]">
@@ -190,10 +190,7 @@ export default function DashboardPage() {
   const [quota, setQuota] = useState<PlanQuota | null>(null);
 
   const refreshDashboard = useCallback(async () => {
-    if (!user) {
-      return;
-    }
-
+    if (!user) return;
     setLoading(true);
     setError(null);
 
@@ -207,31 +204,18 @@ export default function DashboardPage() {
           authenticatedFetch("/api/v1/user/quota"),
         ]);
 
-      if (!statsRes.ok) {
-        throw new Error(await parseApiError(statsRes));
-      }
-      if (!usageRes.ok) {
-        throw new Error(await parseApiError(usageRes));
-      }
-      if (!sessionUsageRes.ok) {
-        throw new Error(await parseApiError(sessionUsageRes));
-      }
-      if (!activeSessionsRes.ok) {
-        throw new Error(await parseApiError(activeSessionsRes));
-      }
+      if (!statsRes.ok) throw new Error(await parseApiError(statsRes));
+      if (!usageRes.ok) throw new Error(await parseApiError(usageRes));
+      if (!sessionUsageRes.ok) throw new Error(await parseApiError(sessionUsageRes));
+      if (!activeSessionsRes.ok) throw new Error(await parseApiError(activeSessionsRes));
 
-      const statsBody = (await statsRes.json()) as DashboardStats;
-      const usageBody = (await usageRes.json()) as { chart: UsageChartPoint[] };
-      const sessionUsageBody = (await sessionUsageRes.json()) as {
-        sessions: DashboardSessionUsage[];
-      };
-      const activeBody = (await activeSessionsRes.json()) as {
-        sessions: ActiveSession[];
-      };
+      const statsBody = await statsRes.json();
+      const usageBody = await usageRes.json();
+      const sessionUsageBody = await sessionUsageRes.json();
+      const activeBody = await activeSessionsRes.json();
 
       if (quotaRes.ok) {
-        const quotaBody = (await quotaRes.json()) as PlanQuota;
-        setQuota(quotaBody);
+        setQuota(await quotaRes.json());
       } else {
         setQuota(DEFAULT_PLAN_QUOTA);
       }
@@ -244,11 +228,7 @@ export default function DashboardPage() {
       setRecentSessions(sessionUsageBody.sessions || []);
       setActiveSessions(activeBody.sessions || []);
     } catch (fetchError) {
-      setError(
-        fetchError instanceof Error
-          ? fetchError.message
-          : "Failed to fetch dashboard data",
-      );
+      setError(fetchError instanceof Error ? fetchError.message : "Failed to fetch data");
     } finally {
       setLoading(false);
     }
@@ -258,491 +238,220 @@ export default function DashboardPage() {
     void refreshDashboard();
   }, [refreshDashboard]);
 
-  const handleEndSession = useCallback(
-    async (sessionId: string) => {
-      const shouldEnd = window.confirm(
-        "End this active session and close its desktop?",
-      );
-      if (!shouldEnd) {
-        return;
-      }
-
-      setEndingSessionId(sessionId);
-      try {
-        const response = await authenticatedFetch(`/api/v1/sessions/${sessionId}`, {
-          method: "DELETE",
-        });        if (!response.ok) {
-          throw new Error(await parseApiError(response));
-        }
-        await refreshDashboard();
-      } catch (requestError) {
-        setError(
-          requestError instanceof Error
-            ? requestError.message
-            : "Failed to end session",
-        );
-      } finally {
-        setEndingSessionId(null);
-      }
-    },
-    [refreshDashboard],
-  );
-
-  const handleStartSession = useCallback(() => {
-    if (!user) {
-      return;
+  const handleEndSession = async (sessionId: string) => {
+    if (!window.confirm("End this active session?")) return;
+    setEndingSessionId(sessionId);
+    try {
+      const res = await authenticatedFetch(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await parseApiError(res));
+      await refreshDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to end session");
+    } finally {
+      setEndingSessionId(null);
     }
-    router.push("/session/new");
-  }, [router, user]);
+  };
+
+  const handleStartSession = () => {
+    if (user) router.push("/session/new");
+  };
 
   const sourceSummary = useMemo(() => {
     const tracked = stats?.tracked_sources || [];
     const untracked = stats?.untracked_sources || [];
     return {
-      trackedLabel: tracked.length ? tracked.join(", ") : "None yet",
-      untrackedLabel: untracked.length ? untracked.join(", ") : "None",
+      tracked: tracked.length ? tracked.join(", ") : "None yet",
+      untracked: untracked.length ? untracked.join(", ") : "None",
     };
-  }, [stats?.tracked_sources, stats?.untracked_sources]);
+  }, [stats]);
 
   const tokenTotals = stats?.token_totals || EMPTY_TOKEN_TOTALS;
+  const usageRatio = quota ? (quota.used / quota.limit) : 0;
+  const usagePercent = Math.min(100, Math.round(usageRatio * 100));
 
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-600 border-t-transparent dark:border-cyan-500" />
-      </div>
-    );
-  }
-
-  if (error && !stats) {
-    return (
-      <div className="p-8">
-        <div className="flex items-center gap-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-red-600 dark:text-red-400">
-          <AlertTriangle className="h-5 w-5" />
-          <p>{error}</p>
-        </div>
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-600 border-t-transparent" />
       </div>
     );
   }
 
   return (
     <div className="mx-auto max-w-7xl space-y-8 px-4 pb-20 pt-4 text-foreground md:px-8">
+      {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-white md:text-5xl">
+          <h1 className="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-white md:text-5xl">      
             Dashboard
           </h1>
-          <p className="mt-2 max-w-2xl text-sm text-zinc-500 dark:text-zinc-400 md:text-base">
-            Session health, token telemetry, and live session controls for{" "}
-            {user?.displayName || "your workspace"}.
+          <p className="mt-2 max-w-2xl text-sm text-zinc-500 dark:text-zinc-400">
+            Session health and token telemetry for {user?.displayName || "your workspace"}.
           </p>
         </div>
         <button
-          type="button"
           onClick={handleStartSession}
-          disabled={!user}
-          className="inline-flex items-center justify-center rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-cyan-700 dark:bg-white dark:text-zinc-950 dark:hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex items-center justify-center rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white hover:bg-cyan-700 dark:bg-white dark:text-zinc-950 transition-colors"
         >
           Start New Session
         </button>
       </div>
 
-      {error ? (
+      {error && (
         <div className="flex items-center gap-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-red-600 dark:text-red-400">
           <AlertTriangle className="h-5 w-5" />
           <p>{error}</p>
         </div>
-      ) : null}
+      )}
 
-      {/* Starter Plan Banner */}
+      {/* Quota Banner */}
       {quota && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`rounded-[28px] border p-6 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur-sm ${
-            quota.remaining <= 0
-              ? "border-red-500/30 bg-red-50/80 dark:border-red-500/20 dark:bg-red-950/20"
-              : quota.used / quota.limit >= 0.8
-                ? "border-amber-500/30 bg-amber-50/80 dark:border-amber-500/20 dark:bg-amber-950/20"
-                : "border-zinc-200/80 bg-white/80 dark:border-white/8 dark:bg-white/[0.04]"
+          className={`rounded-[28px] border p-6 backdrop-blur-sm ${
+            quota.remaining <= 0 ? "border-red-500 bg-red-50 dark:bg-red-950" : 
+            usageRatio >= 0.8 ? "border-amber-500 bg-amber-50 dark:bg-amber-950" : 
+            "border-zinc-200 bg-white dark:border-white"
           }`}
         >
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-                {quota.plan_name || "$5 Starter"}
+              <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                {quota.plan_name || "Usage Credits"}
               </p>
-              <p className="mt-1 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                {formatCompactNumber(quota.used)}{" "}
-                <span className="text-base font-normal text-zinc-500 dark:text-zinc-400">
-                  / {formatCompactNumber(quota.limit)} {quota.unit || "credits"}
-                </span>
+              <p className="mt-1 text-2xl font-semibold tracking-tight">
+                {formatCompactNumber(quota.used)} / {formatCompactNumber(quota.limit)}
               </p>
-              {quota.remaining <= 0 ? (
-                <p className="mt-1 text-sm text-red-600 dark:text-red-400 font-medium">
-                  Starter plan balance exhausted for this development entitlement.
-                </p>
-              ) : quota.used / quota.limit >= 0.8 ? (
-                <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">
-                  {formatNumber(quota.remaining)} {quota.unit || "credits"} remaining
-                </p>
-              ) : (
-                <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                  {formatNumber(quota.remaining)} {quota.unit || "credits"} remaining
-                </p>
-              )}
             </div>
-            <div className="text-right text-sm text-zinc-500 dark:text-zinc-400">
-              {Math.min(100, Math.round((quota.used / quota.limit) * 100))}% used
+            <div className="text-right text-sm text-zinc-500">
+              {usagePercent}% used
             </div>
           </div>
           <div className="mt-4 h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
             <div
-              className={`h-full rounded-full transition-all duration-700 ${
-                quota.remaining <= 0
-                  ? "bg-red-500"
-                  : quota.used / quota.limit >= 0.8
-                    ? "bg-amber-500"
-                    : "bg-cyan-500"
+              className={`h-full transition-all duration-700 ${
+                quota.remaining <= 0 ? "bg-red-500" : usageRatio >= 0.8 ? "bg-amber-500" : "bg-cyan-500"
               }`}
-              style={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
-            />
+              style={{ width: `${usagePercent}%` }}
+            ></div>
           </div>
         </motion.div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          title="Total Sessions"
-          value={formatNumber(stats?.total_sessions || 0)}
-          icon={Terminal}
-          subtitle={`${stats?.sessions_this_week || 0} started this week`}
-        />
-        <StatCard
-          title="Total Messages"
-          value={formatNumber(stats?.total_messages || 0)}
-          icon={MessageSquare}
-        />
-        <StatCard
-          title="Average Duration"
-          value={`${stats?.avg_session_duration_mins || 0}m`}
-          icon={Clock}
-        />
-        <StatCard
-          title="Active Sessions"
-          value={formatNumber(stats?.active_sessions || 0)}
-          icon={Activity}
-          subtitle="Live desktops in this backend"
-        />
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <StatCard title="Total Sessions" value={formatNumber(stats?.total_sessions || 0)} icon={Terminal} />
+        <StatCard title="Total Messages" value={formatNumber(stats?.total_messages || 0)} icon={MessageSquare} />
+        <StatCard title="Avg Duration" value={`${stats?.avg_session_duration_mins || 0}m`} icon={Clock} />
+        <StatCard title="Active" value={formatNumber(stats?.active_sessions || 0)} icon={Activity} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          title="Total Tokens"
-          value={formatCompactNumber(tokenTotals.total)}
-          icon={Cpu}
-          subtitle={`${formatNumber(tokenTotals.total)} exact tokens tracked`}
-        />
-        <StatCard
-          title="Input Tokens"
-          value={formatCompactNumber(tokenTotals.input)}
-          icon={BarChart3}
-          subtitle="Prompt and input-side usage"
-        />
-        <StatCard
-          title="Output Tokens"
-          value={formatCompactNumber(tokenTotals.output)}
-          icon={PlayCircle}
-          subtitle="Model output and completion usage"
-        />
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="rounded-[28px] border border-zinc-200/80 bg-white/80 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-white/8 dark:bg-white/[0.04] dark:shadow-none"
-        >
-          <div className="flex items-center justify-between text-zinc-500 dark:text-zinc-400">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.22em]">
-              Source Coverage
-            </span>
-            <Power className="h-5 w-5 text-cyan-600 dark:text-cyan-400" />
+      {/* Token Grid */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <StatCard title="Total Tokens" value={formatCompactNumber(tokenTotals.total)} icon={Cpu} />
+        <StatCard title="Input" value={formatCompactNumber(tokenTotals.input)} icon={BarChart3} />
+        <StatCard title="Output" value={formatCompactNumber(tokenTotals.output)} icon={PlayCircle} />
+        <div className="rounded-[28px] border border-zinc-200 bg-white p-6 dark:border-white/5 dark:bg-white/[0.02]">
+          <div className="flex items-center justify-between text-zinc-500">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.22em]">Source Coverage</span>
+            <Power className="h-5 w-5" />
           </div>
-          <div className="mt-5 space-y-4 text-sm">
+          <div className="mt-5 space-y-3 text-sm">
             <div>
-              <p className="font-medium text-zinc-950 dark:text-white">Tracked</p>
-              <p className="mt-1 text-zinc-500 dark:text-zinc-400">
-                {sourceSummary.trackedLabel}
-              </p>
+              <p className="font-medium">Tracked</p>
+              <p className="text-xs text-zinc-500 truncate">{sourceSummary.tracked}</p>
             </div>
-            <div className="border-t border-zinc-200/80 pt-4 dark:border-white/8">
-              <p className="font-medium text-zinc-950 dark:text-white">
-                Waiting for exact metadata
-              </p>
-              <p className="mt-1 text-zinc-500 dark:text-zinc-400">
-                {sourceSummary.untrackedLabel}
-              </p>
+            <div className="border-t border-zinc-100 dark:border-white/5 pt-3">
+              <p className="font-medium">Untracked</p>
+              <p className="text-xs text-zinc-500 truncate">{sourceSummary.untracked}</p>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,1fr)]">
-        <div className="space-y-6">
-          <section className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-[#2f2f35] dark:bg-[#1a1a1c]">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-                  30 Day Usage
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                  Usage trend
-                </h2>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { key: "total_tokens", label: "Tokens" },
-                  { key: "sessions", label: "Sessions" },
-                  { key: "messages", label: "Messages" },
-                ].map((option) => (
+      {/* Charts & History Grid */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <div className="xl:col-span-2 space-y-6">
+          <section className="rounded-3xl border border-zinc-200 bg-white p-6 dark:border-white/5 dark:bg-white/[0.02]">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-semibold">Usage Trend</h2>
+              <div className="flex gap-2">
+                {["total_tokens", "sessions", "messages"].map((m) => (
                   <button
-                    key={option.key}
-                    onClick={() => setChartMetric(option.key as ChartMetric)}
-                    className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
-                      chartMetric === option.key
-                        ? "bg-indigo-600 text-white dark:bg-indigo-500 dark:text-white"
-                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-white/8 dark:text-zinc-300 dark:hover:bg-white/14"
-                    }`}
+                    key={m}
+                    onClick={() => setChartMetric(m as ChartMetric)}
+                    className={`px-3 py-1 text-xs rounded-full transition-colors ${chartMetric === m ? "bg-indigo-600 text-white" : "bg-zinc-100 dark:bg-white/5 text-zinc-500"}`}
                   >
-                    {option.label}
+                    {m.replace("_", " ")}
                   </button>
                 ))}
               </div>
             </div>
-
-            <div className="mt-6 h-[320px]">
+            <div className="h-[300px]">
               <UsageChart data={usage} metric={chartMetric} />
             </div>
-
-            <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">
-              Exact token tracking starts from this rollout. Older sessions remain
-              visible but show no token telemetry.
-            </p>
           </section>
 
-          <section className="rounded-[32px] border border-zinc-200/80 bg-white/85 p-6 shadow-[0_24px_60px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-white/8 dark:bg-white/[0.04] dark:shadow-none">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-                  Session Token Breakdown
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                  Recent session usage
-                </h2>
-              </div>
-              <Link
-                href="/history"
-                className="text-sm font-medium text-cyan-700 hover:text-cyan-600 dark:text-cyan-300 dark:hover:text-cyan-200"
-              >
-                View history
-              </Link>
+          <section className="rounded-3xl border border-zinc-200 bg-white p-6 dark:border-white/5 dark:bg-white/[0.02]">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-semibold">Recent Sessions</h2>
+              <Link href="/history" className="text-sm text-cyan-600">View all</Link>
             </div>
-
-            <div className="mt-6 overflow-x-auto">
-              <table className="min-w-full divide-y divide-zinc-200/80 text-sm dark:divide-white/8">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
                 <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
-                    <th className="pb-3 font-medium">Session</th>
-                    <th className="pb-3 font-medium">Status</th>
-                    <th className="pb-3 font-medium">Created</th>
-                    <th className="pb-3 font-medium text-right">Input</th>
-                    <th className="pb-3 font-medium text-right">Output</th>
-                    <th className="pb-3 font-medium text-right">Total</th>
-                    <th className="pb-3 font-medium text-right">Coverage</th>
+                  <tr className="text-[10px] uppercase tracking-widest text-zinc-500 border-b border-zinc-100 dark:border-white/5">
+                    <th className="pb-3 px-2">Session</th>
+                    <th className="pb-3 px-2">Status</th>
+                    <th className="pb-3 px-2 text-right">Total Tokens</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-200/60 dark:divide-white/6">
-                  {recentSessions.length ? (
-                    recentSessions.map((session) => (
-                      <tr key={session.session_id} className="align-top">
-                        <td className="py-4 pr-6">
-                          <Link
-                            href={`/history/${session.session_id}`}
-                            className="font-medium text-zinc-950 hover:text-cyan-700 dark:text-white dark:hover:text-cyan-300"
-                          >
-                            {session.title}
-                          </Link>
-                          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                            {session.message_count} messages
-                          </p>
-                        </td>
-                        <td className="py-4 pr-6">
-                          <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium capitalize text-zinc-700 dark:bg-white/8 dark:text-zinc-200">
-                            {session.status}
-                          </span>
-                        </td>
-                        <td className="py-4 pr-6 text-zinc-600 dark:text-zinc-300">
-                          {formatDate(session.created_at)}
-                        </td>
-                        <td className="py-4 pr-6 text-right font-medium text-zinc-800 dark:text-zinc-200">
-                          {formatNumber(session.token_totals?.input || 0)}
-                        </td>
-                        <td className="py-4 pr-6 text-right font-medium text-zinc-800 dark:text-zinc-200">
-                          {formatNumber(session.token_totals?.output || 0)}
-                        </td>
-                        <td className="py-4 pr-6 text-right font-semibold text-zinc-950 dark:text-white">
-                          {formatNumber(session.token_totals?.total || 0)}
-                        </td>
-                        <td className="py-4 text-right">
-                          <span
-                            className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
-                              session.token_coverage === "tracked"
-                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/12 dark:text-emerald-300"
-                                : "bg-zinc-100 text-zinc-600 dark:bg-white/8 dark:text-zinc-400"
-                            }`}
-                          >
-                            {session.token_coverage === "tracked"
-                              ? "Tracked"
-                              : "No data"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td
-                        colSpan={7}
-                        className="py-10 text-center text-sm text-zinc-500 dark:text-zinc-400"
-                      >
-                        No sessions available yet.
+                <tbody className="divide-y divide-zinc-50 dark:divide-white/5">
+                  {recentSessions.map((s) => (
+                    <tr key={s.session_id}>
+                      <td className="py-3 px-2">
+                        <Link href={`/history/${s.session_id}`} className="font-medium hover:text-cyan-600">{s.title}</Link>
+                        <p className="text-[10px] text-zinc-500">{formatDate(s.created_at)}</p>
+                      </td>
+                      <td className="py-3 px-2">
+                        <span className="px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-white/5 text-[10px]">{s.status}</span>
+                      </td>
+                      <td className="py-3 px-2 text-right font-mono font-medium">
+                        {formatNumber(s.token_totals?.total || 0)}
                       </td>
                     </tr>
-                  )}
+                  ))}
                 </tbody>
               </table>
             </div>
           </section>
         </div>
 
+        {/* Active Side column */}
         <div className="space-y-6">
-          <section className="rounded-[32px] border border-zinc-200/80 bg-white/85 p-6 shadow-[0_24px_60px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-white/8 dark:bg-white/[0.04] dark:shadow-none">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-              Active Session Management
-            </p>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-              Live desktops
-            </h2>
-
-            <div className="mt-6 space-y-4">
-              {activeSessions.length ? (
-                activeSessions.map((session) => (
-                  <div
-                    key={session.session_id}
-                    className="rounded-[24px] border border-zinc-200/80 bg-zinc-50/90 p-4 dark:border-white/8 dark:bg-white/[0.03]"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-base font-medium text-zinc-950 dark:text-white">
-                          {session.title}
-                        </p>
-                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-                          {session.status} • {formatRelativeTime(session.last_active_at)}
-                        </p>
-                      </div>
-                      <span className="inline-flex items-center gap-2 rounded-full bg-emerald-100 px-3 py-1 text-[11px] font-medium text-emerald-700 dark:bg-emerald-500/12 dark:text-emerald-300">
-                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                        Live
-                      </span>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                      <div className="rounded-2xl bg-white/80 p-3 dark:bg-white/[0.03]">
-                        <p className="text-zinc-500 dark:text-zinc-400">Last active</p>
-                        <p className="mt-1 font-medium text-zinc-950 dark:text-white">
-                          {formatDateTime(session.last_active_at)}
-                        </p>
-                      </div>
-                      <div className="rounded-2xl bg-white/80 p-3 dark:bg-white/[0.03]">
-                        <p className="text-zinc-500 dark:text-zinc-400">Tracked tokens</p>
-                        <p className="mt-1 font-medium text-zinc-950 dark:text-white">
-                          {formatNumber(session.token_totals?.total || 0)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 flex items-center justify-between gap-3 text-sm text-zinc-500 dark:text-zinc-400">
-                      <span>
-                        {session.token_coverage === "tracked"
-                          ? "Exact token data available"
-                          : "No token data yet"}
-                      </span>
-                      <span>{session.message_count} msgs</span>
-                    </div>
-
-                    <div className="mt-4 flex gap-3">
-                      <Link
-                        href={`/session/${session.session_id}`}
-                        className="flex-1 rounded-full bg-zinc-950 px-4 py-2.5 text-center text-sm font-medium text-white transition-colors hover:bg-cyan-700 dark:bg-white dark:text-zinc-950 dark:hover:bg-cyan-200"
-                      >
-                        Resume
-                      </Link>
-                      <button
-                        onClick={() => void handleEndSession(session.session_id)}
-                        disabled={endingSessionId === session.session_id}
-                        className="rounded-full border border-red-500/20 px-4 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300"
-                      >
-                        {endingSessionId === session.session_id ? "Ending..." : "End"}
-                      </button>
-                    </div>
+          <section className="rounded-3xl border border-zinc-200 bg-white p-6 dark:border-white/5 dark:bg-white/[0.02]">
+            <h2 className="text-xl font-semibold mb-6">Live Desktops</h2>
+            <div className="space-y-4">
+              {activeSessions.map((s) => (
+                <div key={s.session_id} className="p-4 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-zinc-100 dark:border-white/5">
+                  <p className="font-medium truncate">{s.title}</p>
+                  <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-wider">{s.status} • {formatRelativeTime(s.last_active_at)}</p>
+                  <div className="flex gap-2 mt-4">
+                    <Link href={`/session/${s.session_id}`} className="flex-1 text-center py-2 bg-zinc-950 text-white dark:bg-white dark:text-black rounded-full text-xs font-medium">Resume</Link>
+                    <button onClick={() => void handleEndSession(s.session_id)} className="px-4 py-2 border border-red-500/20 text-red-500 rounded-full text-xs font-medium">End</button>
                   </div>
-                ))
-              ) : (
-                <div className="rounded-[24px] border border-dashed border-zinc-300 bg-zinc-50/60 p-6 text-sm text-zinc-500 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400">
-                  No active sessions right now.
                 </div>
-              )}
+              ))}
+              {!activeSessions.length && <p className="text-sm text-zinc-500 italic text-center py-8">No active sessions.</p>}
             </div>
           </section>
 
-          <section className="rounded-[32px] border border-zinc-200/80 bg-white/85 p-6 shadow-[0_24px_60px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-white/8 dark:bg-white/[0.04] dark:shadow-none">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500 dark:text-zinc-400">
-              Runtime
-            </p>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-              System status
-            </h2>
-
-            <div className="mt-6 flex items-center gap-4 rounded-[24px] bg-zinc-50/80 p-4 dark:bg-white/[0.03]">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-100 dark:bg-cyan-500/10">
-                <div className="h-3 w-3 animate-pulse rounded-full bg-cyan-500" />
-              </div>
-              <div>
-                <p className="text-lg font-medium text-zinc-950 dark:text-white">
-                  Services online
-                </p>
-                <p className="text-sm text-emerald-600 dark:text-emerald-400">
-                  API, session manager, and desktop backend responding
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-6 space-y-4 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-500 dark:text-zinc-400">Tracked models</span>
-                <span className="font-medium text-zinc-950 dark:text-white">
-                  {stats?.tracked_sources.length || 0}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-500 dark:text-zinc-400">Untracked models</span>
-                <span className="font-medium text-zinc-950 dark:text-white">
-                  {stats?.untracked_sources.length || 0}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-500 dark:text-zinc-400">Token telemetry</span>
-                <span className="font-medium text-zinc-950 dark:text-white">
-                  Future-only exact capture
-                </span>
-              </div>
+          <section className="rounded-3xl border border-zinc-200 bg-white p-6 dark:border-white/5 dark:bg-white/[0.02]">
+            <h2 className="text-xl font-semibold mb-4">System Status</h2>
+            <div className="flex items-center gap-3 p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/10">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="text-xs font-medium text-emerald-600">All systems operational</span>
             </div>
           </section>
         </div>

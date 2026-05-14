@@ -60,6 +60,15 @@ def _build_summary(command: str, stdout: str, stderr: str, exit_code: int) -> st
     return _clip_text(f"{command}: {basis}", _MAX_SUMMARY_CHARS)
 
 
+_BINARY_DUMP_RE = re.compile(
+    r"(?is)\b(cat|base64)\s+[^;&|]*(?:\.pdf\b|pdf_base64\.txt\b|base64\.txt\b)"
+)
+
+
+def _blocked_binary_dump(command: str) -> bool:
+    return bool(_BINARY_DUMP_RE.search(command or ""))
+
+
 from nexus.tools.base import normalized_tool
 
 @normalized_tool
@@ -81,6 +90,22 @@ def run_command(command: str, background: bool = False) -> dict:
         dict with stdout, stderr, and exit_code.
     """
     try:
+        if _blocked_binary_dump(command):
+            message = (
+                "Skipped PDF/base64 dump. PDFs should be returned as artifacts; "
+                "use extract_pdf_text(path=...) only when you need to read their text."
+            )
+            return {
+                "status": "success",
+                "command": command,
+                "summary": message,
+                "stdout_excerpt": "",
+                "stderr_excerpt": "",
+                "line_count": 0,
+                "truncated": False,
+                "exit_code": 0,
+            }
+
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
         result = sandbox.run_command(command, timeout=120, background=background)

@@ -127,6 +127,7 @@ export type WsCommand =
   | { type: "analyze_screen" }
   | { type: "stop_agent" }
   | { type: "start_voice" }
+  | { type: "start_desktop" }
   | { type: "permission_response"; task_id: string; approved: boolean }
   | { type: "ping" };
 

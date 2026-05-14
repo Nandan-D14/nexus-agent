@@ -11,7 +11,7 @@ import re
 from typing import Any, Literal
 
 from nexus.config import settings
-from nexus.storage import upload_artifact
+from nexus.storage import artifact_storage_metadata, upload_artifact
 from nexus.tools._context import (
     get_run_id,
     get_sandbox,
@@ -302,6 +302,7 @@ async def write_workspace_file(
             "workspace_path": workspace_path,
             "workspace_file": gcs_url or absolute_path,
             "relative_path": normalized_relative,
+            "metadata": artifact_storage_metadata(get_session_id(), get_run_id(), normalized_relative),
             "bytes_written": len(content_text.encode("utf-8")),
             "append": append,
             "status": "success",

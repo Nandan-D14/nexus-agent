@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
@@ -37,7 +37,7 @@ type Props = {
   onStopAgent?: () => void;
 };
 
-export function WorkflowDesktopContainer({
+export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   workflowRun,
   streamUrl,
   artifacts = [],
@@ -240,4 +240,4 @@ export function WorkflowDesktopContainer({
       </div>
     </div>
   );
-}
+});

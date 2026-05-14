@@ -52,7 +52,7 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
-from nexus.tools.docs import generate_pdf_report, save_as_artifact
+from nexus.tools.docs import extract_pdf_text, generate_pdf_report, save_as_artifact
 
 GOOGLE_WORKSPACE_TOOLS = [
     search_drive,
@@ -195,6 +195,7 @@ Tools:
 - write_todo_list(items), update_todo_item(item_index, status, note)
 - write_workspace_file(relative_path, content, append)
 - run_command(command, background=False) for terminal work
+- extract_pdf_text(path, max_chars) for reading uploaded PDFs or PDF base64 text files
 - generate_pdf_report(title, markdown_content, filename) for creating professional PDF documents
 - save_as_artifact(path, title) to promote any file (CSV, PNG, etc.) to the UI panel
 - type_text(text) and press_key(key) for terminal interaction
@@ -217,6 +218,8 @@ Rules:
 - For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before browser or desktop sign-in.
 - Generating dashboards, reports, HTML files, and other workspace deliverables is code_agent work, even if the user will later view the result in a browser or app.
 - Prefer generate_pdf_report for all PDF creation tasks.
+- After generate_pdf_report succeeds, stop and report the artifact/path. Do not base64, cat, copy, or re-read the generated PDF.
+- For uploaded PDFs, call extract_pdf_text(path=...) first. Never cat PDFs or pdf_base64/base64 text files.
 - If the task is actually web navigation or web reading, return control for browser_agent.
 - If the task requires on-screen clicking, dialogs, or visible native app interaction, return control for computer_agent.
 - If the user asks to open a generated local file, create the file first. Use browser_agent or computer_agent only for the final open or visual confirmation step.
@@ -401,6 +404,7 @@ def _create_code_agent(
             list_workspace_files,
             *GOOGLE_WORKSPACE_TOOLS,
             run_command,
+            extract_pdf_text,
             generate_pdf_report,
             save_as_artifact,
             type_text,

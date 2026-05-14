@@ -95,37 +95,37 @@ async def handle_websocket(
             )
             return False
 
-    await _safe_send_json({"type": "sandbox_status", "status": "connecting"})
+    session_manager.cancel_idle_pause(session.id)
 
-    try:
+    async def _activate_sandbox() -> None:
         await session_manager.activate_session(session.id)
-    except Exception as exc:
-        logger.exception("Failed to activate session %s", session.id)
-        await _safe_send_json(
-            {
-                "type": "error",
-                "code": "SANDBOX_INIT_ERROR",
-                "message": str(exc),
-            }
-        )
-        await ws.close(code=1011, reason="Sandbox activation failed")
-        return
 
     orchestrator = NexusOrchestrator(
         session=session,
         ws=ws,
         history_repository=session_manager.history_repository,
+        ensure_sandbox_ready=_activate_sandbox,
     )
+
+    had_active_agent_turn_on_disconnect = False
+
+    def _touch_session() -> None:
+        touch = getattr(session, "touch", None)
+        if callable(touch):
+            touch()
 
     try:
         # Initialize voice + agent connections
-        await orchestrator.initialize()
+        await orchestrator.initialize(lazy_sandbox=True)
 
         # Start background task: Gemini Live → frontend
         voice_task = asyncio.create_task(orchestrator.run_voice_receive_loop())
 
         # Keep background tasks alive so they aren't garbage-collected
         _bg_tasks: set[asyncio.Task] = set()
+
+        def _has_active_bg_task() -> bool:
+            return any(not task.done() for task in _bg_tasks)
 
         def _surface_task_exception(task: asyncio.Task, *, label: str) -> None:
             try:
@@ -167,11 +167,15 @@ async def handle_websocket(
                 message = await ws.receive()
 
                 if message.get("type") == "websocket.disconnect":
+                    had_active_agent_turn_on_disconnect = (
+                        orchestrator.has_active_agent_turn() or _has_active_bg_task()
+                    )
                     orchestrator.mark_ws_disconnected()
                     break
 
                 # Binary frame = raw PCM audio from mic
                 if "bytes" in message and message["bytes"]:
+                    _touch_session()
                     await orchestrator.handle_user_audio(message["bytes"])
 
                 # Text frame = JSON command
@@ -183,7 +187,7 @@ async def handle_websocket(
                         continue
 
                     msg_type = data.get("type", "")
-                    if msg_type in {"text_input", "analyze_screen", "start_voice"}:
+                    if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop"}:
                         if not action_rate_limiter.is_allowed(session.owner_id):
                             await _safe_send_json(
                                 {
@@ -197,6 +201,7 @@ async def handle_websocket(
                     if msg_type == "text_input":
                         text = data.get("text", "").strip()
                         if text:
+                            _touch_session()
                             connector_ids = [
                                 str(item).strip()
                                 for item in (data.get("connector_ids") or [])
@@ -220,21 +225,32 @@ async def handle_websocket(
                             )
 
                     elif msg_type == "start_voice":
+                        _touch_session()
                         _track(
                             asyncio.create_task(orchestrator.start_voice()),
                             label="start_voice",
                         )
 
+                    elif msg_type == "start_desktop":
+                        _touch_session()
+                        _track(
+                            asyncio.create_task(orchestrator.start_desktop()),
+                            label="start_desktop",
+                        )
+
                     elif msg_type == "analyze_screen":
+                        _touch_session()
                         _track(
                             asyncio.create_task(orchestrator.handle_analyze_screen()),
                             label="handle_analyze_screen",
                         )
 
                     elif msg_type == "stop_agent":
+                        _touch_session()
                         await orchestrator.stop_agent()
 
                     elif msg_type == "permission_response":
+                        _touch_session()
                         task_id = data.get("task_id", "")
                         approved = data.get("approved", False)
                         if task_id:
@@ -242,20 +258,28 @@ async def handle_websocket(
 
                     elif msg_type == "ping":
                         await _safe_send_json({"type": "pong"})
-                        session.touch()
-                        # Keep sandbox alive on every ping from frontend
-                        try:
-                            session.sandbox.extend_timeout(900)
-                        except Exception:
-                            pass
+                        if orchestrator.has_active_agent_turn() or _has_active_bg_task():
+                            _touch_session()
+                            try:
+                                session.sandbox.extend_timeout(900)
+                            except Exception:
+                                pass
 
                     else:
                         logger.debug("Unknown message type: %s", msg_type)
 
         except WebSocketDisconnect:
+            had_active_agent_turn_on_disconnect = (
+                orchestrator.has_active_agent_turn() or _has_active_bg_task()
+            )
             orchestrator.mark_ws_disconnected()
             logger.info("Client disconnected from session %s", session.id)
         finally:
+            had_active_agent_turn_on_disconnect = (
+                had_active_agent_turn_on_disconnect
+                or orchestrator.has_active_agent_turn()
+                or _has_active_bg_task()
+            )
             orchestrator.mark_ws_disconnected()
             voice_task.cancel()
             for task in list(_bg_tasks):
@@ -278,5 +302,18 @@ async def handle_websocket(
         except Exception:
             pass
     finally:
+        if not had_active_agent_turn_on_disconnect and not orchestrator.has_active_agent_turn():
+            try:
+                session_manager.schedule_idle_pause(session.id)
+                logger.info(
+                    "Scheduled idle sandbox pause after WebSocket disconnect for session %s",
+                    session.id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to schedule idle sandbox pause after WebSocket disconnect for session %s",
+                    session.id,
+                    exc_info=True,
+                )
         await orchestrator.close()
         logger.info("WebSocket handler finished for session %s", session.id)

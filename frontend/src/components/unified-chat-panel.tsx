@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useMemo, useRef, useEffect, useState } from "react";
+import { useMemo, useRef, useEffect, useState, memo } from "react";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { PermissionCard } from "@/components/permission-card";
 import { motion, AnimatePresence } from "framer-motion";
@@ -72,7 +72,7 @@ function IconCompass({ className }: { className?: string }) {
 /*  Main exported component                                            */
 /* ------------------------------------------------------------------ */
 
-export function UnifiedChatPanel({
+export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   items,
   isThinking,
   onPermissionRespond,
@@ -193,7 +193,7 @@ export function UnifiedChatPanel({
       </div>
     </div>
   );
-}
+});
 
 /* ------------------------------------------------------------------ */
 /*  User Message (Sleek modern bubble)                                 */

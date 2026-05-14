@@ -5,6 +5,7 @@
 
 import copy
 import logging
+import uuid
 from typing import Any, Optional
 
 from google.adk.events import Event
@@ -61,9 +62,11 @@ class FirestoreSessionService(BaseSessionService):
             last_update_time=time.time(),
         )
         
-        # Save to firestore
+        # Save metadata to Firestore. Events are stored append-only in a
+        # subcollection so the session document does not grow without bound.
         import asyncio
         data = session.model_dump(by_alias=True, mode="json")
+        data["events"] = []
         await asyncio.to_thread(doc_ref.set, data)
         
         return session
@@ -86,6 +89,14 @@ class FirestoreSessionService(BaseSessionService):
             return None
             
         data = doc.to_dict()
+        embedded_events = data.get("events") if isinstance(data.get("events"), list) else []
+        event_docs = await asyncio.to_thread(
+            lambda: list(doc_ref.collection("events").order_by("timestamp").stream())
+        )
+        if event_docs:
+            data["events"] = [event_doc.to_dict() or {} for event_doc in event_docs]
+        else:
+            data["events"] = embedded_events
         session = Session.model_validate(data)
         
         if config:
@@ -115,7 +126,9 @@ class FirestoreSessionService(BaseSessionService):
         docs = await asyncio.to_thread(query.get)
         sessions = []
         for doc in docs:
-            s = Session.model_validate(doc.to_dict())
+            data = doc.to_dict() or {}
+            data["events"] = []
+            s = Session.model_validate(data)
             s.events = [] # Following in-memory pattern which drops events for list
             sessions.append(s)
             
@@ -136,11 +149,22 @@ class FirestoreSessionService(BaseSessionService):
         await super().append_event(session=session, event=event)
         session.last_update_time = event.timestamp
         
-        # In a highly optimized system, we could append to a subcollection.
-        # For simplicity and given moderate event lengths, we update the whole doc.
+        # Append event to a subcollection and keep the parent document compact.
         doc_ref = self._get_doc_ref(session.app_name, session.user_id, session.id)
         import asyncio
+        event_id = (
+            getattr(event, "id", None)
+            or getattr(event, "event_id", None)
+            or uuid.uuid4().hex
+        )
+        event_data = event.model_dump(by_alias=True, mode="json")
         data = session.model_dump(by_alias=True, mode="json")
-        await asyncio.to_thread(doc_ref.set, data)
+        data["events"] = []
+        await asyncio.to_thread(
+            lambda: (
+                doc_ref.collection("events").document(str(event_id)).set(event_data),
+                doc_ref.set(data, merge=True),
+            )
+        )
         
         return event
