@@ -6,12 +6,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import PurePosixPath
 import re
 from typing import Any, Literal
 
 from nexus.config import settings
 from nexus.storage import artifact_storage_metadata, upload_artifact
+from nexus.task_state import (
+    build_initial_task_state,
+    infer_task_type,
+    merge_task_state,
+    refresh_task_state_for_request,
+)
 from nexus.tools._context import (
     get_run_id,
     get_sandbox,
@@ -44,6 +51,13 @@ async def _emit_todo_update(items: list[dict[str, str]]) -> None:
             ],
         }
     )
+
+
+async def _emit_task_state_update(state: dict[str, Any]) -> None:
+    send_json = get_send_json()
+    if not send_json:
+        return
+    await send_json({"type": "task_state_updated", "state": state})
 
 
 def derive_workspace_path(session_id: str, run_id: str) -> str:
@@ -151,6 +165,30 @@ def _append_task_summary(existing: str, task_summary: str) -> str:
     return existing.rstrip() + section
 
 
+def _task_state_path(workspace_path: str) -> str:
+    return f"{workspace_path}/task_state.json"
+
+
+def _load_task_state(workspace_path: str) -> dict[str, Any]:
+    sandbox = get_sandbox()
+    path = _task_state_path(workspace_path)
+    if not sandbox.path_exists(path):
+        return {}
+    try:
+        loaded = json.loads(sandbox.read_text_file(path))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
+    content = json.dumps(state, indent=2, sort_keys=True)
+    path = _task_state_path(workspace_path)
+    get_sandbox().write_text_file(path, content)
+    upload_artifact(get_session_id(), get_run_id(), "task_state.json", content)
+    return path
+
+
 from nexus.tools.base import normalized_tool
 
 @normalized_tool
@@ -183,6 +221,20 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
                     upload_artifact(get_session_id(), get_run_id(), relative_name, updated)
                     touched_files.append(relative_name)
 
+        state_path = _task_state_path(workspace_path)
+        existing_state = _load_task_state(workspace_path)
+        task_state = refresh_task_state_for_request(
+            existing_state,
+            task_id=get_run_id(),
+            run_id=get_run_id(),
+            task_summary=task_summary,
+            active_agent="nexus_orchestrator",
+        )
+        _save_task_state(workspace_path, task_state)
+        if not existing_state:
+            touched_files.append("task_state.json")
+        await _emit_task_state_update(task_state)
+
         return {
             "workspace_path": workspace_path,
             "created": created,
@@ -190,11 +242,119 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             "task_file": f"{workspace_path}/task.md",
             "todo_file": f"{workspace_path}/todo.md",
             "notes_file": f"{workspace_path}/notes.md",
+            "task_state_file": state_path,
+            "task_type": task_state["task_type"],
+            "stage": task_state["stage"],
+            "review_status": task_state["review_status"],
             "sources_dir": f"{workspace_path}/sources",
             "outputs_dir": f"{workspace_path}/outputs",
         }
     except Exception as exc:
         return _tool_error(str(exc) or "Failed to prepare the task workspace.")
+
+
+async def initialize_task_state(
+    task_summary: str,
+    task_type: str = "general_task",
+    active_agent: str = "nexus_orchestrator",
+) -> dict[str, Any]:
+    """Initialize or refresh task_state.json for the current agentic workflow."""
+    try:
+        workspace_path = get_active_workspace_path()
+        resolved_type = task_type if task_type != "general_task" else infer_task_type(task_summary)
+        existing_state = _load_task_state(workspace_path)
+        if existing_state:
+            state = refresh_task_state_for_request(
+                existing_state,
+                task_id=get_run_id(),
+                run_id=get_run_id(),
+                task_summary=task_summary,
+                task_type=resolved_type,
+                active_agent=active_agent,
+            )
+        else:
+            state = build_initial_task_state(
+                task_id=get_run_id(),
+                run_id=get_run_id(),
+                task_summary=task_summary,
+                task_type=resolved_type,
+                active_agent=active_agent,
+            )
+        path = _save_task_state(workspace_path, state)
+        await _emit_task_state_update(state)
+        return {
+            "task_state_file": path,
+            "task_id": state["task_id"],
+            "task_type": state["task_type"],
+            "stage": state["stage"],
+            "active_agent": state["active_agent"],
+            "review_status": state["review_status"],
+            "status": "success",
+        }
+    except Exception as exc:
+        return _tool_error(str(exc) or "Failed to initialize task state.")
+
+
+async def update_task_state(
+    stage: str = "intake",
+    active_agent: str = "",
+    review_status: str = "",
+    todo: list[str] = None,
+    evidence: list[str] = None,
+    artifact_paths: list[str] = None,
+    summary: str = "",
+) -> dict[str, Any]:
+    """Update durable task stage, active agent, evidence, artifacts, and review status."""
+    try:
+        workspace_path = get_active_workspace_path()
+        state = _load_task_state(workspace_path)
+        if not state:
+            state = build_initial_task_state(
+                task_id=get_run_id(),
+                run_id=get_run_id(),
+                task_summary=summary,
+                active_agent=active_agent or "nexus_orchestrator",
+            )
+        updated = merge_task_state(
+            state,
+            stage=stage,
+            active_agent=active_agent or None,
+            review_status=review_status or None,
+            todo=todo,
+            evidence=evidence,
+            artifact_paths=artifact_paths,
+            summary=summary,
+        )
+        path = _save_task_state(workspace_path, updated)
+        await _emit_task_state_update(updated)
+        return {
+            "task_state_file": path,
+            "task_id": updated.get("task_id", ""),
+            "task_type": updated.get("task_type", "general_task"),
+            "stage": updated.get("stage", "intake"),
+            "active_agent": updated.get("active_agent", ""),
+            "review_status": updated.get("review_status", "not_required"),
+            "evidence_count": len(updated.get("evidence") or []),
+            "artifact_count": len(updated.get("artifact_paths") or []),
+            "status": "success",
+        }
+    except Exception as exc:
+        return _tool_error(str(exc) or "Failed to update task state.")
+
+
+async def read_task_state() -> dict[str, Any]:
+    """Read task_state.json from the active workspace."""
+    try:
+        workspace_path = get_active_workspace_path()
+        state = _load_task_state(workspace_path)
+        if not state:
+            return _tool_error("task_state.json does not exist yet.")
+        return {
+            "task_state_file": _task_state_path(workspace_path),
+            "state": state,
+        }
+    except Exception as exc:
+        return _tool_error(str(exc) or "Failed to read task state.")
 
 
 async def write_todo_list(items: list[str]) -> dict[str, Any]:

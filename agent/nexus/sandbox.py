@@ -75,49 +75,23 @@ class SandboxSweeper:
 
     async def sweep(self):
         """Find and kill sandboxes that are not associated with any active session."""
-        from e2b_desktop import Sandbox
-        
         logger.info("Starting sandbox sweep...")
         
         # 1. Get all active sandbox IDs from Firestore
         active_ids = set(await self.history_repo.list_all_active_sandbox_ids())
         
         # 2. List all running sandboxes from E2B
-        try:
-            # Sandbox.list returns a SandboxPaginator
-            paginator = await asyncio.to_thread(
-                Sandbox.list, 
-                api_key=self.e2b_api_key or None
-            )
-            # Fetch all items from the paginator
-            running_sandboxes = []
-            
-            def get_all_items(p):
-                items = []
-                current = p
-                while True:
-                    batch = current.next_items()
-                    items.extend(batch)
-                    if not current.has_next:
-                        break
-                return items
-                
-            running_sandboxes = await asyncio.to_thread(get_all_items, paginator)
-        except Exception:
-            logger.exception("Failed to list sandboxes from E2B")
+        running_ids = await list_running_e2b_sandbox_ids(self.e2b_api_key)
+        if running_ids is None:
             return
 
         killed_count = 0
-        for info in running_sandboxes:
-            # Assuming info has sandbox_id or similar
-            sid = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
-            if not sid:
-                continue
-                
+        from e2b_desktop import Sandbox
+
+        for sid in running_ids:
             if sid not in active_ids:
                 logger.info("Killing orphaned sandbox: %s", sid)
                 try:
-                    # We need to connect then kill, or use a static kill method if available
                     await asyncio.to_thread(lambda: Sandbox.connect(sid, api_key=self.e2b_api_key or None).kill())
                     killed_count += 1
                 except Exception:
@@ -127,6 +101,80 @@ class SandboxSweeper:
             logger.info("Sandbox sweep complete. Killed %d orphaned sandboxes.", killed_count)
         else:
             logger.info("Sandbox sweep complete. No orphans found.")
+
+
+def _sandbox_info_id(info: object) -> str | None:
+    value = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _paginator_items(paginator: object) -> list[object]:
+    items: list[object] = []
+    current = paginator
+    while True:
+        batch = current.next_items()
+        items.extend(batch)
+        if not current.has_next:
+            break
+    return items
+
+
+async def list_running_e2b_sandbox_ids(e2b_api_key: str = "") -> set[str] | None:
+    """Return running E2B sandbox ids, or None if verification is unavailable."""
+    try:
+        from e2b_desktop import Sandbox
+
+        paginator = await asyncio.to_thread(
+            Sandbox.list,
+            api_key=e2b_api_key or None,
+        )
+        running_sandboxes = await asyncio.to_thread(_paginator_items, paginator)
+        return {
+            sandbox_id
+            for sandbox_id in (_sandbox_info_id(info) for info in running_sandboxes)
+            if sandbox_id
+        }
+    except Exception:
+        logger.warning("Failed to list running E2B sandboxes", exc_info=True)
+        return None
+
+
+class SandboxLifecycleController:
+    """Verifies sandbox truth and reconciles stale Firestore session state."""
+
+    def __init__(self, history_repo, e2b_api_key: str = "") -> None:
+        self.history_repo = history_repo
+        self.e2b_api_key = e2b_api_key or settings.e2b_api_key
+
+    async def list_verified_active_sessions(
+        self,
+        owner_id: str,
+        *,
+        e2b_api_key: str = "",
+    ) -> list[dict]:
+        sessions = await self.history_repo.list_active_sessions(owner_id)
+        if not sessions:
+            return []
+
+        running_ids = await list_running_e2b_sandbox_ids(e2b_api_key or self.e2b_api_key)
+        if running_ids is None:
+            return []
+
+        verified: list[dict] = []
+        for session in sessions:
+            sandbox_id = session.get("sandbox_id")
+            if isinstance(sandbox_id, str) and sandbox_id in running_ids:
+                session["sandbox_verification"] = "verified"
+                verified.append(session)
+                continue
+
+            session_id = session.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                await self.history_repo.mark_session_sandbox_unavailable(
+                    session_id,
+                    reason="sandbox_not_running",
+                )
+        return verified
 
 
 class SandboxManager:

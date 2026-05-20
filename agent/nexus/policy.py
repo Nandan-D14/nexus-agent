@@ -30,6 +30,9 @@ _SENSITIVE_READ_TOOLS = {
 
 _DESTRUCTIVE_COMMAND_RE = re.compile(
     r"(?is)(\brm\s+-[^;\n]*[rf]|"
+    r"\bRemove-Item\b[^;\n]*(?:-Recurse|-Force)|"
+    r"\brmdir\b[^;\n]*(?:/s|-r)|"
+    r"\bdel\b[^;\n]*(?:/s|/q)|"
     r"\bsudo\b|"
     r"\bmkfs\b|"
     r"\bdd\s+if=|"
@@ -37,6 +40,12 @@ _DESTRUCTIVE_COMMAND_RE = re.compile(
     r"\breboot\b|"
     r"\bkillall\b|"
     r"\bchmod\s+-R\s+777\b|"
+    r"\bgit\s+reset\s+--hard\b|"
+    r"\bgit\s+clean\s+-[^;\n]*[fd]|"
+    r"\bdrop\s+(?:database|schema|table)\b|"
+    r"\btruncate\s+table\b|"
+    r"\bvercel\b[^;\n]*--prod\b|"
+    r"\bfirebase\s+deploy\b|"
     r"\bcurl\b[^;\n|]*\|\s*(?:sh|bash)|"
     r"\bwget\b[^;\n|]*\|\s*(?:sh|bash))"
 )

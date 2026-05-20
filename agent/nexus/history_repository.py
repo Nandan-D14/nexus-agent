@@ -1302,6 +1302,18 @@ class FirestoreHistoryRepository:
     async def mark_session_deleted(self, session_id: str) -> None:
         await asyncio.to_thread(self._mark_session_deleted_sync, session_id)
 
+    async def mark_session_sandbox_unavailable(
+        self,
+        session_id: str,
+        *,
+        reason: str = "sandbox_unavailable",
+    ) -> None:
+        await asyncio.to_thread(
+            self._mark_session_sandbox_unavailable_sync,
+            session_id,
+            reason,
+        )
+
     async def create_step(
         self,
         *,
@@ -1799,6 +1811,72 @@ class FirestoreHistoryRepository:
                 # Note: we only update the session, not the whole task unless needed
             
             batch.commit()
+
+    def _mark_session_sandbox_unavailable_sync(self, session_id: str, reason: str) -> None:
+        now = utcnow()
+        ref = self._db.collection("sessions").document(session_id)
+        doc = ref.get()
+        if not doc.exists:
+            return
+
+        data = doc.to_dict() or {}
+        if data.get("status") == "deleted":
+            return
+
+        owner_id = data.get("ownerId") if isinstance(data.get("ownerId"), str) else ""
+        task_id = data.get("taskId") if isinstance(data.get("taskId"), str) else session_id
+        sandbox_id = data.get("sandboxId") if isinstance(data.get("sandboxId"), str) else None
+        ended_at = data.get("endedAt") or now
+
+        batch = self._db.batch()
+        batch.set(
+            ref,
+            {
+                "status": "ended",
+                "updatedAt": now,
+                "endedAt": ended_at,
+                "sandboxId": None,
+                "resumeState": "ended",
+                "canContinueWorkspace": False,
+                "exactWorkspaceResumeAvailable": False,
+                "continuationMode": "new_sandbox_resume",
+                "workspaceOwnerSessionId": None,
+                "canContinueConversation": True,
+                "lastErrorCode": reason,
+            },
+            merge=True,
+        )
+
+        if owner_id:
+            batch.set(
+                self._task_ref(owner_id, task_id),
+                {
+                    "status": "ended",
+                    "updatedAt": now,
+                    "currentSessionId": session_id,
+                    "runStatus": data.get("runStatus"),
+                },
+                merge=True,
+            )
+            user_ref = self._user_public_ref(owner_id)
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                user_data = user_doc.to_dict() or {}
+                if (
+                    user_data.get("pausedSandboxSessionId") == session_id
+                    or (sandbox_id and user_data.get("pausedSandboxId") == sandbox_id)
+                ):
+                    batch.set(
+                        user_ref,
+                        {
+                            "pausedSandboxId": None,
+                            "pausedSandboxSessionId": None,
+                            "updatedAt": now,
+                        },
+                        merge=True,
+                    )
+
+        batch.commit()
 
     def _create_step_sync(
         self,
@@ -2674,7 +2752,7 @@ class FirestoreHistoryRepository:
             total_sessions += 1
             total_messages += int(data.get("messageCount", 0))
 
-            if data.get("status") in ("active", "ready"):
+            if data.get("status") in ("creating", "ready", "active") and data.get("sandboxId"):
                 active_sessions += 1
 
             created_at = self._coerce_datetime(data.get("createdAt"))

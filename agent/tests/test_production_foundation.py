@@ -16,8 +16,10 @@ sys.modules.setdefault(
 
 from nexus.config import settings
 from nexus.policy import evaluate_tool_policy
+from nexus import sandbox as sandbox_module
 from nexus import storage
 from nexus.routers.worker import _validate_worker_token
+from nexus.sandbox import SandboxLifecycleController
 from nexus.storage import artifact_blob_name, artifact_storage_metadata
 from nexus.task_queue import TaskQueue
 
@@ -136,3 +138,30 @@ async def test_task_queue_disabled_returns_noop(monkeypatch) -> None:
     assert result.queued is False
     assert result.provider == "none"
     assert "disabled" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_filters_and_cleans_stale_active_sandboxes(monkeypatch) -> None:
+    cleaned: list[tuple[str, str]] = []
+
+    class FakeHistoryRepo:
+        async def list_active_sessions(self, owner_id):
+            return [
+                {"session_id": "alive-session", "sandbox_id": "sandbox-alive"},
+                {"session_id": "dead-session", "sandbox_id": "sandbox-dead"},
+            ]
+
+        async def mark_session_sandbox_unavailable(self, session_id, *, reason):
+            cleaned.append((session_id, reason))
+
+    async def fake_running_ids(e2b_api_key=""):
+        return {"sandbox-alive"}
+
+    monkeypatch.setattr(sandbox_module, "list_running_e2b_sandbox_ids", fake_running_ids)
+
+    controller = SandboxLifecycleController(FakeHistoryRepo(), e2b_api_key="test-key")
+    sessions = await controller.list_verified_active_sessions("owner-1")
+
+    assert [session["session_id"] for session in sessions] == ["alive-session"]
+    assert sessions[0]["sandbox_verification"] == "verified"
+    assert cleaned == [("dead-session", "sandbox_not_running")]

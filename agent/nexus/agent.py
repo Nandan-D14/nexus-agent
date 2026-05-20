@@ -129,21 +129,30 @@ def create_multi_agent(
     )
     from nexus.tools.workspace import (
         prepare_task_workspace,
+        initialize_task_state,
+        update_task_state,
+        read_task_state,
         write_todo_list,
         update_todo_item,
         write_workspace_file,
         read_workspace_file,
         list_workspace_files,
     )
+    from nexus.tools.web import web_search, scrape_web_page
 
     orchestrator_tools = [
         prepare_task_workspace,
+        initialize_task_state,
+        update_task_state,
+        read_task_state,
         write_todo_list,
         update_todo_item,
         read_workspace_file,
         list_workspace_files,
         request_background_task,
         google_search,
+        web_search,
+        scrape_web_page,
         search_drive,
         read_drive_file,
         create_drive_doc,
@@ -166,6 +175,9 @@ def create_multi_agent(
     ]
     deepresearcher_tools = [
         prepare_task_workspace,
+        initialize_task_state,
+        update_task_state,
+        read_task_state,
         write_todo_list,
         update_todo_item,
         write_workspace_file,
@@ -173,6 +185,8 @@ def create_multi_agent(
         list_workspace_files,
         request_background_task,
         google_search,
+        web_search,
+        scrape_web_page,
         search_drive,
         read_drive_file,
         create_drive_doc,

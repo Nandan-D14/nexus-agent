@@ -11,7 +11,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings
-from nexus.dependencies import get_history_repository, get_session_manager, get_session_create_limiter, get_ticket_refresh_limiter
+from nexus.dependencies import (
+    get_history_repository,
+    get_sandbox_lifecycle_controller,
+    get_session_create_limiter,
+    get_session_manager,
+    get_ticket_refresh_limiter,
+)
 from nexus.models import (
     HistoryReuseRequest,
     RunInfo,
@@ -413,7 +419,13 @@ async def get_dashboard_sessions(
 @router.get("/api/v1/sessions/active")
 async def get_active_sessions(user: AuthenticatedUser = Depends(require_current_user)):
     history_repository = get_history_repository()
-    sessions = await history_repository.list_active_sessions(user.uid)
+    lifecycle = get_sandbox_lifecycle_controller()
+    user_settings = await history_repository.get_user_settings(user.uid)
+    runtime_config = resolve_session_runtime_config(user_settings)
+    sessions = await lifecycle.list_verified_active_sessions(
+        user.uid,
+        e2b_api_key=runtime_config.e2b_api_key,
+    )
     return {"sessions": sessions}
 
 @router.get("/api/v1/history")

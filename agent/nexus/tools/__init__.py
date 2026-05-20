@@ -20,6 +20,9 @@ from nexus.tools.bg_task import request_background_task
 from nexus.tools.monitor import schedule_monitoring_task
 from nexus.tools.workspace import (
     prepare_task_workspace,
+    initialize_task_state,
+    update_task_state,
+    read_task_state,
     write_todo_list,
     update_todo_item,
     write_workspace_file,
@@ -27,7 +30,7 @@ from nexus.tools.workspace import (
     list_workspace_files,
 )
 from nexus.tools.docs import extract_pdf_text, generate_pdf_report, save_as_artifact
-from nexus.tools.web import scrape_web_page # web_search commented out
+from nexus.tools.web import web_search, scrape_web_page
 from nexus.tools.integrations import (
     search_drive,
     read_drive_file,
@@ -52,11 +55,15 @@ from nexus.tools.ui_control import show_desktop_panel, show_workflow_panel
 
 ALL_TOOLS = [
     prepare_task_workspace,
+    initialize_task_state,
+    update_task_state,
+    read_task_state,
     write_todo_list,
     update_todo_item,
     write_workspace_file,
     read_workspace_file,
     list_workspace_files,
+    web_search,
     scrape_web_page,
     extract_pdf_text,
     generate_pdf_report,

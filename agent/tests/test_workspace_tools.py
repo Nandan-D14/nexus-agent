@@ -29,9 +29,12 @@ from nexus.tools.web import (
 from nexus.tools.workspace import (
     derive_session_workspace_path,
     derive_workspace_path,
+    initialize_task_state,
     list_workspace_files,
     prepare_task_workspace,
+    read_task_state,
     read_workspace_file,
+    update_task_state,
     update_todo_item,
     write_todo_list,
     write_workspace_file,
@@ -189,6 +192,8 @@ class SandboxEnsureDirectoryTests(TestCase):
 class WorkspaceToolTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.sandbox = FakeSandbox()
+        self.upload_patcher = patch("nexus.tools.workspace.upload_artifact", return_value=None)
+        self.upload_patcher.start()
         self.session_token = set_session_id("session123")
         self.run_token = set_run_id("run456")
         self.workspace_token = set_workspace_path(
@@ -197,6 +202,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.sandbox_token = set_sandbox(self.sandbox)
 
     async def asyncTearDown(self) -> None:
+        self.upload_patcher.stop()
         for token in (
             self.sandbox_token,
             self.workspace_token,
@@ -207,14 +213,48 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
 
     async def test_prepare_task_workspace_creates_scaffold(self) -> None:
         result = await prepare_task_workspace("Investigate startup failure")
+        detail = result["detail"]
 
-        self.assertTrue(result["created"])
-        self.assertIn("task.md", result["touched_files"])
-        self.assertIn("todo.md", result["touched_files"])
-        self.assertIn("notes.md", result["touched_files"])
-        self.assertIn(result["workspace_path"], self.sandbox.directories)
-        self.assertIn(f"{result['workspace_path']}/sources", self.sandbox.directories)
-        self.assertIn(f"{result['workspace_path']}/outputs", self.sandbox.directories)
+        self.assertTrue(detail["created"])
+        self.assertIn("task.md", detail["touched_files"])
+        self.assertIn("todo.md", detail["touched_files"])
+        self.assertIn("notes.md", detail["touched_files"])
+        self.assertIn("task_state.json", detail["touched_files"])
+        self.assertEqual(detail["task_type"], "deep_research")
+        self.assertEqual(detail["stage"], "intake")
+        self.assertEqual(detail["review_status"], "pending")
+        self.assertIn(detail["workspace_path"], self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/sources", self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/outputs", self.sandbox.directories)
+
+    async def test_task_state_tools_track_stage_review_evidence_and_artifacts(self) -> None:
+        await prepare_task_workspace("Compare agent frameworks and write a report")
+        init_result = await initialize_task_state(
+            "Compare agent frameworks and write a report",
+            task_type="deep_research",
+            active_agent="deepresearcher",
+        )
+        self.assertEqual(init_result["task_type"], "deep_research")
+        self.assertEqual(init_result["review_status"], "pending")
+
+        update_result = await update_task_state(
+            stage="reviewing",
+            active_agent="research_reviewer_agent",
+            review_status="passed",
+            evidence=["sources/google_adk.md"],
+            artifact_paths=["outputs/final.md"],
+            summary="Reviewer passed the report.",
+        )
+        self.assertEqual(update_result["stage"], "reviewing")
+        self.assertEqual(update_result["review_status"], "passed")
+        self.assertEqual(update_result["evidence_count"], 1)
+        self.assertEqual(update_result["artifact_count"], 1)
+
+        state = (await read_task_state())["state"]
+        self.assertEqual(state["active_agent"], "research_reviewer_agent")
+        self.assertEqual(state["evidence"], ["sources/google_adk.md"])
+        self.assertEqual(state["artifact_paths"], ["outputs/final.md"])
+        self.assertEqual(state["trace"][-1]["summary"], "Reviewer passed the report.")
 
     async def test_todo_tools_write_and_update_stable_format(self) -> None:
         await prepare_task_workspace("Research")
@@ -235,7 +275,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.assertNotIn("output_path", note_result)
         self.assertEqual(
             output_result["output_path"],
-            "/home/user/CoComputer/Workspaces/session123/run456/outputs/final.md",
+            "/home/user/CoComputer/Workspaces/session123/outputs/final.md",
         )
 
     async def test_write_workspace_file_rejects_path_escape(self) -> None:
@@ -288,10 +328,11 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         with patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)):
             result = await scrape_web_page(blocked_url, output_basename="reuters_markets")
 
-        self.assertIn("error", result)
-        self.assertIn("blocked automated access", result["error"])
-        self.assertEqual(result["status_code"], 401)
-        self.assertEqual(result["url"], blocked_url)
+        detail = result["detail"]
+        self.assertEqual(result["status"], "error")
+        self.assertIn("blocked automated access", detail["error"])
+        self.assertEqual(detail["status_code"], 401)
+        self.assertEqual(detail["url"], blocked_url)
 
 
 class WorkspaceRootRetryTests(IsolatedAsyncioTestCase):

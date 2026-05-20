@@ -16,6 +16,7 @@ from starlette.websockets import WebSocket
 from nexus.config import settings
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.production_tasks import ProductionTaskRepository
+from nexus.sandbox import SandboxLifecycleController
 from nexus.session import SessionManager
 from nexus.task_queue import task_queue, TaskQueue
 import redis
@@ -69,6 +70,7 @@ class RateLimiter:
 history_repository = FirestoreHistoryRepository()
 production_task_repository = ProductionTaskRepository()
 session_manager = SessionManager(history_repository=history_repository)
+sandbox_lifecycle_controller = SandboxLifecycleController(history_repository)
 
 session_create_limiter = RateLimiter(max_requests=5, window_seconds=60, name="session_create")
 ticket_refresh_limiter = RateLimiter(max_requests=30, window_seconds=60, name="ticket_refresh")
@@ -85,6 +87,9 @@ def get_production_task_repository() -> ProductionTaskRepository:
 
 def get_task_queue() -> TaskQueue:
     return task_queue
+
+def get_sandbox_lifecycle_controller() -> SandboxLifecycleController:
+    return sandbox_lifecycle_controller
 
 def get_session_create_limiter() -> RateLimiter:
     return session_create_limiter

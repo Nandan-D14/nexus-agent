@@ -59,6 +59,9 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertNotIn("take_screenshot", tool_names)
         self.assertIn("request_background_task", tool_names)
         self.assertIn("prepare_task_workspace", tool_names)
+        self.assertIn("initialize_task_state", tool_names)
+        self.assertIn("update_task_state", tool_names)
+        self.assertIn("read_task_state", tool_names)
         self.assertIn("write_todo_list", tool_names)
         self.assertIn("list_workspace_files", tool_names)
         self.assertIn("search_drive", tool_names)
@@ -74,6 +77,7 @@ class AgentRoutingPolicyTests(TestCase):
         research_computer_tools = _tool_names(self.research_sub_agents["research_computer_agent"])
         research_browser_tools = _tool_names(self.research_sub_agents["research_browser_agent"])
         research_code_tools = _tool_names(self.research_sub_agents["research_code_agent"])
+        research_reviewer_tools = _tool_names(self.research_sub_agents["research_reviewer_agent"])
         single_agent_tools = _tool_names(self.single_agent)
 
         self.assertIn("take_screenshot", computer_tools)
@@ -104,6 +108,9 @@ class AgentRoutingPolicyTests(TestCase):
 
         self.assertIn("request_background_task", deepresearcher_tools)
         self.assertIn("prepare_task_workspace", deepresearcher_tools)
+        self.assertIn("initialize_task_state", deepresearcher_tools)
+        self.assertIn("update_task_state", deepresearcher_tools)
+        self.assertIn("read_task_state", deepresearcher_tools)
         self.assertIn("write_workspace_file", deepresearcher_tools)
         self.assertIn("search_drive", deepresearcher_tools)
         self.assertIn("gmail_search", deepresearcher_tools)
@@ -130,7 +137,19 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("write_workspace_file", research_code_tools)
         self.assertIn("gmail_search", research_code_tools)
 
+        self.assertIn("read_task_state", research_reviewer_tools)
+        self.assertIn("read_workspace_file", research_reviewer_tools)
+        self.assertIn("list_workspace_files", research_reviewer_tools)
+        self.assertIn("write_workspace_file", research_reviewer_tools)
+        self.assertIn("update_task_state", research_reviewer_tools)
+        self.assertNotIn("run_command", research_reviewer_tools)
+        self.assertNotIn("open_browser", research_reviewer_tools)
+        self.assertNotIn("take_screenshot", research_reviewer_tools)
+
         self.assertIn("prepare_task_workspace", single_agent_tools)
+        self.assertIn("initialize_task_state", single_agent_tools)
+        self.assertIn("update_task_state", single_agent_tools)
+        self.assertIn("read_task_state", single_agent_tools)
         self.assertIn("write_todo_list", single_agent_tools)
         self.assertIn("web_search", single_agent_tools)
         self.assertIn("scrape_web_page", single_agent_tools)
@@ -158,6 +177,9 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("prepare_task_workspace", instruction)
         self.assertIn("write_todo_list", instruction)
         self.assertIn("refresh the todo list before delegating", instruction)
+        self.assertIn("initialize_task_state", instruction)
+        self.assertIn("task_state.json", instruction)
+        self.assertIn("research_reviewer_agent", instruction)
 
     def test_sub_agent_prompts_lock_in_escalation_rules(self) -> None:
         computer_instruction = self.sub_agents["computer_agent"].instruction.lower()
@@ -167,6 +189,7 @@ class AgentRoutingPolicyTests(TestCase):
         research_computer_instruction = self.research_sub_agents["research_computer_agent"].instruction.lower()
         research_browser_instruction = self.research_sub_agents["research_browser_agent"].instruction.lower()
         research_code_instruction = self.research_sub_agents["research_code_agent"].instruction.lower()
+        research_reviewer_instruction = self.research_sub_agents["research_reviewer_agent"].instruction.lower()
         single_instruction = self.single_agent.instruction.lower()
 
         self.assertIn("only for tasks that truly require gui or visual state", computer_instruction)
@@ -202,8 +225,14 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("use request_background_task() before continuing", deepresearcher_instruction)
         self.assertIn("write or refresh a 3-7 step master todo list", deepresearcher_instruction)
         self.assertIn("save the final report to outputs/final.md", deepresearcher_instruction)
+        self.assertIn("review_status=\"pending\"", deepresearcher_instruction)
+        self.assertIn("research_reviewer_agent", deepresearcher_instruction)
+        self.assertIn("only mark completed after review_status=\"passed\"", deepresearcher_instruction)
         self.assertIn("a request to research news, summarize it, categorize it, and generate an html dashboard is still a research-plus-code workflow, not a gui workflow", deepresearcher_instruction)
         self.assertIn("leave final open or visual confirmation to research_computer_agent only when explicitly needed", research_code_instruction)
+        self.assertIn("final quality gate", research_reviewer_instruction)
+        self.assertIn("outputs/review.md", research_reviewer_instruction)
+        self.assertIn("do not gather new web or shell evidence", research_reviewer_instruction)
 
         self.assertIn("only for tasks that truly require gui or visual state", research_computer_instruction)
         self.assertIn("do not use screenshots just to explore", research_computer_instruction)
@@ -217,10 +246,17 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("write deliverables into outputs/", research_code_instruction)
         self.assertEqual(
             self.research_sub_agent_names,
-            ["research_browser_agent", "research_code_agent", "research_computer_agent"],
+            [
+                "research_browser_agent",
+                "research_code_agent",
+                "research_computer_agent",
+                "research_reviewer_agent",
+            ],
         )
 
         self.assertIn("for clear non-simple work, call prepare_task_workspace", single_instruction)
+        self.assertIn("initialize_task_state", single_instruction)
+        self.assertIn("task_state.json", single_instruction)
         self.assertIn("write a fresh 3-7 step plan with write_todo_list", single_instruction)
         self.assertIn("prefer run_command", single_instruction)
         self.assertIn("prefer native google workspace tools", single_instruction)
@@ -243,3 +279,4 @@ class AgentRoutingPolicyTests(TestCase):
         self.assertIn("exact custom workflow", research_sub_agents["research_computer_agent"].instruction)
         self.assertIn("exact custom workflow", research_sub_agents["research_browser_agent"].instruction)
         self.assertIn("exact custom workflow", research_sub_agents["research_code_agent"].instruction)
+        self.assertIn("exact custom workflow", research_sub_agents["research_reviewer_agent"].instruction)

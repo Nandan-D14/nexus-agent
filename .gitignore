@@ -116,3 +116,13 @@ preview-ui.html
 
 # ── Graphify ──────────────────────────────────────────────────
 graphify-out/
+
+# ── Python DB / Cache ──────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+
+# ── IDE / Editor Specific ─────────────────────────────────────
+*.sublime-workspace
+*.sublime-project
+*.komodoproject
