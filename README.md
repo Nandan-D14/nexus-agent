@@ -324,7 +324,7 @@ graph LR
 ---
 
 ## 📺 Demonstration Video
-[**Watch the 4-Minute Demo Video Here**](https://www.youtube.com/watch?v=9g9S6vdoNbA)  
+[**Watch the 4-Minute Demo Video Here**](https://youtu.be/yYetL4iX8Vs)  
 *This video showcases the agent's ability to browse the web, execute terminal commands, and persist data across sessions using Google Drive.*
 
 ---
