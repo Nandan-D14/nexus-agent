@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 if TYPE_CHECKING:
     from nexus.background_tasks import BackgroundTaskManager
     from nexus.history_repository import FirestoreHistoryRepository
+    from nexus.production_tasks import ProductionTaskRepository
     from nexus.runtime_config import SessionRuntimeConfig
     from nexus.sandbox import SandboxManager
 
@@ -44,6 +45,12 @@ _current_owner_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _current_history_repository: contextvars.ContextVar[Optional["FirestoreHistoryRepository"]] = (
     contextvars.ContextVar("_current_history_repository", default=None)
+)
+_current_production_task_repository: contextvars.ContextVar[Optional["ProductionTaskRepository"]] = (
+    contextvars.ContextVar("_current_production_task_repository", default=None)
+)
+_current_task_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_task_id", default=""
 )
 _current_send_json: contextvars.ContextVar[Optional["SendJsonCallback"]] = (
     contextvars.ContextVar("_current_send_json", default=None)
@@ -159,6 +166,28 @@ def set_history_repository(
 def get_history_repository() -> Optional["FirestoreHistoryRepository"]:
     """Retrieve the Firestore repository for connector tools."""
     return _current_history_repository.get()
+
+
+def set_production_task_repository(
+    repository: Optional["ProductionTaskRepository"],
+) -> contextvars.Token:
+    """Set the durable production task repository for policy approvals."""
+    return _current_production_task_repository.set(repository)
+
+
+def get_production_task_repository() -> Optional["ProductionTaskRepository"]:
+    """Retrieve the durable production task repository, if bound."""
+    return _current_production_task_repository.get()
+
+
+def set_task_id(task_id: str | None) -> contextvars.Token:
+    """Set the durable task ID for the current execution context."""
+    return _current_task_id.set(task_id or "")
+
+
+def get_task_id() -> str:
+    """Retrieve the durable task ID for the current execution context."""
+    return _current_task_id.get()
 
 
 def set_send_json(callback: Optional["SendJsonCallback"]) -> contextvars.Token:

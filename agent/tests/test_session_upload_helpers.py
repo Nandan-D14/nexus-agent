@@ -10,26 +10,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus import server
+from nexus.routers import files
 from nexus.orchestrator import NexusOrchestrator
 
 
 class SafeWorkspacePathTests(TestCase):
     def test_safe_workspace_relative_path_preserves_valid_upload_path(self) -> None:
         self.assertEqual(
-            server._safe_workspace_relative_path("sources/uploads/report.pdf"),
+            files._safe_workspace_relative_path("sources/uploads/report.pdf"),
             "sources/uploads/report.pdf",
         )
 
     def test_safe_workspace_relative_path_rejects_parent_segments(self) -> None:
         with self.assertRaises(Exception):
-            server._safe_workspace_relative_path("../report.pdf")
+            files._safe_workspace_relative_path("../report.pdf")
 
 
 class DriveMirrorTests(IsolatedAsyncioTestCase):
     async def test_mirror_upload_to_google_drive_skips_when_drive_not_connected(self) -> None:
-        with patch.object(server, "get_google_drive_client_for_user", new=AsyncMock(return_value=None)):
-            result = await server._mirror_upload_to_google_drive(
+        with patch.object(files, "get_google_drive_client_for_user", new=AsyncMock(return_value=None)):
+            result = await files._mirror_upload_to_google_drive(
                 user_id="user-1",
                 session_id="session-1",
                 filename="report.pdf",
@@ -54,8 +54,8 @@ class DriveMirrorTests(IsolatedAsyncioTestCase):
             }
         )
 
-        with patch.object(server, "get_google_drive_client_for_user", new=AsyncMock(return_value=fake_client)):
-            result = await server._mirror_upload_to_google_drive(
+        with patch.object(files, "get_google_drive_client_for_user", new=AsyncMock(return_value=fake_client)):
+            result = await files._mirror_upload_to_google_drive(
                 user_id="user-1",
                 session_id="session-1",
                 filename="report.pdf",

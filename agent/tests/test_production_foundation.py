@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -16,12 +18,24 @@ sys.modules.setdefault(
 
 from nexus.config import settings
 from nexus.policy import evaluate_tool_policy
+from nexus.production_tasks import (
+    DurableTask,
+    DurableTaskEvent,
+    canonicalize_task_status,
+    history_event_projection_from_durable,
+    history_task_projection_from_durable,
+    map_durable_status_to_history,
+    map_history_status_to_durable,
+)
+from nexus.routers import sessions as sessions_router
 from nexus import sandbox as sandbox_module
+from nexus import task_worker as task_worker_module
 from nexus import storage
 from nexus.routers.worker import _validate_worker_token
 from nexus.sandbox import SandboxLifecycleController
 from nexus.storage import artifact_blob_name, artifact_storage_metadata
 from nexus.task_queue import TaskQueue
+from nexus.task_worker import TaskWorker, WorkerRunResult
 
 
 def test_auto_mode_allows_low_risk_local_tool() -> None:
@@ -55,6 +69,48 @@ def test_policy_denies_secret_exfiltration_command() -> None:
 
     assert decision.action == "deny"
     assert decision.risk == "blocked"
+
+
+def test_durable_status_mapping_is_canonical() -> None:
+    assert canonicalize_task_status("ACTIVE") == "running"
+    assert canonicalize_task_status("ended") == "completed"
+    assert canonicalize_task_status("destroyed") == "cancelled"
+    assert map_history_status_to_durable("error") == "failed"
+    assert map_durable_status_to_history("waiting_approval") == "running"
+    assert map_durable_status_to_history("paused") == "queued"
+
+
+def test_history_projection_helpers_from_durable_state() -> None:
+    now = datetime.now(timezone.utc)
+    task = DurableTask(
+        task_id="task_1",
+        owner_id="user_1",
+        title="Do work",
+        status="waiting_approval",
+        created_at=now,
+        updated_at=now,
+        session_id="session_1",
+        current_run_id="run_1",
+    )
+    task_projection = history_task_projection_from_durable(task)
+    assert task_projection["taskId"] == "task_1"
+    assert task_projection["status"] == "running"
+    assert task_projection["canonicalSource"] == "production_tasks"
+
+    event = DurableTaskEvent(
+        event_id="evt_1",
+        task_id="task_1",
+        owner_id="user_1",
+        event_type="agent_complete",
+        created_at=now,
+        payload={"summary": "done"},
+        run_id="run_1",
+        seq=3,
+    )
+    event_projection = history_event_projection_from_durable(event)
+    assert event_projection["runStatus"] == "completed"
+    assert event_projection["summary"] == "done"
+    assert event_projection["lastEventSeq"] == 3
 
 
 def test_artifact_blob_name_is_canonical() -> None:
@@ -138,6 +194,121 @@ async def test_task_queue_disabled_returns_noop(monkeypatch) -> None:
     assert result.queued is False
     assert result.provider == "none"
     assert "disabled" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_endpoint_reads_canonical_durable_task_first(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    durable_task = DurableTask(
+        task_id="task_1",
+        owner_id="user_1",
+        title="Durable work",
+        status="waiting_approval",
+        created_at=now,
+        updated_at=now,
+        session_id="session_1",
+        current_run_id="run_1",
+    )
+    production_repo = SimpleNamespace(get_task=AsyncMock(return_value=durable_task))
+    history_repo = SimpleNamespace(get_task=AsyncMock())
+
+    monkeypatch.setattr(sessions_router, "get_production_task_repository", lambda: production_repo)
+    monkeypatch.setattr(sessions_router, "get_history_repository", lambda: history_repo)
+
+    result = await sessions_router.get_task("task_1", user=SimpleNamespace(uid="user_1"))
+
+    assert result.task_id == "task_1"
+    assert result.status == "running"
+    assert result.current_run_id == "run_1"
+    history_repo.get_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_worker_executes_claimed_run_through_orchestrator(monkeypatch) -> None:
+    task = SimpleNamespace(
+        task_id="task_1",
+        owner_id="user_1",
+        title="Durable task",
+        input_text="do the work",
+        session_id=None,
+    )
+    repo = SimpleNamespace(get_task=AsyncMock(return_value=task))
+    history_repo = SimpleNamespace(get_user_settings=AsyncMock(return_value={}))
+    session = SimpleNamespace(
+        id="task_1",
+        owner_id="user_1",
+        task_id="",
+        current_run_id=None,
+        run_status="queued",
+    )
+    session_manager = SimpleNamespace(
+        history_repository=history_repo,
+        get_session=AsyncMock(return_value=None),
+        create_session=AsyncMock(return_value=session),
+        activate_session=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.session = kwargs["session"]
+
+        async def initialize(self, *, lazy_sandbox: bool = False):
+            captured["lazy_sandbox"] = lazy_sandbox
+
+        async def handle_text_input(self, text: str):
+            captured["text"] = text
+            self.session.run_status = "completed"
+
+        async def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(task_worker_module, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(task_worker_module, "get_session_manager", lambda: session_manager)
+    monkeypatch.setattr(task_worker_module, "resolve_session_runtime_config", lambda settings: object())
+    monkeypatch.setattr(task_worker_module, "NexusOrchestrator", FakeOrchestrator)
+
+    result = await TaskWorker(worker_id="worker_1")._execute_claimed_run(
+        task_id="task_1",
+        run_id="run_1",
+        owner_id="user_1",
+    )
+
+    assert result == WorkerRunResult("completed", "Agent turn completed.")
+    session_manager.create_session.assert_awaited_once()
+    assert session.task_id == "task_1"
+    assert session.current_run_id == "run_1"
+    assert captured["production_task_repository"] is repo
+    assert captured["text"] == "do the work"
+    assert captured["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_worker_finishes_cancelled_runs_as_cancelled(monkeypatch) -> None:
+    finished: dict[str, object] = {}
+
+    class FakeRepo:
+        async def claim_run(self, **kwargs):
+            return SimpleNamespace(owner_id="user_1")
+
+        async def append_event(self, **kwargs):
+            return None
+
+        async def finish_run(self, **kwargs):
+            finished.update(kwargs)
+
+    class CancelWorker(TaskWorker):
+        async def _execute_claimed_run(self, *, task_id: str, run_id: str, owner_id: str):
+            return WorkerRunResult("cancelled", "Stopped.")
+
+    monkeypatch.setattr(task_worker_module, "get_production_task_repository", lambda: FakeRepo())
+
+    result = await CancelWorker(worker_id="worker_1").run_once(task_id="task_1", run_id="run_1")
+
+    assert result.status == "cancelled"
+    assert finished["status"] == "cancelled"
+    assert finished["error"] == "Stopped."
 
 
 @pytest.mark.asyncio

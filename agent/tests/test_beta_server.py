@@ -15,13 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nexus.auth import AuthenticatedUser
 from nexus import server
+from nexus import dependencies
 
 
 class BetaServerSmokeTests(TestCase):
     def setUp(self) -> None:
         self._previous_beta_access_enabled = server.settings.beta_access_enabled
         server.settings.beta_access_enabled = True
-        server.app.dependency_overrides[server.require_current_user] = lambda: AuthenticatedUser(
+        
+        from nexus.auth import require_current_user
+        
+        server.app.dependency_overrides[require_current_user] = lambda: AuthenticatedUser(
             uid="user-123",
             email="tester@example.com",
             display_name="Tester",
@@ -69,8 +73,8 @@ class BetaServerSmokeTests(TestCase):
         )
 
         with (
-            patch.object(server, "history_repository", repo),
-            patch.object(server, "session_manager", self._make_session_manager()),
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
         ):
             with TestClient(server.app) as client:
                 response = client.get("/api/v1/beta/status")
@@ -89,8 +93,8 @@ class BetaServerSmokeTests(TestCase):
         )
 
         with (
-            patch.object(server, "history_repository", repo),
-            patch.object(server, "session_manager", self._make_session_manager()),
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
         ):
             with TestClient(server.app) as client:
                 response = client.post("/sessions", json={"mode": "fresh"})
@@ -122,11 +126,12 @@ class BetaServerSmokeTests(TestCase):
         manager = self._make_session_manager()
         manager.create_session = AsyncMock(return_value=session)
 
+        from nexus import sessions_helpers
         with (
-            patch.object(server, "history_repository", repo),
-            patch.object(server, "session_manager", manager),
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", manager),
             patch.object(
-                server,
+                sessions_helpers,
                 "get_byok_status",
                 return_value=SimpleNamespace(configured=True, missing=()),
             ),

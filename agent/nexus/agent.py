@@ -25,6 +25,7 @@ from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 from nexus.runtime_config import SessionRuntimeConfig
 from google.adk.tools import google_search
+from nexus.tool_gateway import gate_tools
 from nexus.tools import ALL_TOOLS
 from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
 
@@ -75,11 +76,16 @@ def create_agent(
     """Create the single CoComputer ADK agent with all desktop control tools."""
     effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
     instruction = SYSTEM_PROMPT if not skill_instruction else f"{SYSTEM_PROMPT}\n\n{skill_instruction}"
+    # Gate every tool through the central policy enforcer so destructive
+    # commands and external side-effects cannot bypass policy. The gateway
+    # is a no-op for ``allow`` decisions, so well-behaved tools see no
+    # behavior change.
+    gated_tools = gate_tools([*ALL_TOOLS, *(integration_tools or [])])
     agent = Agent(
         name="nexus",
         model=_get_model(effective_runtime_config),
         instruction=instruction,
-        tools=[*ALL_TOOLS, *(integration_tools or [])],
+        tools=gated_tools,
     )
     return agent
 

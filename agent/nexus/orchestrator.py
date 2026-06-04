@@ -30,14 +30,17 @@ from nexus.tools._context import (
     set_bg_task_manager,
     set_history_repository,
     set_owner_id,
+    set_production_task_repository,
     set_run_id,
     set_runtime_config,
     set_sandbox,
     set_send_json,
     set_session_id,
+    set_task_id,
     set_workspace_path,
 )
 from nexus.config import settings
+from nexus.event_sink import CompositeEventSink, build_session_event_sink
 from nexus.fast_lookup import cache_key, get_cached_value, set_cached_value
 from nexus.prompts.system import SYSTEM_PROMPT, VOICE_SYSTEM_PROMPT
 from nexus.routing import build_current_lookup_queries, classify_request, extract_search_query
@@ -52,6 +55,7 @@ from nexus.tools.workspace import (
 from nexus.usage import TokenUsageRecord, extract_token_usage_records
 
 if TYPE_CHECKING:
+    from nexus.production_tasks import ProductionTaskRepository
     from nexus.session import Session
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,7 @@ class NexusOrchestrator:
         session: "Session",
         ws: WebSocket,
         history_repository: FirestoreHistoryRepository | None = None,
+        production_task_repository: "ProductionTaskRepository | None" = None,
         ensure_sandbox_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.session = session
@@ -85,8 +90,19 @@ class NexusOrchestrator:
         self._voice_reconnect_task: asyncio.Task | None = None
         self._voice_connection_error_cls: type[Exception] | None = None
         self.history_repository = history_repository
+        self.production_task_repository = production_task_repository
         self._ensure_sandbox_ready_callback = ensure_sandbox_ready
         self._sandbox_ready_reported = bool(session.stream_url)
+        self._current_run_id = session.current_run_id
+        self._durable_task_id = self._resolve_durable_task_id()
+        self._durable_run_id = self._resolve_durable_run_id()
+        self._event_sink: CompositeEventSink = build_session_event_sink(
+            repository=production_task_repository if self._durable_task_id else None,
+            send_json=self._send_json_to_ws,
+            task_id=self._durable_task_id,
+            owner_id=session.owner_id,
+            run_id=self._durable_run_id,
+        )
 
         # Only create voice manager when Gemini credentials are available
         if self.runtime_config.gemini_available:
@@ -116,7 +132,6 @@ class NexusOrchestrator:
             on_task_started=self._on_background_task_started,
             on_task_finished=self._on_background_task_finished,
         )
-        self._current_run_id = session.current_run_id
         self._current_turn_step_id: str | None = None
         self._tool_step_ids: dict[str, list[str]] = {}
 
@@ -148,6 +163,8 @@ class NexusOrchestrator:
         set_session_id(self.session.id)
         set_owner_id(self.session.owner_id)
         set_history_repository(self.history_repository)
+        set_production_task_repository(self.production_task_repository)
+        set_task_id(self._durable_task_id)
         set_send_json(self._send_json)
         self._bind_workspace_context()
         if not lazy_sandbox:
@@ -220,6 +237,14 @@ class NexusOrchestrator:
                 "type": "run_status",
                 "run": self._run_payload(status=self.session.run_status),
             })
+
+    def _resolve_durable_task_id(self) -> str | None:
+        task_id = str(getattr(self.session, "task_id", "") or "").strip()
+        return task_id if task_id.startswith("task_") else None
+
+    def _resolve_durable_run_id(self) -> str | None:
+        run_id = str(getattr(self.session, "current_run_id", "") or "").strip()
+        return run_id if run_id.startswith("run_") else None
 
     async def start_desktop(self) -> None:
         """Start or resume the sandbox because the user opened the desktop."""
@@ -1491,6 +1516,8 @@ class NexusOrchestrator:
             set_sandbox(self.session.sandbox)
             set_owner_id(self.session.owner_id)
             set_history_repository(self.history_repository)
+            set_production_task_repository(self.production_task_repository)
+            set_task_id(self._durable_task_id)
             self._bind_workspace_context()
             workspace_root_ready = await self._ensure_session_workspace_root()
             if not workspace_root_ready:
@@ -2137,6 +2164,14 @@ class NexusOrchestrator:
             logger.warning("Failed to send WS audio frame", exc_info=True)
 
     async def _send_json(self, data: dict) -> None:
+        """Emit an orchestrator event through the configured sinks."""
+        event_sink = getattr(self, "_event_sink", None)
+        if event_sink is None:
+            await self._send_json_to_ws(data)
+            return
+        await event_sink.send(data)
+
+    async def _send_json_to_ws(self, data: dict) -> None:
         """Send JSON message to the frontend WebSocket."""
         message_type = data.get("type")
         try:

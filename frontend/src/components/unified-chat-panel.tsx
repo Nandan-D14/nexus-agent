@@ -24,6 +24,8 @@ type ChatItem =
       description: string;
       estimated_seconds: number;
       agent: string;
+      approval_id?: string;
+      durable_task_id?: string;
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number };
@@ -31,7 +33,12 @@ type ChatItem =
 type Props = {
   items: ChatItem[];
   isThinking: boolean;
-  onPermissionRespond: (taskId: string, approved: boolean) => void;
+  onPermissionRespond: (
+    taskId: string,
+    approved: boolean,
+    approvalId?: string,
+    durableTaskId?: string,
+  ) => void;
 };
 
 type Turn = {
@@ -155,6 +162,8 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                       <motion.div layout key={idx} className="py-1">
                         <PermissionCard
                           taskId={perm.task_id}
+                          approvalId={perm.approval_id}
+                          durableTaskId={perm.durable_task_id}
                           description={perm.description}
                           estimatedSeconds={perm.estimated_seconds}
                           agent={perm.agent}

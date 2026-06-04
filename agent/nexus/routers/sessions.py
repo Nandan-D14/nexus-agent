@@ -13,6 +13,7 @@ from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings
 from nexus.dependencies import (
     get_history_repository,
+    get_production_task_repository,
     get_sandbox_lifecycle_controller,
     get_session_create_limiter,
     get_session_manager,
@@ -31,6 +32,7 @@ from nexus.models import (
     UserSettingsUpdateRequest,
 )
 from nexus.runtime_config import build_byok_storage_update, build_public_user_settings, resolve_session_runtime_config, ensure_selected_gemini_provider_available
+from nexus.production_tasks import map_durable_status_to_history
 from nexus.usage import get_expected_usage_sources
 from nexus.sessions_helpers import (
     _build_session_response,
@@ -426,6 +428,23 @@ async def get_active_sessions(user: AuthenticatedUser = Depends(require_current_
         user.uid,
         e2b_api_key=runtime_config.e2b_api_key,
     )
+
+def _serialize_durable_task_as_task_info(task) -> TaskInfo:
+    status = map_durable_status_to_history(task.status)
+    return TaskInfo(
+        task_id=task.task_id,
+        owner_id=task.owner_id,
+        title=task.title,
+        status=status,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        current_session_id=task.session_id,
+        current_run_id=task.current_run_id,
+        run_status=status,
+        message_count=0,
+        step_count=0,
+        artifact_count=0,
+    )
     return {"sessions": sessions}
 
 @router.get("/api/v1/history")
@@ -476,6 +495,12 @@ async def list_tasks(
 
 @router.get("/api/v1/tasks/{task_id}", response_model=TaskInfo)
 async def get_task(task_id: str, user: AuthenticatedUser = Depends(require_current_user)):
+    if task_id.startswith("task_"):
+        production_task_repository = get_production_task_repository()
+        durable_task = await production_task_repository.get_task(task_id)
+        if durable_task and durable_task.owner_id == user.uid:
+            return _serialize_durable_task_as_task_info(durable_task)
+
     history_repository = get_history_repository()
     task = await history_repository.get_task(user.uid, task_id)
     if not task:

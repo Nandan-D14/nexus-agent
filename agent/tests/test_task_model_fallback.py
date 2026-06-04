@@ -295,6 +295,7 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
 
         with (
             patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
+            patch.object(orchestrator_module, "create_runner", return_value=(MagicMock(), MagicMock())),
         ):
             orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
             orchestrator._adk_session_id = "adk-session"

@@ -9,6 +9,7 @@ from google.adk.agents import Agent
 
 from nexus.credentialed_gemini import CredentialedGemini
 from nexus.runtime_config import SessionRuntimeConfig
+from nexus.tool_gateway import gate_tools
 from nexus.tools.computer import (
     move_mouse,
     left_click,
@@ -371,7 +372,7 @@ def _create_computer_agent(
         name=name,
         model=_get_model(runtime_config),
         instruction=instruction,
-        tools=[
+        tools=gate_tools([
             prepare_task_workspace,
             *TASK_STATE_TOOLS,
             write_todo_list,
@@ -389,7 +390,7 @@ def _create_computer_agent(
             press_key,
             scroll_screen,
             drag,
-        ],
+        ]),
     )
 
 
@@ -403,7 +404,7 @@ def _create_browser_agent(
         name=name,
         model=_get_model(runtime_config),
         instruction=instruction,
-        tools=[
+        tools=gate_tools([
             prepare_task_workspace,
             *TASK_STATE_TOOLS,
             write_todo_list,
@@ -427,7 +428,7 @@ def _create_browser_agent(
             playwright_type,
             playwright_get_text,
             playwright_wait_for,
-        ],
+        ]),
     )
 
 
@@ -441,7 +442,7 @@ def _create_code_agent(
         name=name,
         model=_get_model(runtime_config),
         instruction=instruction,
-        tools=[
+        tools=gate_tools([
             prepare_task_workspace,
             *TASK_STATE_TOOLS,
             write_todo_list,
@@ -457,7 +458,7 @@ def _create_code_agent(
             save_as_artifact,
             type_text,
             press_key,
-        ],
+        ]),
     )
 
 
@@ -471,13 +472,13 @@ def _create_research_reviewer_agent(
         name=name,
         model=_get_model(runtime_config),
         instruction=instruction,
-        tools=[
+        tools=gate_tools([
             read_task_state,
             read_workspace_file,
             list_workspace_files,
             write_workspace_file,
             update_task_state,
-        ],
+        ]),
     )
 
 
@@ -552,6 +553,6 @@ def create_deepresearcher_agent(
         name="deepresearcher",
         model=_get_model(runtime_config),
         instruction=_with_skill_instruction(DEEPRESEARCHER_PROMPT, skill_instruction),
-        tools=tools,
+        tools=gate_tools(tools),
         sub_agents=[research_browser, research_code, research_computer, research_reviewer],
     )

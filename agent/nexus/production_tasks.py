@@ -14,7 +14,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from firebase_admin import firestore
 from google.cloud.firestore_v1 import FieldFilter
@@ -33,6 +33,113 @@ TaskStatus = Literal[
     "cancelled",
     "cancelling",
 ]
+
+CANONICAL_TASK_STATUSES: frozenset[str] = frozenset(TaskStatus.__args__)  # type: ignore[attr-defined]
+TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+HISTORY_TO_DURABLE_STATUS: dict[str, TaskStatus] = {
+    "idle": "queued",
+    "creating": "queued",
+    "ready": "queued",
+    "queued": "queued",
+    "active": "running",
+    "running": "running",
+    "waiting_approval": "waiting_approval",
+    "paused": "paused",
+    "completed": "completed",
+    "ended": "completed",
+    "failed": "failed",
+    "error": "failed",
+    "cancelled": "cancelled",
+    "cancelling": "cancelling",
+    "destroyed": "cancelled",
+    "deleted": "cancelled",
+}
+
+
+def canonicalize_task_status(status: str | None) -> TaskStatus:
+    """Normalize any execution status into the durable lifecycle vocabulary."""
+    normalized = str(status or "queued").strip().lower()
+    if normalized in CANONICAL_TASK_STATUSES:
+        return cast(TaskStatus, normalized)
+    return HISTORY_TO_DURABLE_STATUS.get(normalized, "queued")
+
+
+def map_history_status_to_durable(status: str | None) -> TaskStatus:
+    """Map legacy session/run statuses to the canonical durable lifecycle."""
+    return canonicalize_task_status(status)
+
+
+def map_durable_status_to_history(status: str | None) -> str:
+    """Map durable status back to the legacy history status surface."""
+    durable = canonicalize_task_status(status)
+    if durable == "waiting_approval":
+        return "running"
+    if durable == "paused":
+        return "queued"
+    return durable
+
+
+def history_task_projection_from_durable(task: "DurableTask") -> dict[str, Any]:
+    """Build a history-task projection from canonical durable task state."""
+    return {
+        "taskId": task.task_id,
+        "ownerId": task.owner_id,
+        "title": task.title,
+        "status": map_durable_status_to_history(task.status),
+        "runStatus": map_durable_status_to_history(task.status),
+        "currentSessionId": task.session_id,
+        "currentRunId": task.current_run_id,
+        "updatedAt": task.updated_at,
+        "schemaVersion": 2,
+        "canonicalSource": "production_tasks",
+    }
+
+
+def history_run_projection_from_durable(run: "DurableTaskRun") -> dict[str, Any]:
+    """Build a history-run projection from canonical durable run state."""
+    return {
+        "runId": run.run_id,
+        "taskId": run.task_id,
+        "ownerId": run.owner_id,
+        "sessionId": run.session_id,
+        "status": map_durable_status_to_history(run.status),
+        "startedAt": run.started_at,
+        "completedAt": run.completed_at,
+        "updatedAt": run.updated_at,
+        "summary": run.summary,
+        "error": run.error,
+        "schemaVersion": 2,
+        "canonicalSource": "production_tasks",
+    }
+
+
+def history_event_projection_from_durable(event: "DurableTaskEvent") -> dict[str, Any]:
+    """Build history projection hints for a durable event."""
+    updates: dict[str, Any] = {
+        "taskId": event.task_id,
+        "runId": event.run_id,
+        "lastEventId": event.event_id,
+        "lastEventSeq": event.seq,
+        "lastEventType": event.event_type,
+        "lastEventAt": event.created_at,
+        "canonicalSource": "production_tasks",
+    }
+    if event.event_type == "user_message":
+        updates["messageCountDelta"] = 1
+    elif event.event_type in {"step_started", "agent_tool_call"}:
+        updates["runStatus"] = "running"
+    elif event.event_type == "agent_complete":
+        updates["runStatus"] = "completed"
+        summary = event.payload.get("summary")
+        if isinstance(summary, str):
+            updates["summary"] = summary
+    elif event.event_type == "task_cancel_requested":
+        updates["runStatus"] = "cancelling"
+    elif event.event_type == "approval_requested":
+        updates["runStatus"] = "running"
+        updates["approvalStatus"] = "pending"
+    return updates
 
 
 def utcnow() -> datetime:
@@ -93,6 +200,10 @@ class DurableTaskEvent:
     payload: dict[str, Any]
     run_id: str | None = None
     visible: bool = True
+    # Monotonic per-task sequence number for reliable replay.
+    # Older events written before this field was introduced will return seq=0,
+    # in which case clients should fall back to after_event_id pagination.
+    seq: int = 0
 
 
 @dataclass
@@ -134,7 +245,7 @@ class ProductionTaskRepository:
             task_id=task_id,
             owner_id=str(data.get("ownerId") or ""),
             title=str(data.get("title") or "Untitled task"),
-            status=str(data.get("status") or "queued"),
+            status=canonicalize_task_status(str(data.get("status") or "queued")),
             created_at=_coerce_datetime(data.get("createdAt")) or utcnow(),
             updated_at=_coerce_datetime(data.get("updatedAt")),
             autonomy_mode=str(data.get("autonomyMode") or "manual"),
@@ -153,7 +264,7 @@ class ProductionTaskRepository:
             run_id=run_id,
             task_id=str(data.get("taskId") or ""),
             owner_id=str(data.get("ownerId") or ""),
-            status=str(data.get("status") or "queued"),
+            status=canonicalize_task_status(str(data.get("status") or "queued")),
             created_at=_coerce_datetime(data.get("createdAt")) or utcnow(),
             updated_at=_coerce_datetime(data.get("updatedAt")),
             started_at=_coerce_datetime(data.get("startedAt")),
@@ -168,6 +279,11 @@ class ProductionTaskRepository:
 
     @staticmethod
     def _build_event(event_id: str, data: dict[str, Any]) -> DurableTaskEvent:
+        try:
+            seq_raw = data.get("seq", 0)
+            seq = int(seq_raw) if seq_raw is not None else 0
+        except (TypeError, ValueError):
+            seq = 0
         return DurableTaskEvent(
             event_id=event_id,
             task_id=str(data.get("taskId") or ""),
@@ -177,6 +293,7 @@ class ProductionTaskRepository:
             payload=data.get("payload") if isinstance(data.get("payload"), dict) else {},
             run_id=data.get("runId") if isinstance(data.get("runId"), str) else None,
             visible=bool(data.get("visible", True)),
+            seq=seq,
         )
 
     @staticmethod
@@ -232,7 +349,7 @@ class ProductionTaskRepository:
             "taskId": task_id,
             "ownerId": owner_id,
             "title": title.strip() or "Untitled task",
-            "status": "queued",
+            "status": canonicalize_task_status("queued"),
             "autonomyMode": normalize_autonomy_mode(autonomy_mode or settings.default_autonomy_mode),
             "sessionId": session_id,
             "currentRunId": None,
@@ -271,7 +388,7 @@ class ProductionTaskRepository:
             "runId": run_id,
             "taskId": task_id,
             "ownerId": owner_id,
-            "status": "queued",
+            "status": canonicalize_task_status("queued"),
             "attempt": 1,
             "sessionId": session_id,
             "createdAt": now,
@@ -281,7 +398,7 @@ class ProductionTaskRepository:
         batch.set(self._run_ref(task_id, run_id), payload)
         batch.set(
             self._task_ref(task_id),
-            {"currentRunId": run_id, "status": "queued", "updatedAt": now},
+            {"currentRunId": run_id, "status": canonicalize_task_status("queued"), "updatedAt": now},
             merge=True,
         )
         batch.commit()
@@ -318,20 +435,43 @@ class ProductionTaskRepository:
     ) -> DurableTaskEvent:
         event_id = _uuid("evt_")
         now = utcnow()
-        data = {
-            "eventId": event_id,
-            "taskId": task_id,
-            "ownerId": owner_id,
-            "runId": run_id,
-            "type": event_type,
-            "payload": payload,
-            "visible": visible,
-            "createdAt": now,
-        }
-        batch = self._db.batch()
-        batch.set(self._event_ref(task_id, event_id), data)
-        batch.set(self._task_ref(task_id), {"lastEventAt": now, "updatedAt": now}, merge=True)
-        batch.commit()
+        task_ref = self._task_ref(task_id)
+        event_ref = self._event_ref(task_id, event_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_append(txn):
+            task_doc = task_ref.get(transaction=txn)
+            task_data = task_doc.to_dict() or {}
+            try:
+                last_seq = int(task_data.get("lastEventSeq", 0) or 0)
+            except (TypeError, ValueError):
+                last_seq = 0
+            next_seq = last_seq + 1
+            data = {
+                "eventId": event_id,
+                "taskId": task_id,
+                "ownerId": owner_id,
+                "runId": run_id,
+                "type": event_type,
+                "payload": payload,
+                "visible": visible,
+                "createdAt": now,
+                "seq": next_seq,
+            }
+            txn.set(event_ref, data)
+            txn.set(
+                task_ref,
+                {
+                    "lastEventAt": now,
+                    "lastEventSeq": next_seq,
+                    "updatedAt": now,
+                },
+                merge=True,
+            )
+            return data
+
+        data = transactional_append(transaction)
         return self._build_event(event_id, data)
 
     async def list_events(
@@ -340,26 +480,65 @@ class ProductionTaskRepository:
         task_id: str,
         owner_id: str,
         after_event_id: str | None = None,
+        after_seq: int | None = None,
+        run_id: str | None = None,
         limit: int | None = None,
     ) -> list[DurableTaskEvent]:
-        return await asyncio.to_thread(self._list_events_sync, task_id, owner_id, after_event_id, limit)
+        """Return durable events for a task.
+
+        Prefer ``after_seq`` when reconnecting clients have a last-seen sequence
+        number. ``after_event_id`` is kept for backward compatibility.
+        """
+        return await asyncio.to_thread(
+            self._list_events_sync,
+            task_id,
+            owner_id,
+            after_event_id,
+            after_seq,
+            run_id,
+            limit,
+        )
 
     def _list_events_sync(
         self,
         task_id: str,
         owner_id: str,
         after_event_id: str | None,
+        after_seq: int | None,
+        run_id: str | None,
         limit: int | None,
     ) -> list[DurableTaskEvent]:
         task = self._get_task_sync(task_id)
         if not task or task.owner_id != owner_id:
             return []
+
+        # Prefer seq-based ordering when available.
+        if after_seq is not None or self._task_has_seq_field(task_id):
+            query = (
+                self._task_ref(task_id)
+                .collection("events")
+                .where(filter=FieldFilter("visible", "==", True))
+                .order_by("seq")
+            )
+            if after_seq is not None and after_seq > 0:
+                query = query.where(filter=FieldFilter("seq", ">", int(after_seq)))
+            if run_id:
+                query = query.where(filter=FieldFilter("runId", "==", run_id))
+            query = query.limit(limit or settings.task_event_replay_limit)
+            return [
+                self._build_event(doc.id, doc.to_dict() or {})
+                for doc in query.stream()
+            ]
+
+        # Legacy path: order by createdAt, paginate by event id.
         query = (
             self._task_ref(task_id)
             .collection("events")
             .where(filter=FieldFilter("visible", "==", True))
             .order_by("createdAt")
         )
+        if run_id:
+            query = query.where(filter=FieldFilter("runId", "==", run_id))
         if after_event_id:
             after_doc = self._event_ref(task_id, after_event_id).get()
             if after_doc.exists:
@@ -371,6 +550,15 @@ class ProductionTaskRepository:
             self._build_event(doc.id, doc.to_dict() or {})
             for doc in query.stream()
         ]
+
+    def _task_has_seq_field(self, task_id: str) -> bool:
+        """Best-effort check for whether the task has begun emitting seq numbers."""
+        try:
+            doc = self._task_ref(task_id).get()
+            data = doc.to_dict() or {}
+            return int(data.get("lastEventSeq", 0) or 0) > 0
+        except Exception:
+            return False
 
     async def claim_run(self, *, task_id: str, run_id: str, worker_id: str) -> DurableTaskRun | None:
         return await asyncio.to_thread(self._claim_run_sync, task_id, run_id, worker_id)
@@ -392,14 +580,14 @@ class ProductionTaskRepository:
             run_data = run_doc.to_dict() or {}
             if bool(task_data.get("cancelRequested")):
                 return None
-            status = str(run_data.get("status") or "queued")
+            status = canonicalize_task_status(str(run_data.get("status") or "queued"))
             existing_lease = _coerce_datetime(run_data.get("leaseExpiresAt"))
             if status == "running" and existing_lease and existing_lease > now:
                 return None
             if status in {"completed", "failed", "cancelled"}:
                 return None
             updates = {
-                "status": "running",
+                "status": canonicalize_task_status("running"),
                 "leaseOwner": worker_id,
                 "leaseExpiresAt": lease_expires_at,
                 "startedAt": run_data.get("startedAt") or now,
@@ -408,7 +596,7 @@ class ProductionTaskRepository:
             txn.set(run_ref, updates, merge=True)
             txn.set(
                 task_ref,
-                {"status": "running", "currentRunId": run_id, "updatedAt": now},
+                {"status": canonicalize_task_status("running"), "currentRunId": run_id, "updatedAt": now},
                 merge=True,
             )
             run_data.update(updates)
@@ -437,7 +625,7 @@ class ProductionTaskRepository:
     ) -> None:
         now = utcnow()
         updates = {
-            "status": status,
+            "status": canonicalize_task_status(status),
             "summary": summary,
             "error": error,
             "completedAt": now,
@@ -449,7 +637,7 @@ class ProductionTaskRepository:
         batch.set(self._run_ref(task_id, run_id), updates, merge=True)
         batch.set(
             self._task_ref(task_id),
-            {"status": status, "updatedAt": now, "lastSummary": summary},
+            {"status": canonicalize_task_status(status), "updatedAt": now, "lastSummary": summary},
             merge=True,
         )
         batch.commit()
@@ -463,7 +651,7 @@ class ProductionTaskRepository:
             return False
         now = utcnow()
         self._task_ref(task_id).set(
-            {"cancelRequested": True, "status": "cancelling", "updatedAt": now},
+            {"cancelRequested": True, "status": canonicalize_task_status("cancelling"), "updatedAt": now},
             merge=True,
         )
         self._append_event_sync(
@@ -516,9 +704,41 @@ class ProductionTaskRepository:
         }
         batch = self._db.batch()
         batch.set(self._approval_ref(task_id, approval_id), payload)
-        batch.set(self._task_ref(task_id), {"status": "waiting_approval", "updatedAt": now}, merge=True)
+        batch.set(
+            self._task_ref(task_id),
+            {"status": canonicalize_task_status("waiting_approval"), "updatedAt": now},
+            merge=True,
+        )
         batch.commit()
         return self._build_approval(approval_id, payload)
+
+    async def get_approval(
+        self,
+        *,
+        task_id: str,
+        approval_id: str,
+        owner_id: str,
+    ) -> DurableApproval | None:
+        return await asyncio.to_thread(
+            self._get_approval_sync,
+            task_id,
+            approval_id,
+            owner_id,
+        )
+
+    def _get_approval_sync(
+        self,
+        task_id: str,
+        approval_id: str,
+        owner_id: str,
+    ) -> DurableApproval | None:
+        doc = self._approval_ref(task_id, approval_id).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        if data.get("ownerId") != owner_id:
+            return None
+        return self._build_approval(approval_id, data)
 
     async def resolve_approval(
         self,
@@ -557,6 +777,9 @@ class ProductionTaskRepository:
             "resolvedAt": now,
         }
         approval_ref.set(updates, merge=True)
-        self._task_ref(task_id).set({"status": "queued", "updatedAt": now}, merge=True)
+        self._task_ref(task_id).set(
+            {"status": canonicalize_task_status("running"), "updatedAt": now},
+            merge=True,
+        )
         data.update(updates)
         return self._build_approval(approval_id, data)

@@ -94,6 +94,7 @@ def _event_payload(event: DurableTaskEvent) -> dict[str, Any]:
         "type": event.event_type,
         "created_at": event.created_at.isoformat(),
         "payload": event.payload,
+        "seq": event.seq,
     }
 
 
@@ -160,9 +161,18 @@ async def get_durable_task(task_id: str, user: AuthenticatedUser = Depends(requi
 async def list_durable_task_events(
     task_id: str,
     after_event_id: str | None = Query(default=None),
+    after_seq: int | None = Query(default=None, ge=0),
+    run_id: str | None = Query(default=None),
     limit: int = Query(default=settings.task_event_replay_limit, ge=1, le=500),
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    """Replay durable task events.
+
+    Clients should prefer ``after_seq`` (the last ``seq`` they received) for
+    reconnect/replay because seq is monotonic per task. ``after_event_id`` is
+    kept as a fallback for older clients and legacy events written before seq
+    numbers existed.
+    """
     repo = get_production_task_repository()
     task = await repo.get_task(task_id)
     if not task or task.owner_id != user.uid:
@@ -171,9 +181,17 @@ async def list_durable_task_events(
         task_id=task_id,
         owner_id=user.uid,
         after_event_id=after_event_id,
+        after_seq=after_seq,
+        run_id=run_id,
         limit=limit,
     )
-    return {"events": [_event_payload(event) for event in events]}
+    payloads = [_event_payload(event) for event in events]
+    last_seq = max((event.seq for event in events), default=after_seq or 0)
+    return {
+        "events": payloads,
+        "last_seq": last_seq,
+        "has_more": len(payloads) >= limit,
+    }
 
 
 @router.post("/api/v1/tasks/{task_id}/messages")

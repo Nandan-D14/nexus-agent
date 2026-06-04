@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from nexus.dependencies import get_production_task_repository
 from nexus.orchestrator import NexusOrchestrator
 from nexus.session import Session, SessionManager
 
@@ -104,6 +105,7 @@ async def handle_websocket(
         session=session,
         ws=ws,
         history_repository=session_manager.history_repository,
+        production_task_repository=get_production_task_repository(),
         ensure_sandbox_ready=_activate_sandbox,
     )
 

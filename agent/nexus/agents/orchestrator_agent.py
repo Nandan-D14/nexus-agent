@@ -9,6 +9,7 @@ from google.adk.agents import Agent
 
 from nexus.credentialed_gemini import CredentialedGemini
 from nexus.runtime_config import SessionRuntimeConfig
+from nexus.tool_gateway import gate_tools
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +177,6 @@ def create_orchestrator_agent(
         name="nexus_orchestrator",
         model=_get_model(runtime_config),
         instruction=instruction,
-        tools=tools,
+        tools=gate_tools(tools),
         sub_agents=[computer_agent, browser_agent, code_agent, deepresearcher_agent],
     )

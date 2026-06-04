@@ -7,8 +7,9 @@
 
 import {
   GoogleAuthProvider,
+  getRedirectResult,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from "firebase/auth";
@@ -77,6 +78,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Capture the redirect result when the user returns from the Google sign-in page.
+    getRedirectResult(auth).catch((err) => {
+      // Ignore benign redirect errors (e.g. no redirect pending).
+      const code = (err as { code?: string }).code;
+      if (code && code !== "auth/credential-already-in-use") {
+        console.error("[AuthProvider] Redirect result error", err);
+        setError(err instanceof Error ? err.message : "Google sign-in failed");
+      }
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       if (firebaseUser) {
         setUser(mapUser(firebaseUser));
@@ -98,9 +109,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signInWithGoogle = useCallback(async () => {
     setError(null);
     try {
-      await signInWithPopup(auth, googleProvider);
-      // syncUserProfile is called by the onAuthStateChanged listener; no need
-      // to call it here to avoid duplicate Firestore writes.
+      await signInWithRedirect(auth, googleProvider);
+      // The page will redirect to Google; onAuthStateChanged and
+      // getRedirectResult handle the rest when the user returns.
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sign-in failed");
       throw err;

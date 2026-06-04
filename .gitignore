@@ -87,6 +87,7 @@ frontend/*.log
 test_screenshot.png
 
 # ── Plan / draft files (dev only) ────────────────────────────
+plans/
 *_plan.md
 *-plan.md
 next-step.md

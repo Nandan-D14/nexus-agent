@@ -182,6 +182,10 @@ export default function SessionPage() {
     viewMode === "live" &&
     Boolean(sessionData?.ws_ticket) &&
     hasActivatedSession;
+  const durableTaskId =
+    sessionData?.task_id && sessionData.task_id.startsWith("task_")
+      ? sessionData.task_id
+      : null;
 
   // Keep refs in sync for unmount cleanup
   streamUrlRef.current = streamUrl;
@@ -189,7 +193,7 @@ export default function SessionPage() {
   minimizeDesktopRef.current = minimizeDesktop;
 
   const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
-    useWebSocket(shouldConnectWs ? wsUrl : null);
+    useWebSocket(shouldConnectWs ? wsUrl : null, durableTaskId);
 
   const handleSpeechStart = useCallback(() => {
     // Zero-latency barge-in: stop agent audio the moment the user starts speaking
@@ -429,6 +433,8 @@ export default function SessionPage() {
           {
             kind: "permission",
             task_id: msg.task_id,
+            approval_id: msg.approval_id,
+            durable_task_id: msg.durable_task_id,
             description: msg.description,
             estimated_seconds: msg.estimated_seconds,
             agent: msg.agent,
@@ -1274,10 +1280,31 @@ export default function SessionPage() {
   );
 
   const handlePermissionRespond = useCallback(
-    (taskId: string, approved: boolean) => {
+    (
+      taskId: string,
+      approved: boolean,
+      approvalId?: string,
+      durableTaskId?: string,
+    ) => {
+      if (approvalId && durableTaskId) {
+        void authenticatedFetch(
+          `/api/v1/tasks/${encodeURIComponent(durableTaskId)}/approvals/${encodeURIComponent(approvalId)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ approved }),
+          },
+        ).catch((error) => {
+          toast(
+            error instanceof Error ? error.message : "Could not submit approval.",
+            "error",
+          );
+        });
+        return;
+      }
       sendJson({ type: "permission_response", task_id: taskId, approved });
     },
-    [sendJson],
+    [sendJson, toast],
   );
 
   const handleStopAgent = useCallback(() => {

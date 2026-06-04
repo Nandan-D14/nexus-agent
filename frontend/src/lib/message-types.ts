@@ -66,7 +66,14 @@ export const DEFAULT_PLAN_QUOTA: PlanQuota = {
   },
 };
 
-export type WsMessage =
+export type WsEventMeta = {
+  event_id?: string;
+  task_id?: string;
+  run_id?: string;
+  seq?: number;
+};
+
+export type WsMessage = WsEventMeta & (
   | { type: "sandbox_status"; status: string }
   | { type: "vnc_url"; url: string }
   | { type: "transcript"; role: "user" | "agent"; text: string }
@@ -81,7 +88,16 @@ export type WsMessage =
   | { type: "agent_screenshot"; image_b64: string; analysis: string }
   | { type: "agent_complete"; summary: string }
   | { type: "agent_delegation"; from: string; to: string }
-  | { type: "permission_request"; task_id: string; description: string; estimated_seconds: number; agent: string }
+  | {
+      type: "permission_request";
+      task_id: string;
+      description: string;
+      estimated_seconds: number;
+      agent: string;
+      approval_id?: string;
+      durable_task_id?: string;
+      risk?: string;
+    }
   | { type: "bg_task_progress"; task_id: string; progress: number; message: string }
   | { type: "bg_task_complete"; task_id: string; success: boolean; result: string }
   | { type: "todo_list_updated"; items: Array<{ title: string; status: "pending" | "in_progress" | "done"; note?: string }> }
@@ -113,7 +129,8 @@ export type WsMessage =
     }
   | { type: "error"; code: string; message: string; detail?: string }
   | { type: "pong" }
-  | { type: "ui_action"; action: "switch_tab"; target: "workflow" | "desktop"; reason?: string };
+  | { type: "ui_action"; action: "switch_tab"; target: "workflow" | "desktop"; reason?: string }
+);
 
 // ── Client -> Server (Text frames) ─────────────────────────────────
 
@@ -177,6 +194,7 @@ export type ContextPacket = {
 
 export type SessionData = {
   session_id: string;
+  task_id?: string | null;
   stream_url: string | null;
   ws_ticket: string;
   status: SessionStatus | string;

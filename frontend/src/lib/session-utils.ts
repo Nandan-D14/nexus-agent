@@ -31,6 +31,8 @@ export type ChatItem =
       description: string;
       estimated_seconds: number;
       agent: string;
+      approval_id?: string;
+      durable_task_id?: string;
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number };

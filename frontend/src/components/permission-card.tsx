@@ -9,10 +9,17 @@ import { useState } from "react";
 
 type Props = {
   taskId: string;
+  approvalId?: string;
+  durableTaskId?: string;
   description: string;
   estimatedSeconds: number;
   agent: string;
-  onRespond: (taskId: string, approved: boolean) => void;
+  onRespond: (
+    taskId: string,
+    approved: boolean,
+    approvalId?: string,
+    durableTaskId?: string,
+  ) => void;
 };
 
 function formatEstimatedTime(seconds: number): string {
@@ -22,6 +29,8 @@ function formatEstimatedTime(seconds: number): string {
 
 export function PermissionCard({
   taskId,
+  approvalId,
+  durableTaskId,
   description,
   estimatedSeconds,
   agent,
@@ -31,7 +40,7 @@ export function PermissionCard({
 
   function handleRespond(approved: boolean) {
     setResponse(approved ? "approved" : "denied");
-    onRespond(taskId, approved);
+    onRespond(taskId, approved, approvalId, durableTaskId);
   }
 
   const resolved = response !== null;
