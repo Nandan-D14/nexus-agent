@@ -24,6 +24,94 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _rehydrate_workspace_from_gcs(
+    session: "Session",
+    repo: "FirestoreHistoryRepository",
+) -> None:
+    """Restore workspace files from GCS into a fresh sandbox after snapshot expiry.
+
+    This makes files permanently available — even if the E2B sandbox snapshot
+    expired (>24 h), all files the agent previously wrote are pulled back from
+    Google Cloud Storage so the agent can continue seamlessly.
+    """
+    try:
+        from nexus.storage import get_storage_client
+
+        run_ids: list[str] = []
+        try:
+            runs_ref = (
+                repo._db.collection("sessions")
+                .document(session.id)
+                .collection("runs")
+                .order_by("createdAt")
+                .limit(50)
+                .stream()
+            )
+            run_ids = [doc.id for doc in runs_ref]
+        except Exception as exc:
+            logger.warning("Rehydration: could not list runs for session %s: %s", session.id, exc)
+            return
+
+        if not run_ids:
+            return
+
+        artifacts = []
+        for run_id in run_ids:
+            try:
+                batch = await repo.list_run_artifacts(session.id, run_id, limit=200)
+                artifacts.extend(batch)
+            except Exception as exc:
+                logger.warning("Rehydration: could not list artifacts for run %s: %s", run_id, exc)
+
+        if not artifacts:
+            logger.info("Rehydration: no artifacts for session %s — nothing to restore", session.id)
+            return
+
+        SKIP_KINDS = {"screenshot", "image", "thumbnail"}
+        gcs_client = get_storage_client()
+        restored = 0
+        skipped = 0
+
+        for artifact in artifacts:
+            if artifact.kind in SKIP_KINDS:
+                skipped += 1
+                continue
+
+            meta = artifact.metadata or {}
+            bucket_name = meta.get("gcs_bucket")
+            blob_name = meta.get("gcs_blob")
+            path = artifact.path
+
+            if not bucket_name or not blob_name or not path:
+                skipped += 1
+                continue
+
+            if not path.startswith("/"):
+                skipped += 1
+                continue
+
+            try:
+                content_bytes = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda b=bucket_name, n=blob_name: (
+                        gcs_client.get_bucket(b).blob(n).download_as_bytes()
+                    ),
+                )
+                session.sandbox.write_binary_file(path, content_bytes)
+                restored += 1
+                logger.debug("Rehydration: restored %s (%d bytes)", path, len(content_bytes))
+            except Exception as exc:
+                logger.warning("Rehydration: could not restore %s: %s", path, exc)
+                skipped += 1
+
+        logger.info(
+            "Workspace rehydration complete for session %s — restored %d files, skipped %d",
+            session.id, restored, skipped,
+        )
+    except Exception as exc:
+        logger.warning("Workspace rehydration failed for session %s (non-fatal): %s", session.id, exc)
+
+
 async def _maybe_mount_gdrive(
     session: "Session",
     repo: "FirestoreHistoryRepository",
@@ -300,6 +388,15 @@ class SessionManager:
             session.status = "ready"
             session.touch()
             await self._sync_session(session, status="ready")
+
+            # Rehydrate workspace files from GCS on resume (best-effort, non-fatal).
+            # Covers the case where the E2B snapshot expired (>24h) — all files
+            # are restored from permanent GCS storage so the agent can continue.
+            if self.history_repository and session.resume_mode in {
+                "continue_latest_workspace",
+                "continue_conversation",
+            }:
+                await _rehydrate_workspace_from_gcs(session, self.history_repository)
 
             # Mount Google Drive if user has a refresh token configured
             if self.history_repository:
