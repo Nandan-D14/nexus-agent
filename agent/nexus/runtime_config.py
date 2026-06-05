@@ -100,6 +100,30 @@ class SessionRuntimeConfig:
         return self.use_vertex_ai or bool(self.gemini_api_key)
 
 
+def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict[str, Any]:
+    """Return durable-safe runtime metadata without API keys."""
+    if runtime_config is None:
+        return {}
+    return {
+        "gemini_provider": runtime_config.gemini_provider,
+        "google_project_id_set": bool(runtime_config.google_project_id),
+        "google_cloud_region": runtime_config.google_cloud_region,
+        "gemini_agent_model": runtime_config.gemini_agent_model,
+        "gemini_agent_fallback_models": list(runtime_config.gemini_agent_fallback_models),
+        "gemini_light_model": runtime_config.gemini_light_model,
+        "gemini_live_model": runtime_config.gemini_live_model,
+        "gemini_live_region": runtime_config.gemini_live_region,
+        "gemini_vision_model": runtime_config.gemini_vision_model,
+        "gemini_vision_fallback_models": list(runtime_config.gemini_vision_fallback_models),
+        "use_kilo": runtime_config.use_kilo,
+        "kilo_model_id": runtime_config.kilo_model_id,
+        "kilo_gateway_url_set": bool(runtime_config.kilo_gateway_url),
+        "e2b_api_key_set": bool(runtime_config.e2b_api_key),
+        "gemini_api_key_set": bool(runtime_config.gemini_api_key),
+        "kilo_api_key_set": bool(runtime_config.kilo_api_key),
+    }
+
+
 def normalize_gemini_provider(value: Any) -> GeminiProvider:
     if value == "vertex":
         return "vertex"

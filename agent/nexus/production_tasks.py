@@ -109,8 +109,40 @@ def history_run_projection_from_durable(run: "DurableTaskRun") -> dict[str, Any]
         "updatedAt": run.updated_at,
         "summary": run.summary,
         "error": run.error,
+        "executionPayload": run.execution_payload or {},
         "schemaVersion": 2,
         "canonicalSource": "production_tasks",
+    }
+
+
+def build_execution_payload(
+    *,
+    task_id: str,
+    run_id: str,
+    owner_id: str,
+    session_id: str | None,
+    input_text: str,
+    connector_ids: list[str] | None = None,
+    uploaded_files: list[dict[str, Any]] | None = None,
+    runtime_config_snapshot: dict[str, Any] | None = None,
+    autonomy_mode: str | None = None,
+    budget: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Canonical durable execution payload for worker-owned runs."""
+    return {
+        "schema_version": 1,
+        "task_id": task_id,
+        "run_id": run_id,
+        "owner_id": owner_id,
+        "session_id": session_id,
+        "input_text": input_text,
+        "connector_ids": [str(item).strip() for item in (connector_ids or []) if str(item).strip()],
+        "uploaded_files": [item for item in (uploaded_files or []) if isinstance(item, dict)],
+        "runtime_config": runtime_config_snapshot or {},
+        "autonomy_mode": normalize_autonomy_mode(autonomy_mode or settings.default_autonomy_mode),
+        "budget": budget or {},
+        "metadata": metadata or {},
     }
 
 
@@ -188,6 +220,7 @@ class DurableTaskRun:
     session_id: str | None = None
     error: str | None = None
     summary: str | None = None
+    execution_payload: dict[str, Any] | None = None
 
 
 @dataclass
@@ -275,6 +308,11 @@ class ProductionTaskRepository:
             session_id=data.get("sessionId") if isinstance(data.get("sessionId"), str) else None,
             error=data.get("error") if isinstance(data.get("error"), str) else None,
             summary=data.get("summary") if isinstance(data.get("summary"), str) else None,
+            execution_payload=(
+                data.get("executionPayload")
+                if isinstance(data.get("executionPayload"), dict)
+                else None
+            ),
         )
 
     @staticmethod
@@ -378,12 +416,69 @@ class ProductionTaskRepository:
             return None
         return self._build_task(task_id, doc.to_dict() or {})
 
-    async def create_run(self, *, task_id: str, owner_id: str, session_id: str | None = None) -> DurableTaskRun:
-        return await asyncio.to_thread(self._create_run_sync, task_id, owner_id, session_id)
+    async def create_run(
+        self,
+        *,
+        task_id: str,
+        owner_id: str,
+        session_id: str | None = None,
+        input_text: str | None = None,
+        connector_ids: list[str] | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
+        runtime_config_snapshot: dict[str, Any] | None = None,
+        autonomy_mode: str | None = None,
+        budget: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> DurableTaskRun:
+        return await asyncio.to_thread(
+            self._create_run_sync,
+            task_id,
+            owner_id,
+            session_id,
+            input_text,
+            connector_ids,
+            uploaded_files,
+            runtime_config_snapshot,
+            autonomy_mode,
+            budget,
+            metadata,
+        )
 
-    def _create_run_sync(self, task_id: str, owner_id: str, session_id: str | None) -> DurableTaskRun:
+    def _create_run_sync(
+        self,
+        task_id: str,
+        owner_id: str,
+        session_id: str | None,
+        input_text: str | None,
+        connector_ids: list[str] | None,
+        uploaded_files: list[dict[str, Any]] | None,
+        runtime_config_snapshot: dict[str, Any] | None,
+        autonomy_mode: str | None,
+        budget: dict[str, Any] | None,
+        metadata: dict[str, Any] | None,
+    ) -> DurableTaskRun:
         run_id = _uuid("run_")
         now = utcnow()
+        task_doc = self._task_ref(task_id).get()
+        task_data = task_doc.to_dict() or {}
+        effective_input = input_text if input_text is not None else str(task_data.get("inputText") or "")
+        effective_budget = budget if budget is not None else task_data.get("budget")
+        if not isinstance(effective_budget, dict):
+            effective_budget = {}
+        effective_autonomy = autonomy_mode or str(task_data.get("autonomyMode") or settings.default_autonomy_mode)
+        execution_payload = build_execution_payload(
+            task_id=task_id,
+            run_id=run_id,
+            owner_id=owner_id,
+            session_id=session_id,
+            input_text=effective_input,
+            connector_ids=connector_ids,
+            uploaded_files=uploaded_files,
+            runtime_config_snapshot=runtime_config_snapshot,
+            autonomy_mode=effective_autonomy,
+            budget=effective_budget,
+            metadata=metadata,
+        )
         payload = {
             "runId": run_id,
             "taskId": task_id,
@@ -391,6 +486,7 @@ class ProductionTaskRepository:
             "status": canonicalize_task_status("queued"),
             "attempt": 1,
             "sessionId": session_id,
+            "executionPayload": execution_payload,
             "createdAt": now,
             "updatedAt": now,
         }
@@ -403,6 +499,18 @@ class ProductionTaskRepository:
         )
         batch.commit()
         return self._build_run(run_id, payload)
+
+    async def get_run(self, *, task_id: str, run_id: str, owner_id: str) -> DurableTaskRun | None:
+        return await asyncio.to_thread(self._get_run_sync, task_id, run_id, owner_id)
+
+    def _get_run_sync(self, task_id: str, run_id: str, owner_id: str) -> DurableTaskRun | None:
+        doc = self._run_ref(task_id, run_id).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        if data.get("ownerId") != owner_id:
+            return None
+        return self._build_run(run_id, data)
 
     async def append_event(
         self,

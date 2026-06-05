@@ -10,11 +10,14 @@ import json
 import logging
 import time
 from collections import defaultdict
+from typing import Any, Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from nexus.dependencies import get_production_task_repository
+from nexus.dependencies import get_production_task_repository, get_task_queue
 from nexus.orchestrator import NexusOrchestrator
+from nexus.production_tasks import TERMINAL_TASK_STATUSES
+from nexus.runtime_config import runtime_config_snapshot
 from nexus.session import Session, SessionManager
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,148 @@ class _ActionRateLimiter:
 
 
 action_rate_limiter = _ActionRateLimiter(max_requests=25, window_seconds=60, name="ws_action")
+
+
+def _event_to_ws_frame(event) -> dict[str, Any]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    frame = dict(payload)
+    frame.update(
+        {
+            "type": event.event_type,
+            "event_id": event.event_id,
+            "task_id": event.task_id,
+            "run_id": event.run_id,
+            "seq": event.seq,
+        }
+    )
+    return frame
+
+
+async def _stream_durable_task_events(
+    *,
+    repo,
+    task_id: str,
+    owner_id: str,
+    run_id: str,
+    send_json,
+    after_seq: int = 0,
+) -> None:
+    last_seq = after_seq
+    idle_terminal_polls = 0
+    while True:
+        events = await repo.list_events(
+            task_id=task_id,
+            owner_id=owner_id,
+            after_seq=last_seq,
+            run_id=run_id,
+            limit=100,
+        )
+        for event in events:
+            last_seq = max(last_seq, int(getattr(event, "seq", 0) or 0))
+            delivered = await send_json(_event_to_ws_frame(event))
+            if not delivered:
+                return
+
+        task = await repo.get_task(task_id)
+        terminal = bool(task and task.status in TERMINAL_TASK_STATUSES)
+        if terminal and not events:
+            idle_terminal_polls += 1
+            if idle_terminal_polls >= 2:
+                return
+        elif events:
+            idle_terminal_polls = 0
+
+        await asyncio.sleep(1.0)
+
+
+async def _try_start_durable_text_run(
+    *,
+    session: Session,
+    orchestrator: NexusOrchestrator,
+    text: str,
+    connector_ids: list[str],
+    uploaded_files: list[dict[str, Any]],
+    send_json,
+) -> bool:
+    """Create and enqueue a durable run for a WebSocket text turn.
+
+    Returns True when durable execution owns the turn. Returns False to let the
+    caller use the legacy live WebSocket path.
+    """
+    repo = get_production_task_repository()
+    queue = get_task_queue()
+    if not getattr(settings, "task_worker_enabled", False):
+        return False
+    is_queue_configured = getattr(queue, "is_configured", None)
+    if callable(is_queue_configured) and not is_queue_configured():
+        return False
+
+    task_id = getattr(session, "task_id", None)
+    task = None
+
+    if isinstance(task_id, str) and task_id.startswith("task_"):
+        task = await repo.get_task(task_id)
+        if not task or task.owner_id != session.owner_id:
+            task = None
+
+    if task is None:
+        task = await repo.create_task(
+            owner_id=session.owner_id,
+            title=text[:120] or "New task",
+            input_text=text,
+            session_id=session.id,
+            metadata={"source": "websocket"},
+        )
+        session.task_id = task.task_id
+
+    run = await repo.create_run(
+        task_id=task.task_id,
+        owner_id=session.owner_id,
+        session_id=session.id,
+        input_text=text,
+        connector_ids=connector_ids,
+        uploaded_files=uploaded_files,
+        runtime_config_snapshot=runtime_config_snapshot(getattr(session, "runtime_config", None)),
+        autonomy_mode=getattr(getattr(session, "runtime_config", None), "autonomy_mode", None),
+        metadata={"source": "websocket", "user_transcript_recorded": True},
+    )
+    session.current_run_id = run.run_id
+    if hasattr(orchestrator, "bind_durable_run"):
+        orchestrator.bind_durable_run(task_id=task.task_id, run_id=run.run_id)
+
+    await repo.append_event(
+        task_id=task.task_id,
+        owner_id=session.owner_id,
+        run_id=run.run_id,
+        event_type="transcript",
+        payload={
+            "role": "user",
+            "text": text,
+            "connector_ids": connector_ids,
+            "uploaded_files": uploaded_files,
+        },
+    )
+
+    enqueue = await queue.enqueue_task_run(task_id=task.task_id, run_id=run.run_id)
+    if not enqueue.queued:
+        logger.info(
+            "Durable queue unavailable for session %s task %s run %s: %s",
+            session.id,
+            task.task_id,
+            run.run_id,
+            enqueue.reason,
+        )
+        return False
+
+    await send_json(
+        {
+            "type": "run_queued",
+            "task_id": task.task_id,
+            "run_id": run.run_id,
+            "queue": enqueue.__dict__,
+        }
+    )
+    return True
 
 
 async def handle_websocket(
@@ -214,7 +359,40 @@ async def handle_websocket(
                                 for item in (data.get("uploaded_files") or [])
                                 if isinstance(item, dict)
                             ]
-                            # Run as background task so stop_agent can interrupt
+                            durable_started = False
+                            try:
+                                durable_started = await _try_start_durable_text_run(
+                                    session=session,
+                                    orchestrator=orchestrator,
+                                    text=text,
+                                    connector_ids=connector_ids,
+                                    uploaded_files=uploaded_files,
+                                    send_json=_safe_send_json,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to start durable text run for session %s; using live path.",
+                                    session.id,
+                                    exc_info=True,
+                                )
+
+                            if durable_started:
+                                _track(
+                                    asyncio.create_task(
+                                        _stream_durable_task_events(
+                                            repo=get_production_task_repository(),
+                                            task_id=session.task_id,
+                                            owner_id=session.owner_id,
+                                            run_id=session.current_run_id,
+                                            send_json=_safe_send_json,
+                                            after_seq=0,
+                                        )
+                                    ),
+                                    label="stream_durable_task_events",
+                                )
+                                continue
+
+                            # Run as background task so stop_agent can interrupt.
                             _track(
                                 asyncio.create_task(
                                     orchestrator.handle_text_input(

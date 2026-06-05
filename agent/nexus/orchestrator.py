@@ -246,6 +246,23 @@ class NexusOrchestrator:
         run_id = str(getattr(self.session, "current_run_id", "") or "").strip()
         return run_id if run_id.startswith("run_") else None
 
+    def bind_durable_run(self, *, task_id: str, run_id: str) -> None:
+        """Attach this live orchestrator to a durable task/run."""
+        self.session.task_id = task_id
+        self.session.current_run_id = run_id
+        self._current_run_id = run_id
+        self._durable_task_id = self._resolve_durable_task_id()
+        self._durable_run_id = self._resolve_durable_run_id()
+        self._event_sink = build_session_event_sink(
+            repository=self.production_task_repository if self._durable_task_id else None,
+            send_json=self._send_json_to_ws,
+            task_id=self._durable_task_id,
+            owner_id=self.session.owner_id,
+            run_id=self._durable_run_id,
+        )
+        set_task_id(self._durable_task_id)
+        self._bind_workspace_context()
+
     async def start_desktop(self) -> None:
         """Start or resume the sandbox because the user opened the desktop."""
         await self._ensure_sandbox_ready("desktop")
@@ -256,11 +273,26 @@ class NexusOrchestrator:
             return
         try:
             user_settings = await self.history_repository.get_user_settings(self.session.owner_id)
-            self._skill_instruction = build_enabled_skills_prompt(user_settings)
             connections = await self.history_repository.list_enabled_integration_connections(
                 self.session.owner_id
             )
             self._integration_tools = build_mcp_adk_tools(connections)
+
+            # Extract MCP tool metadata for the skill prompt so the LLM knows
+            # which external tools are available.
+            mcp_tool_meta: list[dict[str, Any]] = []
+            for conn in connections:
+                if conn.connector_type == "mcp_remote_http" and conn.private.get("tools"):
+                    for tool_info in conn.private["tools"]:
+                        tool_name = tool_info.get("name", "")
+                        params_obj = tool_info.get("parameters") or {}
+                        props = params_obj.get("properties", {}) if isinstance(params_obj, dict) else {}
+                        param_names = ", ".join(props.keys()) if isinstance(props, dict) else ""
+                        mcp_tool_meta.append({"name": tool_name, "parameters": param_names})
+
+            self._skill_instruction = build_enabled_skills_prompt(
+                user_settings, mcp_tools=mcp_tool_meta or None
+            )
         except Exception:
             logger.warning("Failed to load integration tools for session %s", self.session.id, exc_info=True)
             self._integration_tools = []
@@ -355,9 +387,11 @@ class NexusOrchestrator:
         text: str,
         connector_ids: list[str] | None = None,
         uploaded_files: list[dict[str, Any]] | None = None,
+        emit_user_transcript: bool = True,
     ) -> None:
         """Handle direct text input (bypass voice)."""
-        await self._send_json({"type": "transcript", "role": "user", "text": text})
+        if emit_user_transcript:
+            await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="typed", text=text)
         if await self._try_fast_route(
             text,

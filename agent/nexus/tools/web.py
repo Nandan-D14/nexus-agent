@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 
 from nexus.tools.workspace import get_active_workspace_path, write_workspace_file
+from nexus.tools.base import normalized_tool, tool_error, tool_success
 
 logger = logging.getLogger(__name__)
 
@@ -170,14 +171,26 @@ def extract_readable_markdown(html_text: str, *, url: str) -> str:
     return _fallback_extract_markdown(html_text, url=url)
 
 
+@normalized_tool
 async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
-    """Search the web quickly and save normalized results into the workspace."""
+    """Search the web quickly and save normalized results into the workspace.
+
+    Uses DuckDuckGo for fast, privacy-respecting search. Results are saved
+    to the workspace sources/ directory for later reference.
+
+    Args:
+        query: Search query text.
+        max_results: Maximum number of results to return (default 5).
+
+    Returns:
+        NormalizedToolResult with search results and saved file path.
+    """
     try:
         cleaned_query = " ".join((query or "").split()).strip()
         if not cleaned_query:
-            return _tool_error("query is required")
+            return tool_error("query is required", error_code="INVALID_INPUT")
         if max_results < 1:
-            return _tool_error("max_results must be at least 1")
+            return tool_error("max_results must be at least 1", error_code="INVALID_INPUT")
 
         async with httpx.AsyncClient(
             follow_redirects=True,
@@ -203,38 +216,51 @@ async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
             filename,
             json.dumps(payload, indent=2, ensure_ascii=True),
         )
-        if write_result.get("error"):
-            return write_result
-        return {
-            "query": cleaned_query,
-            "results": results,
-            "saved_path": f"{get_active_workspace_path()}/{filename}",
-        }
+        if isinstance(write_result, dict) and write_result.get("error"):
+            return tool_error(write_result["error"])
+
+        return tool_success(
+            f"Found {len(results)} results for '{cleaned_query}'",
+            query=cleaned_query,
+            results=results,
+            saved_path=f"{get_active_workspace_path()}/{filename}",
+            result_count=len(results),
+        )
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else None
-        return _tool_error(
-            f"Web search failed with HTTP {status_code or 'error'}. Please retry or try a narrower query.",
+        return tool_error(
+            f"Web search failed with HTTP {status_code or 'error'}. Try a narrower query or use tavily_search.",
+            error_code="HTTP_ERROR",
+            suggested_alternatives=["tavily_search", "scrape_web_page"],
             status_code=status_code,
             query=" ".join((query or "").split()).strip(),
         )
     except httpx.RequestError as exc:
-        return _tool_error(
+        return tool_error(
             f"Web search failed: {exc}",
+            suggested_alternatives=["tavily_search"],
             query=" ".join((query or "").split()).strip(),
         )
     except Exception as exc:
-        return _tool_error(str(exc) or "Web search failed unexpectedly.")
+        return tool_error(str(exc) or "Web search failed unexpectedly.")
 
 
-from nexus.tools.base import normalized_tool
 
 @normalized_tool
 async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[str, Any]:
-    """Fetch a page, extract readable text, and save it into the workspace."""
+    """Fetch a page, extract readable text, and save it into the workspace.
+
+    Args:
+        url: The full URL to scrape.
+        output_basename: Optional filename for the saved markdown file.
+
+    Returns:
+        NormalizedToolResult with extracted content and saved file path.
+    """
     try:
         cleaned_url = (url or "").strip()
         if not cleaned_url:
-            return _tool_error("url is required")
+            return tool_error("url is required", error_code="INVALID_INPUT")
 
         async with httpx.AsyncClient(
             follow_redirects=True,
@@ -251,14 +277,16 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
         slug = _slugify(base or title, fallback="page")
         relative_path = f"sources/{slug}.md"
         write_result = await write_workspace_file(relative_path, markdown)
-        if write_result.get("error"):
-            return write_result
-        return {
-            "url": cleaned_url,
-            "title": title,
-            "content": markdown,
-            "saved_path": f"{get_active_workspace_path()}/{relative_path}",
-        }
+        if isinstance(write_result, dict) and write_result.get("error"):
+            return tool_error(write_result["error"])
+
+        return tool_success(
+            f"Scraped {title} from {cleaned_url}",
+            url=cleaned_url,
+            title=title,
+            content=markdown,
+            saved_path=f"{get_active_workspace_path()}/{relative_path}",
+        )
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else None
         message = (
@@ -268,15 +296,18 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
             message += (
                 " This source blocked automated access. Try another source or use open_browser only if the page is essential."
             )
-        return _tool_error(
+        return tool_error(
             message,
+            error_code=f"HTTP_{status_code}" if status_code else "HTTP_ERROR",
+            suggested_alternatives=["open_browser", "web_search"] if status_code in {401, 403} else [],
             url=cleaned_url,
             status_code=status_code,
         )
     except httpx.RequestError as exc:
-        return _tool_error(
+        return tool_error(
             f"Could not scrape {cleaned_url}: {exc}",
+            suggested_alternatives=["web_search"],
             url=cleaned_url,
         )
     except Exception as exc:
-        return _tool_error(str(exc) or "Could not scrape the page unexpectedly.", url=(url or "").strip())
+        return tool_error(str(exc) or "Could not scrape the page unexpectedly.", url=(url or "").strip())

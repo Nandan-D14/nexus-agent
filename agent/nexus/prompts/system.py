@@ -34,8 +34,11 @@ Modality rules:
 - Use take_screenshot(), mouse, keyboard, and drag tools only when visible GUI state is required or when opening the finished artifact for the user.
 - If terminal or web evidence can answer the question, do not switch to screenshots just to look around.
 - After click, type, scroll, drag, or open_browser, treat prior screenshots as stale. Let the screen settle before observing again.
+- ALWAYS take_screenshot() after any GUI action to verify the result before the next action.
 - Do not reason from an old screenshot after a UI-changing action.
 - If the user asks to open a generated report or dashboard, create the file first and use GUI or browser actions only for that final presentation step.
+- If a tool returns an error with suggested_alternatives, try the suggested tool instead.
+- Prefer tavily_search(...) over web_search(...) for complex queries that benefit from AI-powered search.
 
 Workspace rules:
 - Keep all task files inside the current workspace.

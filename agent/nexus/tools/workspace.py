@@ -189,7 +189,7 @@ def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
     return path
 
 
-from nexus.tools.base import normalized_tool
+from nexus.tools.base import normalized_tool, tool_error, tool_success
 
 @normalized_tool
 async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
@@ -253,12 +253,22 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
         return _tool_error(str(exc) or "Failed to prepare the task workspace.")
 
 
+@normalized_tool
 async def initialize_task_state(
     task_summary: str,
     task_type: str = "general_task",
     active_agent: str = "nexus_orchestrator",
 ) -> dict[str, Any]:
-    """Initialize or refresh task_state.json for the current agentic workflow."""
+    """Initialize or refresh task_state.json for the current agentic workflow.
+
+    Args:
+        task_summary: Description of the current task.
+        task_type: One of code_task, browser_task, gui_task, deep_research, etc.
+        active_agent: Name of the agent currently working.
+
+    Returns:
+        NormalizedToolResult with task state details.
+    """
     try:
         workspace_path = get_active_workspace_path()
         resolved_type = task_type if task_type != "general_task" else infer_task_type(task_summary)
@@ -282,19 +292,20 @@ async def initialize_task_state(
             )
         path = _save_task_state(workspace_path, state)
         await _emit_task_state_update(state)
-        return {
-            "task_state_file": path,
-            "task_id": state["task_id"],
-            "task_type": state["task_type"],
-            "stage": state["stage"],
-            "active_agent": state["active_agent"],
-            "review_status": state["review_status"],
-            "status": "success",
-        }
+        return tool_success(
+            f"Initialized task state: {resolved_type}",
+            task_state_file=path,
+            task_id=state["task_id"],
+            task_type=state["task_type"],
+            stage=state["stage"],
+            active_agent=state["active_agent"],
+            review_status=state["review_status"],
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to initialize task state.")
+        return tool_error(str(exc) or "Failed to initialize task state.")
 
 
+@normalized_tool
 async def update_task_state(
     stage: str = "intake",
     active_agent: str = "",
@@ -304,7 +315,20 @@ async def update_task_state(
     artifact_paths: list[str] = None,
     summary: str = "",
 ) -> dict[str, Any]:
-    """Update durable task stage, active agent, evidence, artifacts, and review status."""
+    """Update durable task stage, active agent, evidence, artifacts, and review status.
+
+    Args:
+        stage: Current workflow stage (intake, planning, executing, reviewing, etc.).
+        active_agent: Name of the agent currently working.
+        review_status: Review state (not_required, pending, passed, changes_requested).
+        todo: Updated todo list items.
+        evidence: List of evidence descriptions.
+        artifact_paths: List of output file paths.
+        summary: Brief description of current progress.
+
+    Returns:
+        NormalizedToolResult with updated task state.
+    """
     try:
         workspace_path = get_active_workspace_path()
         state = _load_task_state(workspace_path)
@@ -327,78 +351,108 @@ async def update_task_state(
         )
         path = _save_task_state(workspace_path, updated)
         await _emit_task_state_update(updated)
-        return {
-            "task_state_file": path,
-            "task_id": updated.get("task_id", ""),
-            "task_type": updated.get("task_type", "general_task"),
-            "stage": updated.get("stage", "intake"),
-            "active_agent": updated.get("active_agent", ""),
-            "review_status": updated.get("review_status", "not_required"),
-            "evidence_count": len(updated.get("evidence") or []),
-            "artifact_count": len(updated.get("artifact_paths") or []),
-            "status": "success",
-        }
+        return tool_success(
+            f"Task state updated: stage={updated.get('stage', 'intake')}, agent={updated.get('active_agent', '')}",
+            task_state_file=path,
+            task_id=updated.get("task_id", ""),
+            task_type=updated.get("task_type", "general_task"),
+            stage=updated.get("stage", "intake"),
+            active_agent=updated.get("active_agent", ""),
+            review_status=updated.get("review_status", "not_required"),
+            evidence_count=len(updated.get("evidence") or []),
+            artifact_count=len(updated.get("artifact_paths") or []),
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to update task state.")
+        return tool_error(str(exc) or "Failed to update task state.")
 
 
+@normalized_tool
 async def read_task_state() -> dict[str, Any]:
-    """Read task_state.json from the active workspace."""
+    """Read task_state.json from the active workspace.
+
+    Returns:
+        NormalizedToolResult with the current task state, or error if not found.
+    """
     try:
         workspace_path = get_active_workspace_path()
         state = _load_task_state(workspace_path)
         if not state:
-            return _tool_error("task_state.json does not exist yet.")
-        return {
-            "task_state_file": _task_state_path(workspace_path),
-            "state": state,
-        }
+            return tool_error(
+                "task_state.json does not exist yet.",
+                error_code="NOT_FOUND",
+                suggested_alternatives=["initialize_task_state"],
+            )
+        return tool_success(
+            f"Task state: {state.get('task_type', 'unknown')} / {state.get('stage', 'unknown')}",
+            task_state_file=_task_state_path(workspace_path),
+            state=state,
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to read task state.")
+        return tool_error(str(exc) or "Failed to read task state.")
 
 
+@normalized_tool
 async def write_todo_list(items: list[str]) -> dict[str, Any]:
-    """Write the task todo list to todo.md in the active workspace."""
+    """Write the task todo list to todo.md in the active workspace.
+
+    Args:
+        items: List of todo item descriptions.
+
+    Returns:
+        NormalizedToolResult with todo file path and item count.
+    """
     try:
         if not isinstance(items, list):
-            return _tool_error("items must be a list of todo strings.")
+            return tool_error("items must be a list of todo strings.", error_code="INVALID_INPUT")
         workspace_path = get_active_workspace_path()
         content = _build_todo_markdown(items)
         path = f"{workspace_path}/todo.md"
         get_sandbox().write_text_file(path, content)
-        
+
         # Mirror to GCS
         upload_artifact(get_session_id(), get_run_id(), "todo.md", content)
-        
+
         # Sync to frontend
         todo_items = _parse_todo_markdown(content)
         await _emit_todo_update(todo_items)
 
-        return {
-            "todo_file": path,
-            "item_count": len(todo_items),
-            "status": "success",
-        }
+        return tool_success(
+            f"Wrote {len(todo_items)} todo items",
+            todo_file=path,
+            item_count=len(todo_items),
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to write the todo list.")
+        return tool_error(str(exc) or "Failed to write the todo list.")
 
 
+@normalized_tool
 async def update_todo_item(
     item_index: int,
     status: Literal["pending", "in_progress", "done"],
     note: str = "",
 ) -> dict[str, Any]:
-    """Update one todo item in todo.md."""
+    """Update one todo item in todo.md.
+
+    Args:
+        item_index: 1-based index of the todo item.
+        status: New status (pending, in_progress, done).
+        note: Optional note to attach to the item.
+
+    Returns:
+        NormalizedToolResult with updated item details.
+    """
     try:
         if status not in _STATUS_VALUES:
-            return _tool_error("status must be pending, in_progress, or done")
+            return tool_error("status must be pending, in_progress, or done", error_code="INVALID_INPUT")
         if not isinstance(item_index, int):
-            return _tool_error(
-                "item_index must be an integer. Index is 1-based. Please retry with a valid index."
+            return tool_error(
+                "item_index must be an integer. Index is 1-based. Please retry with a valid index.",
+                error_code="INVALID_INPUT",
             )
         if item_index < 1:
-            return _tool_error(
-                "item_index must be at least 1. Index is 1-based. Please retry with a valid index."
+            return tool_error(
+                "item_index must be at least 1. Index is 1-based. Please retry with a valid index.",
+                error_code="INVALID_INPUT",
             )
 
         workspace_path = get_active_workspace_path()
@@ -406,7 +460,7 @@ async def update_todo_item(
         sandbox = get_sandbox()
         items = _parse_todo_markdown(sandbox.read_text_file(path))
         if item_index > len(items):
-            return _tool_error("item_index is out of range for the current todo list")
+            return tool_error("item_index is out of range for the current todo list", error_code="INVALID_INPUT")
         target = items[item_index - 1]
         target["status"] = status
         target["note"] = note.strip()
@@ -419,83 +473,110 @@ async def update_todo_item(
         # Sync to frontend
         await _emit_todo_update(items)
 
-        return {
-            "todo_file": path,
-            "updated_item": item_index,
-            "status": status,
-            "title": target["title"],
-        }
+        return tool_success(
+            f"Updated todo #{item_index} to {status}",
+            todo_file=path,
+            updated_item=item_index,
+            item_status=status,
+            title=target["title"],
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to update the todo item.")
+        return tool_error(str(exc) or "Failed to update the todo item.")
 
 
+@normalized_tool
 async def write_workspace_file(
     relative_path: str,
     content: str,
     append: bool = False,
 ) -> dict[str, Any]:
-    """Write text content to a file inside the active workspace."""
+    """Write text content to a file inside the active workspace.
+
+    Args:
+        relative_path: Path relative to workspace root (e.g. "notes.md", "outputs/report.html").
+        content: Text content to write.
+        append: If True, append to existing file instead of overwriting.
+
+    Returns:
+        NormalizedToolResult with file path and bytes written.
+    """
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
         content_text = content if isinstance(content, str) else str(content)
         sandbox = get_sandbox()
         sandbox.write_text_file(absolute_path, content_text, append=append)
-        
+
         normalized_relative = _normalize_relative_path(relative_path)
-        
+
         # Mirror to GCS
-        # If appending, we need the full content for the signed URL to be useful
         full_content = content_text
         if append:
             try:
                 full_content = sandbox.read_text_file(absolute_path)
             except Exception:
                 pass
-                
+
         gcs_url = upload_artifact(get_session_id(), get_run_id(), normalized_relative, full_content)
 
         preview = " ".join(content_text.split())
         if len(preview) > 240:
             preview = preview[:239].rstrip() + "…"
-            
-        response = {
+
+        result_meta = {
             "workspace_path": workspace_path,
             "workspace_file": gcs_url or absolute_path,
             "relative_path": normalized_relative,
             "metadata": artifact_storage_metadata(get_session_id(), get_run_id(), normalized_relative),
             "bytes_written": len(content_text.encode("utf-8")),
             "append": append,
-            "status": "success",
-            "summary": preview or f"Saved {normalized_relative}",
         }
         if gcs_url:
-            response["gcs_url"] = gcs_url
-            
+            result_meta["gcs_url"] = gcs_url
         if normalized_relative.startswith("outputs/"):
-            response["output_path"] = gcs_url or absolute_path
-            
-        return response
+            result_meta["output_path"] = gcs_url or absolute_path
+
+        return tool_success(
+            preview or f"Saved {normalized_relative}",
+            **result_meta,
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to write the workspace file.")
+        return tool_error(str(exc) or "Failed to write the workspace file.")
 
 
+@normalized_tool
 async def read_workspace_file(relative_path: str) -> dict[str, Any]:
-    """Read a text file from the active workspace."""
+    """Read a text file from the active workspace.
+
+    Args:
+        relative_path: Path relative to workspace root.
+
+    Returns:
+        NormalizedToolResult with file content.
+    """
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
         content = get_sandbox().read_text_file(absolute_path)
-        return {
-            "workspace_path": workspace_path,
-            "workspace_file": absolute_path,
-            "relative_path": _normalize_relative_path(relative_path),
-            "content": content,
-        }
+        return tool_success(
+            f"Read {_normalize_relative_path(relative_path)} ({len(content)} chars)",
+            workspace_path=workspace_path,
+            workspace_file=absolute_path,
+            relative_path=_normalize_relative_path(relative_path),
+            content=content,
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to read the workspace file.")
+        return tool_error(str(exc) or "Failed to read the workspace file.")
 
 
+@normalized_tool
 async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
-    """List files inside the active workspace."""
+    """List files inside the active workspace.
+
+    Args:
+        relative_path: Optional subdirectory to list (relative to workspace root).
+
+    Returns:
+        NormalizedToolResult with directory entries.
+    """
     try:
         workspace_path = get_active_workspace_path()
         normalized = relative_path.strip()
@@ -505,11 +586,13 @@ async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
             _, target_path = _join_workspace_path(normalized)
             display_relative = _normalize_relative_path(normalized)
         entries = get_sandbox().list_directory(target_path)
-        return {
-            "workspace_path": workspace_path,
-            "directory_path": target_path,
-            "relative_path": display_relative,
-            "entries": entries,
-        }
+        return tool_success(
+            f"Listed {len(entries)} entries in {display_relative or 'workspace root'}",
+            workspace_path=workspace_path,
+            directory_path=target_path,
+            relative_path=display_relative,
+            entries=entries,
+            entry_count=len(entries),
+        )
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to list workspace files.")
+        return tool_error(str(exc) or "Failed to list workspace files.")

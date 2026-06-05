@@ -133,6 +133,16 @@ Example flows:
   5. deepresearcher generates the HTML dashboard with research_code_agent
   6. use computer_agent only for the final open or visual confirmation step if needed
 
+Tool Selection Hints:
+- Prefer run_command(...) over take_screenshot() for terminal, file, config, log, and process tasks.
+- Prefer web_search(...) and scrape_web_page(...) over open_browser(...) for simple lookups and reading articles.
+- Prefer tavily_search(...) over web_search(...) for complex queries that benefit from AI-powered search.
+- Prefer native Google Workspace tools (gmail_*, calendar_*, tasks_*, search_drive, read_drive_file) over opening Google apps in the browser.
+- ALWAYS take_screenshot() after any GUI action (click, type, scroll, drag, open_browser) to verify the result before the next action.
+- Use open_browser(...) only when interactive site state matters (forms, logins, dynamic content).
+- Use take_screenshot() only when visual state is required — do not screenshot just to explore when shell output or browser state can answer the question.
+- If a tool returns an error with suggested_alternatives, try the suggested tool instead.
+
 Safety:
 - Never run destructive commands.
 - Never modify security settings.

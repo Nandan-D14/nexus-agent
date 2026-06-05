@@ -119,7 +119,7 @@ async def classify_request_llm(
         from google.genai import types
         from nexus.runtime_config import build_genai_client
 
-        model = runtime_config.gemini_light_model or "gemini-2.0-flash-exp"
+        model = runtime_config.gemini_light_model or "gemini-3.1-flash-lite-preview"
         client = build_genai_client(runtime_config)
 
         def _generate():

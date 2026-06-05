@@ -379,6 +379,10 @@ def take_screenshot() -> dict:
         # Store the full image for the frontend (orchestrator picks it up)
         _last_screenshot.image = img_b64
 
+        # Clear the screen dirty flag — agent has now observed the current state
+        from nexus.tools.screen_state import clear_dirty
+        clear_dirty()
+
         return {
             "description": description,
             "cached": used_cache,

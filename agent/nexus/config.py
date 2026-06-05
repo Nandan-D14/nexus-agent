@@ -46,26 +46,26 @@ class Settings(BaseSettings):
     google_cloud_region: str = "global"  # For Gemini 3 vision/agent (must be "global")
 
     # Gemini models
-    # Note: Gemini 3 models require the "global" endpoint, not regional endpoints
-    brain_model: str = "gemini-3.1-pro-preview"
-    gemini_agent_model: str = "gemini-3-flash-preview"
-    gemini_api_key_agent_model: str = "gemini-3-flash-preview"
+    # Note: Gemini 3.x models require the "global" endpoint, not regional endpoints
+    brain_model: str = "gemini-3.5-flash"
+    gemini_agent_model: str = "gemini-3.5-flash"
+    gemini_api_key_agent_model: str = "gemini-3.5-flash"
     gemini_api_key_agent_fallback_models: str = (
-        "gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview"
+        "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview"
     )
     gemini_light_model: str = "gemini-3.1-flash-lite-preview"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"  # Live API still uses 2.5 series
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
-    gemini_vision_model: str = "gemini-3-flash-preview"
+    gemini_vision_model: str = "gemini-3.5-flash"
     # Fallback vision models tried in order when the primary hits quota/errors
-    gemini_vision_fallback_models: str = "gemini-3.1-flash-lite-preview"
+    gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
 
     # Desktop observation
     screenshot_after_action_delay_seconds: float = 0.9
 
     # Kilo Code (OpenAI-compatible gateway — can be used alongside Gemini)
     kilo_api_key: str = ""
-    kilo_model_id: str = "minimax/minimax-m2.5:free"
+    kilo_model_id: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     kilo_gateway_url: str = "https://api.kilo.ai/api/gateway"
 
     @property

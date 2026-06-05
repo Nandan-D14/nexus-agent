@@ -204,6 +204,28 @@ async def _await_durable_approval(
     if repository is None or not task_id.startswith("task_") or not owner_id:
         return None
 
+    # Check if this tool has already been approved in a previous approval request for this task.
+    # We only auto-approve medium-risk tools (like read operations) to ensure high-risk actions (like sending emails) are always confirmed.
+    if decision.risk == "medium":
+        try:
+            from google.cloud.firestore_v1 import FieldFilter
+            def _check_already_approved() -> bool:
+                approvals_ref = repository._task_ref(task_id).collection("approvals")
+                docs = approvals_ref.where(filter=FieldFilter("status", "==", "approved")).stream()
+                for doc in docs:
+                    data = doc.to_dict() or {}
+                    meta = data.get("metadata") or {}
+                    if meta.get("tool") == tool_name:
+                        return True
+                return False
+
+            already_approved = await asyncio.to_thread(_check_already_approved)
+            if already_approved:
+                logger.info("Tool %s was already approved for task %s; auto-approving.", tool_name, task_id)
+                return True
+        except Exception:
+            logger.warning("Failed to check existing approvals for tool %s", tool_name, exc_info=True)
+
     approval = await repository.create_approval(
         task_id=task_id,
         owner_id=owner_id,
@@ -247,10 +269,68 @@ async def _await_approval(
     decision: ToolPolicyDecision,
     args_view: dict[str, Any],
 ) -> bool | None:
+    # Check if this tool is already in the manager's approved tools (medium risk only)
+    manager = None
+    if decision.risk == "medium":
+        try:
+            from nexus.tools._context import get_bg_task_manager
+            manager = get_bg_task_manager()
+            if manager is not None:
+                if not hasattr(manager, "approved_tools"):
+                    manager.approved_tools = set()
+                if tool_name in manager.approved_tools:
+                    logger.info("Tool %s was already approved in this session's BackgroundTaskManager; auto-approving.", tool_name)
+                    return True
+        except Exception:
+            pass
+
     durable = await _await_durable_approval(tool_name, decision, args_view)
     if durable is not None:
+        if durable is True and decision.risk == "medium":
+            try:
+                if manager is None:
+                    from nexus.tools._context import get_bg_task_manager
+                    manager = get_bg_task_manager()
+                if manager is not None:
+                    if not hasattr(manager, "approved_tools"):
+                        manager.approved_tools = set()
+                    manager.approved_tools.add(tool_name)
+            except Exception:
+                pass
         return durable
-    return await _await_background_task_approval(tool_name, decision)
+
+    approved = await _await_background_task_approval(tool_name, decision)
+    if approved is True and decision.risk == "medium":
+        try:
+            if manager is None:
+                from nexus.tools._context import get_bg_task_manager
+                manager = get_bg_task_manager()
+            if manager is not None:
+                if not hasattr(manager, "approved_tools"):
+                    manager.approved_tools = set()
+                manager.approved_tools.add(tool_name)
+        except Exception:
+            pass
+    return approved
+
+
+def _check_verification_warning(tool_name: str) -> str | None:
+    """Check if the perception-action loop should warn before this tool runs."""
+    try:
+        from nexus.tools.verification import should_verify_before_action
+        return should_verify_before_action(tool_name)
+    except Exception:
+        return None
+
+
+def _inject_warning(result: Any, warning: str) -> Any:
+    """Prepend a verification warning to a tool's result summary."""
+    if isinstance(result, dict):
+        existing_summary = result.get("summary", "")
+        result["summary"] = f"{warning}\n\n{existing_summary}" if existing_summary else warning
+        if "verification_warning" not in result:
+            result["verification_warning"] = warning
+    return result
 
 
 def gated_tool(func: Callable) -> Callable:
@@ -282,7 +362,13 @@ def gated_tool(func: Callable) -> Callable:
                 if approved is False:
                     return _approval_denied_result(tool_name, decision)
                 return _approval_required_result(tool_name, decision)
-            return await func(*args, **kwargs)
+
+            # Perception-action loop: warn if screen is dirty before GUI actions
+            warning = _check_verification_warning(tool_name)
+            result = await func(*args, **kwargs)
+            if warning:
+                return _inject_warning(result, warning)
+            return result
 
         return async_wrapper
 
@@ -299,7 +385,13 @@ def gated_tool(func: Callable) -> Callable:
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
             return _approval_required_result(tool_name, decision)
-        return func(*args, **kwargs)
+
+        # Perception-action loop: warn if screen is dirty before GUI actions
+        warning = _check_verification_warning(tool_name)
+        result = func(*args, **kwargs)
+        if warning:
+            return _inject_warning(result, warning)
+        return result
 
     return sync_wrapper
 

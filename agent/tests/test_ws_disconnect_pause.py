@@ -103,6 +103,77 @@ class InMemoryProductionRepo:
         return events[:limit]
 
 
+class QueuedProductionRepo:
+    def __init__(self) -> None:
+        self.task = None
+        self.run = None
+        self.events: list[SimpleNamespace] = []
+        self.create_run_kwargs: dict | None = None
+
+    async def create_task(self, **kwargs):
+        self.task = SimpleNamespace(
+            task_id="task_ws",
+            owner_id=kwargs["owner_id"],
+            status="queued",
+            title=kwargs["title"],
+            input_text=kwargs["input_text"],
+            session_id=kwargs.get("session_id"),
+        )
+        return self.task
+
+    async def get_task(self, task_id: str):
+        if self.task and task_id == self.task.task_id:
+            return self.task
+        return None
+
+    async def create_run(self, **kwargs):
+        self.create_run_kwargs = kwargs
+        self.run = SimpleNamespace(
+            run_id="run_ws",
+            task_id=kwargs["task_id"],
+            owner_id=kwargs["owner_id"],
+            status="queued",
+            execution_payload={"input_text": kwargs["input_text"]},
+        )
+        return self.run
+
+    async def append_event(self, **kwargs):
+        seq = len(self.events) + 1
+        event = SimpleNamespace(
+            event_id=f"evt_ws_{seq}",
+            task_id=kwargs["task_id"],
+            owner_id=kwargs["owner_id"],
+            run_id=kwargs.get("run_id"),
+            event_type=kwargs["event_type"],
+            created_at=datetime.now(timezone.utc),
+            payload=kwargs.get("payload") or {},
+            seq=seq,
+        )
+        self.events.append(event)
+        return event
+
+    async def list_events(self, *, task_id: str, owner_id: str, after_seq=None, run_id=None, limit=100, **kwargs):
+        min_seq = int(after_seq or 0)
+        events = [
+            event
+            for event in self.events
+            if event.task_id == task_id
+            and event.owner_id == owner_id
+            and event.seq > min_seq
+            and (not run_id or event.run_id == run_id)
+        ]
+        return events[:limit]
+
+
+class QueuedTaskQueue:
+    def __init__(self) -> None:
+        self.enqueue_kwargs: dict | None = None
+
+    async def enqueue_task_run(self, **kwargs):
+        self.enqueue_kwargs = kwargs
+        return SimpleNamespace(queued=True, provider="test", name="queued", reason="")
+
+
 @pytest.mark.asyncio
 async def test_idle_disconnect_schedules_sandbox_pause(monkeypatch) -> None:
     FakeOrchestrator.active_on_disconnect = False
@@ -200,6 +271,67 @@ async def test_disconnect_during_background_turn_does_not_pause_sandbox(monkeypa
     await ws_handler.handle_websocket(ws, session, session_manager)
 
     session_manager.destroy_session.assert_not_awaited()
+    session_manager.schedule_idle_pause.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_text_input_queues_durable_run_when_worker_available(monkeypatch) -> None:
+    repo = QueuedProductionRepo()
+    queue = QueuedTaskQueue()
+    session = SimpleNamespace(
+        id="session-123",
+        owner_id="firebase-uid",
+        task_id=None,
+        current_run_id=None,
+        runtime_config=None,
+    )
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+    ws = FakeWebSocket(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "type": "text_input",
+                        "text": "work",
+                        "connector_ids": ["github"],
+                        "uploaded_files": [{"name": "a.txt"}],
+                    }
+                )
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    created: list[FakeOrchestrator] = []
+
+    class QueuedFakeOrchestrator(FakeOrchestrator):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handle_text_input = AsyncMock()
+            self.bind_durable_run = Mock()
+            created.append(self)
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", QueuedFakeOrchestrator)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(ws_handler, "get_task_queue", lambda: queue)
+    monkeypatch.setattr(ws_handler.settings, "task_worker_enabled", True)
+
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    assert repo.create_run_kwargs["connector_ids"] == ["github"]
+    assert repo.create_run_kwargs["uploaded_files"] == [{"name": "a.txt"}]
+    assert repo.create_run_kwargs["metadata"]["user_transcript_recorded"] is True
+    assert queue.enqueue_kwargs == {"task_id": "task_ws", "run_id": "run_ws"}
+    created[0].bind_durable_run.assert_called_once_with(task_id="task_ws", run_id="run_ws")
+    created[0].handle_text_input.assert_not_awaited()
+    sent_types = [call.args[0]["type"] for call in ws.send_json.call_args_list]
+    assert "run_queued" in sent_types
+    assert "transcript" in sent_types
     session_manager.schedule_idle_pause.assert_not_called()
 
 

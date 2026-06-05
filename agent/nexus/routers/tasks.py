@@ -28,13 +28,22 @@ class DurableTaskCreateRequest(BaseModel):
     title: str = Field(default="New task", max_length=240)
     message: str = Field(default="", max_length=20000)
     session_id: str | None = None
+    connector_ids: list[str] = Field(default_factory=list)
+    uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
     autonomy_mode: str | None = None
     budget: dict[str, Any] | None = None
+    runtime_config_snapshot: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class DurableTaskMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
+    connector_ids: list[str] = Field(default_factory=list)
+    uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
+    runtime_config_snapshot: dict[str, Any] = Field(default_factory=dict)
+    autonomy_mode: str | None = None
+    budget: dict[str, Any] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     run: bool = True
 
 
@@ -83,6 +92,7 @@ def _run_payload(run: DurableTaskRun) -> dict[str, Any]:
         "session_id": run.session_id,
         "error": run.error,
         "summary": run.summary,
+        "execution_payload": run.execution_payload or {},
     }
 
 
@@ -128,7 +138,18 @@ async def create_durable_task(
         budget=payload.budget,
         metadata=payload.metadata,
     )
-    run = await repo.create_run(task_id=task.task_id, owner_id=user.uid, session_id=payload.session_id)
+    run = await repo.create_run(
+        task_id=task.task_id,
+        owner_id=user.uid,
+        session_id=payload.session_id,
+        input_text=payload.message,
+        connector_ids=payload.connector_ids,
+        uploaded_files=payload.uploaded_files,
+        runtime_config_snapshot=payload.runtime_config_snapshot,
+        autonomy_mode=payload.autonomy_mode,
+        budget=payload.budget,
+        metadata=payload.metadata,
+    )
     await repo.append_event(
         task_id=task.task_id,
         owner_id=user.uid,
@@ -205,7 +226,18 @@ async def append_durable_task_message(
     task = await repo.get_task(task_id)
     if not task or task.owner_id != user.uid:
         raise HTTPException(status_code=404, detail="Task not found")
-    run = await repo.create_run(task_id=task_id, owner_id=user.uid, session_id=task.session_id)
+    run = await repo.create_run(
+        task_id=task_id,
+        owner_id=user.uid,
+        session_id=task.session_id,
+        input_text=payload.message,
+        connector_ids=payload.connector_ids,
+        uploaded_files=payload.uploaded_files,
+        runtime_config_snapshot=payload.runtime_config_snapshot,
+        autonomy_mode=payload.autonomy_mode,
+        budget=payload.budget,
+        metadata=payload.metadata,
+    )
     event = await repo.append_event(
         task_id=task_id,
         owner_id=user.uid,

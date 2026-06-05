@@ -9,12 +9,8 @@ import logging
 import socket
 from dataclasses import dataclass
 
-from starlette.websockets import WebSocketState
-
+from nexus.agent_turn_runner import AgentTurnRequest, AgentTurnRunner
 from nexus.dependencies import get_production_task_repository, get_session_manager
-from nexus.orchestrator import NexusOrchestrator
-from nexus.production_tasks import map_history_status_to_durable
-from nexus.runtime_config import resolve_session_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +22,10 @@ class WorkerRunResult:
 
 
 class TaskWorker:
-    """Initial production worker.
+    """Durable production worker for claimed task runs.
 
-    This slice establishes durable claim/lease/event behavior. The full agent
-    turn migration can plug into ``_execute_claimed_run`` without changing the
-    Cloud Tasks and Firestore contract.
+    The worker owns the claim/lease lifecycle and delegates the actual agent
+    turn to ``AgentTurnRunner`` so live and durable execution share one path.
     """
 
     def __init__(self, worker_id: str | None = None) -> None:
@@ -94,78 +89,46 @@ class TaskWorker:
             return WorkerRunResult("failed", summary)
 
     async def _execute_claimed_run(self, *, task_id: str, run_id: str, owner_id: str) -> WorkerRunResult:
-        """Run a claimed durable task through the existing agent turn path."""
+        """Run a claimed durable task through the shared agent turn runner."""
         repo = get_production_task_repository()
         task = await repo.get_task(task_id)
         if not task or task.owner_id != owner_id:
             return WorkerRunResult("failed", "Durable task was not found for the claimed owner.")
 
-        input_text = task.input_text.strip()
+        run = await repo.get_run(task_id=task_id, run_id=run_id, owner_id=owner_id)
+        execution_payload = run.execution_payload if run and run.execution_payload else {}
+        metadata = execution_payload.get("metadata") if isinstance(execution_payload.get("metadata"), dict) else {}
+        input_text = str(execution_payload.get("input_text") or task.input_text).strip()
         if not input_text:
             return WorkerRunResult("failed", "Durable task has no input text to execute.")
 
         session_manager = get_session_manager()
-        history_repository = session_manager.history_repository
-        user_settings = {}
-        if history_repository:
-            try:
-                user_settings = await history_repository.get_user_settings(owner_id)
-            except Exception:
-                logger.warning("Failed to load user settings for durable task %s", task_id, exc_info=True)
-        runtime_config = resolve_session_runtime_config(user_settings)
-
-        session_id = task.session_id or task_id
-        session = await session_manager.get_session(session_id)
-        if not session or session.owner_id != owner_id or getattr(session, "runtime_config", None) is None:
-            session = await session_manager.create_session(
-                owner_id=owner_id,
-                runtime_config=runtime_config,
-                session_id=session_id,
-                task_id=task_id,
-                initial_title=task.title,
-            )
-
-        session.task_id = task_id
-        session.current_run_id = run_id
-        session.run_status = "queued"
-
-        async def activate_sandbox() -> None:
-            await session_manager.activate_session(session.id)
-
-        orchestrator = NexusOrchestrator(
-            session=session,
-            ws=_WorkerEventWebSocket(),
-            history_repository=history_repository,
+        runner = AgentTurnRunner(
+            session_manager=session_manager,
             production_task_repository=repo,
-            ensure_sandbox_ready=activate_sandbox,
         )
-        try:
-            await orchestrator.initialize(lazy_sandbox=True)
-            await orchestrator.handle_text_input(input_text)
-            durable_status = map_history_status_to_durable(session.run_status)
-            if durable_status in {"failed", "cancelled"}:
-                return WorkerRunResult(durable_status, f"Agent turn {durable_status}.")
-            return WorkerRunResult("completed", "Agent turn completed.")
-        finally:
-            await orchestrator.close()
-
-
-class _WorkerEventWebSocket:
-    """No-op WebSocket facade used by durable workers.
-
-    The orchestrator still expects a WebSocket-like object for its existing
-    locked send path. Durable replay comes from ``DurableEventSink``; this
-    facade only keeps the old live transport dependency inert.
-    """
-
-    client_state = WebSocketState.CONNECTED
-    application_state = WebSocketState.CONNECTED
-
-    async def send_json(self, data: dict) -> None:
-        return None
-
-    async def send_bytes(self, data: bytes) -> None:
-        return None
+        outcome = await runner.run(
+            AgentTurnRequest(
+                task_id=task_id,
+                run_id=run_id,
+                owner_id=owner_id,
+                session_id=str(execution_payload.get("session_id") or task.session_id or task_id),
+                title=task.title,
+                input_text=input_text,
+                connector_ids=[
+                    str(item)
+                    for item in execution_payload.get("connector_ids", [])
+                    if str(item).strip()
+                ],
+                uploaded_files=[
+                    item
+                    for item in execution_payload.get("uploaded_files", [])
+                    if isinstance(item, dict)
+                ],
+                emit_user_transcript=not bool(metadata.get("user_transcript_recorded")),
+            )
+        )
+        return WorkerRunResult(outcome.status, outcome.summary)
 
 
 task_worker = TaskWorker()

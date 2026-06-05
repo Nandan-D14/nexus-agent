@@ -234,8 +234,8 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
             task_type="deep_research",
             active_agent="deepresearcher",
         )
-        self.assertEqual(init_result["task_type"], "deep_research")
-        self.assertEqual(init_result["review_status"], "pending")
+        self.assertEqual(init_result["metadata"]["task_type"], "deep_research")
+        self.assertEqual(init_result["metadata"]["review_status"], "pending")
 
         update_result = await update_task_state(
             stage="reviewing",
@@ -245,12 +245,12 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
             artifact_paths=["outputs/final.md"],
             summary="Reviewer passed the report.",
         )
-        self.assertEqual(update_result["stage"], "reviewing")
-        self.assertEqual(update_result["review_status"], "passed")
-        self.assertEqual(update_result["evidence_count"], 1)
-        self.assertEqual(update_result["artifact_count"], 1)
+        self.assertEqual(update_result["metadata"]["stage"], "reviewing")
+        self.assertEqual(update_result["metadata"]["review_status"], "passed")
+        self.assertEqual(update_result["metadata"]["evidence_count"], 1)
+        self.assertEqual(update_result["metadata"]["artifact_count"], 1)
 
-        state = (await read_task_state())["state"]
+        state = (await read_task_state())["metadata"]["state"]
         self.assertEqual(state["active_agent"], "research_reviewer_agent")
         self.assertEqual(state["evidence"], ["sources/google_adk.md"])
         self.assertEqual(state["artifact_paths"], ["outputs/final.md"])
@@ -261,7 +261,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         await write_todo_list(["Gather logs", "Compare docs"])
         await update_todo_item(2, "done", "Compared current docs")
 
-        todo_text = (await read_workspace_file("todo.md"))["content"]
+        todo_text = (await read_workspace_file("todo.md"))["metadata"]["content"]
         self.assertIn("1. [pending] Gather logs", todo_text)
         self.assertIn("2. [done] Compare docs - Compared current docs", todo_text)
 
@@ -271,10 +271,10 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         note_result = await write_workspace_file("notes.md", "hello", append=True)
         output_result = await write_workspace_file("outputs/final.md", "done")
 
-        self.assertIn("workspace_file", note_result)
-        self.assertNotIn("output_path", note_result)
+        self.assertIn("workspace_file", note_result["metadata"])
+        self.assertNotIn("output_path", note_result["metadata"])
         self.assertEqual(
-            output_result["output_path"],
+            output_result["metadata"]["output_path"],
             "/home/user/CoComputer/Workspaces/session123/outputs/final.md",
         )
 
@@ -282,7 +282,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         await prepare_task_workspace("Research")
         result = await write_workspace_file("../escape.txt", "nope")
         self.assertEqual(
-            result["error"],
+            result["summary"],
             "relative_path must stay inside the active workspace",
         )
 
@@ -293,7 +293,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         result = await update_todo_item(0, "in_progress")
 
         self.assertEqual(
-            result["error"],
+            result["summary"],
             "item_index must be at least 1. Index is 1-based. Please retry with a valid index.",
         )
 
@@ -302,23 +302,23 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
 
         result = await write_todo_list([])
 
-        self.assertEqual(result["error"], "Provide at least one todo item")
+        self.assertEqual(result["summary"], "Provide at least one todo item")
 
     async def test_list_workspace_files_returns_entries(self) -> None:
         await prepare_task_workspace("Research")
         await write_workspace_file("outputs/final.md", "done")
         listing = await list_workspace_files("outputs")
 
-        self.assertEqual(listing["relative_path"], "outputs")
-        self.assertEqual(len(listing["entries"]), 1)
-        self.assertEqual(listing["entries"][0]["name"], "final.md")
+        self.assertEqual(listing["metadata"]["relative_path"], "outputs")
+        self.assertEqual(len(listing["metadata"]["entries"]), 1)
+        self.assertEqual(listing["metadata"]["entries"][0]["name"], "final.md")
 
     async def test_web_search_returns_error_payload_for_blank_query(self) -> None:
         await prepare_task_workspace("Research")
 
         result = await web_search("", max_results=5)
 
-        self.assertEqual(result["error"], "query is required")
+        self.assertEqual(result["summary"], "query is required")
 
     async def test_scrape_web_page_returns_error_payload_for_blocked_source(self) -> None:
         await prepare_task_workspace("Research")
@@ -328,11 +328,10 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         with patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)):
             result = await scrape_web_page(blocked_url, output_basename="reuters_markets")
 
-        detail = result["detail"]
         self.assertEqual(result["status"], "error")
-        self.assertIn("blocked automated access", detail["error"])
-        self.assertEqual(detail["status_code"], 401)
-        self.assertEqual(detail["url"], blocked_url)
+        self.assertIn("blocked automated access", result["summary"])
+        self.assertEqual(result["metadata"]["status_code"], 401)
+        self.assertEqual(result["metadata"]["url"], blocked_url)
 
 
 class WorkspaceRootRetryTests(IsolatedAsyncioTestCase):

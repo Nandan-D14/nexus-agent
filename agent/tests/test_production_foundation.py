@@ -21,8 +21,11 @@ from nexus.policy import evaluate_tool_policy
 from nexus.production_tasks import (
     DurableTask,
     DurableTaskEvent,
+    DurableTaskRun,
+    build_execution_payload,
     canonicalize_task_status,
     history_event_projection_from_durable,
+    history_run_projection_from_durable,
     history_task_projection_from_durable,
     map_durable_status_to_history,
     map_history_status_to_durable,
@@ -111,6 +114,42 @@ def test_history_projection_helpers_from_durable_state() -> None:
     assert event_projection["runStatus"] == "completed"
     assert event_projection["summary"] == "done"
     assert event_projection["lastEventSeq"] == 3
+
+    run = DurableTaskRun(
+        run_id="run_1",
+        task_id="task_1",
+        owner_id="user_1",
+        status="completed",
+        created_at=now,
+        updated_at=now,
+        session_id="session_1",
+        execution_payload={"input_text": "do work"},
+    )
+    run_projection = history_run_projection_from_durable(run)
+    assert run_projection["status"] == "completed"
+    assert run_projection["executionPayload"] == {"input_text": "do work"}
+
+
+def test_build_execution_payload_is_canonical_and_sanitized() -> None:
+    payload = build_execution_payload(
+        task_id="task_1",
+        run_id="run_1",
+        owner_id="user_1",
+        session_id="session_1",
+        input_text="do work",
+        connector_ids=[" github ", "", "drive"],
+        uploaded_files=[{"name": "a.txt"}, "bad"],  # type: ignore[list-item]
+        runtime_config_snapshot={"gemini_provider": "apiKey"},
+        autonomy_mode="auto",
+        budget={"credits": 3},
+        metadata={"source": "test"},
+    )
+
+    assert payload["schema_version"] == 1
+    assert payload["connector_ids"] == ["github", "drive"]
+    assert payload["uploaded_files"] == [{"name": "a.txt"}]
+    assert payload["runtime_config"] == {"gemini_provider": "apiKey"}
+    assert payload["autonomy_mode"] == "auto"
 
 
 def test_artifact_blob_name_is_canonical() -> None:
@@ -232,42 +271,30 @@ async def test_task_worker_executes_claimed_run_through_orchestrator(monkeypatch
         input_text="do the work",
         session_id=None,
     )
-    repo = SimpleNamespace(get_task=AsyncMock(return_value=task))
-    history_repo = SimpleNamespace(get_user_settings=AsyncMock(return_value={}))
-    session = SimpleNamespace(
-        id="task_1",
-        owner_id="user_1",
-        task_id="",
-        current_run_id=None,
-        run_status="queued",
+    run = SimpleNamespace(
+        execution_payload={
+            "input_text": "do the work",
+            "session_id": "session_1",
+            "connector_ids": ["github"],
+            "uploaded_files": [{"name": "a.txt"}],
+            "metadata": {"user_transcript_recorded": True},
+        }
     )
-    session_manager = SimpleNamespace(
-        history_repository=history_repo,
-        get_session=AsyncMock(return_value=None),
-        create_session=AsyncMock(return_value=session),
-        activate_session=AsyncMock(),
-    )
+    repo = SimpleNamespace(get_task=AsyncMock(return_value=task), get_run=AsyncMock(return_value=run))
+    session_manager = SimpleNamespace(history_repository=SimpleNamespace())
     captured: dict[str, object] = {}
 
-    class FakeOrchestrator:
+    class FakeRunner:
         def __init__(self, **kwargs):
             captured.update(kwargs)
-            self.session = kwargs["session"]
 
-        async def initialize(self, *, lazy_sandbox: bool = False):
-            captured["lazy_sandbox"] = lazy_sandbox
-
-        async def handle_text_input(self, text: str):
-            captured["text"] = text
-            self.session.run_status = "completed"
-
-        async def close(self):
-            captured["closed"] = True
+        async def run(self, request):
+            captured["request"] = request
+            return SimpleNamespace(status="completed", summary="Agent turn completed.")
 
     monkeypatch.setattr(task_worker_module, "get_production_task_repository", lambda: repo)
     monkeypatch.setattr(task_worker_module, "get_session_manager", lambda: session_manager)
-    monkeypatch.setattr(task_worker_module, "resolve_session_runtime_config", lambda settings: object())
-    monkeypatch.setattr(task_worker_module, "NexusOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr(task_worker_module, "AgentTurnRunner", FakeRunner)
 
     result = await TaskWorker(worker_id="worker_1")._execute_claimed_run(
         task_id="task_1",
@@ -276,12 +303,15 @@ async def test_task_worker_executes_claimed_run_through_orchestrator(monkeypatch
     )
 
     assert result == WorkerRunResult("completed", "Agent turn completed.")
-    session_manager.create_session.assert_awaited_once()
-    assert session.task_id == "task_1"
-    assert session.current_run_id == "run_1"
     assert captured["production_task_repository"] is repo
-    assert captured["text"] == "do the work"
-    assert captured["closed"] is True
+    request = captured["request"]
+    assert request.task_id == "task_1"
+    assert request.run_id == "run_1"
+    assert request.session_id == "session_1"
+    assert request.input_text == "do the work"
+    assert request.connector_ids == ["github"]
+    assert request.uploaded_files == [{"name": "a.txt"}]
+    assert request.emit_user_transcript is False
 
 
 @pytest.mark.asyncio
