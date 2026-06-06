@@ -11,8 +11,15 @@ tasks, runs, events, approvals, and worker leases.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# Magic strings constants
+FIELD_CANCEL_REQUESTED = "cancelRequested"
+STATUS_WAITING_APPROVAL = "waiting_approval"
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 
@@ -62,6 +69,8 @@ def canonicalize_task_status(status: str | None) -> TaskStatus:
     normalized = str(status or "queued").strip().lower()
     if normalized in CANONICAL_TASK_STATUSES:
         return cast(TaskStatus, normalized)
+    if normalized not in HISTORY_TO_DURABLE_STATUS:
+        logger.warning(f"Unknown task status '{normalized}' mapped to 'queued'")
     return HISTORY_TO_DURABLE_STATUS.get(normalized, "queued")
 
 
@@ -130,6 +139,14 @@ def build_execution_payload(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Canonical durable execution payload for worker-owned runs."""
+    cleaned_connectors = []
+    for item in (connector_ids or []):
+        val = str(item).strip()
+        if val:
+            cleaned_connectors.append(val)
+        else:
+            logger.warning("build_execution_payload: implicitly stripped an empty connector_id")
+
     return {
         "schema_version": 1,
         "task_id": task_id,
@@ -137,7 +154,7 @@ def build_execution_payload(
         "owner_id": owner_id,
         "session_id": session_id,
         "input_text": input_text,
-        "connector_ids": [str(item).strip() for item in (connector_ids or []) if str(item).strip()],
+        "connector_ids": cleaned_connectors,
         "uploaded_files": [item for item in (uploaded_files or []) if isinstance(item, dict)],
         "runtime_config": runtime_config_snapshot or {},
         "autonomy_mode": normalize_autonomy_mode(autonomy_mode or settings.default_autonomy_mode),
@@ -254,11 +271,11 @@ class DurableApproval:
 
 
 class ProductionTaskRepository:
-    """Firestore-backed durable task repository."""
+    """Operations on the canonical durable task data models."""
 
-    @property
-    def _db(self):
-        return get_firestore_client()
+    def __init__(self) -> None:
+        self._db = get_firestore_client()
+        self._has_seq_cache: set[str] = set()
 
     def _task_ref(self, task_id: str):
         return self._db.collection("tasks").document(task_id)
@@ -460,6 +477,9 @@ class ProductionTaskRepository:
         run_id = _uuid("run_")
         now = utcnow()
         task_doc = self._task_ref(task_id).get()
+        if not task_doc.exists:
+            logger.error(f"Cannot create run for non-existent task: {task_id}")
+            raise ValueError(f"Task not found: {task_id}")
         task_data = task_doc.to_dict() or {}
         effective_input = input_text if input_text is not None else str(task_data.get("inputText") or "")
         effective_budget = budget if budget is not None else task_data.get("budget")
@@ -497,7 +517,11 @@ class ProductionTaskRepository:
             {"currentRunId": run_id, "status": canonicalize_task_status("queued"), "updatedAt": now},
             merge=True,
         )
-        batch.commit()
+        try:
+            batch.commit()
+        except Exception as exc:
+            logger.exception(f"Failed to commit run creation for task {task_id}")
+            raise RuntimeError(f"Failed to commit run creation for task {task_id}: {exc}") from exc
         return self._build_run(run_id, payload)
 
     async def get_run(self, *, task_id: str, run_id: str, owner_id: str) -> DurableTaskRun | None:
@@ -661,10 +685,15 @@ class ProductionTaskRepository:
 
     def _task_has_seq_field(self, task_id: str) -> bool:
         """Best-effort check for whether the task has begun emitting seq numbers."""
+        if task_id in self._has_seq_cache:
+            return True
         try:
             doc = self._task_ref(task_id).get()
             data = doc.to_dict() or {}
-            return int(data.get("lastEventSeq", 0) or 0) > 0
+            has_seq = int(data.get("lastEventSeq", 0) or 0) > 0
+            if has_seq:
+                self._has_seq_cache.add(task_id)
+            return has_seq
         except Exception:
             return False
 

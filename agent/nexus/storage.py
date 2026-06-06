@@ -70,11 +70,11 @@ def generate_artifact_signed_url(
         return None
 
 def upload_artifact(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:
-    """Uploads a file to GCS and returns a signed URL."""
+    """Uploads a file to GCS and returns a URL (signed if possible, public otherwise)."""
     try:
         client = get_storage_client()
         bucket_name = get_artifact_bucket_name()
-        
+
         try:
             bucket = client.get_bucket(bucket_name)
         except Exception as bucket_exc:
@@ -95,18 +95,37 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
 
         blob_name = artifact_blob_name(session_id, run_id, relative_path)
         blob = bucket.blob(blob_name)
-        
+
         if isinstance(content, str):
             blob.upload_from_string(content, content_type="text/plain; charset=utf-8")
         else:
             blob.upload_from_string(content)
 
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(seconds=_SIGNED_URL_EXPIRATION_SECONDS),
-            method="GET",
-        )
-        return url
+        # Try signed URL first (requires service account key).
+        # Fall back to public URL when running with user credentials (local dev).
+        try:
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(seconds=_SIGNED_URL_EXPIRATION_SECONDS),
+                method="GET",
+            )
+            return url
+        except Exception as sign_exc:
+            logger.warning(
+                "Signed URL generation failed for %s (expected in local dev without SA key): %s. "
+                "Falling back to public URL.",
+                blob_name, sign_exc,
+            )
+            try:
+                blob.make_public()
+                return blob.public_url
+            except Exception as pub_exc:
+                logger.warning(
+                    "make_public also failed for %s: %s. Returning direct GCS URI.",
+                    blob_name, pub_exc,
+                )
+                return f"https://storage.googleapis.com/{bucket_name}/{blob_name}"
+
     except Exception as e:
         logger.error("Failed to upload artifact %s to GCS: %s", relative_path, e)
         return None
@@ -119,7 +138,7 @@ async def upload_artifact_async(session_id: str, run_id: str, relative_path: str
 async def delete_user_artifacts_async(user_id: str, session_ids: list[str]) -> None:
     """Deletes all artifacts in GCS associated with the user's sessions."""
     import asyncio
-    
+
     def _delete_sync():
         try:
             client = get_storage_client()
@@ -128,7 +147,7 @@ async def delete_user_artifacts_async(user_id: str, session_ids: list[str]) -> N
                 bucket = client.get_bucket(bucket_name)
             except Exception:
                 return # Bucket doesn't exist
-            
+
             for session_id in session_ids:
                 blobs = list(bucket.list_blobs(prefix=f"{session_id}/"))
                 if blobs:
