@@ -29,7 +29,13 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
-from nexus.tools.docs import extract_pdf_text, generate_pdf_report, save_as_artifact
+from nexus.tools.docs import (
+    extract_pdf_text,
+    generate_pdf_report,
+    generate_excel_report,
+    generate_docx_report,
+    save_as_artifact,
+)
 from nexus.tools.web import web_search, scrape_web_page
 from nexus.tools.integrations import (
     search_drive,
@@ -67,6 +73,8 @@ ALL_TOOLS = [
     scrape_web_page,
     extract_pdf_text,
     generate_pdf_report,
+    generate_excel_report,
+    generate_docx_report,
     save_as_artifact,
     search_drive,
     read_drive_file,

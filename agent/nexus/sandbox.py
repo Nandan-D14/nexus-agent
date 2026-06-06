@@ -307,7 +307,7 @@ class SandboxManager:
 
     def _provision_sandbox(self) -> None:
         """Pre-install common libraries to speed up agent tasks."""
-        libs = ["fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+        libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
         cmd = f"pip install {' '.join(libs)}"
         try:
             # We run this in the background or with a long timeout
