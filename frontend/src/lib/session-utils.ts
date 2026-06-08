@@ -202,12 +202,58 @@ export function upsertArtifact(prev: RunArtifact[], artifact: RunArtifact): RunA
 }
 
 export function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatItem[] {
-  return messages.map((message) => ({
-    kind: "message" as const,
-    role: message.role,
-    text: message.text,
-    ts: message.created_at ? new Date(message.created_at).getTime() : Date.now(),
-  }));
+  return messages.map((message) => {
+    const ts = message.created_at ? new Date(message.created_at).getTime() : Date.now();
+
+    if (message.role === "tool_call") {
+      const { tool, args } = parseToolCallText(message.text, message.source);
+      return {
+        kind: "event" as const,
+        type: "agent_tool_call",
+        tool,
+        args,
+        ts,
+      };
+    }
+
+    if (message.role === "tool_result") {
+      return {
+        kind: "event" as const,
+        type: "agent_tool_result",
+        tool: message.source || "tool",
+        output: message.text,
+        ts,
+      };
+    }
+
+    return {
+      kind: "message" as const,
+      role: message.role,
+      text: message.text,
+      ts,
+    };
+  });
+}
+
+function parseToolCallText(text: string, source?: string): { tool: string; args: Record<string, unknown> } {
+  const lines = text.split("\n");
+  const toolMatch = lines[0]?.match(/^Tool:\s*(.+)$/);
+  const tool = toolMatch ? toolMatch[1].trim() : source || "tool";
+
+  let args: Record<string, unknown> = {};
+  if (lines.length > 1) {
+    const argsLine = lines.slice(1).join("\n").replace(/^Args:\s*/, "");
+    try {
+      const parsed = JSON.parse(argsLine);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed;
+      }
+    } catch {
+      // Ignore parse failures
+    }
+  }
+
+  return { tool, args };
 }
 
 export function buildSessionTemplateDraft(

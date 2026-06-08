@@ -1561,6 +1561,7 @@ export default function SessionPage() {
                     <UnifiedChatPanel
                       items={chatItems}
                       isThinking={phase === "thinking"}
+                      phase={phase}
                       onPermissionRespond={handlePermissionRespond}
                     />
                   )}

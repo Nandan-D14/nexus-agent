@@ -536,12 +536,8 @@ async def get_session_artifacts(session_id: str, user: AuthenticatedUser = Depen
     if not session and (not stored_session or stored_session.owner_id != user.uid):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    run = await history_repository.get_session_run(session_id)
-    if not run:
-        return {"artifacts": []}
-
     from nexus.routers.files import _serialize_artifact
-    artifacts = await history_repository.list_run_artifacts(session_id, run.run_id)
+    artifacts = await history_repository.list_session_artifacts(session_id)
     return {
         "artifacts": [
             _serialize_artifact(artifact).model_dump(mode="json")
@@ -561,11 +557,7 @@ async def get_session_run_steps(session_id: str, user: AuthenticatedUser = Depen
     if not session and (not stored_session or stored_session.owner_id != user.uid):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    run = await history_repository.get_session_run(session_id)
-    if not run:
-        return {"steps": []}
-
-    steps = await history_repository.list_run_steps(session_id, run.run_id)
+    steps = await history_repository.list_session_steps(session_id)
     return {
         "steps": [
             _serialize_run_step(step).model_dump(mode="json")

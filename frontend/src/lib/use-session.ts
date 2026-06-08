@@ -279,7 +279,7 @@ export function useSession(): UseSessionReturn {
       const body = (await res.json()) as {
         messages: Array<{
           id: string;
-          role: "user" | "agent";
+          role: "user" | "agent" | "tool_call" | "tool_result";
           source?: string;
           text: string;
           createdAt?: string | null;
@@ -288,11 +288,9 @@ export function useSession(): UseSessionReturn {
       };
 
       return (body.messages || []).map((message) => {
-        const role: ArchivedMessage["role"] =
-          message.role === "user" ? "user" : "agent";
         return {
           id: message.id,
-          role,
+          role: message.role,
           source: message.source,
           text: typeof message.text === "string" ? message.text : "",
           turn_index: typeof message.turnIndex === "number" ? message.turnIndex : 0,
@@ -461,6 +459,5 @@ export function useSession(): UseSessionReturn {
     isLoading: isCreating || isGetting || isRefreshing || isDestroying,
     error: createError ?? getError ?? resumeError ?? reuseError ?? refreshError ?? destroyError,
   };
-  console.log("[useSession] returning keys:", Object.keys(result));
   return result;
 }

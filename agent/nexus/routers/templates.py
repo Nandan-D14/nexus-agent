@@ -169,8 +169,8 @@ async def _prepare_template_source(owner_id: str, session_id: str):
         if not stored_session:
             raise HTTPException(status_code=404, detail="Session not found")
     run = await history_repository.get_session_run(session_id)
-    steps = await history_repository.list_run_steps(session_id, run.run_id) if run else []
-    artifacts = await history_repository.list_run_artifacts(session_id, run.run_id) if run else []
+    steps = await history_repository.list_session_steps(session_id)
+    artifacts = await history_repository.list_session_artifacts(session_id)
     return stored_session, run, steps, artifacts
 
 def _build_template_prompt(template, inputs: dict[str, str]) -> str:

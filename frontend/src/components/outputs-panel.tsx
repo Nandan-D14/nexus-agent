@@ -6,6 +6,8 @@
 "use client";
 
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   FileText,
   Download,
@@ -206,9 +208,11 @@ export function OutputsPanel({
 
               {artifact.preview && (
                 <div className="mt-4 pt-4 border-t border-zinc-800/50">
-                  <p className="text-[13px] leading-relaxed text-zinc-400 dark:text-zinc-400 line-clamp-3 group-hover:line-clamp-none transition-all">
-                    {artifact.preview}
-                  </p>
+                  <div className="text-[13px] leading-relaxed text-zinc-400 dark:text-zinc-400 line-clamp-3 group-hover:line-clamp-none transition-all [&_p]:mb-2 [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-zinc-200 [&_strong]:font-semibold [&_h1]:text-zinc-200 [&_h2]:text-zinc-200 [&_h3]:text-zinc-200 [&_a]:text-blue-400 [&_hr]:border-zinc-700 [&_hr]:my-2">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {artifact.preview}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               )}
 

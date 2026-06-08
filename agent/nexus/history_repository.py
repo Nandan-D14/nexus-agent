@@ -1383,6 +1383,10 @@ class FirestoreHistoryRepository:
     async def list_run_steps(self, session_id: str, run_id: str, limit: int = 200) -> list[StoredRunStep]:
         return await asyncio.to_thread(self._list_run_steps_sync, session_id, run_id, limit)
 
+    async def list_session_steps(self, session_id: str, limit: int = 500) -> list[StoredRunStep]:
+        """Return steps from *all* runs in a session, ordered chronologically."""
+        return await asyncio.to_thread(self._list_session_steps_sync, session_id, limit)
+
     async def create_artifact(
         self,
         *,
@@ -1411,6 +1415,10 @@ class FirestoreHistoryRepository:
 
     async def list_run_artifacts(self, session_id: str, run_id: str, limit: int = 100) -> list[StoredArtifact]:
         return await asyncio.to_thread(self._list_run_artifacts_sync, session_id, run_id, limit)
+
+    async def list_session_artifacts(self, session_id: str, limit: int = 200) -> list[StoredArtifact]:
+        """Return artifacts from *all* runs in a session, newest first."""
+        return await asyncio.to_thread(self._list_session_artifacts_sync, session_id, limit)
 
     async def get_artifact_for_owner(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
         return await asyncio.to_thread(self._get_artifact_for_owner_sync, owner_id, artifact_id)
@@ -2137,6 +2145,55 @@ class FirestoreHistoryRepository:
             for doc in docs
         ]
 
+    # ------------------------------------------------------------------
+    #  Session-wide collection-group helpers
+    # ------------------------------------------------------------------
+    #
+    #  Steps and artifacts are stored under two Firestore paths:
+    #    1. sessions/{sid}/runs/{rid}/steps/{id}   (canonical)
+    #    2. users/{uid}/tasks/{tid}/runs/{rid}/steps/{id}  (task mirror)
+    #
+    #  A collection_group("steps") query returns docs from *both*
+    #  hierarchies.  We filter to the canonical "sessions/" prefix and
+    #  deduplicate by document ID to prevent React key collisions in
+    #  the frontend.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deduplicated_collection_group_docs(
+        query_stream,
+        *,
+        canonical_prefix: str = "sessions/",
+        limit: int = 500,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Yield (doc_id, doc_data) from a collection-group stream,
+        keeping only canonical documents and deduplicating by ID."""
+        results: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for doc in query_stream:
+            if doc.id in seen:
+                continue
+            if not doc.reference.path.startswith(canonical_prefix):
+                continue
+            seen.add(doc.id)
+            results.append((doc.id, doc.to_dict() or {}))
+            if len(results) >= limit:
+                break
+        return results
+
+    def _list_session_steps_sync(self, session_id: str, limit: int) -> list[StoredRunStep]:
+        """List steps across all runs for a session, ordered by creation time."""
+        stream = (
+            self._db.collection_group("steps")
+            .where(filter=FieldFilter("sessionId", "==", session_id))
+            .order_by("createdAt", direction=firestore.Query.ASCENDING)
+            .stream()
+        )
+        return [
+            self._build_stored_run_step(session_id, data.get("runId", ""), doc_id, data)
+            for doc_id, data in self._deduplicated_collection_group_docs(stream, limit=limit)
+        ]
+
     def _create_artifact_sync(
         self,
         session_id: str,
@@ -2266,6 +2323,19 @@ class FirestoreHistoryRepository:
         return [
             self._build_stored_artifact(session_id, run_id, doc.id, doc.to_dict() or {})
             for doc in docs
+        ]
+
+    def _list_session_artifacts_sync(self, session_id: str, limit: int) -> list[StoredArtifact]:
+        """List artifacts across all runs for a session, newest first."""
+        stream = (
+            self._db.collection_group("artifacts")
+            .where(filter=FieldFilter("sessionId", "==", session_id))
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
+        return [
+            self._build_stored_artifact(session_id, data.get("runId", ""), doc_id, data)
+            for doc_id, data in self._deduplicated_collection_group_docs(stream, limit=limit)
         ]
 
     def _workflow_templates_collection_ref(self, owner_id: str):
@@ -3976,8 +4046,8 @@ class FirestoreHistoryRepository:
         )
         messages = self._get_session_messages_sync(session_id)
         run = self._get_session_run_sync(session_id)
-        steps = self._list_run_steps_sync(session_id, run.run_id, 50) if run else []
-        artifacts = self._list_run_artifacts_sync(session_id, run.run_id, 25) if run else []
+        steps = self._list_session_steps_sync(session_id, 50)
+        artifacts = self._list_session_artifacts_sync(session_id, 25)
         handoff_summary = self._build_handoff_summary(
             session_id,
             data,

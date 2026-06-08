@@ -1,271 +1,385 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CoComputer - Chat Interface</title>
+  <title>CoComputer - Chat</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
-  <style>
-    body {
-      background-color: #1a1a1c;
-      color: #e4e4e7;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+          },
+        }
+      }
     }
-    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+  </script>
+  <style>
+    /* Custom Scrollbar for sleek UI */
+    .custom-scrollbar::-webkit-scrollbar { width: 4px; }
     .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #3f3f46; border-radius: 10px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 10px; }
+    .dark .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #3f3f46; }
+    
+    * { transition-property: background-color, border-color, color, fill, stroke; transition-duration: 150ms; }
+    .logo-container:hover svg { transform: scale(0.95); opacity: 0.9; }
+    .logo-container svg { transition: transform 0.2s ease, opacity 0.2s ease; }
+    
+    /* Animation for collapse/expand */
+    .collapse-content {
+      transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out, margin 0.3s ease-in-out;
+      overflow: hidden;
+    }
   </style>
 </head>
-<body class="h-screen w-screen flex overflow-hidden selection:bg-zinc-700 font-sans text-[14px]">
+<body class="h-screen w-screen flex overflow-hidden font-sans text-[14px] bg-[#f8f9fa] dark:bg-[#141415] text-zinc-800 dark:text-zinc-200 antialiased selection:bg-indigo-100 selection:text-indigo-900 dark:selection:bg-indigo-900/50 dark:selection:text-indigo-200 transition-colors duration-300">
 
-  <!-- Sidebar -->
-  <aside class="w-[260px] h-full flex flex-col bg-[#161618] border-r border-zinc-800/50 flex-shrink-0">
-    <!-- Header Logo -->
-    <div class="p-4 flex items-center justify-between mt-1">
-      <div class="flex items-center gap-2 font-bold text-zinc-100">
-        <i data-lucide="cpu" class="w-5 h-5 text-indigo-400"></i>
-        <span class="text-[15px] tracking-wide">CoComputer</span>
-      </div>
-      <button class="text-zinc-500 hover:text-zinc-300"><i data-lucide="panel-left" class="w-4 h-4"></i></button>
-    </div>
-
-    <!-- Top Nav -->
-    <div class="px-3 space-y-0.5 mt-2">
-      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-200 bg-zinc-800/50 transition-colors">
-        <i data-lucide="message-square" class="w-4 h-4 text-indigo-400"></i> Chat Console
-      </button>
-      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
-        <i data-lucide="monitor" class="w-4 h-4"></i> Live Desktop
-      </button>
-      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
-        <i data-lucide="git-merge" class="w-4 h-4"></i> Agent Workflow
-      </button>
-      <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
-        <i data-lucide="folder-code" class="w-4 h-4"></i> Context Packets
-      </button>
-    </div>
-
-    <!-- Projects -->
-    <div class="px-3 mt-6 border-b border-zinc-800/50 pb-4">
-      <div class="flex items-center justify-between px-3 text-[11px] font-semibold text-zinc-500 mb-1">
-        Projects
-        <button class="hover:text-zinc-300"><i data-lucide="plus" class="w-3.5 h-3.5"></i></button>
-      </div>
-      <button class="w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors">
-        <i data-lucide="folder" class="w-4 h-4"></i> workspace
-      </button>
-    </div>
-
-    <!-- All Tasks -->
-    <div class="px-3 mt-4 flex-1 overflow-y-auto custom-scrollbar">
-      <div class="flex items-center justify-between px-3 text-[11px] font-semibold text-zinc-500 mb-1">
-        All tasks
-        <button class="hover:text-zinc-300"><i data-lucide="list-filter" class="w-3.5 h-3.5"></i></button>
-      </div>
-      <div class="space-y-0.5 mt-2">
-        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
-          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
-          <span class="truncate">Is the API key responding?</span>
+  <!-- Floating Sidebar Container with padding only around it -->
+  <div class="h-full py-2 pl-2 pr-2 sm:py-2 sm:pl-2 sm:pr-2 flex-shrink-0 flex">
+    <div class="h-full flex rounded-[20px] overflow-hidden shadow-sm border border-zinc-200 dark:border-white/5 bg-white dark:bg-[#1c1c1e] transition-colors duration-300">
+      <!-- Left Rail -->
+      <nav class="w-[68px] h-full flex flex-col items-center py-4 bg-[#111111] dark:bg-[#09090b] z-20 flex-shrink-0 border-r border-transparent dark:border-white/5">
+        <!-- Logo -->
+        <button class="logo-container w-9 h-9 rounded-lg flex items-center justify-center mb-6 text-white cursor-pointer">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="4" y="4" width="6.5" height="6.5" rx="1" />
+            <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1" />
+            <path d="M13.5 10.5V4.5a.5.5 0 0 1 .85-.35l6 6a.5.5 0 0 1-.35.85h-6a.5.5 0 0 1-.5-.5z" />
+            <path d="M10.5 13.5v6a.5.5 0 0 1-.85.35l-6-6a.5.5 0 0 1 .35-.85h6a.5.5 0 0 1 .5.5z" />
+          </svg>
         </button>
-        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
-          <i data-lucide="cpu" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
-          <span class="truncate">Check if OpenAI API Key is Working</span>
-        </button>
-        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] bg-zinc-800/40 text-zinc-200 hover:bg-zinc-800/60 transition-colors text-left leading-snug">
-          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-400"></i>
-          <span class="truncate">Does the CoComputer API Work and...</span>
-        </button>
-        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
-          <i data-lucide="message-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
-          <span class="truncate">Check Vertex API Functionality for...</span>
-        </button>
-        <button class="w-full flex items-start gap-3 px-3 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors text-left leading-snug">
-          <i data-lucide="terminal-square" class="w-4 h-4 shrink-0 mt-0.5 text-zinc-500"></i>
-          <span class="truncate">Where to Watch IPL or Cricket for...</span>
-        </button>
-      </div>
-    </div>
 
-    <!-- Bottom Settings Profile -->
-    <div class="p-4 flex items-center justify-between text-zinc-500 border-t border-zinc-800/50">
-      <div class="flex items-center gap-2">
-        <i data-lucide="settings" class="w-4 h-4"></i>
-        <i data-lucide="grid-2x2" class="w-4 h-4"></i>
-        <i data-lucide="monitor" class="w-4 h-4"></i>
-      </div>
-    </div>
-  </aside>
+        <!-- Nav Items -->
+        <div class="flex flex-col gap-2 w-full px-2.5">
+          <button class="w-full aspect-square flex items-center justify-center text-zinc-400 hover:text-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 transition-all rounded-[10px]" title="Home">
+            <i data-lucide="home" class="w-[20px] h-[20px]"></i>
+          </button>
+          <button class="w-full aspect-square flex items-center justify-center text-zinc-400 hover:text-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 transition-all rounded-[10px]" title="Activity">
+            <i data-lucide="line-chart" class="w-[20px] h-[20px]"></i>
+          </button>
+          <button class="w-full aspect-square flex items-center justify-center text-white bg-[#2d2d2d] dark:bg-zinc-800 rounded-[12px] transition-all shadow-sm" title="Target">
+            <i data-lucide="crosshair" class="w-[20px] h-[20px]"></i>
+          </button>
+          <button class="w-full aspect-square flex items-center justify-center text-zinc-400 hover:text-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 transition-all rounded-[10px]" title="Workspace">
+            <i data-lucide="briefcase" class="w-[20px] h-[20px]"></i>
+          </button>
+        </div>
 
-  <!-- Main Area -->
-  <main class="flex-1 flex flex-col min-w-0 relative bg-[#1a1a1c]">
+        <!-- Bottom Settings -->
+        <div class="mt-auto flex flex-col gap-2 w-full px-2.5">
+          <button class="w-full aspect-square flex items-center justify-center text-zinc-400 hover:text-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-200 transition-all rounded-[10px]" title="Settings">
+            <i data-lucide="settings" class="w-[20px] h-[20px]"></i>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Secondary Sidebar -->
+      <aside id="secondary-sidebar" class="w-[260px] h-full flex flex-col bg-[#f8f9fb] dark:bg-[#18181b] flex-shrink-0 transition-all duration-300 relative group overflow-hidden z-10">
+        <div class="px-5 py-6 flex flex-col h-full overflow-y-auto custom-scrollbar min-w-[260px]">
+          <div class="flex items-center justify-between mb-5">
+            <h2 class="text-zinc-900 dark:text-zinc-100 font-bold text-[15px] tracking-tight">Opportunities</h2>
+          </div>
+          
+          <!-- Views Top -->
+          <div class="space-y-1 mb-8">
+            <button class="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-[#e3e5e8] dark:bg-white/10 text-zinc-900 dark:text-white font-semibold transition-colors">
+              <div class="flex items-center gap-3">
+                <i data-lucide="list-todo" class="w-[18px] h-[18px] text-zinc-700 dark:text-zinc-300"></i> <span class="text-[13.5px]">All</span>
+              </div>
+              <span class="text-[12px] text-zinc-500 dark:text-zinc-400 font-semibold">4</span>
+            </button>
+            <button class="w-full flex items-center justify-between px-3 py-2 rounded-xl text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+              <div class="flex items-center gap-3">
+                <i data-lucide="archive" class="w-[18px] h-[18px] text-zinc-500 dark:text-zinc-500"></i> <span class="text-[13.5px]">Archived</span>
+              </div>
+              <span class="text-[12px] text-zinc-400 dark:text-zinc-500 font-semibold">0</span>
+            </button>
+          </div>
+
+          <!-- Status Section -->
+          <div class="mb-8">
+            <div class="text-[12px] font-semibold text-zinc-400 dark:text-zinc-500 mb-2 px-1">Status</div>
+            <div class="space-y-0.5">
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="circle-dot" class="w-[16px] h-[16px] text-zinc-800 dark:text-zinc-400"></i> <span class="text-[13.5px]">New</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">5</span>
+              </button>
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="link" class="w-[16px] h-[16px] text-zinc-500 dark:text-zinc-400"></i> <span class="text-[13.5px]">Open</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">2</span>
+              </button>
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="check-circle-2" class="w-[16px] h-[16px] text-zinc-500 dark:text-zinc-400"></i> <span class="text-[13.5px]">Solved</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">1</span>
+              </button>
+              <button class="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mt-1 font-medium text-[13.5px]">
+                <i data-lucide="plus" class="w-[16px] h-[16px]"></i> Add Status
+              </button>
+            </div>
+          </div>
+
+          <!-- Group Section -->
+          <div class="mb-2">
+            <div class="text-[12px] font-semibold text-zinc-400 dark:text-zinc-500 mb-2 px-1">Group</div>
+            <div class="space-y-0.5">
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="target" class="w-[16px] h-[16px] text-zinc-500 dark:text-zinc-400"></i> <span class="text-[13.5px]">Marketing</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">3</span>
+              </button>
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="percent" class="w-[16px] h-[16px] text-zinc-500 dark:text-zinc-400"></i> <span class="text-[13.5px]">Sales</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">1</span>
+              </button>
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/50 dark:hover:bg-white/5 transition-colors font-medium">
+                <div class="flex items-center gap-3">
+                  <i data-lucide="wand-2" class="w-[16px] h-[16px] text-zinc-500 dark:text-zinc-400"></i> <span class="text-[13.5px]">Design</span>
+                </div>
+                <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold">4</span>
+              </button>
+              <button class="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mt-1 font-medium text-[13.5px]">
+                <i data-lucide="plus" class="w-[16px] h-[16px]"></i> Add Group
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Interactive Resize Handle -->
+        <div onclick="toggleSidebar()" class="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors z-30 flex items-center justify-center group/resizer">
+           <div class="bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-sm rounded-full p-0.5 opacity-0 group-hover/resizer:opacity-100 transition-opacity absolute right-[-10px]">
+            <i data-lucide="chevron-left" class="w-3 h-3 text-zinc-400 dark:text-zinc-400"></i>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Main Content Area (NOT floating, takes up full right side) -->
+  <main class="flex-1 flex flex-col min-w-0 z-0 transition-colors duration-300 relative bg-[#f8f9fa] dark:bg-[#141415]">
     <!-- Topbar -->
-    <header class="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-800/30">
+    <header class="h-14 shrink-0 flex items-center justify-between px-6 sm:px-8 border-b border-zinc-200 dark:border-white/5 bg-[#f8f9fa] dark:bg-[#141415]">
       <div class="flex items-center">
-        <button class="flex items-center gap-2 text-[14px] font-medium text-zinc-200 hover:text-zinc-100 transition-colors">
-          CoComputer <span class="text-[10px] uppercase font-bold text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 bg-zinc-800/30">Beta</span> <i data-lucide="chevron-down" class="w-4 h-4 text-zinc-500 ml-1"></i>
+        <!-- Breadcrumb / Title -->
+        <button class="flex items-center gap-2 text-[15px] font-semibold text-zinc-800 dark:text-zinc-200 hover:text-zinc-600 dark:hover:text-white transition-colors">
+          Manus 1.6 Lite <i data-lucide="chevron-down" class="w-4 h-4 text-zinc-400 ml-1"></i>
         </button>
       </div>
-      <div class="flex items-center gap-4 text-[13px] font-medium">
-        <button class="flex items-center gap-2 text-zinc-400 hover:text-zinc-300 transition-colors">
-          <i data-lucide="globe" class="w-4 h-4"></i> Sandbox E2B
+      <div class="flex items-center gap-4 text-[13px] font-medium text-zinc-500 dark:text-zinc-400">
+        <button class="flex items-center gap-2 hover:text-zinc-800 dark:hover:text-white transition-colors">
+          <i data-lucide="globe" class="w-[16px] h-[16px]"></i> Sandbox E2B
         </button>
-        <button class="flex items-center gap-2 text-emerald-400 hover:text-emerald-300 transition-colors">
-          <i data-lucide="signal" class="w-4 h-4"></i> Connected
+        <button class="flex items-center gap-2 text-emerald-600 dark:text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-400 transition-colors">
+          <i data-lucide="signal" class="w-[16px] h-[16px]"></i> Connected
         </button>
-        <button class="text-zinc-400 hover:text-zinc-300 ml-2">
-          <i data-lucide="settings" class="w-4 h-4"></i>
+        <div class="h-4 w-px bg-zinc-200 dark:bg-zinc-800 mx-1"></div>
+
+        <!-- Theme Toggle -->
+        <button onclick="toggleTheme()" class="hover:text-zinc-800 dark:hover:text-white transition-colors" title="Toggle Theme">
+          <i data-lucide="moon" class="w-[18px] h-[18px] dark:hidden block"></i>
+          <i data-lucide="sun" class="w-[18px] h-[18px] hidden dark:block"></i>
         </button>
-        <button class="text-zinc-400 hover:text-zinc-300">
-          <i data-lucide="user" class="w-4 h-4"></i>
+
+        <button class="hover:text-zinc-800 dark:hover:text-white transition-colors">
+          <i data-lucide="settings" class="w-[18px] h-[18px]"></i>
+        </button>
+        <button class="hover:text-zinc-800 dark:hover:text-white transition-colors">
+          <i data-lucide="user" class="w-[18px] h-[18px]"></i>
         </button>
       </div>
     </header>
 
     <!-- Chat Area -->
-    <div class="flex-1 overflow-y-auto px-6 pb-40 flex flex-col items-center custom-scrollbar">
-      
-      <div class="w-full max-w-3xl flex flex-col gap-8 mt-4 leading-relaxed">
-        <!-- User bubble -->
-        <div class="self-end max-w-[85%]">
-          <div class="bg-[#2a2a2c] rounded-2xl px-5 py-4 text-[15px] text-zinc-200 shadow-sm">
-            check this cocomputer api work or not if yes what are models it avalible with and what is the use of it<br/>
-            TOKEN_STRING_EXAMPLE_12345<br/>
-            <a href="#" class="text-indigo-400 underline decoration-indigo-400/30 underline-offset-2">https://developers.cocomputer.com/api</a>
+    <div class="flex-1 overflow-y-auto p-6 sm:p-10 custom-scrollbar relative">
+      <div class="max-w-[800px] mx-auto flex flex-col gap-10 pb-32 mt-4">
+        
+        <!-- User Message -->
+        <div class="self-end max-w-[80%]">
+          <div class="bg-zinc-200 dark:bg-[#2a2a2c] rounded-2xl rounded-tr-sm px-5 py-3.5 text-[15px] text-zinc-800 dark:text-zinc-200 shadow-sm leading-relaxed">
+            check again those credentials are workign or not
           </div>
         </div>
 
-        <!-- Agent Response -->
+        <!-- Agent Message -->
         <div class="w-full flex flex-col gap-4">
-          <div class="flex items-center gap-2">
-            <i data-lucide="cpu" class="w-6 h-6 text-zinc-200"></i>
-            <span class="font-bold text-[16px] tracking-tight">CoComputer</span>
-            <span class="text-[10px] text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 ml-1 bg-zinc-800/30">Lite</span>
-          </div>
-
-          <div class="text-[15px] text-zinc-300 pl-1">
-            I will check the status of the CoComputer API, identify the available models, and determine its primary use cases for you.
-          </div>
-
-          <!-- Workflow component -->
-          <div class="mt-2 text-[14px]">
-            <!-- Header -->
-            <div class="flex items-center gap-2 cursor-pointer transition-colors pt-2 pb-3">
-              <i data-lucide="check-circle-2" class="w-4 h-4 text-zinc-500"></i>
-              <span class="font-semibold text-zinc-200">Research CoComputer API documentation and capabilities</span>
-              <i data-lucide="chevron-up" class="w-4 h-4 text-zinc-500 ml-1"></i>
+          <!-- Header -->
+          <div class="flex items-center gap-3">
+            <div class="w-7 h-7 rounded bg-transparent flex items-center justify-center text-zinc-900 dark:text-white">
+              <i data-lucide="sparkles" class="w-6 h-6 text-zinc-900 dark:text-white fill-current"></i>
             </div>
+            <span class="font-bold text-[17px] text-zinc-900 dark:text-zinc-100 tracking-tight">manus</span>
+            <span class="text-[10px] font-bold text-zinc-500 border border-zinc-300 dark:border-zinc-700 rounded-[4px] px-1.5 py-0.5 bg-transparent tracking-wide">Lite</span>
+          </div>
+
+          <!-- Content -->
+          <div class="text-[15px] text-zinc-800 dark:text-[#d1d5db] leading-relaxed">
+            I'll re-check the validity of your API credentials on tokenlb.net to see if they are still working.
             
-            <!-- Steps styling similar to image -->
-            <div class="pl-2.5 pb-2">
-              <div class="border-l border-zinc-800/80 pl-5 space-y-4 relative pb-2 min-h-[50px]">
-                
-                <!-- Subtask 1 -->
-                <div class="flex flex-col gap-2 relative">
-                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
-                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
-                  </div>
-                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
-                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Access the CoComputer API developer documentation to understand its purpose and available models.
-                  </div>
-                  <p class="text-zinc-300 text-[14px] mt-1 pr-4">
-                    The CoComputer API enables automation of development workflows, supports sources, sessions, and activities, and offers models for code and task generation. Next, I'll review specific endpoints.
-                  </p>
+            <!-- Workflow Tree - with collapsible UI -->
+            <div class="mt-6 mb-6 space-y-4">
+              <!-- Step 1 -->
+              <div class="relative pl-7 transition-all">
+                <!-- Vertical Line -->
+                <div class="absolute left-[3px] top-6 bottom-[-16px] w-[2px] bg-zinc-300 dark:bg-zinc-800/60 rounded-full z-0"></div>
+                <!-- Circle Checkmark -->
+                <div class="absolute left-[-1px] top-1 w-2.5 h-2.5 rounded-full bg-zinc-300 dark:bg-[#2a2a2c] flex items-center justify-center ring-4 ring-[#f8f9fa] dark:ring-[#141415] z-10">
+                  <i data-lucide="check" class="w-2 h-2 text-zinc-600 dark:text-zinc-400"></i>
                 </div>
                 
-                <!-- Subtask 2 -->
-                <div class="flex flex-col gap-2 relative mt-4">
-                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
-                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                <!-- Toggleable Header -->
+                <div class="flex items-center justify-between cursor-pointer group" onclick="toggleStep(this)">
+                  <div class="text-[14.5px] font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors">
+                    Test API key validity with a simple account/model list request
                   </div>
-                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
-                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Check the REST Reference for CoComputer API to find specific endpoints and model information.
+                  <!-- Hide/Show UI -->
+                  <div class="flex items-center gap-1.5 text-[12px] font-semibold text-zinc-500 bg-zinc-200/50 dark:bg-white/5 px-2 py-0.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity">
+                    <span>Hide</span>
+                    <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
                   </div>
                 </div>
 
-                <!-- Subtask 3 -->
-                <div class="flex flex-col gap-2 relative mt-3">
-                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
-                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                <!-- Collapsible Content -->
+                <div class="mt-3.5 flex flex-col gap-3.5 collapse-content" style="max-height: 500px; opacity: 1;">
+                  <!-- Tool Call -->
+                  <div class="flex items-start justify-between text-[13px] text-zinc-600 dark:text-zinc-400">
+                    <div class="flex items-center gap-2.5">
+                      <div class="bg-zinc-200 dark:bg-[#1c1c1e] rounded-[6px] px-1.5 py-0.5 border border-zinc-300 dark:border-white/5 font-mono text-[11px] flex items-center gap-1 shadow-sm text-zinc-500 dark:text-zinc-400">
+                        &gt;_
+                      </div>
+                      Check if the API key is still valid by fetching the model list.
+                    </div>
+                    <div class="text-[11px] font-mono text-zinc-500 dark:text-zinc-600 pt-1">21:09</div>
                   </div>
-                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
-                    <i data-lucide="globe" class="w-3.5 h-3.5"></i> Check the '\alpha.sources' list endpoint to see how to authenticate and list sources.
+                  <!-- Output Text -->
+                  <div class="text-[14.5px] text-zinc-700 dark:text-[#a1a1aa] leading-relaxed">
+                    I verified the API key is still valid, fetching the model list successfully. The key models like claude-opus-4-6 and claude-sonnet-4-6 are operational; others face issues or timeouts.
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 2 -->
+              <div class="relative pl-7 transition-all">
+                <!-- Vertical Line -->
+                <div class="absolute left-[3px] top-6 bottom-[-16px] w-[2px] bg-zinc-300 dark:bg-zinc-800/60 rounded-full z-0 hidden"></div>
+                <!-- Circle Checkmark -->
+                 <div class="absolute left-[-1px] top-1 w-2.5 h-2.5 rounded-full bg-zinc-300 dark:bg-[#2a2a2c] flex items-center justify-center ring-4 ring-[#f8f9fa] dark:ring-[#141415] z-10">
+                  <i data-lucide="check" class="w-2 h-2 text-zinc-600 dark:text-zinc-400"></i>
+                </div>
+                
+                <!-- Toggleable Header -->
+                <div class="flex items-center justify-between cursor-pointer group" onclick="toggleStep(this)">
+                  <div class="text-[14.5px] font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors">
+                    Verify key functionality with a basic chat completion attempt
+                  </div>
+                  <!-- Hide/Show UI -->
+                  <div class="flex items-center gap-1.5 text-[12px] font-semibold text-zinc-500 bg-zinc-200/50 dark:bg-white/5 px-2 py-0.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity">
+                    <span>Show</span>
+                    <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
                   </div>
                 </div>
 
-                <!-- Subtask 4 -->
-                <div class="flex flex-col gap-2 relative mt-3">
-                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
-                    <i data-lucide="compass" class="w-[14px] h-[14px] text-zinc-500"></i>
+                <!-- Collapsible Content (Initially Hidden) -->
+                <div class="flex flex-col gap-3.5 collapse-content" style="max-height: 0px; opacity: 0; margin-top: 0px;">
+                  <!-- Tool Call -->
+                  <div class="flex items-start justify-between text-[13px] text-zinc-600 dark:text-zinc-400">
+                    <div class="flex items-center gap-2.5">
+                      <div class="bg-zinc-200 dark:bg-[#1c1c1e] rounded-[6px] px-1.5 py-0.5 border border-zinc-300 dark:border-white/5 font-mono text-[11px] flex items-center gap-1 shadow-sm text-zinc-500 dark:text-zinc-400">
+                        &gt;_
+                      </div>
+                      Perform a basic chat completion request...
+                    </div>
                   </div>
-                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
-                    <i data-lucide="terminal" class="w-3.5 h-3.5"></i> Create a Python script to test the CoComputer API with the provided key.
-                  </div>
-                  <p class="text-zinc-300 text-[14px] mt-1 pr-4">
-                    I confirmed the CoComputer API supports listing sources with optional filters and pagination. A test script was created and executed to verify API functionality.
-                  </p>
-                </div>
-                
-                <!-- Subtask 5 -->
-                <div class="flex flex-col gap-2 relative mt-4">
-                  <div class="absolute -left-[28px] top-1 bg-[#1a1a1c] p-0.5">
-                    <i data-lucide="terminal-square" class="w-[14px] h-[14px] text-zinc-400"></i>
-                  </div>
-                  <div class="bg-[#242426] border border-zinc-800/80 rounded-full px-3 py-1 text-[13px] text-zinc-400 flex items-center gap-2 inline-flex w-fit">
-                    <i data-lucide="play" class="w-3.5 h-3.5"></i> Execute the Python script to test the API.
+                  <div class="text-[14.5px] text-zinc-700 dark:text-[#a1a1aa] leading-relaxed">
+                    I confirmed the API key's validity by attempting a chat completion...
                   </div>
                 </div>
-                
-                <!-- Final Step Output snippet visual -->
-                <div class="mt-4 flex items-center gap-4">
-                  <div class="relative w-[120px] h-[80px] rounded overflow-hidden border border-zinc-700/80 brightness-75 hover:brightness-100 transition">
-                    <img src="https://images.unsplash.com/photo-1618401471353-b98afee0b2eb?q=80&w=400&auto=format&fit=crop" class="object-cover w-full h-full opacity-60" />
-                  </div>
-                  
-                  <div class="flex items-center gap-2 text-[14px] font-medium text-emerald-500">
-                    <i data-lucide="check" class="w-4 h-4"></i> Provide a final feasibility report and architectural recommendation
-                  </div>
-                  
-                  <div class="ml-auto text-zinc-500 text-[12px] flex items-center gap-2">
-                    3 / 3 <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
-                  </div>
-                </div>
-
               </div>
             </div>
+
+            <!-- Follow-up message -->
+            <div class="flex items-center gap-3 mt-10 mb-4">
+              <div class="w-7 h-7 rounded bg-transparent flex items-center justify-center text-zinc-900 dark:text-white">
+                <i data-lucide="sparkles" class="w-6 h-6 text-zinc-900 dark:text-white fill-current"></i>
+              </div>
+              <span class="font-bold text-[17px] text-zinc-900 dark:text-zinc-100 tracking-tight">manus</span>
+              <span class="text-[10px] font-bold text-zinc-500 border border-zinc-300 dark:border-zinc-700 rounded-[4px] px-1.5 py-0.5 bg-transparent tracking-wide">Lite</span>
+            </div>
             
+            <p class="mb-6">I have re-verified your credentials on <a href="#" class="text-zinc-900 dark:text-white underline decoration-zinc-500 underline-offset-2 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">tokenlb.net</a> and here is the current status:</p>
+
+            <h3 class="text-[18px] font-bold text-zinc-900 dark:text-white mb-5 mt-6 tracking-tight">Credential Verification Results</h3>
+            
+            <!-- Table -->
+            <div class="overflow-hidden border border-zinc-300 dark:border-white/5 rounded-xl mb-6 bg-white dark:bg-[#1c1c1e]">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="bg-zinc-50 dark:bg-white/5">
+                    <th class="p-3.5 px-4 text-[13.5px] font-semibold text-zinc-800 dark:text-zinc-200 border-b border-r border-zinc-300 dark:border-white/5 w-[20%]">Test Type</th>
+                    <th class="p-3.5 px-4 text-[13.5px] font-semibold text-zinc-800 dark:text-zinc-200 border-b border-r border-zinc-300 dark:border-white/5 w-[15%]">Result</th>
+                    <th class="p-3.5 px-4 text-[13.5px] font-semibold text-zinc-800 dark:text-zinc-200 border-b border-zinc-300 dark:border-white/5 w-[65%]">Observation</th>
+                  </tr>
+                </thead>
+                <tbody class="text-[14.5px]">
+                  <tr class="border-b border-zinc-300 dark:border-white/5">
+                    <td class="p-3.5 px-4 font-medium text-zinc-900 dark:text-zinc-300 border-r border-zinc-300 dark:border-white/5">Authentication</td>
+                    <td class="p-3.5 px-4 text-emerald-600 dark:text-emerald-400 font-semibold border-r border-zinc-300 dark:border-white/5">Success</td>
+                    <td class="p-3.5 px-4 text-zinc-700 dark:text-[#a1a1aa] leading-relaxed">The API key is still valid and allows access to the system.</td>
+                  </tr>
+                  <tr class="border-b border-zinc-300 dark:border-white/5">
+                    <td class="p-3.5 px-4 font-medium text-zinc-900 dark:text-zinc-300 border-r border-zinc-300 dark:border-white/5">Model Listing</td>
+                    <td class="p-3.5 px-4 text-emerald-600 dark:text-emerald-400 font-semibold border-r border-zinc-300 dark:border-white/5">Success</td>
+                    <td class="p-3.5 px-4 text-zinc-700 dark:text-[#a1a1aa] leading-relaxed">I was able to successfully retrieve the list of available models.</td>
+                  </tr>
+                  <tr>
+                    <td class="p-3.5 px-4 font-medium text-zinc-900 dark:text-zinc-300 border-r border-zinc-300 dark:border-white/5">Usage (Chat)</td>
+                    <td class="p-3.5 px-4 text-zinc-600 dark:text-zinc-400 font-semibold border-r border-zinc-300 dark:border-white/5">Restricted</td>
+                    <td class="p-3.5 px-4 text-zinc-700 dark:text-[#a1a1aa] leading-relaxed">Requests are returning <span class="font-mono text-[12px] bg-zinc-200 dark:bg-black/40 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-white/5">403 Forbidden</span> or <span class="font-mono text-[12px] bg-zinc-200 dark:bg-black/40 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-white/5">429 Too Many Requests</span>.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
           </div>
         </div>
       </div>
       
-    </div>
-
-    <!-- Input Area Fixed -->
-    <div class="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none px-6">
-      <div class="w-full max-w-3xl pointer-events-auto">
-        <div class="relative bg-transparent border border-zinc-700/50 rounded-2xl p-1 shadow-2xl transition-all focus-within:border-zinc-500/50">
-          <textarea rows="1" class="w-full min-h-[48px] bg-transparent text-[15px] text-zinc-200 placeholder-zinc-500 resize-none outline-none px-4 py-3 placeholder:font-medium" placeholder="Send message to CoComputer"></textarea>
-          
-          <div class="flex items-center justify-between mt-1 px-2 pb-2">
-            <div class="flex items-center gap-2 focus-within:text-zinc-300">
-              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-full transition-colors flex items-center justify-center border border-zinc-700/50" title="Attach">
-                <i data-lucide="plus" class="w-4 h-4"></i>
-              </button>
-              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Links">
-                <i data-lucide="link-2" class="w-4 h-4"></i>
-              </button>
-              <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Workspace Context">
-                <i data-lucide="monitor" class="w-4 h-4"></i>
-              </button>
-            </div>
+      <!-- Input Area Contextual -->
+      <div class="absolute bottom-8 left-0 right-0 flex justify-center pointer-events-none px-6 sm:px-10">
+        <div class="w-full max-w-[800px] pointer-events-auto">
+          <div class="relative bg-white dark:bg-[#1c1c1e] border border-zinc-300 dark:border-white/10 rounded-2xl p-1.5 shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgba(0,0,0,0.6)] transition-all focus-within:border-indigo-300 dark:focus-within:border-zinc-500/50 focus-within:ring-4 focus-within:ring-indigo-100 dark:focus-within:ring-zinc-500/10">
+            <textarea rows="1" class="w-full min-h-[52px] bg-transparent text-[15px] text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 resize-none outline-none px-4 py-3 placeholder:font-medium font-medium leading-relaxed" placeholder="Ask anything..."></textarea>
             
-            <div class="flex items-center gap-2">
-               <button class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors" title="Voice Input">
-                <i data-lucide="mic" class="w-4 h-4"></i>
-              </button>
-              <button class="p-1.5 bg-[#3a3a3c] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-600 rounded-full transition-colors disabled:opacity-50 border border-zinc-700/50" title="Send">
-                <i data-lucide="arrow-up" class="w-4 h-4"></i>
-              </button>
+            <div class="flex items-center justify-between mt-1 px-2 pb-1.5">
+              <div class="flex items-center gap-1 focus-within:text-zinc-600 dark:focus-within:text-zinc-300">
+                <button class="p-1.5 text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/5 rounded-lg transition-colors flex items-center justify-center border border-transparent" title="Attach">
+                  <i data-lucide="plus" class="w-[18px] h-[18px]"></i>
+                </button>
+                <button class="p-1.5 text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/5 rounded-lg transition-colors border border-transparent" title="Links">
+                  <i data-lucide="link-2" class="w-[18px] h-[18px]"></i>
+                </button>
+              </div>
+              
+              <div class="flex items-center gap-1.5">
+                <button class="p-1.5 text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/5 rounded-lg transition-colors border border-transparent" title="Voice Input">
+                  <i data-lucide="mic" class="w-[18px] h-[18px]"></i>
+                </button>
+                <button class="p-2 bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 rounded-xl transition-colors shadow-sm disabled:opacity-50" title="Send">
+                  <i data-lucide="arrow-up" class="w-[18px] h-[18px]"></i>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -275,6 +389,52 @@
 
   <script>
     lucide.createIcons();
+
+    function toggleTheme() {
+      const html = document.documentElement;
+      if (html.classList.contains('dark')) {
+        html.classList.remove('dark');
+        html.classList.add('light');
+      } else {
+        html.classList.remove('light');
+        html.classList.add('dark');
+      }
+    }
+
+    function toggleSidebar() {
+      const sidebar = document.getElementById('secondary-sidebar');
+      if (sidebar.classList.contains('w-[260px]')) {
+        sidebar.classList.replace('w-[260px]', 'w-0');
+        sidebar.classList.replace('min-w-[260px]', 'min-w-0');
+      } else {
+        sidebar.classList.replace('w-0', 'w-[260px]');
+        sidebar.classList.replace('min-w-0', 'min-w-[260px]');
+      }
+    }
+
+    function toggleStep(element) {
+      const content = element.nextElementSibling;
+      const chevron = element.querySelector('[data-lucide^="chevron"]');
+      const text = element.querySelector('span');
+      const line = element.parentElement.querySelector('.absolute.w-\\[2px\\]');
+      
+      if (content.style.maxHeight && content.style.maxHeight !== '0px') {
+        content.style.maxHeight = '0px';
+        content.style.opacity = '0';
+        content.style.marginTop = '0px';
+        chevron.setAttribute('data-lucide', 'chevron-down');
+        text.textContent = 'Show';
+        if(line) line.classList.add('hidden');
+      } else {
+        content.style.maxHeight = '500px'; // roughly enough for content
+        content.style.opacity = '1';
+        content.style.marginTop = '0.875rem'; // mt-3.5
+        chevron.setAttribute('data-lucide', 'chevron-up');
+        text.textContent = 'Hide';
+        if(line) line.classList.remove('hidden');
+      }
+      lucide.createIcons();
+    }
   </script>
 </body>
 </html>

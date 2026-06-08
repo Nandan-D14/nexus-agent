@@ -6,6 +6,7 @@
 "use client";
 
 import { useState } from "react";
+import { Loader2 } from "lucide-react";
 
 type Props = {
   taskId: string;
@@ -37,13 +38,16 @@ export function PermissionCard({
   onRespond,
 }: Props) {
   const [response, setResponse] = useState<"approved" | "denied" | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   function handleRespond(approved: boolean) {
+    setSubmitting(true);
     setResponse(approved ? "approved" : "denied");
     onRespond(taskId, approved, approvalId, durableTaskId);
   }
 
   const resolved = response !== null;
+  const disabled = resolved || submitting;
 
   return (
     <div
@@ -110,7 +114,7 @@ export function PermissionCard({
       {/* Action buttons */}
       <div className="flex items-center gap-2 pt-0.5">
         <button
-          disabled={resolved}
+          disabled={disabled}
           onClick={() => handleRespond(true)}
           className={[
             "flex-1 text-[11px] font-bold uppercase tracking-widest py-1.5 px-3 rounded-md",
@@ -120,12 +124,15 @@ export function PermissionCard({
                 ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default"
                 : "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-muted-foreground cursor-default"
               : "bg-emerald-500/10 border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:shadow-[0_0_10px_rgba(16,185,129,0.1)] active:scale-[0.98]",
+            submitting && response !== "approved" ? "opacity-50 cursor-not-allowed" : "",
           ].join(" ")}
         >
-          {resolved && response === "approved" ? "Approved" : "Approve"}
+          {submitting && response !== "approved" ? (
+            <Loader2 className="w-3 h-3 animate-spin mx-auto" />
+          ) : resolved && response === "approved" ? "Approved" : "Approve"}
         </button>
         <button
-          disabled={resolved}
+          disabled={disabled}
           onClick={() => handleRespond(false)}
           className={[
             "flex-1 text-[11px] font-bold uppercase tracking-widest py-1.5 px-3 rounded-md",
@@ -135,9 +142,12 @@ export function PermissionCard({
                 ? "bg-red-500/10 border-red-500/20 text-red-400 cursor-default"
                 : "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-muted-foreground cursor-default"
               : "bg-red-500/5 border-zinc-800 text-red-400 hover:bg-red-500/10 hover:border-red-500/30 hover:shadow-[0_0_10px_rgba(239,68,68,0.08)] active:scale-[0.98]",
+            submitting && response !== "denied" ? "opacity-50 cursor-not-allowed" : "",
           ].join(" ")}
         >
-          {resolved && response === "denied" ? "Denied" : "Deny"}
+          {submitting && response !== "denied" ? (
+            <Loader2 className="w-3 h-3 animate-spin mx-auto" />
+          ) : resolved && response === "denied" ? "Denied" : "Deny"}
         </button>
       </div>
     </div>

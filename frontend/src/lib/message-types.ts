@@ -348,7 +348,7 @@ export type WorkspaceResumeState = {
 
 export type ArchivedMessage = {
   id: string;
-  role: "user" | "agent";
+  role: "user" | "agent" | "tool_call" | "tool_result";
   text: string;
   source?: string;
   turn_index: number;
