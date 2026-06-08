@@ -15,6 +15,7 @@ from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.dependencies import get_history_repository, get_session_manager
 from nexus.google_drive import get_google_drive_client_for_user
 from nexus.models import RunArtifact
+from nexus.storage import generate_artifact_signed_url
 from nexus.tools.workspace import derive_workspace_path
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,18 @@ def _safe_workspace_relative_path(value: str) -> str:
     return "/".join(part for part in raw.split("/") if part and part != ".")
 
 def _serialize_artifact(artifact) -> RunArtifact:
+    url = artifact.url
+    metadata = artifact.metadata or {}
+    
+    # Refresh expired GCS signed URLs. Google Drive URLs are permanent.
+    if url and "drive.google.com" not in url and "storage.googleapis.com" in url:
+        gcs_bucket = metadata.get("gcs_bucket")
+        gcs_blob = metadata.get("gcs_blob")
+        if gcs_bucket and gcs_blob:
+            fresh_url = generate_artifact_signed_url(bucket_name=gcs_bucket, blob_name=gcs_blob)
+            if fresh_url:
+                url = fresh_url
+
     return RunArtifact(
         artifact_id=artifact.artifact_id,
         run_id=artifact.run_id,
@@ -43,8 +56,8 @@ def _serialize_artifact(artifact) -> RunArtifact:
         created_at=artifact.created_at,
         source_step_id=artifact.source_step_id,
         path=artifact.path,
-        url=artifact.url,
-        metadata=artifact.metadata or {},
+        url=url,
+        metadata=metadata,
     )
 
 async def _mirror_upload_to_google_drive(
@@ -160,6 +173,14 @@ async def download_session_file(
         raise HTTPException(status_code=404, detail="Live session not found")
     if not session.current_run_id:
         raise HTTPException(status_code=400, detail="Session does not have an active run")
+    
+    # Fail fast if the sandbox is not running/alive to avoid a 1-2 minute timeout hang
+    if not session.sandbox or not session.sandbox.is_alive:
+        raise HTTPException(
+            status_code=410,
+            detail="Sandbox container is not active. File cannot be retrieved from the workspace sandbox."
+        )
+
     await session_manager.ensure_session_ready(session_id)
     filename = _safe_workspace_relative_path(relative_path)
     workspace_path = derive_workspace_path(session.id, session.current_run_id)

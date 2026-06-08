@@ -128,6 +128,23 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
 
     except Exception as e:
         logger.error("Failed to upload artifact %s to GCS: %s", relative_path, e)
+        
+        # Fallback: Save as a data URI directly in the database if GCS fails
+        try:
+            import base64
+            import mimetypes
+            mime, _ = mimetypes.guess_type(relative_path)
+            mime = mime or "application/octet-stream"
+            
+            content_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            # Only inline if < 5MB to avoid blowing up Firestore document limits
+            if len(content_bytes) < 5 * 1024 * 1024:
+                b64 = base64.b64encode(content_bytes).decode("ascii")
+                logger.info("Fell back to base64 data URI for %s", relative_path)
+                return f"data:{mime};base64,{b64}"
+        except Exception as b64_exc:
+            logger.error("Failed to encode base64 fallback for %s: %s", relative_path, b64_exc)
+            
         return None
 
 async def upload_artifact_async(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:

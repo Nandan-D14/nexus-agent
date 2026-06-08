@@ -2587,15 +2587,17 @@ class NexusOrchestrator:
             result = await write_workspace_file("outputs/final.md", text, append=False)
             output_path = result.get("output_path")
             if isinstance(output_path, str) and output_path:
+                is_url = output_path.startswith(("http:", "https:", "data:"))
                 await self._create_artifact(
                     kind="workspace_output",
                     title="final.md",
                     preview=self._clip_text(text, 280),
                     source_step_id=self._current_turn_step_id,
-                    path=output_path,
+                    path=result.get("relative_path") or "outputs/final.md",
+                    url=output_path if is_url else None,
                     metadata={
                         "workspace_path": self._workspace_path or "",
-                        "workspace_relative_path": "outputs/final.md",
+                        "workspace_relative_path": result.get("relative_path") or "outputs/final.md",
                         "source": "final_response",
                     },
                 )
@@ -2759,6 +2761,13 @@ class NexusOrchestrator:
     ) -> None:
         if not self.history_repository or not self._current_run_id:
             return
+        
+        # Fail-safe: if path is a URL or data URI, move it to url
+        if path and path.startswith(("http:", "https:", "data:")):
+            if not url:
+                url = path
+            path = None
+
         try:
             artifact = await self.history_repository.create_artifact(
                 session_id=self.session.id,
@@ -2852,12 +2861,19 @@ class NexusOrchestrator:
         for key in ("path", "file_path", "output_path", "url", "download_url"):
             value = output_mapping.get(key)
             if isinstance(value, str) and value.strip():
+                is_url_val = value.startswith(("http:", "https:", "data:"))
+                
+                # Extract relative path from output_mapping if possible
+                rel_path = output_mapping.get("relative_path")
+                if not isinstance(rel_path, str) or not rel_path.strip():
+                    rel_path = value if not is_url_val else None
+
                 return {
                     "kind": "export_reference",
                     "title": tool_name.replace("_", " "),
                     "preview": self._clip_text(output_str or value, 280),
-                    "path": value if "path" in key else None,
-                    "url": value if "url" in key else None,
+                    "path": rel_path,
+                    "url": value if is_url_val else None,
                     "metadata": {"tool": tool_name, "ref_key": key},
                 }
         for container_key in ("detail", "metadata"):
@@ -2867,12 +2883,19 @@ class NexusOrchestrator:
             for key in ("path", "file_path", "output_path", "url", "download_url"):
                 value = nested.get(key)
                 if isinstance(value, str) and value.strip():
+                    is_url_val = value.startswith(("http:", "https:", "data:"))
+                    
+                    # Try to get relative path from nested or output_mapping
+                    rel_path = nested.get("relative_path") or output_mapping.get("relative_path")
+                    if not isinstance(rel_path, str) or not rel_path.strip():
+                        rel_path = value if not is_url_val else None
+
                     return {
                         "kind": "export_reference",
                         "title": tool_name.replace("_", " "),
                         "preview": self._clip_text(output_str or value, 280),
-                        "path": value if "path" in key else None,
-                        "url": value if "url" in key else None,
+                        "path": rel_path,
+                        "url": value if is_url_val else None,
                         "metadata": {
                             "tool": tool_name,
                             "ref_key": key,

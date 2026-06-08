@@ -309,6 +309,15 @@ async def download_artifact_by_id(
     artifact = await history_repo.get_artifact_for_owner(user.uid, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    
+    # Return permanent URLs (Google Drive, data URIs) directly without GCS signing
+    if artifact.url and "storage.googleapis.com" not in artifact.url:
+        return {
+            "artifact_id": artifact.artifact_id,
+            "url": artifact.url,
+            "expires_in_seconds": 900,
+        }
+
     metadata = artifact.metadata or {}
     bucket = metadata.get("gcs_bucket")
     blob = metadata.get("gcs_blob")
