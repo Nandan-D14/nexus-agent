@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   FileText,
@@ -35,24 +35,24 @@ function formatTimestamp(value: string | null | undefined): string {
   return date.toLocaleString();
 }
 
-function ArtifactIcon({ kind }: { kind: string }) {
+function ArtifactIcon({ kind, className }: { kind: string; className?: string }) {
   switch (kind) {
     case "pdf_report":
     case "pdf":
-      return <FileText className="w-5 h-5 text-red-400" />;
+      return <FileText className={className || "w-5 h-5 text-red-400"} />;
     case "image":
     case "screenshot":
-      return <ImageIcon className="w-5 h-5 text-blue-400" />;
+      return <ImageIcon className={className || "w-5 h-5 text-blue-400"} />;
     case "data":
     case "csv":
     case "json":
-      return <Database className="w-5 h-5 text-emerald-400" />;
+      return <Database className={className || "w-5 h-5 text-emerald-400"} />;
     case "spreadsheet":
-      return <FileSpreadsheet className="w-5 h-5 text-green-400" />;
+      return <FileSpreadsheet className={className || "w-5 h-5 text-green-400"} />;
     case "document":
-      return <FileType className="w-5 h-5 text-blue-500" />;
+      return <FileType className={className || "w-5 h-5 text-blue-500"} />;
     default:
-      return <File className="w-5 h-5 text-zinc-400" />;
+      return <File className={className || "w-5 h-5 text-zinc-400"} />;
   }
 }
 
@@ -168,7 +168,9 @@ async function downloadFromWorkspaceSandbox(sessionId: string, path: string): Pr
     const blob = await res.blob();
     return window.URL.createObjectURL(blob);
   } catch (e) {
-    console.error("Workspace download failed", e);
+    if ((e as any)?.name !== "AbortError") {
+      console.error("Workspace download failed", e);
+    }
     return null;
   }
 }
@@ -181,6 +183,7 @@ export function OutputsPanel({
   // Cache of fresh URLs fetched from the backend, keyed by artifact_id
   const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const fetchedIds = useRef<Set<string>>(new Set());
 
   /**
    * Resolve a working URL for an artifact. Prefers the one already on the
@@ -242,6 +245,17 @@ export function OutputsPanel({
     },
     [freshUrls],
   );
+
+  // Auto-fetch fresh URLs for images so their thumbnails load immediately
+  useEffect(() => {
+    artifacts.forEach((artifact) => {
+      const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
+      if (isImage && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
+        fetchedIds.current.add(artifact.artifact_id);
+        resolveUrl(artifact).catch(() => {});
+      }
+    });
+  }, [artifacts, resolveUrl, freshUrls]);
 
   /** Download an artifact by getting a fresh signed URL and triggering browser download. */
   const handleDownload = useCallback(
@@ -331,126 +345,102 @@ export function OutputsPanel({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {artifacts.map((artifact) => {
             const isLoading = loadingId === artifact.artifact_id;
             const currentUrl = getUrl(artifact);
+            const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
 
             return (
               <div
                 key={artifact.artifact_id}
-                className="group relative rounded-2xl border border-zinc-800 bg-[#141416] hover:bg-[#19191b] hover:border-zinc-700 transition-all duration-200 p-5 shadow-sm"
+                className="group relative rounded-xl border border-zinc-800 bg-[#141414] hover:bg-[#1a1a1c] hover:border-zinc-700 transition-all duration-200 overflow-hidden shadow-sm flex flex-col"
               >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-start gap-4">
-                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 group-hover:border-zinc-700 transition-colors">
-                      <ArtifactIcon kind={artifact.kind} />
+                {/* Top Preview Area */}
+                <div className="relative aspect-video w-full bg-[#1c1c1e] flex items-center justify-center overflow-hidden border-b border-zinc-800">
+                  {isImage && currentUrl ? (
+                    <img src={currentUrl} alt={artifact.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">
+                      <ArtifactIcon kind={artifact.kind} className="w-12 h-12 text-zinc-500" />
                     </div>
-                    <div>
-                      <h4 className="text-[15px] font-semibold text-zinc-100 group-hover:text-white transition-colors">
-                        {artifact.title || artifact.kind.replace(/_/g, " ")}
-                      </h4>
-                      <div className="mt-1.5 flex items-center gap-3">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800">
-                          {artifact.kind.replace(/_/g, " ")}
-                        </span>
-                        <span className="text-[11px] text-zinc-500">
-                          {formatTimestamp(artifact.created_at)}
-                        </span>
-                      </div>
-                    </div>
+                  )}
+
+                  {/* Optional Eye Icon Badge (like in the screenshot) */}
+                  <div className="absolute bottom-2 right-2 bg-white/10 backdrop-blur-md px-2 py-0.5 rounded-full text-[10px] font-medium text-white flex items-center gap-1 border border-white/10 shadow-sm">
+                    <Eye className="w-3 h-3" /> Preview
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    {/* Preview button */}
+                  {/* Hover Overlay with Actions */}
+                  <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-3 transition-opacity">
                     <button
                       onClick={() => handleTogglePreview(artifact)}
                       disabled={isLoading}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${
-                        viewingId === artifact.artifact_id
-                          ? "bg-indigo-500 text-white border-indigo-400"
-                          : "bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500 hover:text-white border-indigo-500/20"
-                      } disabled:opacity-50`}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
                     >
-                      {isLoading ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Eye className="w-3.5 h-3.5" />
-                      )}
+                      {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
                       {viewingId === artifact.artifact_id ? "Hide" : "Preview"}
                     </button>
-
-                    {/* Download button — always available, fetches fresh URL on click */}
                     <button
                       onClick={() => handleDownload(artifact)}
                       disabled={isLoading}
-                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700 text-xs font-bold transition-all border border-zinc-700/50 disabled:opacity-50"
+                      className="p-1.5 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
+                      title="Download"
                     >
-                      {isLoading ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Download className="w-3.5 h-3.5" />
-                      )}
-                      Download
+                      {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                     </button>
-
-                    {/* Open in new tab */}
                     {currentUrl && (
                       <a
                         href={currentUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700 text-xs font-bold transition-all border border-zinc-700/50"
+                        className="p-1.5 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-xs font-semibold transition-all shadow-md"
+                        title="Open in new tab"
                       >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        Open
+                        <ExternalLink className="w-4 h-4" />
                       </a>
                     )}
                   </div>
                 </div>
 
-                {artifact.preview && (
-                  <div className="mt-4 pt-4 border-t border-zinc-800/50">
-                    <div className="text-[13px] leading-relaxed text-zinc-400 dark:text-zinc-400 line-clamp-3 group-hover:line-clamp-none transition-all [&_p]:mb-2 [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-zinc-200 [&_strong]:font-semibold [&_h1]:text-zinc-200 [&_h2]:text-zinc-200 [&_h3]:text-zinc-200 [&_a]:text-blue-400 [&_hr]:border-zinc-700 [&_hr]:my-2">
-                      <ReactMarkdown>
-                        {artifact.preview}
-                      </ReactMarkdown>
-                    </div>
+                {/* Bottom Info Area */}
+                <div className="p-4 flex flex-col flex-grow">
+                  <h4 className="text-[14px] font-semibold text-zinc-200 line-clamp-1 group-hover:text-white transition-colors" title={artifact.title || artifact.kind}>
+                    {artifact.title || artifact.kind.replace(/_/g, " ")}
+                  </h4>
+                  <div className="mt-1 flex items-center gap-2">
+                    <p className="text-[12px] text-zinc-500 line-clamp-1">
+                      Last edited {formatTimestamp(artifact.created_at)}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Inline Preview expansions (Appears below the card content if activated) */}
+                {viewingId === artifact.artifact_id && (
+                  <div className="border-t border-zinc-800 bg-[#0a0a0c] p-3">
+                    {/* Markdown Preview */}
+                    {artifact.preview && !isImage && (
+                      <div className="text-[13px] leading-relaxed text-zinc-400 dark:text-zinc-400 line-clamp-4 group-hover:line-clamp-none transition-all mb-4 [&_a]:text-blue-400">
+                        <ReactMarkdown>{artifact.preview}</ReactMarkdown>
+                      </div>
+                    )}
+                    
+                    {/* Inline image preview (large) */}
+                    {isImage && currentUrl && (
+                      <div className="rounded-xl overflow-hidden border border-zinc-800 bg-black/20 relative">
+                        <div className="absolute top-2 right-2 bg-black/50 rounded p-1 hover:bg-black/80 cursor-pointer text-zinc-300" onClick={() => setViewingId(null)}>
+                          <X className="w-4 h-4" />
+                        </div>
+                        <img src={currentUrl} alt={artifact.title} className="w-full h-auto object-contain max-h-[300px]" />
+                      </div>
+                    )}
+
+                    {/* Inline Iframe viewer */}
+                    {!isImage && currentUrl && (
+                      <InlineIframeViewer url={currentUrl} title={artifact.title || "Preview"} onClose={() => setViewingId(null)} />
+                    )}
                   </div>
                 )}
-
-                {/* Inline image preview */}
-                {viewingId === artifact.artifact_id &&
-                  (artifact.kind === "image" || artifact.kind === "screenshot") &&
-                  currentUrl && (
-                    <div className="mt-4 rounded-xl overflow-hidden border border-zinc-800 bg-black/20">
-                      <div className="flex items-center justify-end px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800">
-                        <button
-                          onClick={() => setViewingId(null)}
-                          className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                      <img
-                        src={currentUrl}
-                        alt={artifact.title}
-                        className="w-full h-auto max-h-[400px] object-contain"
-                      />
-                    </div>
-                  )}
-
-                {/* Inline Iframe viewer for non-images */}
-                {viewingId === artifact.artifact_id &&
-                  currentUrl &&
-                  artifact.kind !== "image" &&
-                  artifact.kind !== "screenshot" && (
-                    <InlineIframeViewer
-                      url={currentUrl}
-                      title={artifact.title || "Preview"}
-                      onClose={() => setViewingId(null)}
-                    />
-                  )}
               </div>
             );
           })}
