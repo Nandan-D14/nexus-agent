@@ -69,6 +69,45 @@ def generate_artifact_signed_url(
         logger.error("Failed to generate signed URL for %s/%s: %s", bucket_name, blob_name, e)
         return None
 
+def download_artifact_as_data_uri(
+    *,
+    bucket_name: str,
+    blob_name: str,
+    max_bytes: int = 5 * 1024 * 1024,
+) -> Optional[str]:
+    """Download a GCS blob and return its content as a base64 data URI.
+
+    This bypasses signed URL generation entirely — it reads the blob using
+    application default credentials (which always work within the project)
+    and encodes the content inline.
+
+    Returns None if the blob doesn't exist or exceeds *max_bytes*.
+    """
+    try:
+        import base64
+        import mimetypes
+
+        client = get_storage_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        if not blob.exists():
+            return None
+        blob.reload()
+        if blob.size and blob.size > max_bytes:
+            logger.warning(
+                "Blob %s/%s is %d bytes, exceeds data-URI limit of %d",
+                bucket_name, blob_name, blob.size, max_bytes,
+            )
+            return None
+        content = blob.download_as_bytes()
+        mime = blob.content_type or mimetypes.guess_type(blob_name)[0] or "application/octet-stream"
+        encoded = base64.b64encode(content).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    except Exception:
+        logger.exception("Failed to download blob %s/%s as data URI", bucket_name, blob_name)
+        return None
+
+
 def upload_artifact(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:
     """Uploads a file to GCS and returns a URL (signed if possible, public otherwise)."""
     try:

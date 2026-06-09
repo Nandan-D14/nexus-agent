@@ -5,7 +5,8 @@
 
 "use client";
 
-import { ChevronDown, Signal, Monitor, Settings, User } from "lucide-react";
+import { Signal, Monitor, Settings, User, Maximize, Minimize, MonitorOff, Save } from "lucide-react";
+import { Tooltip } from "@heroui/react";
 
 type Props = {
   viewMode: string;
@@ -35,14 +36,13 @@ export function SessionHeader({
   onEndSession,
 }: Props) {
   return (
-    <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-transparent bg-transparent backdrop-blur-md z-10">
+    <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-200 dark:border-zinc-800 bg-transparent shadow-sm z-10">
       <div className="flex items-center gap-4">
-        <button className="flex items-center gap-2 text-[14px] font-medium text-zinc-200 hover:text-zinc-100 transition-colors">
-          CoComputer{" "}
-          <span className="text-[10px] uppercase font-bold text-zinc-400 border border-zinc-700/80 rounded px-1.5 py-0.5 bg-zinc-800/30">
+        <button className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100 hover:opacity-80 transition-opacity">
+          CoComputer
+          <span className="text-[10px] uppercase font-bold text-zinc-500 dark:text-zinc-400 border border-zinc-300 dark:border-zinc-700 rounded-md px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800/50">
             Beta
-          </span>{" "}
-          <ChevronDown className="w-4 h-4 text-zinc-500 ml-1" />
+          </span>
         </button>
 
         {viewMode === "live" && isConnected && (
@@ -52,64 +52,105 @@ export function SessionHeader({
         )}
       </div>
 
-      <div className="flex items-center gap-4 text-[13px] font-medium">
+      <div className="flex items-center gap-2 text-sm font-medium">
         {!isNewSession && (
-          <button
-            suppressHydrationWarning
-            onClick={
-              viewMode === "live"
-                ? onToggleDesktopFullscreen
-                : onShowDesktop
-            }
-            className="flex items-center gap-2 text-zinc-400 hover:text-zinc-200 transition-colors"
-          >
-            <Monitor className="w-4 h-4" />
-            {viewMode !== "live"
-              ? "Open Desktop"
-              : isDesktopFullscreen
-              ? "Exit Fullscreen"
-              : isDesktopVisible
-              ? "Fullscreen"
-              : "Open Desktop"}
-          </button>
+          <Tooltip>
+            <Tooltip.Trigger>
+              <button
+                suppressHydrationWarning
+                onClick={
+                  viewMode === "live"
+                    ? onToggleDesktopFullscreen
+                    : onShowDesktop
+                }
+                className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+              >
+                {viewMode !== "live" || (!isDesktopFullscreen && !isDesktopVisible) ? (
+                  <Monitor className="w-4 h-4" />
+                ) : isDesktopFullscreen ? (
+                  <Minimize className="w-4 h-4" />
+                ) : (
+                  <Maximize className="w-4 h-4" />
+                )}
+              </button>
+            </Tooltip.Trigger>
+            <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+              {viewMode !== "live"
+                ? "Open Desktop"
+                : isDesktopFullscreen
+                ? "Exit Fullscreen"
+                : isDesktopVisible
+                ? "Fullscreen"
+                : "Open Desktop"}
+            </Tooltip.Content>
+          </Tooltip>
         )}
 
         {viewMode === "live" && isDesktopVisible && !isDesktopFullscreen && (
-          <button
-            suppressHydrationWarning
-            onClick={onHideDesktop}
-            className="text-zinc-400 hover:text-zinc-200 transition-colors"
-          >
-            Hide
-          </button>
+          <Tooltip>
+            <Tooltip.Trigger>
+              <button
+                suppressHydrationWarning
+                onClick={onHideDesktop}
+                className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+              >
+                <MonitorOff className="w-4 h-4" />
+              </button>
+            </Tooltip.Trigger>
+            <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+              Hide Desktop
+            </Tooltip.Content>
+          </Tooltip>
         )}
 
         {!isNewSession && (
-          <button
-            suppressHydrationWarning
-            onClick={onOpenSaveTemplate}
-            className="text-zinc-400 hover:text-zinc-200 transition-colors ml-1"
-          >
-            Save Template
-          </button>
+          <Tooltip>
+            <Tooltip.Trigger>
+              <button
+                suppressHydrationWarning
+                onClick={onOpenSaveTemplate}
+                className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+              >
+                <Save className="w-4 h-4" />
+              </button>
+            </Tooltip.Trigger>
+            <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+              Save Template
+            </Tooltip.Content>
+          </Tooltip>
         )}
 
-        <button
-          className="text-zinc-400 hover:text-zinc-300 ml-2"
-          onClick={onOpenSettings}
-        >
-          <Settings className="w-4 h-4" />
-        </button>
-        <button className="text-zinc-400 hover:text-zinc-300">
-          <User className="w-4 h-4" />
-        </button>
+        <Tooltip>
+          <Tooltip.Trigger>
+            <button
+              className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors ml-1"
+              onClick={onOpenSettings}
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </Tooltip.Trigger>
+          <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+            Settings
+          </Tooltip.Content>
+        </Tooltip>
+
+        <Tooltip>
+          <Tooltip.Trigger>
+            <button className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
+              <User className="w-4 h-4" />
+            </button>
+          </Tooltip.Trigger>
+          <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+            User Profile
+          </Tooltip.Content>
+        </Tooltip>
 
         <button
           suppressHydrationWarning
           onClick={onEndSession}
-          className="text-red-400 hover:text-red-300 transition-colors ml-2"
+          className="ml-2 px-4 py-1.5 rounded-md bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 font-semibold hover:bg-red-100 dark:hover:bg-red-500/20 transition-colors border border-red-200 dark:border-red-500/20"
         >
-          {viewMode === "live" ? "End" : "Exit"}
+          {viewMode === "live" ? "End Session" : "Exit"}
         </button>
       </div>
     </header>

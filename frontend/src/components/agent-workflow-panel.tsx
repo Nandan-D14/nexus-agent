@@ -84,10 +84,10 @@ export function AgentWorkflowPanel({
 
   if (!run || run.steps.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center bg-[#111113] p-8 text-center">
-        <div className="rounded-xl border border-zinc-800 bg-[#19191b] px-6 py-5">
-          <Bot className="mx-auto mb-3 h-5 w-5 text-zinc-500" />
-          <p className="text-[13px] text-zinc-500 font-medium tracking-tight leading-relaxed max-w-[220px]">
+      <div className="h-full flex items-center justify-center bg-zinc-50 dark:bg-zinc-950 p-8 text-center">
+        <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-6 py-5">
+          <Bot className="mx-auto mb-3 h-5 w-5 text-zinc-400 dark:text-zinc-500" />
+          <p className="text-[13px] text-zinc-500 dark:text-zinc-400 font-medium tracking-tight leading-relaxed max-w-[220px]">
             {emptyState}
           </p>
         </div>
@@ -113,20 +113,20 @@ export function AgentWorkflowPanel({
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#111113] text-zinc-100">
-      <div className="shrink-0 border-b border-zinc-800 bg-[#141416] px-4 py-2">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-[#202023]">
-              <MonitorCog className="h-5 w-5 text-zinc-300" />
+    <div className="h-full flex flex-col bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100">
+      <div className="shrink-0 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-4 py-2">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+              <MonitorCog className="h-3.5 w-3.5" />
             </div>
             <div className="min-w-0">
-              <div className="truncate text-[14px] font-semibold tracking-tight text-zinc-100">
+              <div className="truncate text-xs font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
                 {run.title || "CoComputer"}
               </div>
-              <div className="mt-1 flex min-w-0 items-center gap-2 text-[12px] text-zinc-400">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(run.status)}`} />
-                <span className="shrink-0 font-medium text-zinc-200">
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(run.status)}`} />
+                <span className="shrink-0 font-medium">
                   {run.status === "completed"
                     ? "Task completed"
                     : run.status === "failed"
@@ -135,7 +135,7 @@ export function AgentWorkflowPanel({
                 </span>
                 {activeStep && (
                   <>
-                    <span className="h-3 w-px shrink-0 bg-zinc-700" />
+                    <span className="h-2.5 w-px shrink-0 bg-zinc-300 dark:bg-zinc-700" />
                     <span className="truncate">{activeStep.title}</span>
                   </>
                 )}
@@ -145,12 +145,12 @@ export function AgentWorkflowPanel({
 
           <div className="flex shrink-0 items-center gap-2">
             {failedSteps > 0 && (
-              <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-300">
+              <span className="rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
                 {failedSteps} failed
               </span>
             )}
             {isRunning && (
-              <span className="inline-flex items-center gap-2 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300">
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Live
               </span>
@@ -208,9 +208,9 @@ export function AgentWorkflowPanel({
           </div>
         </div>
 
-        <div className="min-h-0 bg-[#111113] p-4">
-          <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#252525]">
-            <div className="flex min-h-10 shrink-0 items-center justify-between gap-3 border-b border-zinc-700/70 bg-[#292929] px-4">
+        <div className="min-h-0 bg-[#111113]">
+          <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#111113]">
+            <div className="flex min-h-10 shrink-0 items-center justify-between gap-3 border-b border-zinc-800/60 bg-[#161618] px-4 shadow-sm">
               <div className="flex min-w-0 items-center gap-2">
                 {stepIcon(selectedStep.step_type, selectedStep.status)}
                 <span className="truncate text-[12px] font-medium text-zinc-300">
@@ -225,7 +225,7 @@ export function AgentWorkflowPanel({
                       setPinnedSelection(false);
                       setSelectedStepId(focusStep?.step_id ?? null);
                     }}
-                    className="rounded-md px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200"
+                    className="rounded-md px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200"
                   >
                     Follow
                   </button>
@@ -243,7 +243,7 @@ export function AgentWorkflowPanel({
               </div>
             </div>
 
-            <div ref={outputRef} className="min-h-0 flex-1 overflow-auto p-5 custom-scrollbar">
+            <div ref={outputRef} className="min-h-0 flex-1 overflow-auto p-4 custom-scrollbar">
               <DynamicStepOutput step={selectedStep} outputText={outputText} />
             </div>
           </div>

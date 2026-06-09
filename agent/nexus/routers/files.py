@@ -24,13 +24,27 @@ router = APIRouter()
 
 _SAFE_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/ -]+$")
 
-def _safe_workspace_relative_path(value: str) -> str:
+def _safe_workspace_relative_path(value: str, session_id: str | None = None, run_id: str | None = None) -> str:
     raw = (value or "").strip().replace("\\", "/")
+    
+    # Strip workspace root prefixes if they are present
+    if session_id:
+        from nexus.tools.workspace import derive_workspace_path, derive_session_workspace_path
+        if run_id:
+            run_root = derive_workspace_path(session_id, run_id).replace("\\", "/").rstrip("/")
+            if raw.startswith(run_root):
+                raw = raw[len(run_root):].lstrip("/")
+        session_root = derive_session_workspace_path(session_id).replace("\\", "/").rstrip("/")
+        if raw.startswith(session_root):
+            raw = raw[len(session_root):].lstrip("/")
+
+
     if not raw or raw.startswith("/") or ".." in raw.split("/"):
         raise HTTPException(status_code=400, detail="relative_path must stay inside the run workspace")
     if not _SAFE_RELATIVE_PATH_RE.match(raw):
         raise HTTPException(status_code=400, detail="relative_path contains unsupported characters")
     return "/".join(part for part in raw.split("/") if part and part != ".")
+
 
 def _serialize_artifact(artifact) -> RunArtifact:
     url = artifact.url
@@ -103,7 +117,11 @@ async def upload_session_file(
     if not session.current_run_id:
         raise HTTPException(status_code=400, detail="Session does not have an active run")
     await session_manager.ensure_session_ready(session_id)
-    filename = _safe_workspace_relative_path(relative_path or f"sources/uploads/{file.filename or 'upload.bin'}")
+    filename = _safe_workspace_relative_path(
+        relative_path or f"sources/uploads/{file.filename or 'upload.bin'}",
+        session_id=session.id,
+        run_id=session.current_run_id,
+    )
     workspace_path = derive_workspace_path(session.id, session.current_run_id)
     target_path = f"{workspace_path}/{filename}"
     content = await file.read()
@@ -182,7 +200,7 @@ async def download_session_file(
         )
 
     await session_manager.ensure_session_ready(session_id)
-    filename = _safe_workspace_relative_path(relative_path)
+    filename = _safe_workspace_relative_path(relative_path, session_id=session.id, run_id=session.current_run_id)
     workspace_path = derive_workspace_path(session.id, session.current_run_id)
     target_path = f"{workspace_path}/{filename}"
     try:

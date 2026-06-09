@@ -25,6 +25,22 @@ class SafeWorkspacePathTests(TestCase):
         with self.assertRaises(Exception):
             files._safe_workspace_relative_path("../report.pdf")
 
+    def test_safe_workspace_relative_path_strips_absolute_prefixes(self) -> None:
+        result = files._safe_workspace_relative_path(
+            "/home/user/CoComputer/Workspaces/session-123/964068555373/outputs/report.pdf",
+            session_id="session-123",
+            run_id="964068555373",
+        )
+        self.assertEqual(result, "outputs/report.pdf")
+
+    def test_safe_workspace_relative_path_strips_absolute_session_prefix(self) -> None:
+        result = files._safe_workspace_relative_path(
+            "/home/user/CoComputer/Workspaces/session-123/outputs/report.pdf",
+            session_id="session-123",
+        )
+        self.assertEqual(result, "outputs/report.pdf")
+
+
 
 class DriveMirrorTests(IsolatedAsyncioTestCase):
     async def test_mirror_upload_to_google_drive_skips_when_drive_not_connected(self) -> None:

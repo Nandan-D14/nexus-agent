@@ -19,7 +19,7 @@ from nexus.dependencies import (
 )
 from nexus.policy import evaluate_tool_policy, normalize_autonomy_mode
 from nexus.production_tasks import DurableApproval, DurableTask, DurableTaskEvent, DurableTaskRun
-from nexus.storage import generate_artifact_signed_url
+from nexus.storage import download_artifact_as_data_uri, generate_artifact_signed_url
 
 router = APIRouter()
 
@@ -324,6 +324,10 @@ async def download_artifact_by_id(
     if not isinstance(bucket, str) or not isinstance(blob, str):
         raise HTTPException(status_code=409, detail="Artifact does not have durable storage metadata")
     url = generate_artifact_signed_url(bucket_name=bucket, blob_name=blob)
+    if not url:
+        # Signed URL failed (e.g. no SA key in local dev) — fall back to
+        # downloading the blob directly and returning it as a data URI.
+        url = download_artifact_as_data_uri(bucket_name=bucket, blob_name=blob)
     if not url:
         raise HTTPException(status_code=404, detail="Artifact object not found")
     return {

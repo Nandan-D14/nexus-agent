@@ -256,10 +256,10 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   {(turn.events.length > 0 || turn.agentMessages.length > 0 || turn.permissions.length > 0) && (
                     <div className="w-full flex flex-col gap-6">
                       <div className="flex items-center gap-2.5 px-0.5">
-                        <div className="w-6 h-6 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
-                          <Cpu className="w-4 h-4 text-indigo-400" />
+                        <div className="w-6 h-6 rounded-md bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center">
+                          <Cpu className="w-4 h-4 text-zinc-700 dark:text-zinc-300" />
                         </div>
-                        <span className="font-bold text-[15px] tracking-tight text-foreground">CoComputer</span>
+                        <span className="font-semibold text-sm tracking-tight text-foreground">CoComputer</span>
                       </div>
 
                       {turn.events.length > 0 && (
@@ -360,7 +360,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
 function UserMessageCard({ text }: { text: string }) {
   return (
     <div className="flex w-full justify-end py-1">
-      <div className="max-w-[85%] rounded-2xl bg-zinc-900 dark:bg-[#27272a] px-5 py-4 text-[15px] leading-relaxed text-white dark:text-zinc-100 shadow-sm border border-zinc-700/30">
+      <div className="max-w-[85%] rounded-2xl bg-zinc-100 dark:bg-zinc-800 px-5 py-3.5 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-700/50">
         {text}
       </div>
     </div>

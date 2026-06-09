@@ -303,6 +303,13 @@ export default function SessionPage() {
 
       case "run_status":
         setRunInfo(msg.run);
+        // Safety net: reset phase when the run reaches a terminal state,
+        // even if agent_complete was never sent (e.g. crash, disconnect, quota).
+        if (msg.run?.status === "completed" || msg.run?.status === "failed" || msg.run?.status === "cancelled") {
+          setPhase("done");
+          setAgentStatus("");
+          setAgentAction(null);
+        }
         setSessionInfo((prev) =>
           prev
             ? {
@@ -551,7 +558,9 @@ export default function SessionPage() {
 
       case "error":
         setPageError(msg.detail || msg.message);
+        setPhase("done");
         setAgentStatus("");
+        setAgentAction(null);
         setChatItems((prev) => [
           ...prev,
           {

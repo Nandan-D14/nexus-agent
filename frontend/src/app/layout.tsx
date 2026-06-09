@@ -7,11 +7,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Caveat } from "next/font/google";
 import "./globals.css";
 
-import { LiveDesktopProvider } from "@/components/live-desktop-provider";
-import { AuthProvider } from "@/lib/auth-context";
-import { SettingsProvider } from "@/lib/settings-context";
-import { ToastProvider } from "@/components/toast-provider";
-import { ThemeProvider } from "@/components/theme-provider";
+import { Providers } from "./providers";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -43,20 +39,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} antialiased min-h-screen`}
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <ToastProvider>
-            <AuthProvider>
-              <SettingsProvider>
-                <LiveDesktopProvider>{children}</LiveDesktopProvider>
-              </SettingsProvider>
-            </AuthProvider>
-          </ToastProvider>
-        </ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

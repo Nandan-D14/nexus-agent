@@ -12,6 +12,7 @@ import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
 import { Activity, Monitor, Loader2, FileText } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { RunArtifact } from "@/lib/message-types";
+import { Tabs, Tooltip } from "@heroui/react";
 
 type Tab = "workflow" | "desktop" | "artifacts";
 
@@ -89,66 +90,61 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   return (
     <div className="h-full flex flex-col bg-[#0a0a0c] rounded-xl border border-zinc-800 overflow-hidden">
       {/* Clean Tab Bar */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800 bg-[#0f0f11]">
-        <div className="flex items-center gap-1">
-          {/* Workflow Tab */}
-          <button
-            onClick={() => handleTabChange("workflow")}
-            className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-              activeTab === "workflow"
-                ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-            }`}
-          >
-            <Activity className={`w-4 h-4 ${activeTab === "workflow" ? "text-cyan-400" : "text-zinc-600"}`} />
-            <span>Workflow</span>
-            {workflowRun && workflowRun.steps.length > 0 && (
-              <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-zinc-700 text-zinc-300 text-[11px] font-semibold">
-                {workflowRun.steps.length}
-              </span>
-            )}
-            {activeSteps > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-cyan-400 rounded-full" />
-            )}
-          </button>
+      <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800/50 bg-transparent shadow-sm z-10 relative">
+        <Tabs 
+          selectedKey={activeTab} 
+          onSelectionChange={(key) => handleTabChange(key as Tab)}
+        >
+          <Tabs.ListContainer>
+            <Tabs.List aria-label="Workspace Tabs" className="flex flex-row items-center gap-1">
+              <Tabs.Tab id="workflow" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip content="Workflow" placement="bottom" delay={0} closeDelay={0}>
+                  <div className="relative flex items-center justify-center">
+                    <Activity className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    {workflowRun && workflowRun.steps.length > 0 && (
+                      <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
+                        {workflowRun.steps.length}
+                      </span>
+                    )}
+                    {activeSteps > 0 && (
+                      <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-cyan-500 rounded-full" />
+                    )}
+                  </div>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
 
-          {/* Desktop Tab */}
-          <button
-            onClick={() => handleTabChange("desktop")}
-            className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-              activeTab === "desktop"
-                ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-            }`}
-          >
-            <Monitor className={`w-4 h-4 ${activeTab === "desktop" ? "text-emerald-400" : "text-zinc-600"}`} />
-            <span>Desktop</span>
-            {isStreamActive && (
-              <span className="relative flex h-2 w-2 ml-1">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-              </span>
-            )}
-          </button>
+              <Tabs.Tab id="desktop" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip content="Desktop" placement="bottom" delay={0} closeDelay={0}>
+                  <div className="relative flex items-center justify-center">
+                    <Monitor className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    {isStreamActive && (
+                      <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
+                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      </span>
+                    )}
+                  </div>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
 
-          {/* Artifacts Tab */}
-          <button
-            onClick={() => handleTabChange("artifacts")}
-            className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-              activeTab === "artifacts"
-                ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-            }`}
-          >
-            <FileText className={`w-4 h-4 ${activeTab === "artifacts" ? "text-amber-400" : "text-zinc-600"}`} />
-            <span>Artifacts</span>
-            {artifacts.length > 0 && (
-              <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-zinc-700 text-zinc-300 text-[11px] font-semibold">
-                {artifacts.length}
-              </span>
-            )}
-          </button>
-        </div>
+              <Tabs.Tab id="artifacts" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip content="Artifacts" placement="bottom" delay={0} closeDelay={0}>
+                  <div className="relative flex items-center justify-center">
+                    <FileText className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    {artifacts.length > 0 && (
+                      <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
+                        {artifacts.length}
+                      </span>
+                    )}
+                  </div>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+            </Tabs.List>
+          </Tabs.ListContainer>
+        </Tabs>
 
         {/* Agent Activity */}
         <AnimatePresence>
@@ -200,20 +196,20 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                   <>
                     <div className="absolute inset-0 z-10 bg-black/30 cursor-not-allowed" />
                     <motion.div 
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="absolute top-3 right-3 z-20 flex items-center gap-3 px-4 py-2 rounded-lg bg-[#141416] border border-zinc-700 shadow-xl"
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="absolute top-2 right-2 z-20 flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-[#141416]/90 backdrop-blur border border-zinc-700/50 shadow-md"
                     >
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${phase === "thinking" ? "bg-cyan-400" : "bg-amber-400"}`} />
-                        <span className="text-xs font-medium text-zinc-300">
-                          {agentStatus || (phase === "thinking" ? "Thinking..." : "Working...")}
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${phase === "thinking" ? "bg-cyan-400" : "bg-amber-400"}`} />
+                        <span className="text-[10px] font-medium text-zinc-300 uppercase tracking-wide">
+                          {agentStatus || (phase === "thinking" ? "Thinking" : "Working")}
                         </span>
                       </div>
                       <div className="w-px h-3 bg-zinc-700" />
                       <button
                         onClick={onStopAgent}
-                        className="text-[11px] font-semibold text-red-400 hover:text-red-300 transition-colors"
+                        className="text-[10px] font-medium text-red-400 hover:text-red-300 transition-colors uppercase tracking-wide"
                       >
                         Stop
                       </button>
