@@ -28,6 +28,7 @@ from nexus.sandbox import SandboxDeadError
 from nexus.skills import build_enabled_skills_prompt
 from nexus.tools._context import (
     set_bg_task_manager,
+    set_ensure_sandbox_callback,
     set_history_repository,
     set_owner_id,
     set_production_task_repository,
@@ -166,6 +167,7 @@ class NexusOrchestrator:
         set_production_task_repository(self.production_task_repository)
         set_task_id(self._durable_task_id)
         set_send_json(self._send_json)
+        set_ensure_sandbox_callback(lambda: self._ensure_sandbox_ready("tool_use"))
         self._bind_workspace_context()
         if not lazy_sandbox:
             workspace_root_ready = await self._ensure_session_workspace_root()
@@ -459,7 +461,7 @@ class NexusOrchestrator:
         if decision.mode == "current":
             await self._run_fast_current_lookup(text)
             return True
-        if decision.mode == "capability" or decision.mode == "ask":
+        if decision.mode == "capability" or decision.mode == "ask" or decision.mode == "chat":
             return await self._run_fast_answer(text, source=source)
         return False
 
@@ -1588,9 +1590,6 @@ class NexusOrchestrator:
         self._turn_tool_summaries = []
         self._budget_stop_requested = False
         self._budget_stop_reason = ""
-        if not await self._ensure_sandbox_ready("agent_turn"):
-            await self._set_run_status("failed")
-            return
         await self._prepare_workspace_for_turn(message)
         self._current_turn_step_id = await self._create_step(
             step_type="agent_turn",
@@ -2524,6 +2523,9 @@ class NexusOrchestrator:
 
     async def _prepare_workspace_for_turn(self, task_summary: str) -> None:
         if not self._current_run_id:
+            return
+        if not await self._ensure_sandbox_ready("workspace_prep"):
+            logger.warning("Sandbox not available for workspace preparation in session %s", self.session.id)
             return
         self._bind_workspace_context()
         if not await self._ensure_session_workspace_root():

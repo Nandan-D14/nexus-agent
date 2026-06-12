@@ -20,7 +20,7 @@ def _mark_screen_changed(action: str) -> None:
     mark_dirty(action)
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def move_mouse(x: int, y: int) -> dict:
     """Move the mouse cursor to screen coordinates (x, y) without clicking.
 
@@ -48,7 +48,7 @@ def move_mouse(x: int, y: int) -> dict:
         return tool_error(f"Move mouse to ({x}, {y}) failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def left_click(x: int, y: int) -> dict:
     """Click the left mouse button at screen coordinates (x, y).
 
@@ -77,7 +77,7 @@ def left_click(x: int, y: int) -> dict:
         return tool_error(f"Left click at ({x}, {y}) failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def right_click(x: int, y: int) -> dict:
     """Right-click at screen coordinates (x, y) to open context menus.
 
@@ -102,7 +102,7 @@ def right_click(x: int, y: int) -> dict:
         return tool_error(f"Right click at ({x}, {y}) failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def double_click(x: int, y: int) -> dict:
     """Double-click at screen coordinates (x, y) to open files or select text.
 
@@ -127,7 +127,7 @@ def double_click(x: int, y: int) -> dict:
         return tool_error(f"Double click at ({x}, {y}) failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def type_text(text: str) -> dict:
     """Type text at the current cursor position.
 
@@ -154,7 +154,7 @@ def type_text(text: str) -> dict:
         return tool_error(f"Type text failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def press_key(key: str) -> dict:
     """Press a keyboard key or key combination.
 
@@ -189,7 +189,7 @@ def press_key(key: str) -> dict:
         return tool_error(f"Press key '{key}' failed: {e}")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def scroll_screen(direction: str, amount: int = 3) -> dict:
     """Scroll the screen up or down.
 
@@ -217,7 +217,7 @@ def scroll_screen(direction: str, amount: int = 3) -> dict:
         )
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> dict:
     """Drag from one screen position to another.
 

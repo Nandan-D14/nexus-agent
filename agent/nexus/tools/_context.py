@@ -56,6 +56,27 @@ _current_send_json: contextvars.ContextVar[Optional["SendJsonCallback"]] = (
     contextvars.ContextVar("_current_send_json", default=None)
 )
 
+_ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable[None]]]] = (
+    contextvars.ContextVar("_ensure_sandbox_callback", default=None)
+)
+
+
+def set_ensure_sandbox_callback(callback: Callable[[], Awaitable[None]] | None) -> contextvars.Token:
+    """Set the async callback that boots the sandbox if it isn't already alive."""
+    return _ensure_sandbox_callback.set(callback)
+
+
+async def ensure_sandbox() -> "SandboxManager":
+    """Ensure the sandbox is alive before use. Boots it lazily if needed.
+
+    Call this at the top of any tool that requires sandbox access.
+    Returns the sandbox manager for convenience.
+    """
+    callback = _ensure_sandbox_callback.get()
+    if callback is not None:
+        await callback()
+    return get_sandbox()
+
 
 def set_sandbox(sandbox: "SandboxManager") -> contextvars.Token:
     """Set the sandbox for the current execution context."""

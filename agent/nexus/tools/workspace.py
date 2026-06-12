@@ -191,7 +191,7 @@ def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
 
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
     """Create or reuse the per-run workspace scaffold inside the sandbox."""
     try:
@@ -253,7 +253,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
         return _tool_error(str(exc) or "Failed to prepare the task workspace.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def initialize_task_state(
     task_summary: str,
     task_type: str = "general_task",
@@ -305,7 +305,7 @@ async def initialize_task_state(
         return tool_error(str(exc) or "Failed to initialize task state.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def update_task_state(
     stage: str = "intake",
     active_agent: str = "",
@@ -366,7 +366,7 @@ async def update_task_state(
         return tool_error(str(exc) or "Failed to update task state.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def read_task_state() -> dict[str, Any]:
     """Read task_state.json from the active workspace.
 
@@ -391,7 +391,7 @@ async def read_task_state() -> dict[str, Any]:
         return tool_error(str(exc) or "Failed to read task state.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def write_todo_list(items: list[str]) -> dict[str, Any]:
     """Write the task todo list to todo.md in the active workspace.
 
@@ -425,7 +425,7 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
         return tool_error(str(exc) or "Failed to write the todo list.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def update_todo_item(
     item_index: int,
     status: Literal["pending", "in_progress", "done"],
@@ -484,7 +484,7 @@ async def update_todo_item(
         return tool_error(str(exc) or "Failed to update the todo item.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def write_workspace_file(
     relative_path: str,
     content: str,
@@ -543,7 +543,7 @@ async def write_workspace_file(
         return tool_error(str(exc) or "Failed to write the workspace file.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def read_workspace_file(relative_path: str) -> dict[str, Any]:
     """Read a text file from the active workspace.
 
@@ -567,7 +567,7 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
         return tool_error(str(exc) or "Failed to read the workspace file.")
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
     """List files inside the active workspace.
 

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-RouteMode = Literal["ask", "search", "current", "work", "computer", "deep", "clarify", "capability"]
+RouteMode = Literal["ask", "chat", "search", "current", "work", "computer", "deep", "clarify", "capability"]
 
 
 @dataclass(frozen=True)
@@ -66,24 +66,29 @@ _CAPABILITY_RE = re.compile(
 _ROUTING_PROMPT = """You are the request router for CoComputer, an agentic system with full desktop control and specialized sub-agents.
 Your goal is to choose the most efficient execution route for the user's request.
 
+CRITICAL RULE: Only set needs_full_agent=true when the task REQUIRES a sandbox (file system, terminal, code execution, GUI/desktop control). Pure text responses, Q&A, creative writing, planning, brainstorming, and conversations do NOT need a sandbox.
+
 Available Routes:
-- ask: Simple direct questions or conversational turns (hi, thanks) that don't need tools.
-- search: Simple web lookups for static facts (who is, what is).
-- current: Real-time queries like sports scores, news, or weather that need fresh web data.
-- work: Local file-system tasks, coding, implementing features, or multi-step workflows.
-- computer: GUI actions, clicking, typing into apps, screenshots, or visual navigation.
-- deep: Complex research tasks requiring multiple sources, analysis, or long reports.
-- capability: Questions about your own tools, features, connectors, or what you "can" do.
-- clarify: Empty, nonsense, or extremely ambiguous requests (e.g. "fix it" with no context).
+- ask: Conversational turns (hi, thanks), direct questions about general knowledge, opinions, or explanations. NO sandbox needed.
+- chat: Creative writing (poems, stories, essays, emails, plans), brainstorming, summarization, translation, drafting. NO sandbox needed.
+- search: Simple web lookups for static facts. NO sandbox needed.
+- current: Real-time queries like sports scores, news, or weather. NO sandbox needed.
+- clarify: Empty, nonsense, or extremely ambiguous requests. NO sandbox needed.
+- capability: Questions about CoComputer's own tools, features, or connectors. NO sandbox needed.
+- work: Tasks that REQUIRE sandbox: writing/reading files, running terminal commands, coding, implementing features, deploying, git operations.
+- computer: Tasks that REQUIRE sandbox: GUI actions, clicking, typing into apps, screenshots, visual navigation.
+- deep: Complex research requiring multiple sources and long analysis (uses sandbox for file storage).
 
 Decision Logic:
-1. If the request mentions "click", "desktop", "screen", "screenshot", or visual apps -> "computer" (needs_full_agent=true).
-2. If it asks to "implement", "fix code", "write file", or "run" -> "work" (needs_full_agent=true).
-3. If it requires complex research or "deep dive" -> "deep" (needs_full_agent=true).
-4. If it's a simple fact question -> "search" (needs_full_agent=false).
-5. If it's a current event/score -> "current" (needs_full_agent=false).
-6. If it's just "hi" or a direct question about a general concept -> "ask" (needs_full_agent=false).
-7. If it asks "can you use Gmail?" or "what tools do you have?" -> "capability" (needs_full_agent=false).
+1. If it's "hi", "hello", "thanks", or general conversation -> "ask" (needs_full_agent=false)
+2. If it asks to write a poem, story, email, plan, essay, or any creative text -> "chat" (needs_full_agent=false)
+3. If it asks to summarize, translate, brainstorm, or explain something -> "chat" (needs_full_agent=false)
+4. If it's a factual question answerable from general knowledge -> "ask" (needs_full_agent=false)
+5. If it needs current web info (scores, news, weather) -> "current" (needs_full_agent=false)
+6. If it's a simple fact lookup -> "search" (needs_full_agent=false)
+7. If it mentions "click", "desktop", "screen", "screenshot", or GUI apps -> "computer" (needs_full_agent=true)
+8. If it asks to write/modify files, run code, use terminal, git, deploy -> "work" (needs_full_agent=true)
+9. If it's ambiguous ("fix it", "do this") with no context -> "clarify" (needs_full_agent=false)
 
 Output your decision as JSON:
 {{
@@ -104,9 +109,10 @@ async def classify_request_llm(
     has_connectors: bool = False,
     has_uploads: bool = False,
 ) -> RouteDecision:
-    """Classify the request using Gemini Flash for improved accuracy."""
-    if runtime_config is None or not runtime_config.gemini_available:
-        # Fallback to simple logic if LLM is unavailable
+    from nexus.config import settings
+    import os
+    api_key = settings.qwen_api_key or os.environ.get("QWEN_API_KEY", "")
+    if not api_key:
         return classify_request_simple(text, has_connectors=has_connectors, has_uploads=has_uploads)
 
     prompt = _ROUTING_PROMPT.format(
@@ -116,33 +122,27 @@ async def classify_request_llm(
     )
 
     try:
-        from google.genai import types
-        from nexus.runtime_config import build_genai_client
-
-        model = runtime_config.gemini_light_model or "gemini-3.1-flash-lite-preview"
-        client = build_genai_client(runtime_config)
-
-        def _generate():
-            return client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
-            )
-
-        response = await asyncio.to_thread(_generate)
-        data = json.loads(response.text)
+        import litellm
+        api_base = settings.qwen_api_base or os.environ.get("QWEN_API_BASE", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+        
+        response = await litellm.acompletion(
+            model="openai/qwen3-4b",
+            api_key=api_key,
+            api_base=api_base,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        data = json.loads(response.choices[0].message.content)
         
         return RouteDecision(
-            mode=data.get("mode", "work"),
-            needs_full_agent=bool(data.get("needs_full_agent", True)),
+            mode=data.get("mode", "ask"),
+            needs_full_agent=bool(data.get("needs_full_agent", False)),
             reason=data.get("reason", "llm classification"),
             clarification=data.get("clarification", ""),
         )
     except Exception as exc:
-        logger.warning("LLM routing failed, falling back to simple logic: %s", exc)
+        logger.warning("LLM routing failed (%s), falling back to simple logic — default will be no-sandbox", exc)
         return classify_request_simple(text, has_connectors=has_connectors, has_uploads=has_uploads)
 
 
@@ -199,7 +199,7 @@ def classify_request_simple(
     if word_count <= 20 and lowered in {"hi", "hello", "hey", "thanks", "thank you"}:
         return RouteDecision("ask", False, "simple conversational turn")
 
-    return RouteDecision("work", True, "default to normal agent flow")
+    return RouteDecision("ask", False, "default to no-sandbox safe route")
 
 
 async def classify_request(

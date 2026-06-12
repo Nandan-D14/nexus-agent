@@ -12,7 +12,7 @@ from nexus.tools.base import normalized_tool, tool_error, tool_success
 logger = logging.getLogger(__name__)
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def open_browser(url: str) -> dict:
     """Open a URL in the web browser (Firefox).
 

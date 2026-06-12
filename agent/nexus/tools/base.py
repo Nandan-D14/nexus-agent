@@ -93,44 +93,56 @@ def tool_success(
     }
 
 
-def normalized_tool(func: Callable) -> Callable:
+def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Callable:
     """Decorator that normalizes tool outputs into ``NormalizedToolResult``.
 
     Works with both sync and async tool functions. Catches all exceptions
     and converts them into structured error results so the LLM always
     receives a valid response.
+
+    Args:
+        needs_sandbox: If True, lazily boots the sandbox before the tool runs.
+            Use for tools that require sandbox access (bash, computer, browser, etc.).
     """
 
-    @wraps(func)
-    async def async_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
-        try:
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)
-            else:
-                result = func(*args, **kwargs)
-            return _normalize(func.__name__, result)
-        except Exception as e:
-            logger.exception("Tool %s failed", func.__name__)
-            return tool_error(
-                f"Tool {func.__name__} failed: {e}",
-                error_code="TOOL_EXCEPTION",
-                tool_name=func.__name__,
-            )
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
+            try:
+                if needs_sandbox:
+                    from nexus.tools._context import ensure_sandbox
+                    await ensure_sandbox()
+                if asyncio.iscoroutinefunction(fn):
+                    result = await fn(*args, **kwargs)
+                else:
+                    result = fn(*args, **kwargs)
+                return _normalize(fn.__name__, result)
+            except Exception as e:
+                logger.exception("Tool %s failed", fn.__name__)
+                return tool_error(
+                    f"Tool {fn.__name__} failed: {e}",
+                    error_code="TOOL_EXCEPTION",
+                    tool_name=fn.__name__,
+                )
 
-    @wraps(func)
-    def sync_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
-        try:
-            result = func(*args, **kwargs)
-            return _normalize(func.__name__, result)
-        except Exception as e:
-            logger.exception("Tool %s failed", func.__name__)
-            return tool_error(
-                f"Tool {func.__name__} failed: {e}",
-                error_code="TOOL_EXCEPTION",
-                tool_name=func.__name__,
-            )
+        @wraps(fn)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
+            try:
+                result = fn(*args, **kwargs)
+                return _normalize(fn.__name__, result)
+            except Exception as e:
+                logger.exception("Tool %s failed", fn.__name__)
+                return tool_error(
+                    f"Tool {fn.__name__} failed: {e}",
+                    error_code="TOOL_EXCEPTION",
+                    tool_name=fn.__name__,
+                )
 
-    return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+        return async_wrapper if asyncio.iscoroutinefunction(fn) else sync_wrapper
+
+    if func is not None:
+        return decorator(func)
+    return decorator
 
 
 def _normalize(func_name: str, result: Any) -> NormalizedToolResult:

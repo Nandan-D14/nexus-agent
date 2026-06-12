@@ -71,7 +71,7 @@ def _blocked_binary_dump(command: str) -> bool:
 
 from nexus.tools.base import normalized_tool
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def run_command(command: str, background: bool = False) -> dict:
     """Run a shell command in the Linux terminal and return the output.
 

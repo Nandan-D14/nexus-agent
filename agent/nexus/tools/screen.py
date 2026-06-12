@@ -178,7 +178,7 @@ def get_last_screenshot_b64() -> str | None:
 
 from nexus.tools.base import normalized_tool
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def take_screenshot() -> dict:
     """Take a screenshot to see the current screen state.
 

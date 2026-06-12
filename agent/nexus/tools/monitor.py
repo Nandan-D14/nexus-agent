@@ -13,7 +13,7 @@ from nexus.tools.base import normalized_tool, tool_error, tool_success
 logger = logging.getLogger(__name__)
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def schedule_monitoring_task(
     description: str,
     interval_minutes: int,

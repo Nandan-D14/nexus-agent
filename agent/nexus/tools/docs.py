@@ -27,7 +27,7 @@ def _resolve_workspace_or_absolute_path(path: str) -> str:
     return f"{get_workspace_path().rstrip('/')}/{cleaned.lstrip('/')}"
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def extract_pdf_text(path: str, max_chars: int = 12000) -> dict[str, Any]:
     """Extract readable text from a PDF upload or a base64 text file containing a PDF."""
     sandbox = get_sandbox()
@@ -165,7 +165,7 @@ except Exception as exc:
         },
     }
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def generate_pdf_report(
     title: str,
     markdown_content: str,
@@ -404,7 +404,7 @@ sys.exit(1)
             "detail": {"filename": filename, "path": output_path},
         }
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any]:
     """
     Take any file created in the workspace and promote it to an artifact for the user to view.
@@ -470,7 +470,7 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             "detail": None
         }
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def generate_excel_report(
     title: str,
     headers: list[str],
@@ -629,7 +629,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
         }
 
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 async def generate_docx_report(
     title: str,
     markdown_content: str,

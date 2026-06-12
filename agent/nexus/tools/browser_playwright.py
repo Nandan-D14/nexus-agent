@@ -88,7 +88,7 @@ if __name__ == "__main__":
             "retry_hint": "Check CDP connection (localhost:9222)."
         }
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def playwright_navigate(url: str) -> dict[str, Any]:
     """Navigate the Chromium browser to a URL using Playwright via CDP."""
     safe_url = url.replace("'", "\\'").replace('"', '\\"')
@@ -98,7 +98,7 @@ def playwright_navigate(url: str) -> dict[str, Any]:
 """
     return _execute_playwright_script(script)
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def playwright_click(selector: str) -> dict[str, Any]:
     """Click an element in the browser using Playwright."""
     safe_selector = selector.replace("'", "\\'").replace('"', '\\"')
@@ -108,7 +108,7 @@ def playwright_click(selector: str) -> dict[str, Any]:
 """
     return _execute_playwright_script(script)
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def playwright_type(selector: str, text: str) -> dict[str, Any]:
     """Type text into an element in the browser using Playwright."""
     safe_selector = selector.replace("'", "\\'").replace('"', '\\"')
@@ -119,7 +119,7 @@ def playwright_type(selector: str, text: str) -> dict[str, Any]:
 """
     return _execute_playwright_script(script)
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def playwright_get_text(selector: str) -> dict[str, Any]:
     """Get the text content of an element in the browser using Playwright."""
     safe_selector = selector.replace("'", "\\'").replace('"', '\\"')
@@ -130,7 +130,7 @@ def playwright_get_text(selector: str) -> dict[str, Any]:
 """
     return _execute_playwright_script(script)
 
-@normalized_tool
+@normalized_tool(needs_sandbox=True)
 def playwright_wait_for(selector: str, timeout_ms: int) -> dict[str, Any]:
     """Wait for an element to be visible in the browser using Playwright."""
     safe_selector = selector.replace("'", "\\'").replace('"', '\\"')
