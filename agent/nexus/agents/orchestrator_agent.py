@@ -154,18 +154,9 @@ Safety:
 # ---------------------------------------------------------------------------
 
 def _get_model(runtime_config: SessionRuntimeConfig):
-    """Return the model for the orchestrator."""
-    if runtime_config.use_kilo:
-        from google.adk.models.lite_llm import LiteLlm
-        return LiteLlm(
-            model=f"openai/{runtime_config.kilo_model_id}",
-            api_key=runtime_config.kilo_api_key,
-            api_base=runtime_config.kilo_gateway_url,
-        )
-    return CredentialedGemini(
-        runtime_config=runtime_config,
-        model=runtime_config.gemini_agent_model,
-    )
+    """Return the Qwen router model for the orchestrator."""
+    from nexus.qwen_router import create_qwen_model
+    return create_qwen_model("qwen3.7-max")
 
 
 def create_orchestrator_agent(

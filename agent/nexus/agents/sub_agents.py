@@ -30,7 +30,7 @@ from nexus.tools.browser_playwright import (
     playwright_get_text,
     playwright_wait_for,
 )
-from google.adk.tools import google_search
+# from google.adk.tools import google_search  # Gemini-only; use web_search (DuckDuckGo) or tavily_search instead
 from nexus.tools.web import web_search, scrape_web_page
 from nexus.tools.integrations import (
     search_drive,
@@ -152,7 +152,7 @@ Workflow:
 1. Ensure the shared workspace exists with prepare_task_workspace(...) if needed.
 2. Read task.md and todo.md. If todo.md is still empty, create a short todo list with write_todo_list(...).
 3. Mark the current web step in_progress with update_todo_item(...).
-4. Use web_search(query) for discovery whenever you need sources or candidate pages; use google_search(queries) when grounded Google Search is better.
+4. Use web_search(query) for discovery whenever you need sources or candidate pages; use tavily_search(queries) when connected and AI-powered search is better.
 5. Use scrape_web_page(url) to capture readable content into the workspace before opening pages interactively.
 6. Open the site with open_browser(url), or inspect the already-open browser tab, only when interactive browser state matters or when you must show a finished report in the browser.
 7. Use take_screenshot() only when page state or visible content must be read and scrape_web_page is insufficient.
@@ -163,7 +163,7 @@ Workflow:
 Rules:
 - For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before opening Google apps in Firefox.
 - Prefer web_search and scrape_web_page for discovery and capture before interactive browsing.
-- For research, article summarization, or news gathering, stay in web_search/google_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
+- For research, article summarization, or news gathering, stay in web_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
 - If scrape_web_page returns an error such as 401, 403, or 429, treat that source as blocked instead of failing the whole task.
 - When a source blocks scraping, continue with other sources or use open_browser only if that specific page is essential.
 - Prefer Playwright CDP tools over physical mouse clicks and vision when interacting with web forms or specific DOM elements.
@@ -173,13 +173,13 @@ Rules:
 - If the task asks for a generated HTML dashboard or report, gather sources and evidence here, then hand file creation to code_agent.
 - Do not compose the deliverable in browser UI unless the user explicitly asked for a browser-based editor workflow.
 - Prefer action between screenshots. If the page is unchanged, keep browsing or summarize instead of repeatedly observing.
-- Do not use vision for ordinary search results, article reading, or source capture when google_search/scrape_web_page worked.
+- Do not use vision for ordinary search results, article reading, or source capture when web_search/scrape_web_page worked.
 
 Tools:
 - prepare_task_workspace(task_summary), read_workspace_file(relative_path), list_workspace_files(relative_path)
 - write_todo_list(items), update_todo_item(item_index, status, note)
 - write_workspace_file(relative_path, content, append)
-- web_search(query), google_search(queries), scrape_web_page(url)
+- web_search(query), tavily_search(query), scrape_web_page(url)
 - open_browser(url)
 - take_screenshot()
 - run_command(command, background=False) only for narrow browser helper checks
@@ -257,7 +257,7 @@ Workflow:
 3. Read task.md, todo.md, and task_state.json, then write or refresh a 3-7 step master todo list with write_todo_list(...).
 4. Move task_state through these deterministic stages with update_task_state(...): planning -> gathering_evidence -> synthesizing -> reviewing -> finalizing -> completed.
 5. Break the task into concrete sub-questions and independent source batches.
-6. Delegate web and source gathering to research_browser_agent, primarily with google_search(...) and scrape_web_page(...).
+6. Delegate web and source gathering to research_browser_agent, primarily with web_search(...) and scrape_web_page(...).
 7. Delegate local repo, log, file, config, CLI evidence-gathering, and final report or dashboard generation to research_code_agent.
 8. Delegate GUI-only verification to research_computer_agent only after the deliverable exists or when another worker truly cannot proceed without visible state.
 9. Save the final report to outputs/final.md or update it, then set review_status="pending" and delegate to research_reviewer_agent.
@@ -347,19 +347,10 @@ def _with_skill_instruction(instruction: str, skill_instruction: str = "") -> st
     return f"{instruction}\n\n{skill_instruction.strip()}"
 
 
-def _get_model(runtime_config: SessionRuntimeConfig):
-    """Return the model identifier for sub-agents."""
-    if runtime_config.use_kilo:
-        from google.adk.models.lite_llm import LiteLlm
-        return LiteLlm(
-            model=f"openai/{runtime_config.kilo_model_id}",
-            api_key=runtime_config.kilo_api_key,
-            api_base=runtime_config.kilo_gateway_url,
-        )
-    return CredentialedGemini(
-        runtime_config=runtime_config,
-        model=runtime_config.gemini_agent_model,
-    )
+def _get_model(runtime_config: SessionRuntimeConfig, model_name: str = "qwen3.7-max"):
+    """Return the Qwen router model for sub-agents."""
+    from nexus.qwen_router import create_qwen_model
+    return create_qwen_model(model_name)
 
 
 def _create_computer_agent(
@@ -370,7 +361,7 @@ def _create_computer_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config),
+        model=_get_model(runtime_config, "qwen3.7-plus"),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -402,7 +393,7 @@ def _create_browser_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config),
+        model=_get_model(runtime_config, "qwen3.6-max"),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -413,7 +404,7 @@ def _create_browser_agent(
             read_workspace_file,
             list_workspace_files,
             *GOOGLE_WORKSPACE_TOOLS,
-            google_search,
+            # google_search,  # Gemini-only; web_search (DuckDuckGo) covers search
             web_search,
             scrape_web_page,
             run_command,
@@ -440,7 +431,7 @@ def _create_code_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config),
+        model=_get_model(runtime_config, "qwen3.7-max"),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -470,7 +461,7 @@ def _create_research_reviewer_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config),
+        model=_get_model(runtime_config, "qwen3.7-plus"),
         instruction=instruction,
         tools=gate_tools([
             read_task_state,
@@ -551,7 +542,7 @@ def create_deepresearcher_agent(
 
     return Agent(
         name="deepresearcher",
-        model=_get_model(runtime_config),
+        model=_get_model(runtime_config, "qwen3.6-plus"),
         instruction=_with_skill_instruction(DEEPRESEARCHER_PROMPT, skill_instruction),
         tools=gate_tools(tools),
         sub_agents=[research_browser, research_code, research_computer, research_reviewer],

@@ -24,7 +24,7 @@ from nexus.credentialed_gemini import CredentialedGemini
 from nexus.config import settings
 from nexus.prompts.system import SYSTEM_PROMPT
 from nexus.runtime_config import SessionRuntimeConfig
-from google.adk.tools import google_search
+# from google.adk.tools import google_search  # Gemini-only; use web_search (DuckDuckGo) or tavily_search instead
 from nexus.tool_gateway import gate_tools
 from nexus.tools import ALL_TOOLS
 from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
@@ -43,19 +43,9 @@ class AgentTurnResult:
 
 
 def _get_model(runtime_config: SessionRuntimeConfig):
-    """Return either a LiteLlm wrapper (Kilo) or a Gemini model string."""
-    if runtime_config.use_kilo:
-        from google.adk.models.lite_llm import LiteLlm
-        logger.info("Using Kilo gateway model: %s", runtime_config.kilo_model_id)
-        return LiteLlm(
-            model=f"openai/{runtime_config.kilo_model_id}",
-            api_key=runtime_config.kilo_api_key,
-            api_base=runtime_config.kilo_gateway_url,
-        )
-    return CredentialedGemini(
-        runtime_config=runtime_config,
-        model=runtime_config.gemini_agent_model,
-    )
+    """Return the Qwen router model."""
+    from nexus.qwen_router import create_qwen_model
+    return create_qwen_model("qwen3.7-max")
 
 
 def _runtime_for_task_model(
@@ -156,7 +146,7 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
-        google_search,
+        # google_search,  # Gemini-only; web_search (DuckDuckGo) and tavily_search cover search
         web_search,
         scrape_web_page,
         search_drive,
@@ -190,7 +180,7 @@ def create_multi_agent(
         read_workspace_file,
         list_workspace_files,
         request_background_task,
-        google_search,
+        # google_search,  # Gemini-only; web_search (DuckDuckGo) and tavily_search cover search
         web_search,
         scrape_web_page,
         search_drive,

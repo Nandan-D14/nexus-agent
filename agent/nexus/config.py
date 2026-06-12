@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     kilo_model_id: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     kilo_gateway_url: str = "https://api.kilo.ai/api/gateway"
 
+    # Qwen settings
+    qwen_api_key: str = ""
+    qwen_api_base: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
     @property
     def use_kilo(self) -> bool:
         """True when Kilo is available for agent reasoning/tool calling."""
