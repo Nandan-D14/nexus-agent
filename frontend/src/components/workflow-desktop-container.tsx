@@ -9,12 +9,13 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, LayoutGrid } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
+import { WorkspacePanel } from "./workspace-panel";
 import { RunArtifact } from "@/lib/message-types";
 import { Tabs, Tooltip } from "@heroui/react";
 
-type Tab = "workflow" | "desktop" | "artifacts";
+type Tab = "workflow" | "desktop" | "artifacts" | "workspace";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -98,47 +99,76 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
           <Tabs.ListContainer>
             <Tabs.List aria-label="Workspace Tabs" className="flex flex-row items-center gap-1">
               <Tabs.Tab id="workflow" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
-                <Tooltip content="Workflow" placement="bottom" delay={0} closeDelay={0}>
-                  <div className="relative flex items-center justify-center">
-                    <Activity className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
-                    {workflowRun && workflowRun.steps.length > 0 && (
-                      <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
-                        {workflowRun.steps.length}
-                      </span>
-                    )}
-                    {activeSteps > 0 && (
-                      <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-cyan-500 rounded-full" />
-                    )}
-                  </div>
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Activity className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      {workflowRun && workflowRun.steps.length > 0 && (
+                        <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
+                          {workflowRun.steps.length}
+                        </span>
+                      )}
+                      {activeSteps > 0 && (
+                        <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-cyan-500 rounded-full" />
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Workflow
+                  </Tooltip.Content>
                 </Tooltip>
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
 
               <Tabs.Tab id="desktop" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
-                <Tooltip content="Desktop" placement="bottom" delay={0} closeDelay={0}>
-                  <div className="relative flex items-center justify-center">
-                    <Monitor className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
-                    {isStreamActive && (
-                      <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
-                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      </span>
-                    )}
-                  </div>
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Monitor className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      {isStreamActive && (
+                        <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        </span>
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Desktop
+                  </Tooltip.Content>
                 </Tooltip>
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
 
               <Tabs.Tab id="artifacts" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
-                <Tooltip content="Artifacts" placement="bottom" delay={0} closeDelay={0}>
-                  <div className="relative flex items-center justify-center">
-                    <FileText className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
-                    {artifacts.length > 0 && (
-                      <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
-                        {artifacts.length}
-                      </span>
-                    )}
-                  </div>
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <FileText className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      {artifacts.length > 0 && (
+                        <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
+                          {artifacts.length}
+                        </span>
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Artifacts
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
+              <Tabs.Tab id="workspace" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <LayoutGrid className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Workspace Apps
+                  </Tooltip.Content>
                 </Tooltip>
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
@@ -230,6 +260,19 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               className="absolute inset-0"
             >
               <OutputsPanel artifacts={artifacts} />
+            </motion.div>
+          )}
+
+          {activeTab === "workspace" && (
+            <motion.div
+              key="workspace"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <WorkspacePanel />
             </motion.div>
           )}
         </AnimatePresence>

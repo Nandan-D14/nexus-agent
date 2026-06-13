@@ -32,14 +32,14 @@ export type ToolInvocation = {
 export type GroupedEvent =
   | ToolInvocation
   | { kind: "screenshot"; image_b64?: string; analysis?: string; ts: number }
-  | { kind: "error"; message: string; code?: string; ts: number };
+  | { kind: "error"; message: string; code?: string; ts: number }
+  | { kind: "thinking"; text: string; ts: number };
 
 export type TaskGroup = {
   id: string;
   title: string;
   status: "running" | "completed";
   steps: GroupedEvent[];
-  summary?: string;
   ts: number;
 };
 
@@ -67,21 +67,16 @@ export function groupTurnEvents(events: ChatEvent[]): TaskGroup[] {
   const tasks: TaskGroup[] = [];
   const pendingTools = new Map<string, ToolInvocation[]>();
   let currentTask: TaskGroup | null = null;
-  let lastThinkingInTask: string | null = null;
   let taskIndex = 0;
 
   function finalizeTask() {
     if (!currentTask) return;
-    if (lastThinkingInTask && currentTask.steps.length > 0) {
-      currentTask.summary = lastThinkingInTask;
-    }
     const allDone = currentTask.steps.every(
       (s) => s.kind !== "tool_invocation" || s.status === "completed",
     );
     currentTask.status = allDone ? "completed" : "running";
     tasks.push(currentTask);
     currentTask = null;
-    lastThinkingInTask = null;
   }
 
   for (const event of events) {
@@ -92,10 +87,6 @@ export function groupTurnEvents(events: ChatEvent[]): TaskGroup[] {
     if (event.type === "agent_thinking") {
       const content = typeof event.content === "string" ? event.content : "Thinking...";
 
-      if (currentTask && currentTask.steps.length > 0) {
-        finalizeTask();
-      }
-
       if (!currentTask) {
         taskIndex++;
         currentTask = {
@@ -105,9 +96,13 @@ export function groupTurnEvents(events: ChatEvent[]): TaskGroup[] {
           steps: [],
           ts: event.ts,
         };
+      } else {
+        currentTask.steps.push({
+          kind: "thinking",
+          text: content,
+          ts: event.ts,
+        });
       }
-
-      lastThinkingInTask = content;
       continue;
     }
 

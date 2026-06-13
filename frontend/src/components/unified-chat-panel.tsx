@@ -116,21 +116,21 @@ function CompactArgs({ args }: { args: Record<string, unknown> }) {
         ? JSON.stringify(value).slice(0, 40) + "..."
         : JSON.stringify(value);
     return (
-      <span key={key} className="inline-flex items-center gap-1 bg-muted rounded-md px-1.5 py-0.5 text-[11px]">
-        <span className="text-muted-foreground">{key}:</span>
-        <span className="text-foreground font-medium">{display}</span>
+      <span key={key} className="inline-flex items-center gap-1.5 text-[13px]">
+        <span className="text-zinc-500 dark:text-zinc-500">{key}:</span>
+        <span className="text-zinc-700 dark:text-zinc-300 font-medium">{display}</span>
       </span>
     );
   });
 
   return (
-    <div className="pl-1 mt-1">
-      <div className="flex items-center gap-1.5 flex-wrap">
+    <div className="mt-1">
+      <div className="flex items-center gap-3 flex-wrap">
         {chips}
         {entries.length > 2 && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors font-medium"
+            className="text-[12px] text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors font-medium"
           >
             +{entries.length - 2} more
           </button>
@@ -144,7 +144,7 @@ function CompactArgs({ args }: { args: Record<string, unknown> }) {
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <pre className="text-[11px] font-mono text-muted-foreground bg-muted rounded-md p-2 mt-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+            <pre className="text-[12px] font-mono text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800/80 p-3 rounded-lg whitespace-pre-wrap break-words mt-2">
               {JSON.stringify(args, null, 2)}
             </pre>
           </motion.div>
@@ -444,6 +444,33 @@ function TaskCard({
   const totalTools = toolSteps.length;
   const isDone = !isActive && task.status === "completed";
 
+  // Calculate execution duration
+  const durationStr = useMemo(() => {
+    if (!task.steps.length) return null;
+    const start = task.ts;
+    let end = start;
+    for (const step of task.steps) {
+      if (step.kind === "tool_invocation") {
+        if (step.result?.ts) {
+          end = Math.max(end, step.result.ts);
+        } else {
+          end = Math.max(end, step.callTs);
+        }
+      } else {
+        end = Math.max(end, step.ts);
+      }
+    }
+    const diff = end - start;
+    // Handle both second-based and ms-based timestamps
+    const isMs = start > 1e11;
+    const diffSec = isMs ? Math.round(diff / 1000) : diff;
+    if (diffSec < 0) return null;
+    
+    const mins = Math.floor(diffSec / 60);
+    const secs = diffSec % 60;
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }, [task.steps, task.ts]);
+
   return (
     <motion.div
       layout
@@ -461,9 +488,9 @@ function TaskCard({
         {isActive ? (
           <Loader2 className="w-4 h-4 text-cyan-500 animate-spin shrink-0" />
         ) : isDone ? (
-          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+          <Check className="w-4 h-4 text-emerald-500 shrink-0 font-bold" />
         ) : (
-          <CheckCircle2 className="w-4 h-4 text-zinc-500 shrink-0" />
+          <Check className="w-4 h-4 text-zinc-500 shrink-0" />
         )}
 
         {/* Title */}
@@ -471,42 +498,32 @@ function TaskCard({
           {task.title}
         </span>
 
-        {/* Step count badge */}
-        {totalTools > 0 && (
-          <span className="text-[10px] font-semibold text-muted-foreground bg-muted rounded-md px-1.5 py-0.5 shrink-0">
-            {completedTools}/{totalTools}
-          </span>
-        )}
-
-        {/* Collapse chevron */}
-        <ChevronUp
-          className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${expanded ? "" : "rotate-180"}`}
-        />
+        {/* Duration & chevron */}
+        <div className="flex items-center gap-2.5 ml-auto shrink-0">
+          {durationStr && (
+            <span className="text-[12px] text-zinc-500 dark:text-zinc-400 font-mono">
+              {durationStr}
+            </span>
+          )}
+          <ChevronUp
+            className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${expanded ? "" : "rotate-180"}`}
+          />
+        </div>
       </div>
 
-      {/* Task Body */}
       <AnimatePresence>
         {expanded && (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.1 }}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.15 }}
           >
-            <div className="border-l border-border/60 pl-5 ml-2 space-y-3 py-2 min-h-[20px]">
+            <div className="border-l border-dashed border-zinc-200 dark:border-zinc-800 pl-5 ml-2 space-y-4 py-3 min-h-[20px]">
               {task.steps.map((step, index) => (
                 <StepRow key={`${step.kind}-${index}`} item={step} />
               ))}
             </div>
-
-            {/* Task summary */}
-            {isDone && task.summary && (
-              <div className="ml-2 mt-1 mb-1 pl-4 text-[13px] text-muted-foreground leading-relaxed italic border-l-2 border-emerald-500/30">
-                {task.summary.length > 150
-                  ? task.summary.slice(0, 150) + "..."
-                  : task.summary}
-              </div>
-            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -518,27 +535,95 @@ function TaskCard({
 /*  Step Row (dispatcher for steps within a task)                      */
 /* ------------------------------------------------------------------ */
 
-function StepRow({ item }: { item: GroupedEvent }) {
-  if (item.kind === "tool_invocation") {
-    return <ToolInvocationCard invocation={item} />;
+function getFileBasename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1];
+}
+
+function getInlineSummary(
+  tool: string,
+  args: Record<string, unknown>,
+  result?: { output: string }
+): string | null {
+  if (!args) return null;
+
+  if (tool === "ask_permission" || tool.endsWith("ask_permission")) {
+    const action = typeof args.Action === "string" ? args.Action : "";
+    const target = typeof args.Target === "string" ? args.Target : "";
+    if (action && target) {
+      return `${action}: ${getFileBasename(target)}`;
+    }
   }
 
-  if (item.kind === "screenshot") {
-    return <ScreenshotCard item={item} />;
+  if (typeof args.title === "string" && args.title) {
+    return args.title;
   }
 
-  if (item.kind === "error") {
-    return (
-      <div className="py-1.5 text-[13px] text-red-500 flex items-center gap-2 relative">
-        <div className="absolute -left-[28px] top-1 bg-background p-0.5">
-          <X className="w-[14px] h-[14px] text-red-500" />
-        </div>
-        <span className="font-medium">{item.message}</span>
-      </div>
-    );
+  if (typeof args.TargetFile === "string" && args.TargetFile) {
+    return getFileBasename(args.TargetFile);
+  }
+  if (typeof args.AbsolutePath === "string" && args.AbsolutePath) {
+    return getFileBasename(args.AbsolutePath);
+  }
+  if (typeof args.path === "string" && args.path) {
+    return getFileBasename(args.path);
+  }
+  if (typeof args.file === "string" && args.file) {
+    return getFileBasename(args.file);
+  }
+
+  if (typeof args.CommandLine === "string" && args.CommandLine) {
+    return args.CommandLine;
+  }
+  if (typeof args.command === "string" && args.command) {
+    return args.command;
+  }
+
+  if (typeof args.query === "string" && args.query) {
+    return `"${args.query}"`;
+  }
+
+  if (typeof args.Prompt === "string" && args.Prompt) {
+    return `"${args.Prompt}"`;
+  }
+
+  if (typeof args.question === "string" && args.question) {
+    return args.question;
+  }
+  if (typeof args.Reason === "string" && args.Reason) {
+    return args.Reason;
   }
 
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Step Row (dispatcher for steps within a task)                      */
+/* ------------------------------------------------------------------ */
+
+function StepRow({ item }: { item: GroupedEvent }) {
+  return (
+    <div className="relative w-full">
+      <div className="w-full">
+        {item.kind === "thinking" && (
+          <div className="w-full text-[14px] leading-relaxed text-zinc-600 dark:text-zinc-400 py-1 pr-4 font-normal">
+            <ChatMarkdown content={item.text} />
+          </div>
+        )}
+        {item.kind === "tool_invocation" && <ToolInvocationCard invocation={item} />}
+        {item.kind === "screenshot" && <ScreenshotCard item={item} />}
+        {item.kind === "error" && (
+          <div className="flex flex-col relative py-1">
+            <div className="rounded-full bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-red-600 dark:text-red-400">
+              <X className="w-3.5 h-3.5" />
+              <span className="font-medium tracking-tight">Error</span>
+            </div>
+            <div className="mt-2 text-[13px] text-red-500">{item.message}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -551,6 +636,7 @@ function ToolInvocationCard({
   invocation: Extract<GroupedEvent, { kind: "tool_invocation" }>;
 }) {
   const [resultExpanded, setResultExpanded] = useState(false);
+  const [devMode, setDevMode] = useState(false);
   const provider = classifyAgentTool(invocation.tool);
   const label = displayAgentToolName(invocation.tool);
   const isRunning = invocation.status === "running";
@@ -558,45 +644,62 @@ function ToolInvocationCard({
   const output = invocation.result?.output;
   const isLongOutput = output && output.length > 300;
 
+  // Try parsing output for web search results
+  let parsedResults: any[] | null = null;
+  if (output) {
+    try {
+      const parsed = JSON.parse(output);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.url && parsed[0]?.title) {
+        parsedResults = parsed;
+      }
+    } catch (e) {}
+  }
+
+  const inlineSummary = useMemo(() => {
+    const rawSummary = getInlineSummary(invocation.tool, invocation.args, invocation.result);
+    // Don't repeat the tool name if it is identical to the label
+    if (rawSummary && rawSummary.toLowerCase() === label.toLowerCase()) {
+      return null;
+    }
+    return rawSummary;
+  }, [invocation.tool, invocation.args, invocation.result, label]);
+
+  const hasTechnicalDetails = hasArgs || !!output;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
-      className="flex flex-col gap-2 relative"
+      className="flex flex-col relative py-0.5"
     >
-      {/* Timeline node */}
-      <div className="absolute -left-[28px] top-1 bg-background p-0.5">
-        {isRunning ? (
-          <Loader2 className="w-[14px] h-[14px] text-cyan-500 animate-spin" />
-        ) : (
-          <motion.div
-            initial={{ scale: 0, rotate: -90 }}
-            animate={{ scale: 1, rotate: 0 }}
-            transition={{ type: "spring", stiffness: 400, damping: 15 }}
-          >
-            <Check className="w-[14px] h-[14px] text-emerald-500" />
-          </motion.div>
-        )}
-      </div>
-
-      {/* Tool pill */}
-      <div
-        className={`border rounded-lg px-3 py-1.5 text-[13px] flex items-center gap-2 inline-flex w-fit transition-colors ${
-          isRunning
-            ? "bg-muted border-cyan-500/30 text-foreground"
-            : "bg-muted border-border/60 text-muted-foreground"
-        }`}
-      >
-        {getToolIcon(provider, "w-3.5 h-3.5")}
-        <span className="font-medium">{label}</span>
-        {isRunning && (
-          <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
-        )}
+      {/* Tool Pill & Inline Summary */}
+      <div className="flex items-center gap-3 flex-wrap min-w-0">
+        <div 
+          onClick={() => hasTechnicalDetails && setDevMode(!devMode)}
+          className={`rounded-full bg-zinc-100 dark:bg-[#1f1f22] border border-zinc-200 dark:border-zinc-700/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-zinc-700 dark:text-zinc-300 group ${hasTechnicalDetails ? 'cursor-pointer hover:bg-zinc-200 dark:hover:bg-[#2a2a2d] transition-colors' : ''}`}>
+          {isRunning ? (
+            <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin" />
+          ) : (
+            getToolIcon(provider, "w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500")
+          )}
+          <span className="font-medium tracking-tight whitespace-normal max-w-[500px]">{inlineSummary || label}</span>
+        </div>
       </div>
 
       {/* Args (compact) */}
-      {hasArgs && <CompactArgs args={invocation.args} />}
+      <AnimatePresence>
+        {hasArgs && devMode && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-2 overflow-hidden"
+          >
+            <CompactArgs args={invocation.args} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Result */}
       <AnimatePresence>
@@ -605,25 +708,54 @@ function ToolInvocationCard({
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             transition={{ duration: 0.3 }}
-            className="pl-1 w-full"
+            className="w-full mt-2"
           >
-            <div
-              className={`w-full overflow-y-auto custom-scrollbar bg-muted/50 border border-border/40 rounded-lg p-2.5 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-words relative ${
-                !resultExpanded && isLongOutput ? "max-h-24" : ""
-              }`}
-            >
-              {output}
-              {!resultExpanded && isLongOutput && (
-                <div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-muted/80 to-transparent pointer-events-none" />
-              )}
-            </div>
-            {isLongOutput && (
-              <button
-                onClick={() => setResultExpanded(!resultExpanded)}
-                className="text-[10px] text-muted-foreground hover:text-foreground mt-1 transition-colors font-medium"
-              >
-                {resultExpanded ? "Show less" : "Show more"}
-              </button>
+            {parsedResults ? (
+              <div className="mt-3 flex flex-col gap-2 max-w-2xl">
+                {parsedResults.map((res: any, idx: number) => {
+                  let domain = "";
+                  try { domain = new URL(res.url).hostname.replace("www.", ""); } catch(e){}
+                  return (
+                    <a key={idx} href={res.url} target="_blank" rel="noopener noreferrer" className="group flex flex-col gap-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-[#111113] p-3 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors">
+                      <div className="flex items-center gap-2">
+                        {domain && <img src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`} className="w-4 h-4 rounded-sm bg-white" alt="" />}
+                        <span className="text-[13px] font-medium text-zinc-900 dark:text-zinc-100 line-clamp-1">{res.title}</span>
+                      </div>
+                      {res.snippet && <p className="text-[13px] text-zinc-500 line-clamp-2 leading-relaxed">{res.snippet}</p>}
+                    </a>
+                  );
+                })}
+              </div>
+            ) : (
+              <AnimatePresence>
+                {devMode && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div
+                      className={`w-full mt-2 text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words border-l-2 border-zinc-200 dark:border-zinc-800 pl-3 py-0.5 relative ${
+                        !resultExpanded && isLongOutput ? "max-h-24 overflow-hidden" : ""
+                      }`}
+                    >
+                      {output}
+                      {!resultExpanded && isLongOutput && (
+                        <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-background to-transparent pointer-events-none" />
+                      )}
+                    </div>
+                    {isLongOutput && (
+                      <button
+                        onClick={() => setResultExpanded(!resultExpanded)}
+                        className="text-[11px] text-zinc-400 hover:text-zinc-300 mt-2 transition-colors font-medium"
+                      >
+                        {resultExpanded ? "Show less" : "Show more"}
+                      </button>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             )}
           </motion.div>
         )}
@@ -643,26 +775,23 @@ function ScreenshotCard({
 }) {
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25 }}
-      className="flex flex-col gap-2 relative"
+      initial={{ opacity: 0, y: 8, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
+      className="flex flex-col gap-2 relative py-0.5"
     >
-      <div className="absolute -left-[28px] top-1 bg-background p-0.5">
-        <Eye className="w-[14px] h-[14px] text-zinc-500" />
+      <div className="rounded-full bg-zinc-100 dark:bg-[#1f1f22] border border-zinc-200 dark:border-zinc-700/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-zinc-700 dark:text-zinc-300 group">
+        <Eye className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+        <span className="font-medium tracking-tight">Vision Analysis</span>
       </div>
-      <div className="bg-muted border border-border/60 rounded-full px-3 py-1 text-[13px] text-muted-foreground flex items-center gap-2 inline-flex w-fit">
-        <Eye className="w-3.5 h-3.5" />
-        <span>Vision Analysis</span>
-      </div>
-      <div className="pl-1 space-y-2 mt-1">
+      <div className="space-y-3 mt-1">
         {item.analysis && (
-          <p className="text-[14px] text-foreground leading-relaxed pr-4">
+          <p className="text-[13px] text-zinc-600 dark:text-zinc-400 leading-relaxed pr-4">
             {item.analysis}
           </p>
         )}
         {item.image_b64 && (
-          <div className="relative w-[160px] h-[100px] rounded overflow-hidden border border-zinc-700/80 brightness-75 hover:brightness-100 transition">
+          <div className="relative w-[160px] h-[100px] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 brightness-90 hover:brightness-100 transition">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={`data:image/png;base64,${item.image_b64}`}

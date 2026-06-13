@@ -106,23 +106,50 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
   const isFailed = step.status === "failed";
   const isInProgress = step.status === "in_progress";
   
+  // Extract web results if they exist (for inline rich display)
+  const meta = step.metadata ?? {};
+  const resultObj = meta.result && typeof meta.result === "object" && !Array.isArray(meta.result) 
+    ? (meta.result as Record<string, unknown>) 
+    : undefined;
+    
+  let webResults: Array<{ title: string; url: string; snippet: string }> = [];
+  const rawResults = meta.results || resultObj?.results;
+  if (Array.isArray(rawResults)) {
+    webResults = rawResults.map((val) => {
+      const item = val && typeof val === "object" && !Array.isArray(val) ? (val as Record<string, unknown>) : null;
+      if (!item) return null;
+      return {
+        title: (item.title as string) || (item.name as string) || "",
+        url: (item.url as string) || (item.href as string) || (item.link as string) || "",
+        snippet: (item.snippet as string) || (item.body as string) || (item.description as string) || (item.summary as string) || "",
+      };
+    }).filter((x): x is { title: string; url: string; snippet: string } => Boolean(x && (x.title || x.url || x.snippet)));
+  }
+
+  const query = (meta.query as string) || (resultObj?.query as string) || (step.args?.query as string);
+
   const hasDetails = !disableDetails && Boolean(
-    step.detail || step.output || step.error || step.command || step.image_b64 || (step.args && Object.keys(step.args).length > 0)
+    step.detail || step.output || step.error || step.command || step.image_b64 || (step.args && Object.keys(step.args).length > 0) || webResults.length > 0
   );
   const isSelectable = Boolean(onSelect);
 
+  // Helper to extract domain for the favicon
+  const getDomain = (urlStr: string) => {
+    try {
+      return new URL(urlStr).hostname;
+    } catch {
+      return urlStr.split("/")[0] || urlStr;
+    }
+  };
+
   return (
     <div className="relative group">
-      <div className="flex items-start gap-4">
-        {/* Minimal Timeline Node */}
-        <div className="relative flex flex-col items-center pt-[6px] shrink-0 ml-[6px]">
+      <div className="flex items-start gap-3">
+        {/* Minimal Timeline Node (icon on timeline) */}
+        <div className="relative flex flex-col items-center pt-[2px] shrink-0 w-6">
           <div 
-            className={`w-6 h-6 rounded-full flex items-center justify-center z-10 transition-colors duration-300 ${
-              isFailed 
-                ? "bg-red-500/10 border border-red-500/20" 
-                : isInProgress
-                  ? "bg-[#1c1c1f] border border-zinc-700 shadow-sm"
-                  : "bg-[#0e0e10] border border-zinc-800"
+            className={`w-6 h-6 flex items-center justify-center bg-[#09090b] z-10 transition-colors duration-300 ${
+              isFailed ? "text-red-400" : isInProgress ? "text-zinc-200" : "text-zinc-500"
             }`}
           >
             {getStepIcon(step.step_type, step.status)}
@@ -130,24 +157,31 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
         </div>
 
         {/* Content */}
-        <div className="flex-1 min-w-0 pt-1 pb-2">
+        <div className="flex-1 min-w-0 pb-6">
           <div 
-            className={`flex items-start justify-between gap-4 rounded-md transition-colors ${(hasDetails || isSelectable) ? "cursor-pointer hover:bg-white/[0.02] -ml-2 -mt-1 p-2" : ""}`}
+            className={`flex items-start justify-between gap-4 transition-colors ${
+              isSelectable ? "cursor-pointer group-hover:text-zinc-100" : ""
+            }`}
             onClick={() => {
               onSelect?.();
               if (hasDetails) setExpanded(!expanded);
             }}
           >
-            <div className="flex-1 min-w-0">
-              <div className={`text-[13.5px] leading-snug tracking-tight font-medium ${isFailed ? "text-red-400" : isInProgress ? "text-zinc-200" : "text-zinc-300"}`}>
+            <div className="flex-1 min-w-0 pt-[3px]">
+              <div className={`text-[13px] leading-snug font-normal ${
+                isFailed ? "text-red-400" : isInProgress ? "text-zinc-200" : "text-zinc-400"
+              } transition-colors ${isSelectable ? "group-hover:text-zinc-300" : ""}`}>
                 {step.title}
+                {query && step.step_type === "browser" && (
+                  <span className="text-zinc-500 italic ml-2">"{query}"</span>
+                )}
               </div>
             </div>
             
-            <div className="flex items-center gap-3 shrink-0 mt-0.5">
-              <span className="text-[10px] text-zinc-500/70 font-mono tracking-tighter">
-                {formatTime(step.created_at)}
-              </span>
+            <div className="flex items-center gap-2 shrink-0 pt-[3px]">
+              {webResults.length > 0 && !expanded && (
+                <span className="text-[11px] text-zinc-500 mr-2">{webResults.length} results</span>
+              )}
               {hasDetails && (
                 <div className={`w-4 h-4 flex items-center justify-center transition-colors ${expanded ? "text-zinc-400" : "text-zinc-600"}`}>
                   {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
@@ -156,7 +190,7 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
             </div>
           </div>
 
-          {/* Collapsible Details Panel (Terminal style) */}
+          {/* Inline Rich Details Panel */}
           <AnimatePresence>
             {expanded && hasDetails && (
               <motion.div
@@ -166,90 +200,102 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
                 transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
                 className="overflow-hidden"
               >
-                <div className="pt-2 space-y-2 pb-1">
-                  {/* Detailed Description */}
-                  {step.detail && (
-                    <div className="text-[12.5px] text-zinc-400 leading-relaxed pl-1">
+                <div className="pt-3 space-y-3 pb-1">
+                  
+                  {/* Web Search Results Inline */}
+                  {webResults.length > 0 && (
+                    <div className="rounded-lg border border-zinc-800/60 bg-[#121214] overflow-hidden">
+                      <div className="px-3 py-2 border-b border-zinc-800/60 bg-[#151518] flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-zinc-400">Search Results</span>
+                        <span className="text-[10px] text-zinc-500">{webResults.length} results</span>
+                      </div>
+                      <div className="divide-y divide-zinc-800/40 max-h-64 overflow-y-auto custom-scrollbar">
+                        {webResults.map((item, idx) => (
+                          <a 
+                            key={idx} 
+                            href={item.url || "#"} 
+                            target="_blank" 
+                            rel="noreferrer"
+                            className="block p-3 hover:bg-white/[0.02] transition-colors"
+                            onClick={(e) => {
+                              if (!item.url) e.preventDefault();
+                              e.stopPropagation();
+                            }}
+                          >
+                            <div className="flex items-center gap-2 mb-1">
+                              {item.url ? (
+                                /* eslint-disable-next-line @next/next/no-img-element */
+                                <img 
+                                  src={`https://www.google.com/s2/favicons?domain=${getDomain(item.url)}&sz=32`} 
+                                  alt="" 
+                                  className="w-3.5 h-3.5 rounded-sm bg-zinc-800"
+                                  onError={(e) => { e.currentTarget.style.display = "none"; }}
+                                />
+                              ) : (
+                                <Globe className="w-3.5 h-3.5 text-zinc-600" />
+                              )}
+                              <span className="text-[12px] font-medium text-zinc-200 truncate">{item.title || "Untitled"}</span>
+                            </div>
+                            <div className="text-[11px] text-zinc-500 truncate ml-5.5">{getDomain(item.url)}</div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Detailed Description / Text content */}
+                  {step.detail && step.step_type !== "browser" && (
+                    <div className="text-[13px] text-zinc-400 leading-relaxed max-w-full break-words">
                       {step.detail}
                     </div>
                   )}
 
-                  {/* Terminal / Command */}
+                  {/* Terminal / Command - Minimized */}
                   {step.command && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
-                        <Terminal className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Command</span>
-                      </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar">
-                        <code className="text-[11.5px] text-zinc-300 font-mono whitespace-pre">{step.command}</code>
+                    <div className="rounded border border-zinc-800/40 bg-[#0e0e10]">
+                      <div className="p-2.5 overflow-x-auto custom-scrollbar">
+                        <code className="text-[11.5px] text-zinc-300 font-mono whitespace-pre"><span className="text-zinc-600 select-none mr-2">$</span>{step.command}</code>
                       </div>
                     </div>
                   )}
 
-                  {/* JSON Args */}
-                  {step.args && Object.keys(step.args).length > 0 && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
-                        <Code2 className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Parameters</span>
-                      </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar">
-                        <pre className="text-[11.5px] text-zinc-400 font-mono">
-                          {JSON.stringify(step.args, null, 2)}
-                        </pre>
-                      </div>
+                  {/* JSON Args (subtle) */}
+                  {step.args && Object.keys(step.args).length > 0 && !webResults.length && step.step_type !== "gmail" && step.step_type !== "calendar" && step.step_type !== "tasks" && (
+                    <div className="rounded border border-zinc-800/40 bg-[#0e0e10] p-2.5 overflow-x-auto custom-scrollbar">
+                       <pre className="text-[11px] text-zinc-400 font-mono">
+                         {JSON.stringify(step.args, null, 2)}
+                       </pre>
                     </div>
                   )}
 
-                  {/* Output */}
-                  {step.output && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
-                      <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center gap-2">
-                        <Terminal className="w-3 h-3 text-zinc-500" />
-                        <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Output</span>
-                      </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-64">
-                        <pre className="text-[11.5px] text-zinc-400 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                          {step.output.length > 2000
-                            ? step.output.slice(0, 2000) + "\n\n... [Output truncated]"
-                            : step.output}
-                        </pre>
-                      </div>
+                  {/* Output (subtle) */}
+                  {step.output && step.step_type !== "browser" && (
+                    <div className="rounded border border-zinc-800/40 bg-[#0e0e10] p-2.5 overflow-x-auto custom-scrollbar max-h-48">
+                      <pre className="text-[11px] text-zinc-500 font-mono whitespace-pre-wrap break-all leading-relaxed">
+                        {step.output.length > 2000
+                          ? step.output.slice(0, 2000) + "\n\n... [Output truncated]"
+                          : step.output}
+                      </pre>
                     </div>
                   )}
 
                   {/* Error */}
                   {step.error && (
-                    <div className="rounded border border-red-500/20 bg-red-500/[0.03]">
-                      <div className="px-3 py-1.5 border-b border-red-500/20 bg-red-500/10 flex items-center gap-2">
-                        <X className="w-3 h-3 text-red-400" />
-                        <span className="text-[9.5px] font-bold text-red-400 uppercase tracking-widest">Error</span>
-                      </div>
-                      <div className="p-3 overflow-x-auto custom-scrollbar max-h-64">
-                        <p className="text-[11.5px] text-red-300 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                          {step.error}
-                        </p>
-                      </div>
+                    <div className="text-[12px] text-red-400 font-mono whitespace-pre-wrap break-words leading-relaxed pl-2 border-l-2 border-red-500/30">
+                      {step.error}
                     </div>
                   )}
 
                   {/* Gmail Visualizer */}
                   {step.step_type === "gmail" && step.args && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
-                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
-                        <div className="flex items-center gap-2">
-                          <Mail className="w-3.5 h-3.5 text-zinc-500" />
-                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Gmail</span>
-                        </div>
-                      </div>
+                    <div className="rounded-lg border border-zinc-800/40 bg-[#121214] p-3 space-y-2">
                       <div className="space-y-1">
-                        <div className="text-[13px] font-semibold text-zinc-200">{step.args.subject as string}</div>
+                        <div className="text-[13px] font-medium text-zinc-200">{step.args.subject as string}</div>
                         <div className="flex items-center gap-2 text-[11px] text-zinc-500">
                           <User className="w-3 h-3" />
                           <span>{step.args.to as string}</span>
                         </div>
-                        <div className="text-[12px] text-zinc-400 leading-relaxed whitespace-pre-wrap pt-1 border-t border-zinc-800/20">
+                        <div className="text-[12px] text-zinc-400 leading-relaxed whitespace-pre-wrap pt-2 mt-1 border-t border-zinc-800/40">
                           {step.args.body as string}
                         </div>
                       </div>
@@ -258,15 +304,9 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
 
                   {/* Calendar Visualizer */}
                   {step.step_type === "calendar" && step.args && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
-                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
-                        <div className="flex items-center gap-2">
-                          <Calendar className="w-3.5 h-3.5 text-zinc-500" />
-                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Calendar</span>
-                        </div>
-                      </div>
+                    <div className="rounded-lg border border-zinc-800/40 bg-[#121214] p-3 space-y-2">
                       <div className="space-y-1.5">
-                        <div className="text-[13px] font-semibold text-zinc-200">{step.args.summary as string}</div>
+                        <div className="text-[13px] font-medium text-zinc-200">{step.args.summary as string}</div>
                         <div className="flex items-center gap-4 text-[11px] text-zinc-400">
                           <div className="flex items-center gap-1.5">
                             <Clock className="w-3 h-3 text-zinc-500" />
@@ -280,7 +320,7 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
                           )}
                         </div>
                         {Boolean(step.args.description) && (
-                          <div className="text-[12px] text-zinc-500 leading-relaxed pt-1">
+                          <div className="text-[12px] text-zinc-500 leading-relaxed pt-2 mt-1 border-t border-zinc-800/40">
                             {step.args.description as string}
                           </div>
                         )}
@@ -290,25 +330,19 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
 
                   {/* Tasks Visualizer */}
                   {step.step_type === "tasks" && step.args && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b] p-3 space-y-2">
-                       <div className="flex items-center justify-between border-b border-zinc-800/40 pb-2">
-                        <div className="flex items-center gap-2">
-                          <ListTodo className="w-3.5 h-3.5 text-zinc-500" />
-                          <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-widest">Task</span>
-                        </div>
-                      </div>
+                    <div className="rounded-lg border border-zinc-800/40 bg-[#121214] p-3 space-y-2">
                       <div className="space-y-1.5">
                         <div className="flex items-start gap-2">
-                          <div className="w-4 h-4 rounded border border-zinc-700 mt-0.5 shrink-0" />
-                          <div className="text-[13px] font-semibold text-zinc-200">{step.args.title as string}</div>
+                          <div className="w-3.5 h-3.5 rounded border border-zinc-600 mt-[3px] shrink-0" />
+                          <div className="text-[13px] font-medium text-zinc-200">{step.args.title as string}</div>
                         </div>
                         {Boolean(step.args.notes) && (
-                          <div className="text-[12px] text-zinc-400 pl-6 leading-relaxed">
+                          <div className="text-[12px] text-zinc-400 pl-5.5 leading-relaxed">
                             {step.args.notes as string}
                           </div>
                         )}
                         {Boolean(step.args.due) && (
-                          <div className="flex items-center gap-1.5 pl-6 text-[10px] text-zinc-500">
+                          <div className="flex items-center gap-1.5 pl-5.5 text-[10px] text-zinc-500">
                             <Clock className="w-3 h-3" />
                             <span>Due: {new Date(step.args.due as string).toLocaleDateString()}</span>
                           </div>
@@ -319,23 +353,12 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
 
                   {/* Screenshot */}
                   {step.image_b64 && (
-                    <div className="rounded border border-zinc-800/40 bg-[#09090b]">
-                       <div className="px-3 py-1.5 border-b border-zinc-800/40 bg-[#121214] flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Eye className="w-3 h-3 text-zinc-500" />
-                          <span className="text-[9.5px] font-bold text-zinc-500 uppercase tracking-widest">Vision</span>
-                        </div>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setImageExpanded(!imageExpanded);
-                          }}
-                          className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
-                        >
-                          {imageExpanded ? "Collapse" : "Expand"}
-                        </button>
-                      </div>
-                      <div className={`p-1.5 transition-all duration-500 ${imageExpanded ? "" : "max-h-48 overflow-hidden relative"}`}>
+                    <div className="rounded-lg border border-zinc-800/40 bg-[#0e0e10] overflow-hidden">
+                      <div className={`p-1.5 transition-all duration-500 relative ${imageExpanded ? "" : "max-h-48 overflow-hidden cursor-pointer"}`}
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             if (!imageExpanded) setImageExpanded(true);
+                           }}>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={`data:image/png;base64,${step.image_b64}`}
@@ -343,7 +366,20 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
                           className="w-full rounded-[4px] border border-zinc-800/30"
                         />
                         {!imageExpanded && (
-                          <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-[#09090b] to-transparent pointer-events-none" />
+                          <div className="absolute inset-0 bg-gradient-to-t from-[#0e0e10] via-[#0e0e10]/20 to-transparent flex items-end justify-center pb-3">
+                            <span className="text-[10px] font-medium text-zinc-400 bg-[#121214] border border-zinc-700/50 px-2 py-1 rounded-full shadow-lg">Click to expand</span>
+                          </div>
+                        )}
+                        {imageExpanded && (
+                           <button 
+                             onClick={(e) => {
+                               e.stopPropagation();
+                               setImageExpanded(false);
+                             }}
+                             className="absolute top-3 right-3 text-[10px] bg-black/60 text-white px-2 py-1 rounded-md backdrop-blur-sm border border-white/10 hover:bg-black/80 transition-colors"
+                           >
+                             Collapse
+                           </button>
                         )}
                       </div>
                     </div>

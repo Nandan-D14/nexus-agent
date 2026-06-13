@@ -29,7 +29,7 @@ const DESKTOP_TOOLS = new Set([
   "take_screenshot",
 ]);
 
-const BROWSER_TOOLS = new Set(["web_search", "scrape_web_page", "open_browser"]);
+const BROWSER_TOOLS = new Set(["web_search", "search_web", "scrape_web_page", "open_browser"]);
 const FILE_TOOLS = new Set(["write_workspace_file", "read_workspace_file", "list_workspace_files"]);
 const WORKFLOW_TOOLS = new Set(["write_todo_list", "prepare_task_workspace", "update_todo_item"]);
 
@@ -85,7 +85,7 @@ export function providerLabel(provider: AgentToolProvider): string {
 }
 
 function formatBrowserTool(tool: string): string {
-  if (tool === "web_search") return "Web Search";
+  if (tool === "web_search" || tool === "search_web") return "Web Search";
   if (tool === "scrape_web_page") return "Read Web Page";
   if (tool === "open_browser") return "Open Browser";
   return formatToolPart(tool);

@@ -161,8 +161,8 @@ export function AgentWorkflowPanel({
 
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(10px,14%)_1fr] gap-0 bg-[#111113] max-md:grid-cols-1">
         <div className="min-h-0 border-r border-zinc-800 bg-[#09090b] max-md:h-[38vh] max-md:border-b max-md:border-r-0">
-          <div ref={scrollRef} className="h-full overflow-y-auto px-4 py-4 relative scroll-smooth custom-scrollbar">
-            <div className="absolute left-[36px] top-10 bottom-10 w-[1px] bg-zinc-800/40" />
+          <div ref={scrollRef} className="h-full overflow-y-auto px-4 py-6 relative scroll-smooth custom-scrollbar">
+            <div className="absolute left-[28px] top-8 bottom-8 w-[1px] bg-zinc-800/60" />
             <div className="space-y-1 relative z-10">
               <AnimatePresence initial={false} mode="popLayout">
                 {run.steps.map((step, index) => (
@@ -193,10 +193,10 @@ export function AgentWorkflowPanel({
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0 }}
-                    className="relative flex items-center gap-4 ml-1.5 py-4"
+                    className="relative flex items-center gap-[14px] ml-[2px] py-2"
                   >
-                    <div className="w-5 h-5 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center shrink-0 z-10">
-                      <div className="w-1 h-1 rounded-full bg-zinc-500 animate-pulse" />
+                    <div className="w-5 h-5 rounded-full bg-[#09090b] border border-zinc-800 flex items-center justify-center shrink-0 z-10">
+                      <div className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
                     </div>
                     <div className="text-[13px] text-zinc-500 font-medium italic tracking-tight">
                       Reasoning...

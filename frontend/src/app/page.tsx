@@ -115,6 +115,7 @@ export default function HomePage() {
             <div className="hidden md:flex items-center gap-6 text-sm font-medium text-muted-foreground">
               <a href="#features" className="hover:text-foreground transition-colors">Features</a>
               <a href="#how-it-works" className="hover:text-foreground transition-colors">How it Works</a>
+              <Link href="/pricing" className="hover:text-foreground transition-colors">Pricing</Link>
             </div>
           </div>
 

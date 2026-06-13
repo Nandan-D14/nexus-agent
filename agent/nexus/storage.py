@@ -5,25 +5,61 @@
 
 import logging
 from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 
 from google.cloud import storage
+from google.oauth2 import service_account
 
-from nexus.config import settings
+from nexus.config import AGENT_DIR, WORKSPACE_DIR, settings
 
 logger = logging.getLogger(__name__)
 
 _storage_client: Optional[storage.Client] = None
 _SIGNED_URL_EXPIRATION_SECONDS = 900
 
+
+def _resolve_sa_credentials():
+    """Load explicit SA credentials from the configured key file.
+
+    Mirrors the resolution logic in firebase.py so that the GCS client can
+    generate signed URLs even when GOOGLE_APPLICATION_CREDENTIALS is not
+    exported to the environment (which is intentional when google_project_id
+    is set, to avoid leaking the Firebase SA into the Vertex AI SDK).
+    """
+    raw_path = settings.google_application_credentials
+    if not raw_path:
+        return None
+
+    candidate = Path(raw_path).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return service_account.Credentials.from_service_account_file(str(candidate))
+
+    for root in (Path.cwd(), AGENT_DIR, WORKSPACE_DIR):
+        resolved = (root / candidate).resolve()
+        if resolved.exists():
+            logger.info("Loaded GCS SA credentials from %s", resolved)
+            return service_account.Credentials.from_service_account_file(str(resolved))
+
+    logger.warning("SA credentials file %s not found; GCS will use ADC (signed URLs may fail)", raw_path)
+    return None
+
+
 def get_storage_client() -> storage.Client:
     """Initialize and return the GCS client."""
     global _storage_client
     if _storage_client is None:
+        # Use the Vertex AI project for GCS since it has billing enabled.
+        # We will instruct the user to grant the Firebase SA access to this project.
+        project_id = settings.google_project_id or settings.firebase_project_id
         try:
-            # Use explicit project to avoid issues if ADC doesn't infer it
-            project_id = settings.google_project_id or settings.firebase_project_id
-            _storage_client = storage.Client(project=project_id)
+            creds = _resolve_sa_credentials()
+            if creds:
+                _storage_client = storage.Client(project=project_id, credentials=creds)
+                logger.info("GCS storage client initialized with explicit SA credentials (project=%s)", project_id)
+            else:
+                _storage_client = storage.Client(project=project_id)
+                logger.info("GCS storage client initialized with ADC (project=%s)", project_id)
         except Exception as e:
             logger.warning("Failed to initialize storage client with project %s: %s", project_id, e)
             _storage_client = storage.Client()

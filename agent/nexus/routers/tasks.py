@@ -321,17 +321,34 @@ async def download_artifact_by_id(
     metadata = artifact.metadata or {}
     bucket = metadata.get("gcs_bucket")
     blob = metadata.get("gcs_blob")
-    if not isinstance(bucket, str) or not isinstance(blob, str):
-        raise HTTPException(status_code=409, detail="Artifact does not have durable storage metadata")
-    url = generate_artifact_signed_url(bucket_name=bucket, blob_name=blob)
-    if not url:
-        # Signed URL failed (e.g. no SA key in local dev) — fall back to
-        # downloading the blob directly and returning it as a data URI.
-        url = download_artifact_as_data_uri(bucket_name=bucket, blob_name=blob)
-    if not url:
-        raise HTTPException(status_code=404, detail="Artifact object not found")
-    return {
-        "artifact_id": artifact.artifact_id,
-        "url": url,
-        "expires_in_seconds": 900,
-    }
+
+    # If artifact has GCS metadata, try to fetch it
+    if isinstance(bucket, str) and isinstance(blob, str):
+        url = generate_artifact_signed_url(bucket_name=bucket, blob_name=blob)
+        if not url:
+            # Signed URL failed — fall back to downloading the blob directly
+            url = download_artifact_as_data_uri(bucket_name=bucket, blob_name=blob)
+        if url:
+            return {
+                "artifact_id": artifact.artifact_id,
+                "url": url,
+                "expires_in_seconds": 900,
+            }
+
+    # Artifact has no durable storage — it was created before GCS was fixed,
+    # or the upload failed silently. The sandbox it was created in is likely gone.
+    # Return the original URL if present (even if expired), or a clear error.
+    if artifact.url:
+        return {
+            "artifact_id": artifact.artifact_id,
+            "url": artifact.url,
+            "expires_in_seconds": 0,
+        }
+
+    raise HTTPException(
+        status_code=404,
+        detail="This artifact was created before cloud storage was configured. "
+               "The original sandbox has expired and the file data is no longer available. "
+               "Future artifacts will be stored durably."
+    )
+
