@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -389,6 +390,37 @@ async def refresh_ticket(session_id: str, user: AuthenticatedUser = Depends(requ
         raise HTTPException(status_code=404, detail="Session not found")
     ticket = session_manager.create_ticket(session_id, user.uid)
     return {"ws_ticket": ticket}
+
+@router.post("/sessions/{session_id}/resize")
+async def resize_sandbox_screen(
+    session_id: str,
+    body: dict = Body(...),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    """Resize the sandbox display resolution. Only works when agent is idle."""
+    width = body.get("width")
+    height = body.get("height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise HTTPException(status_code=400, detail="width and height must be integers")
+    if width < 640 or width > 3840 or height < 480 or height > 2160:
+        raise HTTPException(status_code=400, detail="Resolution out of allowed range (640-3840 x 480-2160)")
+
+    session_manager = get_session_manager()
+    session = await session_manager.get_session(session_id)
+    if not session or session.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.sandbox.is_alive:
+        raise HTTPException(status_code=409, detail="Sandbox is not running")
+
+    try:
+        result = await asyncio.to_thread(session.sandbox.resize_screen, width, height)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Resize failed"))
+
+    return result
 
 @router.get("/api/v1/dashboard/stats")
 async def get_dashboard_stats(user: AuthenticatedUser = Depends(require_current_user)):

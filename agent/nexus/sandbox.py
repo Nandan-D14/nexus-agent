@@ -395,6 +395,21 @@ class SandboxManager:
 
     # -- Screen --------------------------------------------------------------
 
+    def resize_screen(self, width: int, height: int) -> dict:
+        """Resize the sandbox virtual display to the given resolution via xrandr."""
+        self._require_sandbox()
+        mode_label = f"{width}x{height}"
+        cmd = (
+            f"export DISPLAY=:1; "
+            f"xrandr --newmode {mode_label} $(cvt {width} {height} 60 | grep Modeline | cut -d' ' -f3-) 2>/dev/null; "
+            f"xrandr --addmode Virtual-1 {mode_label} 2>/dev/null; "
+            f"xrandr --output Virtual-1 --mode {mode_label}"
+        )
+        result = self.run_command(cmd, timeout=15)
+        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
+            return {"success": False, "error": result.get("stderr", "xrandr failed")}
+        return {"success": True, "width": width, "height": height}
+
     def screenshot(self) -> bytes:
         """Capture the screen as PNG bytes."""
         self._require_sandbox()

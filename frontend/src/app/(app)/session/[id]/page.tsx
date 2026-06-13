@@ -1634,6 +1634,8 @@ export default function SessionPage() {
                         agentStatus={agentStatus}
                         agentAction={agentAction}
                         onStopAgent={handleStopAgent}
+                        sessionId={sessionId}
+                        isFullscreen={isDesktopFullscreen}
                       />
                     </div>
                   </div>

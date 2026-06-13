@@ -37,6 +37,8 @@ type Props = {
   agentStatus?: string;
   agentAction?: AgentVisualAction | null;
   onStopAgent?: () => void;
+  sessionId?: string | null;
+  isFullscreen?: boolean;
 };
 
 export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
@@ -52,6 +54,8 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   agentStatus,
   agentAction,
   onStopAgent,
+  sessionId,
+  isFullscreen,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
   const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
@@ -221,7 +225,14 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               className="absolute inset-0"
             >
               <div className="relative w-full h-full rounded-lg overflow-hidden border border-zinc-800">
-                <DesktopPanel streamUrl={streamUrl} analysis={analysis} action={agentAction} />
+                <DesktopPanel
+                  streamUrl={streamUrl}
+                  analysis={analysis}
+                  action={agentAction}
+                  sessionId={sessionId}
+                  isAgentIdle={phase === "idle" || phase === "done"}
+                  isFullscreen={isFullscreen}
+                />
                 {(phase === "thinking" || phase === "acting") && (
                   <>
                     <div className="absolute inset-0 z-10 bg-black/30 cursor-not-allowed" />
