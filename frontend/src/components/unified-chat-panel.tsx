@@ -12,12 +12,10 @@ import { PermissionCard } from "@/components/permission-card";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
-  Cpu,
-  CheckCircle2,
-  ChevronUp,
   ChevronDown,
+  ChevronRight,
   Eye,
-  Terminal,
+  Terminal as TerminalIcon,
   Code2,
   Globe,
   Mail,
@@ -26,8 +24,8 @@ import {
   Plug,
   FileText,
   Loader2,
-  Check,
-  Brain,
+  BrainCircuit,
+  MessageSquare,
 } from "lucide-react";
 import {
   classifyAgentTool,
@@ -86,7 +84,7 @@ type Turn = {
 
 function getToolIcon(provider: AgentToolProvider, className: string) {
   switch (provider) {
-    case "terminal": return <Terminal className={className} />;
+    case "terminal": return <TerminalIcon className={className} />;
     case "browser": return <Globe className={className} />;
     case "desktop": return <Eye className={className} />;
     case "file": return <FileText className={className} />;
@@ -100,59 +98,55 @@ function getToolIcon(provider: AgentToolProvider, className: string) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Compact Args Display                                               */
+/*  Inline summary extraction                                          */
 /* ------------------------------------------------------------------ */
 
-function CompactArgs({ args }: { args: Record<string, unknown> }) {
-  const [expanded, setExpanded] = useState(false);
-  const entries = Object.entries(args);
-
-  if (entries.length === 0) return null;
-
-  const chips = entries.slice(0, 2).map(([key, value]) => {
-    const display = typeof value === "string"
-      ? value.length > 40 ? value.slice(0, 40) + "..." : value
-      : JSON.stringify(value).length > 40
-        ? JSON.stringify(value).slice(0, 40) + "..."
-        : JSON.stringify(value);
-    return (
-      <span key={key} className="inline-flex items-center gap-1.5 text-[13px]">
-        <span className="text-zinc-500 dark:text-zinc-500">{key}:</span>
-        <span className="text-zinc-700 dark:text-zinc-300 font-medium">{display}</span>
-      </span>
-    );
-  });
-
-  return (
-    <div className="mt-1">
-      <div className="flex items-center gap-3 flex-wrap">
-        {chips}
-        {entries.length > 2 && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="text-[12px] text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors font-medium"
-          >
-            +{entries.length - 2} more
-          </button>
-        )}
-      </div>
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-          >
-            <pre className="text-[12px] font-mono text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800/80 p-3 rounded-lg whitespace-pre-wrap break-words mt-2">
-              {JSON.stringify(args, null, 2)}
-            </pre>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
+function getFileBasename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1];
 }
+
+function getInlineSummary(
+  tool: string,
+  args: Record<string, unknown>,
+): string | null {
+  if (!args) return null;
+
+  if (tool === "ask_permission" || tool.endsWith("ask_permission")) {
+    const action = typeof args.Action === "string" ? args.Action : "";
+    const target = typeof args.Target === "string" ? args.Target : "";
+    if (action && target) return `${action}: ${getFileBasename(target)}`;
+  }
+
+  if (typeof args.title === "string" && args.title) return args.title;
+
+  if (typeof args.TargetFile === "string" && args.TargetFile) return args.TargetFile;
+  if (typeof args.AbsolutePath === "string" && args.AbsolutePath) return args.AbsolutePath;
+  if (typeof args.path === "string" && args.path) return args.path;
+  if (typeof args.file === "string" && args.file) return args.file;
+
+  if (typeof args.CommandLine === "string" && args.CommandLine) return args.CommandLine;
+  if (typeof args.command === "string" && args.command) return args.command;
+
+  if (typeof args.query === "string" && args.query) return `"${args.query}"`;
+  if (typeof args.Prompt === "string" && args.Prompt) return `"${args.Prompt}"`;
+  if (typeof args.question === "string" && args.question) return args.question;
+  if (typeof args.Reason === "string" && args.Reason) return args.Reason;
+
+  if (typeof args.DirectoryPath === "string" && args.DirectoryPath) return args.DirectoryPath;
+
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Timeline item type for interleaving                                */
+/* ------------------------------------------------------------------ */
+
+type TimelineItem =
+  | { kind: "taskGroup"; data: TaskGroup; ts: number }
+  | { kind: "agentMessage"; text: string; ts: number }
+  | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
+  | { kind: "delegation"; from: string; to: string; ts: number };
 
 /* ------------------------------------------------------------------ */
 /*  Main exported component                                            */
@@ -223,108 +217,53 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   }, [items]);
 
   const totalAgentMessages = turns.reduce((sum, t) => sum + t.agentMessages.length, 0);
-  const lastTurnIdx = turns.length - 1;
 
   const phaseLabel = phase === "thinking" ? "Reasoning through it..."
-    : phase === "acting" ? "Taking action..."
+    : phase === "acting" ? "Working through..."
     : phase === "listening" ? "Listening..."
-    : "Synthesizing intent...";
+    : "Generating...";
 
   return (
-    <div className="relative h-full">
+    <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
       <div
         ref={scrollRef}
-        className="overflow-y-auto h-full custom-scrollbar flex flex-col px-6 py-8 bg-transparent"
+        className="overflow-y-auto h-full custom-scrollbar flex flex-col px-6 py-8"
       >
-        <div className="mx-auto max-w-3xl w-full flex flex-col gap-12 pb-48">
+        <div className="mx-auto max-w-3xl w-full flex flex-col gap-10 pb-48">
           <AnimatePresence initial={false}>
             {turns.map((turn, i) => {
               const isLastTurn = i === turns.length - 1;
               const isWorking = isLastTurn && isThinking;
               return (
-                <motion.div
+                <TurnBlock
                   key={turn.id}
-                  layout
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex flex-col gap-8"
-                >
-                  {turn.userMessage && (
-                    <UserMessageCard text={turn.userMessage.text} />
-                  )}
-
-                  {(turn.events.length > 0 || turn.agentMessages.length > 0 || turn.permissions.length > 0) && (
-                    <div className="w-full flex flex-col gap-6">
-                      <div className="flex items-center gap-2.5 px-0.5">
-                        <div className="w-6 h-6 rounded-md bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center">
-                          <Cpu className="w-4 h-4 text-zinc-700 dark:text-zinc-300" />
-                        </div>
-                        <span className="font-semibold text-sm tracking-tight text-foreground">CoComputer</span>
-                      </div>
-
-                      {turn.events.length > 0 && (
-                        <ExecutionLog events={turn.events} isWorking={isWorking} />
-                      )}
-
-                      {turn.agentMessages.map((msg, idx) => {
-                        const isLastMsg = isLastTurn && idx === turn.agentMessages.length - 1;
-                        const shouldStream = isLastMsg && !isThinking && totalAgentMessages <= 3;
-                        return (
-                          <AgentMessageCard
-                            key={idx}
-                            text={msg.text}
-                            stream={shouldStream}
-                          />
-                        );
-                      })}
-
-                      {turn.permissions.map((perm, idx) => (
-                        <motion.div layout key={idx} className="py-1">
-                          <PermissionCard
-                            taskId={perm.task_id}
-                            approvalId={perm.approval_id}
-                            durableTaskId={perm.durable_task_id}
-                            description={perm.description}
-                            estimatedSeconds={perm.estimated_seconds}
-                            agent={perm.agent}
-                            onRespond={onPermissionRespond}
-                          />
-                        </motion.div>
-                      ))}
-                    </div>
-                  )}
-
-                  {turn.delegations.map((del, idx) => (
-                    <DelegationBadge key={idx} from={del.from} to={del.to} />
-                  ))}
-                </motion.div>
+                  turn={turn}
+                  isWorking={isWorking}
+                  isLastTurn={isLastTurn}
+                  totalAgentMessages={totalAgentMessages}
+                  onPermissionRespond={onPermissionRespond}
+                />
               );
             })}
           </AnimatePresence>
 
-          {/* Phase-Aware Thinking Indicator */}
+          {/* Phase-Aware Status Indicator */}
           <AnimatePresence>
-            {isThinking && turns.length > 0 && turns[lastTurnIdx].events.length === 0 && turns[lastTurnIdx].agentMessages.length === 0 && (
+            {isThinking && turns.length > 0 && (
               <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="flex items-center gap-3 text-indigo-400 py-2"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="flex items-center gap-3 py-2 mt-2"
               >
-                {phase === "thinking" ? (
-                  <Brain className="w-4 h-4 animate-pulse" />
-                ) : (
-                  <div className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
-                  </div>
-                )}
+                <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center shadow-md shadow-blue-600/20">
+                  <MessageSquare className="w-3.5 h-3.5 text-white" />
+                </div>
                 <motion.span
                   key={phase}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  className="text-[14px] font-medium tracking-wide"
+                  initial={{ opacity: 0, x: 5 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="text-[14px] font-medium text-zinc-400 dark:text-zinc-500 tracking-wide"
                 >
                   {phaseLabel}
                 </motion.span>
@@ -342,7 +281,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}
             onClick={scrollToBottom}
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background border border-border/60 shadow-lg text-[12px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
           >
             <ChevronDown className="w-3.5 h-3.5" />
             Scroll to bottom
@@ -354,13 +293,116 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
 });
 
 /* ------------------------------------------------------------------ */
-/*  User Message (Sleek modern bubble)                                 */
+/*  Turn Block                                                         */
+/* ------------------------------------------------------------------ */
+
+function TurnBlock({
+  turn,
+  isWorking,
+  isLastTurn,
+  totalAgentMessages,
+  onPermissionRespond,
+}: {
+  turn: Turn;
+  isWorking: boolean;
+  isLastTurn: boolean;
+  totalAgentMessages: number;
+  onPermissionRespond: Props["onPermissionRespond"];
+}) {
+  // Build an interleaved timeline from task groups + agent messages + permissions + delegations
+  const taskGroups = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
+
+  const timeline = useMemo(() => {
+    const items: TimelineItem[] = [];
+
+    for (const group of taskGroups) {
+      items.push({ kind: "taskGroup", data: group, ts: group.ts });
+    }
+    for (const msg of turn.agentMessages) {
+      items.push({ kind: "agentMessage", text: msg.text, ts: msg.ts });
+    }
+    for (const perm of turn.permissions) {
+      items.push({ kind: "permission", data: perm, ts: perm.ts });
+    }
+    for (const del of turn.delegations) {
+      items.push({ kind: "delegation", from: del.from, to: del.to, ts: del.ts });
+    }
+
+    items.sort((a, b) => a.ts - b.ts);
+    return items;
+  }, [taskGroups, turn.agentMessages, turn.permissions, turn.delegations]);
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col gap-5 w-full"
+    >
+      {turn.userMessage && (
+        <UserMessageCard text={turn.userMessage.text} />
+      )}
+
+      {timeline.map((item, idx) => {
+        const isLastGroup = isWorking && idx === timeline.length - 1 && item.kind === "taskGroup";
+
+        if (item.kind === "taskGroup") {
+          return (
+            <ThoughtAccordion
+              key={`group-${item.data.id}`}
+              task={item.data}
+              isActive={isLastGroup}
+            />
+          );
+        }
+
+        if (item.kind === "agentMessage") {
+          const msgIdx = turn.agentMessages.findIndex(m => m.ts === item.ts);
+          const isLastMsg = isLastTurn && msgIdx === turn.agentMessages.length - 1;
+          const shouldStream = isLastMsg && !isWorking && totalAgentMessages <= 3;
+          return (
+            <AgentMessageCard
+              key={`msg-${item.ts}-${idx}`}
+              text={item.text}
+              stream={shouldStream}
+            />
+          );
+        }
+
+        if (item.kind === "permission") {
+          return (
+            <motion.div layout key={`perm-${idx}`} className="py-1">
+              <PermissionCard
+                taskId={item.data.task_id}
+                approvalId={item.data.approval_id}
+                durableTaskId={item.data.durable_task_id}
+                description={item.data.description}
+                estimatedSeconds={item.data.estimated_seconds}
+                agent={item.data.agent}
+                onRespond={onPermissionRespond}
+              />
+            </motion.div>
+          );
+        }
+
+        if (item.kind === "delegation") {
+          return <DelegationBadge key={`del-${idx}`} from={item.from} to={item.to} />;
+        }
+
+        return null;
+      })}
+    </motion.div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  User Message                                                       */
 /* ------------------------------------------------------------------ */
 
 function UserMessageCard({ text }: { text: string }) {
   return (
     <div className="flex w-full justify-end py-1">
-      <div className="max-w-[85%] rounded-2xl bg-zinc-100 dark:bg-zinc-800 px-5 py-3.5 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-700/50">
+      <div className="max-w-[80%] rounded-2xl bg-zinc-100 dark:bg-[#1a1a1e] px-5 py-3 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 border border-zinc-200/80 dark:border-zinc-800/60">
         {text}
       </div>
     </div>
@@ -368,13 +410,13 @@ function UserMessageCard({ text }: { text: string }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Agent Message (Crisp markdown)                                     */
+/*  Agent Message                                                      */
 /* ------------------------------------------------------------------ */
 
 function AgentMessageCard({ text, stream = false }: { text: string; stream?: boolean }) {
   return (
-    <motion.div layout className="flex flex-col items-start px-0.5">
-      <div className="w-full text-[15px] leading-relaxed text-foreground font-normal">
+    <motion.div layout className="flex flex-col items-start w-full">
+      <div className="w-full text-[15px] leading-[1.75] text-zinc-800 dark:text-zinc-100 font-medium">
         {stream ? (
           <StreamingText text={text} isStreaming={stream} />
         ) : (
@@ -386,140 +428,83 @@ function AgentMessageCard({ text, stream = false }: { text: string; stream?: boo
 }
 
 /* ------------------------------------------------------------------ */
-/*  Execution Log (Per-task collapsible groups)                         */
+/*  Thought Accordion                                                  */
 /* ------------------------------------------------------------------ */
 
-function ExecutionLog({
-  events,
-  isWorking,
-}: {
-  events: Extract<ChatItem, { kind: "event" }>[];
-  isWorking: boolean;
-}) {
-  const taskGroups = useMemo(() => groupTurnEvents(events), [events]);
+function buildSummary(task: TaskGroup): string {
+  const thinkings = task.steps.filter(s => s.kind === "thinking").length;
+  const toolSteps = task.steps.filter(s => s.kind === "tool_invocation");
 
-  return (
-    <div className="flex flex-col gap-3 w-full max-w-full mt-2">
-      {taskGroups.map((task, index) => {
-        const isLast = index === taskGroups.length - 1;
-        return (
-          <TaskCard
-            key={task.id}
-            task={task}
-            isActive={isLast && isWorking}
-          />
-        );
-      })}
-    </div>
-  );
+  let viewedCount = 0;
+  let ranCount = 0;
+  let fetchedCount = 0;
+  let otherCount = 0;
+
+  for (const step of toolSteps) {
+    if (step.kind !== "tool_invocation") continue;
+    const provider = classifyAgentTool(step.tool);
+    if (provider === "file") viewedCount++;
+    else if (provider === "terminal") ranCount++;
+    else if (provider === "browser") fetchedCount++;
+    else otherCount++;
+  }
+
+  const parts: string[] = [`Thought ${Math.max(1, thinkings)} time(s)`];
+  if (viewedCount > 0) parts.push(`Viewed ${viewedCount} file(s)`);
+  if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
+  if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
+  if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
+
+  return parts.join(", ");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Task Card (Individual collapsible task)                            */
-/* ------------------------------------------------------------------ */
-
-function TaskCard({
+function ThoughtAccordion({
   task,
   isActive,
 }: {
   task: TaskGroup;
   isActive: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
-  const prevActiveRef = useRef(isActive);
-
-  useEffect(() => {
-    if (prevActiveRef.current && !isActive) {
-      const timer = setTimeout(() => setExpanded(false), 1500);
-      prevActiveRef.current = isActive;
-      return () => clearTimeout(timer);
-    }
-    prevActiveRef.current = isActive;
-  }, [isActive]);
-
-  const toolSteps = task.steps.filter((s) => s.kind === "tool_invocation");
-  const completedTools = toolSteps.filter(
-    (s) => s.kind === "tool_invocation" && s.status === "completed",
-  ).length;
-  const totalTools = toolSteps.length;
-  const isDone = !isActive && task.status === "completed";
-
-  // Calculate execution duration
-  const durationStr = useMemo(() => {
-    if (!task.steps.length) return null;
-    const start = task.ts;
-    let end = start;
-    for (const step of task.steps) {
-      if (step.kind === "tool_invocation") {
-        if (step.result?.ts) {
-          end = Math.max(end, step.result.ts);
-        } else {
-          end = Math.max(end, step.callTs);
-        }
-      } else {
-        end = Math.max(end, step.ts);
-      }
-    }
-    const diff = end - start;
-    // Handle both second-based and ms-based timestamps
-    const isMs = start > 1e11;
-    const diffSec = isMs ? Math.round(diff / 1000) : diff;
-    if (diffSec < 0) return null;
-    
-    const mins = Math.floor(diffSec / 60);
-    const secs = diffSec % 60;
-    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  }, [task.steps, task.ts]);
+  const [expanded, setExpanded] = useState(false);
+  const summary = useMemo(() => buildSummary(task), [task]);
 
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
-      className="w-full"
+      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+      className="w-full flex flex-col"
     >
-      {/* Task Header */}
-      <div
-        className="flex items-center gap-2.5 cursor-pointer transition-colors py-2 px-1 rounded-lg hover:bg-muted/50"
+      {/* Accordion header */}
+      <button
+        className="flex items-center gap-1.5 w-fit text-left select-none group py-0.5"
         onClick={() => setExpanded(!expanded)}
       >
-        {/* Status icon */}
-        {isActive ? (
-          <Loader2 className="w-4 h-4 text-cyan-500 animate-spin shrink-0" />
-        ) : isDone ? (
-          <Check className="w-4 h-4 text-emerald-500 shrink-0 font-bold" />
-        ) : (
-          <Check className="w-4 h-4 text-zinc-500 shrink-0" />
-        )}
-
-        {/* Title */}
-        <span className="text-[14px] font-medium text-foreground flex-1 min-w-0 truncate">
-          {task.title}
+        <span className="text-[14px] text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
+          {summary}
         </span>
+        {expanded ? (
+          <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
+        )}
+        {isActive && (
+          <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
+        )}
+      </button>
 
-        {/* Duration & chevron */}
-        <div className="flex items-center gap-2.5 ml-auto shrink-0">
-          {durationStr && (
-            <span className="text-[12px] text-zinc-500 dark:text-zinc-400 font-mono">
-              {durationStr}
-            </span>
-          )}
-          <ChevronUp
-            className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${expanded ? "" : "rotate-180"}`}
-          />
-        </div>
-      </div>
-
+      {/* Accordion content */}
       <AnimatePresence>
         {expanded && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
           >
-            <div className="border-l border-dashed border-zinc-200 dark:border-zinc-800 pl-5 ml-2 space-y-4 py-3 min-h-[20px]">
+            <div className="flex flex-col gap-4 pt-3 pb-1 pl-1">
               {task.steps.map((step, index) => (
                 <StepRow key={`${step.kind}-${index}`} item={step} />
               ))}
@@ -532,235 +517,203 @@ function TaskCard({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step Row (dispatcher for steps within a task)                      */
+/*  Step Row dispatcher                                                */
 /* ------------------------------------------------------------------ */
 
-function getFileBasename(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts[parts.length - 1];
-}
-
-function getInlineSummary(
-  tool: string,
-  args: Record<string, unknown>,
-  result?: { output: string }
-): string | null {
-  if (!args) return null;
-
-  if (tool === "ask_permission" || tool.endsWith("ask_permission")) {
-    const action = typeof args.Action === "string" ? args.Action : "";
-    const target = typeof args.Target === "string" ? args.Target : "";
-    if (action && target) {
-      return `${action}: ${getFileBasename(target)}`;
-    }
-  }
-
-  if (typeof args.title === "string" && args.title) {
-    return args.title;
-  }
-
-  if (typeof args.TargetFile === "string" && args.TargetFile) {
-    return getFileBasename(args.TargetFile);
-  }
-  if (typeof args.AbsolutePath === "string" && args.AbsolutePath) {
-    return getFileBasename(args.AbsolutePath);
-  }
-  if (typeof args.path === "string" && args.path) {
-    return getFileBasename(args.path);
-  }
-  if (typeof args.file === "string" && args.file) {
-    return getFileBasename(args.file);
-  }
-
-  if (typeof args.CommandLine === "string" && args.CommandLine) {
-    return args.CommandLine;
-  }
-  if (typeof args.command === "string" && args.command) {
-    return args.command;
-  }
-
-  if (typeof args.query === "string" && args.query) {
-    return `"${args.query}"`;
-  }
-
-  if (typeof args.Prompt === "string" && args.Prompt) {
-    return `"${args.Prompt}"`;
-  }
-
-  if (typeof args.question === "string" && args.question) {
-    return args.question;
-  }
-  if (typeof args.Reason === "string" && args.Reason) {
-    return args.Reason;
-  }
-
+function StepRow({ item }: { item: GroupedEvent }) {
+  if (item.kind === "thinking") return <ThinkingBlock text={item.text} />;
+  if (item.kind === "tool_invocation") return <ToolLine invocation={item} />;
+  if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
+  if (item.kind === "error") return <ErrorLine message={item.message} />;
   return null;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step Row (dispatcher for steps within a task)                      */
+/*  Thinking Process Block                                             */
 /* ------------------------------------------------------------------ */
 
-function StepRow({ item }: { item: GroupedEvent }) {
+function ThinkingBlock({ text }: { text: string }) {
   return (
-    <div className="relative w-full">
-      <div className="w-full">
-        {item.kind === "thinking" && (
-          <div className="w-full text-[14px] leading-relaxed text-zinc-600 dark:text-zinc-400 py-1 pr-4 font-normal">
-            <ChatMarkdown content={item.text} />
-          </div>
-        )}
-        {item.kind === "tool_invocation" && <ToolInvocationCard invocation={item} />}
-        {item.kind === "screenshot" && <ScreenshotCard item={item} />}
-        {item.kind === "error" && (
-          <div className="flex flex-col relative py-1">
-            <div className="rounded-full bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-red-600 dark:text-red-400">
-              <X className="w-3.5 h-3.5" />
-              <span className="font-medium tracking-tight">Error</span>
-            </div>
-            <div className="mt-2 text-[13px] text-red-500">{item.message}</div>
-          </div>
-        )}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
+        <BrainCircuit className="w-4 h-4" />
+        Thinking process
+      </div>
+      <div className="pl-6 border-l-2 border-zinc-200 dark:border-zinc-800 text-[14px] leading-[1.8] text-zinc-500 dark:text-zinc-400">
+        <ChatMarkdown content={text} />
       </div>
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Tool Invocation Card (paired call + result)                       */
+/*  Tool Line (flat text-style rendering)                              */
 /* ------------------------------------------------------------------ */
 
-function ToolInvocationCard({
+function ToolLine({
   invocation,
 }: {
   invocation: Extract<GroupedEvent, { kind: "tool_invocation" }>;
 }) {
-  const [resultExpanded, setResultExpanded] = useState(false);
-  const [devMode, setDevMode] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const provider = classifyAgentTool(invocation.tool);
   const label = displayAgentToolName(invocation.tool);
   const isRunning = invocation.status === "running";
-  const hasArgs = Object.keys(invocation.args).length > 0;
+  const summary = getInlineSummary(invocation.tool, invocation.args);
   const output = invocation.result?.output;
-  const isLongOutput = output && output.length > 300;
 
-  // Try parsing output for web search results
-  let parsedResults: any[] | null = null;
-  if (output) {
+  // Try parsing web search results
+  let parsedResults: Array<{ url: string; title: string; snippet?: string }> | null = null;
+  if (output && (invocation.tool === "search_web" || invocation.tool === "web_search" || invocation.tool === "scrape_web_page")) {
     try {
       const parsed = JSON.parse(output);
       if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.url && parsed[0]?.title) {
         parsedResults = parsed;
       }
-    } catch (e) {}
+    } catch { /* not JSON */ }
   }
 
-  const inlineSummary = useMemo(() => {
-    const rawSummary = getInlineSummary(invocation.tool, invocation.args, invocation.result);
-    // Don't repeat the tool name if it is identical to the label
-    if (rawSummary && rawSummary.toLowerCase() === label.toLowerCase()) {
-      return null;
-    }
-    return rawSummary;
-  }, [invocation.tool, invocation.args, invocation.result, label]);
+  // ── Terminal ──
+  if (provider === "terminal") {
+    const cmd = summary || "command";
+    const truncated = cmd.length > 70 ? cmd.slice(0, 70) + "..." : cmd;
+    return (
+      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
+        <TerminalIcon className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
+        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">Terminal</span>
+        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
+        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
+      </div>
+    );
+  }
 
-  const hasTechnicalDetails = hasArgs || !!output;
+  // ── Read File ──
+  if (provider === "file") {
+    const path = summary || "file";
+    const truncated = path.length > 60 ? "..." + path.slice(-57) : path;
+    return (
+      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
+        <FileText className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
+        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">Read File</span>
+        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
+        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
+      </div>
+    );
+  }
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
-      className="flex flex-col relative py-0.5"
-    >
-      {/* Tool Pill & Inline Summary */}
-      <div className="flex items-center gap-3 flex-wrap min-w-0">
-        <div 
-          onClick={() => hasTechnicalDetails && setDevMode(!devMode)}
-          className={`rounded-full bg-zinc-100 dark:bg-[#1f1f22] border border-zinc-200 dark:border-zinc-700/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-zinc-700 dark:text-zinc-300 group ${hasTechnicalDetails ? 'cursor-pointer hover:bg-zinc-200 dark:hover:bg-[#2a2a2d] transition-colors' : ''}`}>
-          {isRunning ? (
-            <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin" />
-          ) : (
-            getToolIcon(provider, "w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500")
-          )}
-          <span className="font-medium tracking-tight whitespace-normal max-w-[500px]">{inlineSummary || label}</span>
+  // ── WebFetch with results ──
+  if (parsedResults) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
+          <Globe className="w-4 h-4" />
+          WebFetch {parsedResults.length} results
+        </div>
+        <div className="flex flex-col gap-0 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden ml-6">
+          {parsedResults.map((res, idx) => {
+            let domain = "";
+            try { domain = new URL(res.url).hostname; } catch { /* */ }
+            return (
+              <a
+                key={idx}
+                href={res.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-3 px-4 py-2.5 text-[14px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900/50 transition-colors border-b border-zinc-100 dark:border-zinc-800/60 last:border-b-0"
+              >
+                <Globe className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{domain || res.url}</span>
+              </a>
+            );
+          })}
         </div>
       </div>
+    );
+  }
 
-      {/* Args (compact) */}
-      <AnimatePresence>
-        {hasArgs && devMode && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mt-2 overflow-hidden"
-          >
-            <CompactArgs args={invocation.args} />
-          </motion.div>
+  // ── Web browser tool (no parsed results) ──
+  if (provider === "browser") {
+    const desc = summary || label;
+    const truncated = desc.length > 70 ? desc.slice(0, 70) + "..." : desc;
+    return (
+      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
+        <Globe className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
+        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">WebFetch</span>
+        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
+        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
+      </div>
+    );
+  }
+
+  // ── Generic tool with expandable detail card ──
+  const hasDetails = Object.keys(invocation.args).length > 0 || !!output;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        onClick={() => hasDetails && setDetailsOpen(!detailsOpen)}
+        className={`flex items-center gap-2 text-[14px] min-w-0 text-left ${hasDetails ? "cursor-pointer" : "cursor-default"}`}
+      >
+        {getToolIcon(provider, "w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0")}
+        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">{label}</span>
+        {summary && summary !== label && (
+          <span className="text-zinc-600 dark:text-zinc-400 truncate max-w-[400px]">{summary}</span>
         )}
-      </AnimatePresence>
+        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
+      </button>
 
-      {/* Result */}
       <AnimatePresence>
-        {invocation.result && (
+        {detailsOpen && hasDetails && (
           <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            transition={{ duration: 0.3 }}
-            className="w-full mt-2"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="overflow-hidden ml-6"
           >
-            {parsedResults ? (
-              <div className="mt-3 flex flex-col gap-2 max-w-2xl">
-                {parsedResults.map((res: any, idx: number) => {
-                  let domain = "";
-                  try { domain = new URL(res.url).hostname.replace("www.", ""); } catch(e){}
-                  return (
-                    <a key={idx} href={res.url} target="_blank" rel="noopener noreferrer" className="group flex flex-col gap-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-[#111113] p-3 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors">
-                      <div className="flex items-center gap-2">
-                        {domain && <img src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`} className="w-4 h-4 rounded-sm bg-white" alt="" />}
-                        <span className="text-[13px] font-medium text-zinc-900 dark:text-zinc-100 line-clamp-1">{res.title}</span>
-                      </div>
-                      {res.snippet && <p className="text-[13px] text-zinc-500 line-clamp-2 leading-relaxed">{res.snippet}</p>}
-                    </a>
-                  );
-                })}
+            <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+              {/* Card header */}
+              <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 text-[13px] font-medium text-zinc-600 dark:text-zinc-300">
+                {summary || label}
               </div>
-            ) : (
-              <AnimatePresence>
-                {devMode && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="overflow-hidden"
-                  >
-                    <div
-                      className={`w-full mt-2 text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words border-l-2 border-zinc-200 dark:border-zinc-800 pl-3 py-0.5 relative ${
-                        !resultExpanded && isLongOutput ? "max-h-24 overflow-hidden" : ""
-                      }`}
-                    >
-                      {output}
-                      {!resultExpanded && isLongOutput && (
-                        <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-background to-transparent pointer-events-none" />
-                      )}
-                    </div>
-                    {isLongOutput && (
-                      <button
-                        onClick={() => setResultExpanded(!resultExpanded)}
-                        className="text-[11px] text-zinc-400 hover:text-zinc-300 mt-2 transition-colors font-medium"
-                      >
-                        {resultExpanded ? "Show less" : "Show more"}
-                      </button>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            )}
+
+              {/* Args */}
+              {Object.keys(invocation.args).length > 0 && (
+                <div className="px-4 py-3">
+                  <div className="text-[12px] text-zinc-400 dark:text-zinc-500 mb-1.5 font-medium">Input</div>
+                  <pre className="text-[12px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words leading-relaxed">
+                    {JSON.stringify(invocation.args, null, 2)}
+                  </pre>
+                </div>
+              )}
+
+              {/* Output */}
+              {output && (
+                <div className="px-4 py-3 border-t border-zinc-100 dark:border-zinc-800/60">
+                  <div className="text-[12px] text-zinc-400 dark:text-zinc-500 mb-1.5 font-medium">Output</div>
+                  <pre className="text-[12px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">
+                    {output.length > 500 ? output.slice(0, 500) + "\n..." : output}
+                  </pre>
+                </div>
+              )}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
-    </motion.div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Error Line                                                         */
+/* ------------------------------------------------------------------ */
+
+function ErrorLine({ message }: { message: string }) {
+  return (
+    <div className="flex items-start gap-2 text-[14px]">
+      <X className="w-4 h-4 text-red-400 dark:text-red-500 shrink-0 mt-0.5" />
+      <span className="text-red-500 dark:text-red-400">{message}</span>
+    </div>
   );
 }
 
@@ -774,24 +727,19 @@ function ScreenshotCard({
   item: Extract<GroupedEvent, { kind: "screenshot" }>;
 }) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
-      className="flex flex-col gap-2 relative py-0.5"
-    >
-      <div className="rounded-full bg-zinc-100 dark:bg-[#1f1f22] border border-zinc-200 dark:border-zinc-700/50 text-[13px] flex items-center gap-2 px-3 py-1.5 w-fit text-zinc-700 dark:text-zinc-300 group">
-        <Eye className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
-        <span className="font-medium tracking-tight">Vision Analysis</span>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
+        <Eye className="w-4 h-4" />
+        Vision Analysis
       </div>
-      <div className="space-y-3 mt-1">
+      <div className="pl-6 space-y-3">
         {item.analysis && (
-          <p className="text-[13px] text-zinc-600 dark:text-zinc-400 leading-relaxed pr-4">
+          <p className="text-[13px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
             {item.analysis}
           </p>
         )}
         {item.image_b64 && (
-          <div className="relative w-[160px] h-[100px] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 brightness-90 hover:brightness-100 transition">
+          <div className="relative w-[160px] h-[100px] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 brightness-90 hover:brightness-100 transition">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={`data:image/png;base64,${item.image_b64}`}
@@ -801,17 +749,18 @@ function ScreenshotCard({
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Delegation (Clean text)                                            */
+/*  Delegation Badge                                                   */
 /* ------------------------------------------------------------------ */
+
 function DelegationBadge({ from, to }: { from: string; to: string }) {
   return (
     <div className="flex justify-center py-4">
-      <span className="text-[12px] font-medium text-muted-foreground italic">
+      <span className="text-[12px] font-medium text-zinc-400 dark:text-zinc-600 italic">
         {from} handed off to {to}
       </span>
     </div>
