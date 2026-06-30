@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     # Internal token safety cap (telemetry/debug only, not the user-facing plan allowance)
     default_token_limit: int = 100_000
 
+    # Thesys Generative UI
+    thesys_api_key: str = ""
+    thesys_model: str = "c1/google/gemini-3.1-flash-lite-free/v-20251230"
+    thesys_validate_timeout_seconds: float = 30.0
+    thesys_skip_validation: bool = False  # Set to True to skip the live API test when saving the key (saves free-tier quota)
+
     # Google OAuth 2.0 (for Google Drive integration)
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""

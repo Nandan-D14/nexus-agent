@@ -44,6 +44,7 @@ from nexus.tools.integrations import (
     tasks_create,
     calendar_list,
     calendar_create,
+    render_ui,
 )
 from nexus.tools.workspace import (
     prepare_task_workspace,
@@ -447,6 +448,7 @@ def _create_code_agent(
             extract_pdf_text,
             generate_pdf_report,
             save_as_artifact,
+            render_ui,
             type_text,
             press_key,
         ]),

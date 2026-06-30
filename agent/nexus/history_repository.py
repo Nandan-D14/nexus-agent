@@ -1140,6 +1140,24 @@ class FirestoreHistoryRepository:
             last_error,
         )
 
+    async def upsert_thesys_connection(
+        self,
+        uid: str,
+        *,
+        api_key: str,
+        enabled: bool = True,
+        status: str = "connected",
+        last_error: str | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_thesys_connection_sync,
+            uid,
+            api_key,
+            enabled,
+            status,
+            last_error,
+        )
+
     async def upsert_google_connections(
         self,
         uid: str,
@@ -3448,6 +3466,48 @@ class FirestoreHistoryRepository:
             "enabled": enabled,
             "tools": [
                 {"name": "tinyfish_web_agent", "description": "Use TinyFish to automate browser tasks on a website using natural language goals."},
+            ],
+            "resources": [],
+            "status": status,
+            "lastError": last_error,
+            "lastCheckedAt": now,
+            "updatedAt": now,
+        }
+        existing = self._integration_private_ref(uid, connection_id).get()
+        existing_data = existing.to_dict() if existing.exists else {}
+        private_payload["createdAt"] = existing_data.get("createdAt") or now
+        public_payload = self._public_integration_payload(private_payload)
+        batch = self._db.batch()
+        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        batch.commit()
+        self._sync_integration_summary_sync(uid)
+        return self._build_stored_integration_connection(
+            uid,
+            connection_id,
+            public_payload,
+            private_payload,
+        )
+
+    def _upsert_thesys_connection_sync(
+        self,
+        uid: str,
+        api_key: str,
+        enabled: bool,
+        status: str,
+        last_error: str | None,
+    ) -> StoredIntegrationConnection:
+        now = utcnow()
+        connection_id = "thesys"
+        private_payload = {
+            "ownerId": uid,
+            "connectorType": "native",
+            "provider": "thesys",
+            "name": "Thesys",
+            "apiKey": api_key,
+            "enabled": enabled,
+            "tools": [
+                {"name": "render_ui", "description": "Generate interactive UI components (charts, tables, forms, dashboards) from data."},
             ],
             "resources": [],
             "status": status,

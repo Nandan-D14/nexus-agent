@@ -275,6 +275,11 @@ class UpsertTinyfishConnectionRequest(BaseModel):
     enabled: bool = True
 
 
+class UpsertThesysConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
 class AgentSkillUpsertRequest(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, max_length=40)

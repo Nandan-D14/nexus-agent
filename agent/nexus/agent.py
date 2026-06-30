@@ -122,6 +122,7 @@ def create_multi_agent(
         github_summarize_pr,
         tavily_search,
         tinyfish_web_agent,
+        render_ui,
     )
     from nexus.tools.workspace import (
         prepare_task_workspace,
@@ -167,6 +168,7 @@ def create_multi_agent(
         github_summarize_pr,
         tavily_search,
         tinyfish_web_agent,
+        render_ui,
         *(integration_tools or []),
     ]
     deepresearcher_tools = [
@@ -201,6 +203,7 @@ def create_multi_agent(
         github_summarize_pr,
         tavily_search,
         tinyfish_web_agent,
+        render_ui,
         *(integration_tools or []),
     ]
 
