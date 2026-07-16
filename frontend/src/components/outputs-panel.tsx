@@ -35,6 +35,10 @@ function formatTimestamp(value: string | null | undefined): string {
   return date.toLocaleString();
 }
 
+function isHtmlArtifact(artifact: RunArtifact): boolean {
+  return artifact.kind === "html" || artifact.metadata?.render_mode === "iframe";
+}
+
 function ArtifactIcon({ kind, className }: { kind: string; className?: string }) {
   switch (kind) {
     case "pdf_report":
@@ -51,6 +55,8 @@ function ArtifactIcon({ kind, className }: { kind: string; className?: string })
       return <FileSpreadsheet className={className || "w-5 h-5 text-green-400"} />;
     case "document":
       return <FileType className={className || "w-5 h-5 text-blue-500"} />;
+    case "html":
+      return <FileText className={className || "w-5 h-5 text-amber-400"} />;
     default:
       return <File className={className || "w-5 h-5 text-zinc-400"} />;
   }
@@ -99,6 +105,7 @@ function InlineIframeViewer({
         src={embedUrl}
         className="w-full h-[500px] bg-white"
         title={title}
+        sandbox="allow-scripts allow-forms allow-modals"
       />
     </div>
   );
@@ -167,8 +174,8 @@ async function downloadFromWorkspaceSandbox(sessionId: string, path: string): Pr
     if (!res.ok) return null;
     const blob = await res.blob();
     return window.URL.createObjectURL(blob);
-  } catch (e) {
-    if ((e as any)?.name !== "AbortError") {
+  } catch (e: unknown) {
+    if (!(e instanceof Error) || e.name !== "AbortError") {
       console.error("Workspace download failed", e);
     }
     return null;
@@ -184,6 +191,7 @@ export function OutputsPanel({
   const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const fetchedIds = useRef<Set<string>>(new Set());
+  const autoOpenedIds = useRef<Set<string>>(new Set());
 
   /**
    * Resolve a working URL for an artifact. Prefers the one already on the
@@ -250,12 +258,19 @@ export function OutputsPanel({
   useEffect(() => {
     artifacts.forEach((artifact) => {
       const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
-      if (isImage && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
+      if ((isImage || isHtmlArtifact(artifact)) && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
         fetchedIds.current.add(artifact.artifact_id);
         resolveUrl(artifact).catch(() => {});
       }
     });
   }, [artifacts, resolveUrl, freshUrls]);
+
+  useEffect(() => {
+    const htmlArtifact = artifacts.find(isHtmlArtifact);
+    if (!htmlArtifact || autoOpenedIds.current.has(htmlArtifact.artifact_id)) return;
+    autoOpenedIds.current.add(htmlArtifact.artifact_id);
+    setViewingId(htmlArtifact.artifact_id);
+  }, [artifacts]);
 
   /** Download an artifact by getting a fresh signed URL and triggering browser download. */
   const handleDownload = useCallback(
@@ -350,6 +365,7 @@ export function OutputsPanel({
             const isLoading = loadingId === artifact.artifact_id;
             const currentUrl = getUrl(artifact);
             const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
+            const isHtml = isHtmlArtifact(artifact);
 
             return (
               <div
@@ -360,6 +376,13 @@ export function OutputsPanel({
                 <div className="relative aspect-video w-full bg-[#1c1c1e] flex items-center justify-center overflow-hidden border-b border-zinc-800">
                   {isImage && currentUrl ? (
                     <img src={currentUrl} alt={artifact.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                  ) : isHtml && currentUrl ? (
+                    <iframe
+                      src={currentUrl}
+                      title={`${artifact.title} thumbnail`}
+                      className="w-[200%] h-[200%] scale-50 origin-top-left bg-white pointer-events-none opacity-80 group-hover:opacity-100 transition-opacity"
+                      sandbox="allow-scripts allow-forms allow-modals"
+                    />
                   ) : (
                     <div className="flex flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">
                       <ArtifactIcon kind={artifact.kind} className="w-12 h-12 text-zinc-500" />

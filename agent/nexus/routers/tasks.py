@@ -89,10 +89,14 @@ def _run_payload(run: DurableTaskRun) -> dict[str, Any]:
         "lease_owner": run.lease_owner,
         "lease_expires_at": run.lease_expires_at.isoformat() if run.lease_expires_at else None,
         "attempt": run.attempt,
+        "claim_generation": run.claim_generation,
         "session_id": run.session_id,
         "error": run.error,
         "summary": run.summary,
         "execution_payload": run.execution_payload or {},
+        "checkpoint": run.checkpoint or {},
+        "verification": run.verification or {},
+        "final_response": run.final_response,
     }
 
 
@@ -161,7 +165,10 @@ async def create_durable_task(
             "session_id": payload.session_id,
         },
     )
-    enqueue = await queue.enqueue_task_run(task_id=task.task_id, run_id=run.run_id)
+    enqueue_kwargs = {"task_id": task.task_id, "run_id": run.run_id}
+    if run.claim_token:
+        enqueue_kwargs["claim_token"] = run.claim_token
+    enqueue = await queue.enqueue_task_run(**enqueue_kwargs)
     return {
         "task": _task_payload(task),
         "run": _run_payload(run),
@@ -245,7 +252,21 @@ async def append_durable_task_message(
         event_type="user_message",
         payload={"text": payload.message},
     )
-    enqueue = await queue.enqueue_task_run(task_id=task_id, run_id=run.run_id) if payload.run else None
+    enqueue = (
+        await queue.enqueue_task_run(
+            **{
+                "task_id": task_id,
+                "run_id": run.run_id,
+                **(
+                    {"claim_token": run.claim_token}
+                    if run.claim_token
+                    else {}
+                ),
+            }
+        )
+        if payload.run
+        else None
+    )
     return {
         "event": _event_payload(event),
         "run": _run_payload(run),
@@ -278,7 +299,68 @@ async def resolve_durable_task_approval(
     )
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
-    return {"approval": _approval_payload(approval)}
+    enqueue_payload = None
+    metadata = approval.metadata or {}
+    run_id = str(metadata.get("run_id") or "")
+    if run_id:
+        run = await repo.get_run(
+            task_id=task_id,
+            run_id=run_id,
+            owner_id=user.uid,
+        )
+        if run and run.status in {"waiting_approval", "paused"}:
+            checkpoint = dict(run.checkpoint or {})
+            checkpoint["approval_resolution"] = {
+                "approval_id": approval.approval_id,
+                "approved": payload.approved,
+                "action_hash": metadata.get("action_hash"),
+                "tool": metadata.get("tool"),
+                "canonical_args": metadata.get("canonical_args") or {},
+                "args_preview": metadata.get("args_preview") or {},
+            }
+            await repo.save_checkpoint(
+                task_id=task_id,
+                run_id=run_id,
+                owner_id=user.uid,
+                checkpoint=checkpoint,
+            )
+            requeued = await repo.requeue_run(
+                task_id=task_id,
+                run_id=run_id,
+                reason="Approval resolved; resume exact blocked action.",
+                expected_generation=run.claim_generation,
+            )
+            if requeued is not None:
+                enqueue = await get_task_queue().enqueue_task_run(
+                    task_id=task_id,
+                    run_id=run_id,
+                    claim_token=requeued.claim_token,
+                )
+                enqueue_payload = enqueue.__dict__
+    return {
+        "approval": _approval_payload(approval),
+        "queue": enqueue_payload,
+    }
+
+
+@router.get("/api/v1/tasks/{task_id}/approvals")
+async def list_durable_task_approvals(
+    task_id: str,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=200),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    repo = get_production_task_repository()
+    task = await repo.get_task(task_id)
+    if not task or task.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Task not found")
+    approvals = await repo.list_approvals(
+        task_id=task_id,
+        owner_id=user.uid,
+        status=status,
+        limit=limit,
+    )
+    return {"approvals": [_approval_payload(item) for item in approvals]}
 
 
 @router.post("/api/v1/policy/preview")

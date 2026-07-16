@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @normalized_tool(needs_sandbox=True)
 def open_browser(url: str) -> dict:
-    """Open a URL in the web browser (Firefox).
+    """Open a URL in the provisioned Chromium CDP browser.
 
     After calling this, wait for the page to settle and take_screenshot()
     only if visible browser state is needed.
@@ -30,7 +30,9 @@ def open_browser(url: str) -> dict:
         sandbox = get_sandbox()
         sandbox.open_url(url)
         from nexus.tools.screen import mark_screen_changed
+        from nexus.tools.screen_state import mark_dirty
         mark_screen_changed("open_browser")
+        mark_dirty("open_browser")
         return tool_success(
             f"Opened {url} in browser",
             url=url, action="open_browser",

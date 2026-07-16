@@ -210,7 +210,11 @@ async def _continue_existing_session_for_user(
             owner_id=user.uid,
             runtime_config=resolve_session_runtime_config(user_settings),
             created_at=stored_session.created_at,
-            resume_mode="continue_latest_workspace" if exact_workspace_resume_available else "fresh",
+            resume_mode=(
+                "continue_latest_workspace"
+                if exact_workspace_resume_available
+                else "continue_conversation"
+            ),
             seed_context="",
             initial_title=stored_session.title or "Continued session",
             artifact_count=stored_session.artifact_count,

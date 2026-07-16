@@ -12,6 +12,7 @@ import logging
 import json
 import shlex
 import socket
+import threading
 import time
 from typing import Optional
 
@@ -184,6 +185,9 @@ class SandboxManager:
         self._sandbox = None
         self._stream_url: Optional[str] = None
         self._e2b_api_key = e2b_api_key
+        # Browser tools may race during a new session. One launch attempt per
+        # sandbox avoids conflicting Chromium processes sharing the CDP port.
+        self._chromium_cdp_lock = threading.Lock()
 
     @property
     def is_alive(self) -> bool:
@@ -306,7 +310,7 @@ class SandboxManager:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
     def _provision_sandbox(self) -> None:
-        """Pre-install common libraries to speed up agent tasks."""
+        """Pre-install task libraries and provision one Chromium CDP target."""
         libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
         cmd = f"pip install {' '.join(libs)}"
         try:
@@ -316,6 +320,10 @@ class SandboxManager:
             self._sandbox.commands.run(cmd, timeout=300)
         except Exception as e:
             logger.warning("Sandbox provisioning failed: %s", e)
+        try:
+            self.ensure_chromium_cdp()
+        except Exception as exc:
+            logger.warning("Chromium CDP provisioning failed: %s", exc)
 
     def keep_alive(self, timeout: int = 900) -> None:
         """Extend sandbox timeout."""
@@ -323,30 +331,37 @@ class SandboxManager:
             self._sandbox.set_timeout(timeout)
 
     def pause(self) -> str | None:
-        """Snapshot the sandbox state. Returns the sandbox_id so it can be resumed later.
+        """Pause the sandbox so it can be resumed later via ``connect``/``resume``.
 
-        Clears internal references so ``is_alive`` returns False after this call.
-        Returns None if no sandbox is running or if the E2B API call fails.
+        Current E2B Desktop SDK exposes ``Sandbox.pause()`` which returns the
+        sandbox id. That id is what ``Sandbox.connect(id)`` resumes.
         """
-        if self._sandbox is None:
+        if not self._sandbox:
             return None
         try:
-            sandbox_id: str = self._sandbox.sandbox_id
-            self._sandbox.pause()
+            sandbox_id = self._sandbox.pause()
             logger.info("Sandbox paused (id=%s)", sandbox_id)
-            return sandbox_id
-        except Exception as exc:
-            logger.warning("Failed to pause sandbox: %s", exc)
-            return None
-        finally:
             self._sandbox = None
             self._stream_url = None
+            return str(sandbox_id) if sandbox_id else None
+        except Exception as exc:
+            logger.warning("Sandbox pause failed: %s — destroying instead", exc)
+            try:
+                self.destroy()
+            except Exception:
+                self._sandbox = None
+                self._stream_url = None
+            return None
 
     def connect(self, sandbox_id: str) -> dict:
-        """Connect to an existing (running) sandbox. Returns {sandbox_id, stream_url}."""
+        """Connect to an existing (running or paused) sandbox.
+
+        E2B ``Sandbox.connect`` auto-resumes paused sandboxes.
+        Returns {sandbox_id, stream_url}.
+        """
         from e2b_desktop import Sandbox
-        
-        logger.info("Connecting to executing sandbox %s ...", sandbox_id)
+
+        logger.info("Connecting to sandbox %s ...", sandbox_id)
         self._sandbox = Sandbox.connect(
             sandbox_id,
             api_key=self._e2b_api_key or None,
@@ -354,6 +369,7 @@ class SandboxManager:
         )
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
+        self.ensure_chromium_cdp()
         logger.info("Sandbox connected -- stream URL: %s", self._stream_url)
         return {
             "sandbox_id": self._sandbox.sandbox_id,
@@ -361,25 +377,12 @@ class SandboxManager:
         }
 
     def resume(self, sandbox_id: str) -> dict:
-        """Resume a previously paused sandbox. Returns {sandbox_id, stream_url}.
+        """Resume a paused sandbox.
 
-        Raises if the E2B API call fails (e.g. snapshot expired after 24 hours).
+        E2B has no ``Sandbox.resume`` — ``Sandbox.connect`` resumes paused
+        sandboxes. This method is the session-layer alias for that path.
         """
-        from e2b_desktop import Sandbox
-
-        logger.info("Resuming sandbox %s ...", sandbox_id)
-        self._sandbox = Sandbox.resume(
-            sandbox_id,
-            api_key=self._e2b_api_key or None,
-            timeout=settings.sandbox_timeout_seconds,
-        )
-        self._sandbox.stream.start(require_auth=False)
-        self._stream_url = self._sandbox.stream.get_url()
-        logger.info("Sandbox resumed -- stream URL: %s", self._stream_url)
-        return {
-            "sandbox_id": self._sandbox.sandbox_id,
-            "stream_url": self._stream_url,
-        }
+        return self.connect(sandbox_id)
 
     def destroy(self) -> None:
         """Kill the sandbox."""
@@ -680,7 +683,206 @@ class SandboxManager:
 
     # -- Applications --------------------------------------------------------
 
-    def open_url(self, url: str) -> None:
-        """Open a URL in the default browser."""
+    def _is_chromium_cdp_port_reachable(self, port: int) -> bool:
+        """Probe CDP without allowing a connection refusal to abort provisioning."""
+        command = (
+            f"if curl -fsS --max-time 2 http://127.0.0.1:{port}/json/version "
+            ">/dev/null 2>&1; then printf CDP_READY; fi; exit 0"
+        )
+        try:
+            result = self._sandbox.commands.run(command, timeout=10)
+        except Exception as exc:
+            logger.debug("Chromium CDP readiness probe failed: %s", exc)
+            return False
+        return "CDP_READY" in str(getattr(result, "stdout", ""))
+
+    def _can_connect_to_chromium_cdp(self, port: int) -> bool:
+        """Verify Playwright can attach to the endpoint, not only reach its HTTP port."""
+        script = (
+            "from playwright.sync_api import sync_playwright; "
+            "p = sync_playwright().start(); "
+            f"browser = p.chromium.connect_over_cdp('http://127.0.0.1:{port}'); "
+            "print('CDP_CONNECTED'); browser.close(); p.stop()"
+        )
+        try:
+            result = self._sandbox.commands.run(
+                f"python3 -c {shlex.quote(script)}",
+                timeout=20,
+            )
+        except Exception as exc:
+            logger.debug("Chromium CDP connection probe failed: %s", exc)
+            return False
+        return (
+            _coerce_exit_code(getattr(result, "exit_code", -1)) == 0
+            and "CDP_CONNECTED" in str(getattr(result, "stdout", ""))
+        )
+
+    def _wait_for_chromium_cdp(self, port: int, timeout_seconds: int) -> bool:
+        """Wait for a usable CDP endpoint with bounded exponential backoff."""
+        deadline = time.monotonic() + max(1, timeout_seconds)
+        delay = max(float(settings.browser_startup_retry_initial_seconds), 0.05)
+        max_delay = max(float(settings.browser_startup_retry_max_seconds), delay)
+        attempt = 0
+        port_reachable_logged = False
+
+        while True:
+            if self._is_chromium_cdp_port_reachable(port):
+                if not port_reachable_logged:
+                    logger.info("Chromium CDP port %s reachable", port)
+                    port_reachable_logged = True
+                if self._can_connect_to_chromium_cdp(port):
+                    logger.info("Chromium CDP connected on port %s", port)
+                    return True
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            sleep_for = min(delay, remaining)
+            attempt += 1
+            logger.debug(
+                "Waiting for Chromium CDP on port %s (probe %s, retry in %.2fs)",
+                port,
+                attempt,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+            delay = min(delay * 2, max_delay)
+
+    def _chromium_log_tail(self) -> str:
+        try:
+            result = self._sandbox.commands.run(
+                "tail -n 40 /tmp/nexus-chromium.log 2>/dev/null || true",
+                timeout=10,
+            )
+            return str(getattr(result, "stdout", "")).strip()[-4000:]
+        except Exception:
+            return ""
+
+    def ensure_chromium_cdp(self) -> dict:
+        """Ensure visible Chromium has a reachable, Playwright-verified CDP endpoint."""
         self._require_sandbox()
-        self._sandbox.open(url)
+        port = int(settings.browser_cdp_port)
+
+        with self._chromium_cdp_lock:
+            if self._is_chromium_cdp_port_reachable(port):
+                logger.info("Chromium CDP port %s reachable; reusing browser", port)
+                if self._can_connect_to_chromium_cdp(port):
+                    logger.info("Chromium CDP connected on port %s", port)
+                    return {"status": "ready", "port": port, "reused": True}
+                logger.warning(
+                    "Chromium CDP port %s is reachable but Playwright cannot connect; "
+                    "starting a fresh browser process",
+                    port,
+                )
+
+            import_check = self._sandbox.commands.run(
+                "python3 -c 'import playwright'",
+                timeout=15,
+            )
+            if _coerce_exit_code(getattr(import_check, "exit_code", -1)) != 0:
+                installed = self._sandbox.commands.run(
+                    "pip install playwright && python3 -m playwright install chromium",
+                    timeout=300,
+                )
+                if _coerce_exit_code(getattr(installed, "exit_code", -1)) != 0:
+                    raise RuntimeError(
+                        getattr(installed, "stderr", "")
+                        or "Failed to install Playwright Chromium"
+                    )
+
+            launcher = f"""import json
+import os
+import subprocess
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    executable = p.chromium.executable_path
+
+env = dict(os.environ)
+env["DISPLAY"] = ":1"
+command = [
+    executable,
+    "--remote-debugging-port={port}",
+    "--remote-debugging-address=127.0.0.1",
+    "--user-data-dir=/tmp/nexus-chromium-profile",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "about:blank",
+]
+with open("/tmp/nexus-chromium.log", "ab") as log:
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=log,
+        stderr=log,
+        start_new_session=True,
+    )
+if process.poll() is not None:
+    raise SystemExit("Chromium exited immediately with code %s" % process.returncode)
+print(json.dumps({{"pid": process.pid, "port": {port}}}))
+"""
+            logger.info("Starting Chromium with CDP on port %s", port)
+            self._sandbox.write_text_file("/tmp/nexus_chromium_cdp.py", launcher)
+            result = self._sandbox.commands.run(
+                "python3 /tmp/nexus_chromium_cdp.py",
+                timeout=30,
+            )
+            if _coerce_exit_code(getattr(result, "exit_code", -1)) != 0:
+                raise RuntimeError(
+                    getattr(result, "stderr", "")
+                    or getattr(result, "stdout", "")
+                    or "Chromium CDP launch failed"
+                )
+
+            launch_details: dict[str, object] = {}
+            try:
+                launch_details = json.loads(str(getattr(result, "stdout", "")).strip())
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Chromium launcher returned no process metadata")
+            logger.info(
+                "Chromium process started (pid=%s, cdp_port=%s)",
+                launch_details.get("pid", "unknown"),
+                port,
+            )
+
+            if not self._wait_for_chromium_cdp(
+                port,
+                int(settings.browser_startup_timeout_seconds),
+            ):
+                log_tail = self._chromium_log_tail()
+                detail = f" Chromium log tail: {log_tail}" if log_tail else ""
+                raise RuntimeError(
+                    f"Chromium CDP endpoint on 127.0.0.1:{port} did not become "
+                    f"ready within {settings.browser_startup_timeout_seconds}s.{detail}"
+                )
+            return {"status": "ready", "port": port, "reused": False}
+
+    def open_url(self, url: str) -> None:
+        """Open a URL in the provisioned visible Chromium CDP browser."""
+        self._require_sandbox()
+        self.ensure_chromium_cdp()
+        url_b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
+        port = int(settings.browser_cdp_port)
+        script = (
+            "import base64; "
+            "from playwright.sync_api import sync_playwright; "
+            f"url=base64.b64decode('{url_b64}').decode('utf-8'); "
+            "p=sync_playwright().start(); "
+            f"browser=p.chromium.connect_over_cdp('http://127.0.0.1:{port}'); "
+            "context=browser.contexts[0] if browser.contexts else browser.new_context(); "
+            "page=context.pages[0] if context.pages else context.new_page(); "
+            "page.goto(url, wait_until='domcontentloaded', timeout=30000); "
+            "print(page.url); "
+            "browser.close(); p.stop()"
+        )
+        result = self._sandbox.commands.run(
+            f"python3 -c {shlex.quote(script)}",
+            timeout=45,
+        )
+        if _coerce_exit_code(getattr(result, "exit_code", -1)) != 0:
+            raise RuntimeError(
+                getattr(result, "stderr", "")
+                or "Failed to navigate Chromium"
+            )

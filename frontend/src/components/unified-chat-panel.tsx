@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useMemo, useRef, useEffect, useState, memo } from "react";
+import { useMemo, useRef, useEffect, useState, memo, type ReactNode } from "react";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { StreamingText } from "@/components/streaming-text";
 import { PermissionCard } from "@/components/permission-card";
@@ -26,17 +26,23 @@ import {
   Loader2,
   BrainCircuit,
   MessageSquare,
+  BookOpen,
+  Bot,
+  LayoutGrid,
 } from "lucide-react";
 import {
   classifyAgentTool,
   displayAgentToolName,
+  toolActionLabel,
   type AgentToolProvider,
 } from "@/lib/agent-tool-classification";
 import {
   groupTurnEvents,
+  type GenerativeUiSegment,
   type TaskGroup,
   type GroupedEvent,
 } from "@/lib/turn-event-grouper";
+import { GenerativeUICard } from "@/components/generative-ui-card";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -55,7 +61,14 @@ type ChatItem =
       durable_task_id?: string;
       ts: number;
     }
-  | { kind: "delegation"; from: string; to: string; ts: number };
+  | { kind: "delegation"; from: string; to: string; ts: number }
+  | {
+      kind: "user_question";
+      question_id: string;
+      question: string;
+      answered?: boolean;
+      ts: number;
+    };
 
 type Props = {
   items: ChatItem[];
@@ -67,6 +80,7 @@ type Props = {
     approvalId?: string,
     durableTaskId?: string,
   ) => void;
+  onQuestionRespond?: (questionId: string, answer: string) => void;
 };
 
 type Turn = {
@@ -76,6 +90,7 @@ type Turn = {
   agentMessages: Extract<ChatItem, { kind: "message" }>[];
   permissions: Extract<ChatItem, { kind: "permission" }>[];
   delegations: Extract<ChatItem, { kind: "delegation" }>[];
+  questions: Extract<ChatItem, { kind: "user_question" }>[];
 };
 
 /* ------------------------------------------------------------------ */
@@ -91,8 +106,11 @@ function getToolIcon(provider: AgentToolProvider, className: string) {
     case "gmail": return <Mail className={className} />;
     case "calendar": return <Calendar className={className} />;
     case "tasks": return <ListTodo className={className} />;
+    case "skill": return <BookOpen className={className} />;
+    case "subagent": return <Bot className={className} />;
+    case "worker": return <TerminalIcon className={className} />;
+    case "workflow": return <LayoutGrid className={className} />;
     case "mcp": return <Plug className={className} />;
-    case "workflow": return <ListTodo className={className} />;
     default: return <Code2 className={className} />;
   }
 }
@@ -130,8 +148,24 @@ function getInlineSummary(
 
   if (typeof args.query === "string" && args.query) return `"${args.query}"`;
   if (typeof args.Prompt === "string" && args.Prompt) return `"${args.Prompt}"`;
+  if (typeof args.prompt === "string" && args.prompt) {
+    const p = args.prompt;
+    return p.length > 80 ? `"${p.slice(0, 77)}..."` : `"${p}"`;
+  }
   if (typeof args.question === "string" && args.question) return args.question;
   if (typeof args.Reason === "string" && args.Reason) return args.Reason;
+  if (typeof args.skill_id === "string" && args.skill_id) return args.skill_id;
+  if (typeof args.request === "string" && args.request) {
+    const r = args.request;
+    return r.length > 80 ? `${r.slice(0, 77)}...` : r;
+  }
+  if (typeof args.role === "string" && typeof args.type_name === "string") {
+    return `${args.role} · ${args.type_name}`;
+  }
+  if (typeof args.role === "string" && args.role) return args.role;
+  if (typeof args.subagent_id === "string" && args.subagent_id) {
+    return args.subagent_id.slice(0, 12);
+  }
 
   if (typeof args.DirectoryPath === "string" && args.DirectoryPath) return args.DirectoryPath;
 
@@ -144,9 +178,11 @@ function getInlineSummary(
 
 type TimelineItem =
   | { kind: "taskGroup"; data: TaskGroup; ts: number }
+  | { kind: "generative_ui"; data: GenerativeUiSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
   | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
-  | { kind: "delegation"; from: string; to: string; ts: number };
+  | { kind: "delegation"; from: string; to: string; ts: number }
+  | { kind: "user_question"; data: Extract<ChatItem, { kind: "user_question" }>; ts: number };
 
 /* ------------------------------------------------------------------ */
 /*  Main exported component                                            */
@@ -157,6 +193,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   isThinking,
   phase = "idle",
   onPermissionRespond,
+  onQuestionRespond,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
@@ -194,14 +231,17 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
 
   const turns = useMemo(() => {
     const grouped: Turn[] = [];
-    let currentTurn: Turn = { id: "initial", events: [], agentMessages: [], permissions: [], delegations: [] };
+    let currentTurn: Turn = { id: "initial", events: [], agentMessages: [], permissions: [], delegations: [], questions: [] };
+
+    const hasContent = (t: Turn) =>
+      Boolean(t.userMessage) || t.events.length > 0 || t.agentMessages.length > 0 || t.permissions.length > 0 || t.questions.length > 0;
 
     for (const item of items) {
       if (item.kind === "message" && item.role === "user") {
-        if (currentTurn.userMessage || currentTurn.events.length > 0 || currentTurn.agentMessages.length > 0 || currentTurn.permissions.length > 0) {
+        if (hasContent(currentTurn)) {
           grouped.push(currentTurn);
         }
-        currentTurn = { id: `turn-${item.ts}`, userMessage: item, events: [], agentMessages: [], permissions: [], delegations: [] };
+        currentTurn = { id: `turn-${item.ts}`, userMessage: item, events: [], agentMessages: [], permissions: [], delegations: [], questions: [] };
       } else if (item.kind === "message" && item.role === "agent") {
         currentTurn.agentMessages.push(item);
       } else if (item.kind === "event") {
@@ -210,10 +250,12 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
         currentTurn.permissions.push(item);
       } else if (item.kind === "delegation") {
         currentTurn.delegations.push(item);
+      } else if (item.kind === "user_question") {
+        currentTurn.questions.push(item);
       }
     }
     grouped.push(currentTurn);
-    return grouped.filter(t => t.userMessage || t.events.length > 0 || t.agentMessages.length > 0 || t.permissions.length > 0);
+    return grouped.filter(hasContent);
   }, [items]);
 
   const totalAgentMessages = turns.reduce((sum, t) => sum + t.agentMessages.length, 0);
@@ -242,6 +284,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   isLastTurn={isLastTurn}
                   totalAgentMessages={totalAgentMessages}
                   onPermissionRespond={onPermissionRespond}
+                  onQuestionRespond={onQuestionRespond}
                 />
               );
             })}
@@ -302,21 +345,27 @@ function TurnBlock({
   isLastTurn,
   totalAgentMessages,
   onPermissionRespond,
+  onQuestionRespond,
 }: {
   turn: Turn;
   isWorking: boolean;
   isLastTurn: boolean;
   totalAgentMessages: number;
   onPermissionRespond: Props["onPermissionRespond"];
+  onQuestionRespond?: Props["onQuestionRespond"];
 }) {
-  // Build an interleaved timeline from task groups + agent messages + permissions + delegations
-  const taskGroups = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
+  // Build an interleaved timeline from event segments + messages + cards
+  const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
 
   const timeline = useMemo(() => {
     const items: TimelineItem[] = [];
 
-    for (const group of taskGroups) {
-      items.push({ kind: "taskGroup", data: group, ts: group.ts });
+    for (const seg of eventSegments) {
+      if (seg.kind === "task_group") {
+        items.push({ kind: "taskGroup", data: seg.data, ts: seg.ts });
+      } else if (seg.kind === "generative_ui") {
+        items.push({ kind: "generative_ui", data: seg, ts: seg.ts });
+      }
     }
     for (const msg of turn.agentMessages) {
       items.push({ kind: "agentMessage", text: msg.text, ts: msg.ts });
@@ -327,10 +376,13 @@ function TurnBlock({
     for (const del of turn.delegations) {
       items.push({ kind: "delegation", from: del.from, to: del.to, ts: del.ts });
     }
+    for (const question of turn.questions) {
+      items.push({ kind: "user_question", data: question, ts: question.ts });
+    }
 
     items.sort((a, b) => a.ts - b.ts);
     return items;
-  }, [taskGroups, turn.agentMessages, turn.permissions, turn.delegations]);
+  }, [eventSegments, turn.agentMessages, turn.permissions, turn.delegations, turn.questions]);
 
   return (
     <motion.div
@@ -353,6 +405,22 @@ function TurnBlock({
               task={item.data}
               isActive={isLastGroup}
             />
+          );
+        }
+
+        if (item.kind === "generative_ui") {
+          return (
+            <motion.div
+              layout
+              key={`genui-${item.data.ts}-${idx}`}
+              className="w-full py-1"
+            >
+              <GenerativeUICard
+                title={item.data.title}
+                componentType={item.data.component_type}
+                component={item.data.component}
+              />
+            </motion.div>
           );
         }
 
@@ -387,6 +455,19 @@ function TurnBlock({
 
         if (item.kind === "delegation") {
           return <DelegationBadge key={`del-${idx}`} from={item.from} to={item.to} />;
+        }
+
+        if (item.kind === "user_question") {
+          return (
+            <motion.div layout key={`question-${item.data.question_id}`} className="py-1">
+              <UserQuestionCard
+                questionId={item.data.question_id}
+                question={item.data.question}
+                answered={item.data.answered}
+                onRespond={onQuestionRespond}
+              />
+            </motion.div>
+          );
         }
 
         return null;
@@ -436,21 +517,34 @@ function buildSummary(task: TaskGroup): string {
   const toolSteps = task.steps.filter(s => s.kind === "tool_invocation");
 
   let viewedCount = 0;
+  let wroteCount = 0;
   let ranCount = 0;
   let fetchedCount = 0;
+  let skillCount = 0;
+  let workerCount = 0;
+  let subagentCount = 0;
   let otherCount = 0;
 
   for (const step of toolSteps) {
     if (step.kind !== "tool_invocation") continue;
-    const provider = classifyAgentTool(step.tool);
-    if (provider === "file") viewedCount++;
+    const tool = step.tool;
+    const provider = classifyAgentTool(tool);
+    if (provider === "skill") skillCount++;
+    else if (provider === "worker") workerCount++;
+    else if (provider === "subagent") subagentCount++;
+    else if (tool === "read_workspace_file" || tool === "list_workspace_files") viewedCount++;
+    else if (tool === "write_workspace_file") wroteCount++;
     else if (provider === "terminal") ranCount++;
     else if (provider === "browser") fetchedCount++;
     else otherCount++;
   }
 
   const parts: string[] = [`Thought ${Math.max(1, thinkings)} time(s)`];
+  if (skillCount > 0) parts.push(`Read ${skillCount} skill(s)`);
+  if (workerCount > 0) parts.push(`Called ${workerCount} worker(s)`);
+  if (subagentCount > 0) parts.push(`Spawned ${subagentCount} subagent(s)`);
   if (viewedCount > 0) parts.push(`Viewed ${viewedCount} file(s)`);
+  if (wroteCount > 0) parts.push(`Wrote ${wroteCount} file(s)`);
   if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
   if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
   if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
@@ -550,6 +644,35 @@ function ThinkingBlock({ text }: { text: string }) {
 /*  Tool Line (flat text-style rendering)                              */
 /* ------------------------------------------------------------------ */
 
+function ToolLogLine({
+  icon,
+  label,
+  detail,
+  isRunning,
+}: {
+  icon: ReactNode;
+  label: string;
+  detail?: string | null;
+  isRunning?: boolean;
+}) {
+  const truncated =
+    detail && detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
+  return (
+    <div className="flex items-center gap-2 text-[14px] min-w-0">
+      <span className="shrink-0 text-zinc-400 dark:text-zinc-600">{icon}</span>
+      <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium">
+        {label}
+      </span>
+      {truncated ? (
+        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
+      ) : null}
+      {isRunning ? (
+        <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />
+      ) : null}
+    </div>
+  );
+}
+
 function ToolLine({
   invocation,
 }: {
@@ -557,7 +680,9 @@ function ToolLine({
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const provider = classifyAgentTool(invocation.tool);
+  const actionLabel = toolActionLabel(invocation.tool);
   const label = displayAgentToolName(invocation.tool);
+  const iconClass = "w-4 h-4";
   const isRunning = invocation.status === "running";
   const summary = getInlineSummary(invocation.tool, invocation.args);
   const output = invocation.result?.output;
@@ -571,6 +696,78 @@ function ToolLine({
         parsedResults = parsed;
       }
     } catch { /* not JSON */ }
+  }
+
+  // ── Skill ──
+  if (provider === "skill") {
+    return (
+      <ToolLogLine
+        icon={<BookOpen className={iconClass} />}
+        label={actionLabel}
+        detail={summary}
+        isRunning={isRunning}
+      />
+    );
+  }
+
+  // ── Workers ──
+  if (provider === "worker") {
+    const WorkerIcon =
+      invocation.tool === "desktop_worker" ? Eye : TerminalIcon;
+    return (
+      <ToolLogLine
+        icon={<WorkerIcon className={iconClass} />}
+        label={actionLabel}
+        detail={summary}
+        isRunning={isRunning}
+      />
+    );
+  }
+
+  // ── Subagents ──
+  if (provider === "subagent") {
+    return (
+      <ToolLogLine
+        icon={<Bot className={iconClass} />}
+        label={actionLabel}
+        detail={summary}
+        isRunning={isRunning}
+      />
+    );
+  }
+
+  // ── C1 / artifacts (card renders outside the log accordion) ──
+  if (invocation.tool === "render_ui") {
+    return (
+      <ToolLogLine
+        icon={<LayoutGrid className={iconClass} />}
+        label={actionLabel}
+        detail={summary || "visual component"}
+        isRunning={isRunning}
+      />
+    );
+  }
+
+  if (invocation.tool === "publish_html_artifact") {
+    return (
+      <ToolLogLine
+        icon={<LayoutGrid className={iconClass} />}
+        label={actionLabel}
+        detail={summary || "HTML page"}
+        isRunning={isRunning}
+      />
+    );
+  }
+
+  if (invocation.tool === "ask_user") {
+    return (
+      <ToolLogLine
+        icon={<MessageSquare className={iconClass} />}
+        label={actionLabel}
+        detail={summary}
+        isRunning={isRunning}
+      />
+    );
   }
 
   // ── Terminal ──
@@ -587,14 +784,20 @@ function ToolLine({
     );
   }
 
-  // ── Read File ──
+  // ── Files ──
   if (provider === "file") {
+    const fileLabel =
+      invocation.tool === "write_workspace_file"
+        ? "Writing file"
+        : invocation.tool === "list_workspace_files"
+          ? "Listing files"
+          : "Reading file";
     const path = summary || "file";
     const truncated = path.length > 60 ? "..." + path.slice(-57) : path;
     return (
       <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
         <FileText className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">Read File</span>
+        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">{fileLabel}</span>
         <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
         {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
       </div>
@@ -633,7 +836,7 @@ function ToolLine({
 
   // ── Web browser tool (no parsed results) ──
   if (provider === "browser") {
-    const desc = summary || label;
+    const desc = summary || displayAgentToolName(invocation.tool);
     const truncated = desc.length > 70 ? desc.slice(0, 70) + "..." : desc;
     return (
       <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
@@ -645,7 +848,7 @@ function ToolLine({
     );
   }
 
-  // ── Generic tool with expandable detail card ──
+  // ── Workflow / generic tool with expandable detail card ──
   const hasDetails = Object.keys(invocation.args).length > 0 || !!output;
 
   return (
@@ -655,7 +858,9 @@ function ToolLine({
         className={`flex items-center gap-2 text-[14px] min-w-0 text-left ${hasDetails ? "cursor-pointer" : "cursor-default"}`}
       >
         {getToolIcon(provider, "w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0")}
-        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">{label}</span>
+        <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium">
+          {actionLabel}
+        </span>
         {summary && summary !== label && (
           <span className="text-zinc-600 dark:text-zinc-400 truncate max-w-[400px]">{summary}</span>
         )}
@@ -749,6 +954,93 @@ function ScreenshotCard({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  User Question Card (ask_user)                                      */
+/* ------------------------------------------------------------------ */
+
+function UserQuestionCard({
+  questionId,
+  question,
+  answered = false,
+  onRespond,
+}: {
+  questionId: string;
+  question: string;
+  answered?: boolean;
+  onRespond?: (questionId: string, answer: string) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const [submitted, setSubmitted] = useState(answered);
+
+  const resolved = submitted || answered;
+  const disabled = resolved || !onRespond;
+
+  function handleSubmit() {
+    const trimmed = answer.trim();
+    if (!trimmed || !onRespond) return;
+    setSubmitted(true);
+    onRespond(questionId, trimmed);
+  }
+
+  return (
+    <div
+      className={[
+        "relative rounded-lg border bg-card dark:bg-[#09090b] p-3 space-y-2.5 max-w-md",
+        "transition-all duration-300",
+        resolved
+          ? "border-blue-500/30"
+          : "border-blue-500/40 shadow-[0_0_12px_rgba(59,130,246,0.06)]",
+      ].join(" ")}
+    >
+      <div className="flex items-center gap-2">
+        <div
+          className={[
+            "w-1.5 h-1.5 rounded-full transition-colors duration-300",
+            resolved ? "bg-blue-500" : "bg-blue-500 animate-pulse",
+          ].join(" ")}
+        />
+        <span className="text-[9px] font-black uppercase tracking-[0.15em] text-blue-500">
+          Agent Question
+        </span>
+      </div>
+
+      <p className="text-[14px] leading-relaxed text-zinc-800 dark:text-zinc-200">
+        {question}
+      </p>
+
+      {!resolved ? (
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            placeholder="Your answer..."
+            className="flex-1 rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-[13px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+          />
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={disabled || !answer.trim()}
+            className="rounded-md bg-blue-600 px-3 py-2 text-[12px] font-semibold text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Send
+          </button>
+        </div>
+      ) : (
+        <p className="text-[12px] text-blue-600 dark:text-blue-400 font-medium">
+          Answer sent
+        </p>
+      )}
     </div>
   );
 }

@@ -60,11 +60,11 @@
 ### A. Text/Command path
 1. User sends text from frontend over WebSocket.
 2. `nexus.orchestrator.NexusOrchestrator` receives it.
-3. Orchestrator runs ADK multi-agent flow (`nexus_orchestrator` + sub-agents).
-4. Model (`CredentialedGemini`) decides tool calls.
-5. Tools execute inside E2B sandbox (`bash`, mouse/keyboard, browser, screenshot).
-6. Tool results are fed back to Gemini for next reasoning step.
-7. Final response is streamed to frontend.
+3. Orchestrator runs the single Qwen planner (`nexus_planner`) with terminal/desktop AgentTool workers.
+4. The planner decides tool calls; workers return typed evidence to the planner.
+5. Tools execute inside E2B sandbox (`bash`, mouse/keyboard, Chromium CDP/Playwright, screenshot).
+6. Tool results are fed back for the next reasoning step.
+7. Final response is streamed to frontend after completion verification.
 
 ### B. Voice path (Gemini Live)
 1. Frontend streams mic PCM audio to backend WebSocket.
@@ -78,17 +78,16 @@
 
 ### C. Vision path (Screenshot understanding)
 1. Tool `take_screenshot` captures E2B screen.
-2. JPEG bytes are sent to Gemini Vision (`generate_content`).
-3. Vision description is returned to the orchestrator.
+2. JPEG bytes are sent to the Qwen vision provider (`vision_provider.py`).
+3. Structured screen observations are returned to the planner/desktop worker.
 4. Agent uses that perception to decide next UI action.
-5. If rate-limited, configured fallback models are tried.
+5. If rate-limited, configured Qwen vision fallback tiers are tried and traced.
 
 ## 3) Key Files
 - `agent/nexus/orchestrator.py` - session-level control loop (voice + agent + tools).
+- `agent/nexus/agents/planner_agent.py` - single production planner and AgentTool workers.
 - `agent/nexus/voice.py` - Gemini Live bidirectional audio session manager.
-- `agent/nexus/vision.py` - screenshot analysis using Gemini vision models.
-- `agent/nexus/credentialed_gemini.py` - per-session Gemini client wrapper.
-- `agent/nexus/agents/orchestrator_agent.py` - top-level ADK orchestrator and delegation policy.
+- `agent/nexus/vision_provider.py` - Qwen screenshot grounding.
 - `agent/nexus/tools/*.py` - executable actions in sandbox.
 - `frontend/src/app/api/[...path]/route.ts` - frontend API proxy to backend.
 - `deploy/gcp/deploy.sh` - Cloud Build + Artifact Registry + Cloud Run deployment flow.

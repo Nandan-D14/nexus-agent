@@ -69,6 +69,34 @@ def _denied_result(tool_name: str, decision: ToolPolicyDecision) -> dict[str, An
     }
 
 
+def _budget_result(tool_name: str, guard: Any) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "summary": guard.exhausted_reason or "Durable run budget exhausted.",
+        "detail": {
+            "tool": tool_name,
+            "retryable": False,
+            "remaining_work": "Resume from the saved durable checkpoint with a new budget.",
+            "budget": guard.checkpoint(),
+        },
+        "metadata": {"tool": tool_name, "budget": guard.checkpoint()},
+        "error_code": guard.exhausted_code or "BUDGET_EXHAUSTED",
+        "suggested_alternatives": [],
+    }
+
+
+def _consume_tool_budget(tool_name: str) -> dict[str, Any] | None:
+    try:
+        from nexus.tools._context import get_task_budget_guard
+
+        guard = get_task_budget_guard()
+    except Exception:
+        guard = None
+    if guard is None or guard.before_tool_call(tool_name):
+        return None
+    return _budget_result(tool_name, guard)
+
+
 def _approval_required_result(tool_name: str, decision: ToolPolicyDecision) -> dict[str, Any]:
     """Standard response when the tool needs human approval but isn't auto."""
     return {
@@ -82,8 +110,12 @@ def _approval_required_result(tool_name: str, decision: ToolPolicyDecision) -> d
             "policy_action": decision.action,
             "risk": decision.risk,
             "reason": decision.reason,
+            "retryable": True,
+            "remaining_work": f"Approve the exact blocked {tool_name} action.",
         },
         "metadata": {"policy_action": decision.action, "risk": decision.risk},
+        "error_code": "APPROVAL_REQUIRED",
+        "suggested_alternatives": [],
     }
 
 
@@ -98,6 +130,8 @@ def _approval_denied_result(tool_name: str, decision: ToolPolicyDecision) -> dic
             "reason": decision.reason,
         },
         "metadata": {"policy_action": decision.action, "risk": decision.risk},
+        "error_code": "APPROVAL_DENIED",
+        "suggested_alternatives": [],
     }
 
 
@@ -119,7 +153,11 @@ def _bind_args(func: Callable, args: tuple, kwargs: dict[str, Any]) -> dict[str,
         sig = inspect.signature(func)
         bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
-        return dict(bound.arguments)
+        return {
+            key: value
+            for key, value in bound.arguments.items()
+            if not str(key).startswith("_")
+        }
     except (TypeError, ValueError):
         # Fall back to kwargs only — better than nothing.
         return dict(kwargs)
@@ -143,9 +181,20 @@ def _log_decision(tool_name: str, decision: ToolPolicyDecision, args_view: dict[
     )
 
 
+def _is_secret_key(key: str) -> bool:
+    lowered = str(key).lower()
+    return any(
+        marker in lowered
+        for marker in ("token", "secret", "password", "api_key", "apikey", "authorization")
+    )
+
+
 def _preview_args(args_view: dict[str, Any], *, limit: int = 240) -> dict[str, Any]:
     preview: dict[str, Any] = {}
     for key, value in args_view.items():
+        if _is_secret_key(str(key)):
+            preview[key] = "***"
+            continue
         if isinstance(value, str):
             preview[key] = value if len(value) <= limit else value[: limit - 1] + "…"
         elif isinstance(value, (int, float, bool)) or value is None:
@@ -153,6 +202,31 @@ def _preview_args(args_view: dict[str, Any], *, limit: int = 240) -> dict[str, A
         else:
             preview[key] = type(value).__name__
     return preview
+
+
+def _canonical_approval_args(args_view: dict[str, Any]) -> dict[str, Any]:
+    """Secret-safe args retained for exact approved-action resume matching."""
+    canonical: dict[str, Any] = {}
+    for key, value in args_view.items():
+        if _is_secret_key(str(key)):
+            canonical[key] = "***"
+            continue
+        if isinstance(value, str):
+            # Keep full command/path strings for hash-stable resume; truncate only
+            # extremely large payloads so Firestore docs stay bounded.
+            canonical[key] = value if len(value) <= 8000 else value[:7999] + "…"
+        elif isinstance(value, (int, float, bool)) or value is None:
+            canonical[key] = value
+        elif isinstance(value, (list, tuple)):
+            canonical[key] = [
+                item if isinstance(item, (str, int, float, bool)) or item is None else type(item).__name__
+                for item in list(value)[:40]
+            ]
+        elif isinstance(value, dict):
+            canonical[key] = _preview_args(value, limit=500)
+        else:
+            canonical[key] = type(value).__name__
+    return canonical
 
 
 def _approval_description(tool_name: str, decision: ToolPolicyDecision) -> str:
@@ -180,7 +254,7 @@ async def _await_durable_approval(
     tool_name: str,
     decision: ToolPolicyDecision,
     args_view: dict[str, Any],
-) -> bool | None:
+) -> bool | str | None:
     try:
         from nexus.tools._context import (
             get_owner_id,
@@ -204,27 +278,33 @@ async def _await_durable_approval(
     if repository is None or not task_id.startswith("task_") or not owner_id:
         return None
 
-    # Check if this tool has already been approved in a previous approval request for this task.
-    # We only auto-approve medium-risk tools (like read operations) to ensure high-risk actions (like sending emails) are always confirmed.
-    if decision.risk == "medium":
-        try:
-            from google.cloud.firestore_v1 import FieldFilter
-            def _check_already_approved() -> bool:
-                approvals_ref = repository._task_ref(task_id).collection("approvals")
-                docs = approvals_ref.where(filter=FieldFilter("status", "==", "approved")).stream()
-                for doc in docs:
-                    data = doc.to_dict() or {}
-                    meta = data.get("metadata") or {}
-                    if meta.get("tool") == tool_name:
-                        return True
-                return False
+    from nexus.production_tasks import approval_action_hash
 
-            already_approved = await asyncio.to_thread(_check_already_approved)
-            if already_approved:
-                logger.info("Tool %s was already approved for task %s; auto-approving.", tool_name, task_id)
-                return True
-        except Exception:
-            logger.warning("Failed to check existing approvals for tool %s", tool_name, exc_info=True)
+    action_hash = approval_action_hash(tool_name, args_view)
+    try:
+        consume_action = getattr(repository, "consume_approved_action", None)
+        existing = (
+            await consume_action(
+                task_id=task_id,
+                owner_id=owner_id,
+                action_hash=action_hash,
+            )
+            if callable(consume_action)
+            else None
+        )
+        if existing is not None:
+            logger.info(
+                "Consumed exact approval decision for %s on task %s",
+                tool_name,
+                task_id,
+            )
+            return bool(existing.approved)
+    except Exception:
+        logger.warning(
+            "Failed to consume existing approval for %s",
+            tool_name,
+            exc_info=True,
+        )
 
     approval = await repository.create_approval(
         task_id=task_id,
@@ -234,7 +314,9 @@ async def _await_durable_approval(
         metadata={
             "tool": tool_name,
             "args_preview": _preview_args(args_view),
+            "canonical_args": _canonical_approval_args(args_view),
             "run_id": run_id,
+            "action_hash": action_hash,
         },
     )
     if send_json is not None:
@@ -259,59 +341,36 @@ async def _await_durable_approval(
             owner_id=owner_id,
         )
         if current and current.status in {"approved", "denied"}:
-            return bool(current.approved)
+            if not current.approved:
+                return False
+            consume_action = getattr(
+                repository,
+                "consume_approved_action",
+                None,
+            )
+            if not callable(consume_action):
+                return True
+            consumed = await consume_action(
+                task_id=task_id,
+                owner_id=owner_id,
+                action_hash=action_hash,
+                approval_id=approval.approval_id,
+            )
+            return consumed is not None
         await asyncio.sleep(APPROVAL_POLL_SECONDS)
-    return False
+    return "pending"
 
 
 async def _await_approval(
     tool_name: str,
     decision: ToolPolicyDecision,
     args_view: dict[str, Any],
-) -> bool | None:
-    # Check if this tool is already in the manager's approved tools (medium risk only)
-    manager = None
-    if decision.risk == "medium":
-        try:
-            from nexus.tools._context import get_bg_task_manager
-            manager = get_bg_task_manager()
-            if manager is not None:
-                if not hasattr(manager, "approved_tools"):
-                    manager.approved_tools = set()
-                if tool_name in manager.approved_tools:
-                    logger.info("Tool %s was already approved in this session's BackgroundTaskManager; auto-approving.", tool_name)
-                    return True
-        except Exception:
-            pass
-
+) -> bool | str | None:
     durable = await _await_durable_approval(tool_name, decision, args_view)
     if durable is not None:
-        if durable is True and decision.risk == "medium":
-            try:
-                if manager is None:
-                    from nexus.tools._context import get_bg_task_manager
-                    manager = get_bg_task_manager()
-                if manager is not None:
-                    if not hasattr(manager, "approved_tools"):
-                        manager.approved_tools = set()
-                    manager.approved_tools.add(tool_name)
-            except Exception:
-                pass
         return durable
 
-    approved = await _await_background_task_approval(tool_name, decision)
-    if approved is True and decision.risk == "medium":
-        try:
-            if manager is None:
-                from nexus.tools._context import get_bg_task_manager
-                manager = get_bg_task_manager()
-            if manager is not None:
-                if not hasattr(manager, "approved_tools"):
-                    manager.approved_tools = set()
-                manager.approved_tools.add(tool_name)
-        except Exception:
-            pass
-    return approved
+    return await _await_background_task_approval(tool_name, decision)
 
 
 def _check_verification_warning(tool_name: str) -> str | None:
@@ -333,6 +392,39 @@ def _inject_warning(result: Any, warning: str) -> Any:
     return result
 
 
+def _verification_required_result(tool_name: str, reason: str) -> dict[str, Any]:
+    """Block a blind mutation and return a typed recovery instruction."""
+    return {
+        "status": "error",
+        "summary": reason,
+        "detail": {
+            "tool": tool_name,
+            "verified": False,
+            "retryable": True,
+            "remaining_work": f"Observe current state, then retry {tool_name}.",
+        },
+        "metadata": {
+            "tool": tool_name,
+            "verification_required": True,
+        },
+        "error_code": "SCREEN_VERIFICATION_REQUIRED",
+        "suggested_alternatives": [
+            "playwright_snapshot",
+            "playwright_verify",
+            "take_screenshot",
+        ],
+    }
+
+
+def _resolve_resource_locks():
+    try:
+        from nexus.tools._context import get_subagent_resource_locks
+
+        return get_subagent_resource_locks()
+    except Exception:
+        return None
+
+
 def gated_tool(func: Callable) -> Callable:
     """Wrap a tool callable so every invocation passes policy enforcement.
 
@@ -342,38 +434,19 @@ def gated_tool(func: Callable) -> Callable:
     """
     tool_name = getattr(func, "__name__", "tool")
 
-    if asyncio.iscoroutinefunction(func):
+    is_async = asyncio.iscoroutinefunction(func)
 
-        @functools.wraps(func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            args_view = _bind_args(func, args, kwargs)
-            decision = evaluate_tool_policy(
-                tool_name,
-                args_view,
-                autonomy_mode=_resolve_autonomy_mode(),
-            )
-            _log_decision(tool_name, decision, args_view)
-            if decision.action == "deny":
-                return _denied_result(tool_name, decision)
-            if decision.action == "require_approval":
-                approved = await _await_approval(tool_name, decision, args_view)
-                if approved is True:
-                    return await func(*args, **kwargs)
-                if approved is False:
-                    return _approval_denied_result(tool_name, decision)
-                return _approval_required_result(tool_name, decision)
-
-            # Perception-action loop: warn if screen is dirty before GUI actions
-            warning = _check_verification_warning(tool_name)
-            result = await func(*args, **kwargs)
-            if warning:
-                return _inject_warning(result, warning)
-            return result
-
-        return async_wrapper
+    async def _invoke_underlying(*args: Any, **kwargs: Any) -> Any:
+        if is_async:
+            return await func(*args, **kwargs)
+        # Keep sync tools off the event-loop thread when they may block on I/O.
+        return await asyncio.to_thread(func, *args, **kwargs)
 
     @functools.wraps(func)
-    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+    async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        budget_block = _consume_tool_budget(tool_name)
+        if budget_block is not None:
+            return budget_block
         args_view = _bind_args(func, args, kwargs)
         decision = evaluate_tool_policy(
             tool_name,
@@ -384,16 +457,31 @@ def gated_tool(func: Callable) -> Callable:
         if decision.action == "deny":
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
+            approved = await _await_approval(tool_name, decision, args_view)
+            if approved is True:
+                warning = _check_verification_warning(tool_name)
+                if warning:
+                    return _verification_required_result(tool_name, warning)
+                locks = _resolve_resource_locks()
+                if locks is None:
+                    return await _invoke_underlying(*args, **kwargs)
+                async with locks.async_lock(tool_name):
+                    return await _invoke_underlying(*args, **kwargs)
+            if approved is False:
+                return _approval_denied_result(tool_name, decision)
             return _approval_required_result(tool_name, decision)
 
-        # Perception-action loop: warn if screen is dirty before GUI actions
+        # Perception-action loop: never execute a blind shared-state mutation.
         warning = _check_verification_warning(tool_name)
-        result = func(*args, **kwargs)
         if warning:
-            return _inject_warning(result, warning)
-        return result
+            return _verification_required_result(tool_name, warning)
+        locks = _resolve_resource_locks()
+        if locks is None:
+            return await _invoke_underlying(*args, **kwargs)
+        async with locks.async_lock(tool_name):
+            return await _invoke_underlying(*args, **kwargs)
 
-    return sync_wrapper
+    return async_wrapper
 
 
 def gate_tools(tools: list[Callable]) -> list[Callable]:

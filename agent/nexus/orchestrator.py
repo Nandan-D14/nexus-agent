@@ -18,15 +18,23 @@ from google.adk.events import Event
 from google.genai import types
 from starlette.websockets import WebSocket, WebSocketState
 
-from nexus.agent import AgentTurnResult, create_agent, create_multi_agent, create_runner, run_agent_turn
+from nexus.agent import (
+    AgentTurnResult,
+    create_planner_agent,
+    create_runner,
+    run_agent_turn,
+)
 from nexus.background_tasks import BackgroundTask, BackgroundTaskManager
-from nexus.billing import calculate_screenshot_credits
+from nexus.billing import calculate_screenshot_credits, calculate_usage_credits
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.mcp_client import build_mcp_adk_tools, redact_sensitive
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.sandbox import SandboxDeadError
 from nexus.skills import build_enabled_skills_prompt
 from nexus.tools._context import (
+    reset_worker_call_count,
+    set_artifact_callback,
+    set_ask_user_callback,
     set_bg_task_manager,
     set_ensure_sandbox_callback,
     set_history_repository,
@@ -37,16 +45,33 @@ from nexus.tools._context import (
     set_sandbox,
     set_send_json,
     set_session_id,
+    set_subagent_resource_locks,
+    set_subagent_supervisor,
     set_task_id,
     set_workspace_path,
+    get_task_budget_guard,
 )
 from nexus.config import settings
-from nexus.event_sink import CompositeEventSink, build_session_event_sink
-from nexus.fast_lookup import cache_key, get_cached_value, set_cached_value
+from nexus.control_loop import (
+    ActionDecision,
+    ActionLedger,
+    ActionObservation,
+    CompletionVerification,
+    verify_completion,
+)
+from nexus.context_builder import (
+    PRIORITY_MEMORY,
+    PRIORITY_RESUME,
+    PRIORITY_TURN,
+    TurnContextBuilder,
+)
+from nexus.debug_trace import emit_debug_trace
+from nexus.event_sink import (
+    CompositeEventSink,
+    build_session_event_sink,
+    prepare_correlated_event,
+)
 from nexus.prompts.system import SYSTEM_PROMPT, VOICE_SYSTEM_PROMPT
-from nexus.routing import build_current_lookup_queries, classify_request, extract_search_query
-from nexus.runtime_config import build_genai_client
-from nexus.tools.web import parse_duckduckgo_results
 from nexus.tools.workspace import (
     derive_session_workspace_path,
     derive_workspace_path,
@@ -54,6 +79,19 @@ from nexus.tools.workspace import (
     write_workspace_file,
 )
 from nexus.usage import TokenUsageRecord, extract_token_usage_records
+from nexus.tracing import (
+    TraceContext,
+    monotonic_ms,
+    new_step_id,
+    new_trace_id,
+    result_status,
+    safe_trace_value,
+    set_trace_context,
+)
+
+
+_RESUME_CONTEXT_MODES = frozenset({"continue_latest_workspace", "continue_conversation"})
+
 
 if TYPE_CHECKING:
     from nexus.production_tasks import ProductionTaskRepository
@@ -97,6 +135,13 @@ class NexusOrchestrator:
         self._current_run_id = session.current_run_id
         self._durable_task_id = self._resolve_durable_task_id()
         self._durable_run_id = self._resolve_durable_run_id()
+        self._trace_context = TraceContext(
+            trace_id=new_trace_id(self._current_run_id or ""),
+            run_id=self._current_run_id or "",
+            provider=settings.model_provider,
+            model=settings.planner_model,
+        )
+        set_trace_context(self._trace_context)
         self._event_sink: CompositeEventSink = build_session_event_sink(
             repository=production_task_repository if self._durable_task_id else None,
             send_json=self._send_json_to_ws,
@@ -111,16 +156,40 @@ class NexusOrchestrator:
             self.voice = GeminiLiveManager(self.runtime_config)
             self._voice_connection_error_cls = VoiceConnectionError
 
-        # ADK agent + runner (multi-agent or single-agent based on config)
+        # ADK agent + runner: one production planner path.
         self._integration_tools: list = []
         self._skill_instruction: str = ""
-        if settings.use_multi_agent:
-            self._agent = create_multi_agent(self.runtime_config)
-            logger.info("Using multi-agent orchestrator mode")
-        else:
-            self._agent = create_agent(self.runtime_config)
-            logger.info("Using single-agent mode")
+        self._active_task_model = (
+            getattr(self.runtime_config, "qwen_planner_model", "")
+            or settings.planner_model
+        )
+        self._agent = create_planner_agent(self.runtime_config)
+        logger.info("Using planner V2 mode (AgentTool workers)")
         self._runner, self._session_service = create_runner(self._agent)
+        from nexus.subagents import SubagentSupervisor
+        from nexus.subagent_store import FirestoreSubagentRepository
+
+        subagent_repository = None
+        if (
+            settings.durable_subagents_enabled
+            and isinstance(history_repository, FirestoreHistoryRepository)
+        ):
+            subagent_repository = FirestoreSubagentRepository(
+                db=history_repository._db
+            )
+
+        self._subagent_supervisor = SubagentSupervisor(
+            runtime_config=self.runtime_config,
+            session_service=self._session_service,
+            owner_id=session.owner_id,
+            parent_session_id=session.id,
+            parent_run_id=self._current_run_id,
+            parent_task_id=self._durable_task_id,
+            history_repository=history_repository,
+            subagent_repository=subagent_repository,
+            send_json=self._send_json,
+            usage_callback=self._persist_token_usage,
+        )
         self._adk_session_id: str | None = None
         self._user_id = session.owner_id
         self._active_agent: str = "nexus_orchestrator"
@@ -135,6 +204,11 @@ class NexusOrchestrator:
         )
         self._current_turn_step_id: str | None = None
         self._tool_step_ids: dict[str, list[str]] = {}
+        self._tool_trace_steps: dict[str, list[dict[str, Any]]] = {}
+        self._current_thinking: str = ""
+        self._action_ledger = ActionLedger()
+        self.last_turn_result: dict[str, Any] | None = None
+        self._resume_checkpoint: dict[str, Any] = {}
 
         # Tracks the currently running agent turn so it can be cancelled
         self._agent_task: asyncio.Task | None = None
@@ -154,9 +228,37 @@ class NexusOrchestrator:
         self._budget_stop_requested: bool = False
         self._budget_stop_reason: str = ""
         self._workspace_path: str | None = None
+        # ask_user: question_id -> future resolved by the user's ws reply
+        self._pending_user_questions: dict[str, asyncio.Future] = {}
+
+    def _debug_run_id(self) -> str:
+        return getattr(self, "_current_run_id", None) or f"live:{id(self):x}"
+
+    def restore_durable_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
+        """Restore persisted control-loop state before a reclaimed run starts."""
+        self._resume_checkpoint = dict(checkpoint or {})
 
     async def initialize(self, *, lazy_sandbox: bool = False) -> None:
         """Set up ADK session. Voice connection is deferred until user starts mic."""
+        # region agent log
+        emit_debug_trace(
+            run_id=self._debug_run_id(),
+            hypothesis_id="H1,H2,H3,H5",
+            location="orchestrator.py:190",
+            message="orchestrator_initialized",
+            data={
+                "planner_mode": "planner_v2",
+                "model_provider": settings.model_provider,
+                "planner_model": settings.planner_model,
+                "worker_model": settings.worker_model,
+                "task_worker_enabled": settings.task_worker_enabled,
+                "durable_run_bound": bool(self._durable_task_id),
+                "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
+                "e2b_key_available": bool(self.runtime_config.e2b_api_key),
+                "gemini_available": self.runtime_config.gemini_available,
+            },
+        )
+        # endregion agent log
         # Bind sandbox and bg task manager to tool context
         set_sandbox(self.session.sandbox)
         set_bg_task_manager(self.bg_task_manager)
@@ -167,7 +269,11 @@ class NexusOrchestrator:
         set_production_task_repository(self.production_task_repository)
         set_task_id(self._durable_task_id)
         set_send_json(self._send_json)
+        set_artifact_callback(self._send_artifact_created)
+        set_subagent_supervisor(self._subagent_supervisor)
+        set_subagent_resource_locks(self._subagent_supervisor.resource_locks)
         set_ensure_sandbox_callback(lambda: self._ensure_sandbox_ready("tool_use"))
+        set_ask_user_callback(self._ask_user_and_wait)
         self._bind_workspace_context()
         if not lazy_sandbox:
             workspace_root_ready = await self._ensure_session_workspace_root()
@@ -186,9 +292,11 @@ class NexusOrchestrator:
             logger.info("No Google credentials — voice disabled, text input works")
 
         await self._ensure_adk_session()
+        await self._subagent_supervisor.recover_for_run()
 
-        # Load compact session memory so resume/continue turns stay cheap.
-        if self.history_repository:
+        # Only explicit continuation modes may hydrate durable context. A fresh
+        # session must never inherit a previous task's errors or instructions.
+        if self.history_repository and self._should_load_cached_context(self.session.resume_mode):
             try:
                 stored_session = await self.history_repository.get_session(self.session.id)
                 if stored_session and stored_session.context_packet:
@@ -217,6 +325,8 @@ class NexusOrchestrator:
                             )
             except Exception:
                 logger.warning("Failed to load history for replay", exc_info=True)
+        elif self.history_repository:
+            logger.info("Skipping cached context for fresh session %s", self.session.id)
 
         # Notify frontend
         await self._send_json({
@@ -255,6 +365,13 @@ class NexusOrchestrator:
         self._current_run_id = run_id
         self._durable_task_id = self._resolve_durable_task_id()
         self._durable_run_id = self._resolve_durable_run_id()
+        self._trace_context = TraceContext(
+            trace_id=new_trace_id(run_id),
+            run_id=run_id,
+            provider=settings.model_provider,
+            model=settings.planner_model,
+        )
+        set_trace_context(self._trace_context)
         self._event_sink = build_session_event_sink(
             repository=self.production_task_repository if self._durable_task_id else None,
             send_json=self._send_json_to_ws,
@@ -263,7 +380,43 @@ class NexusOrchestrator:
             run_id=self._durable_run_id,
         )
         set_task_id(self._durable_task_id)
+        self._subagent_supervisor.update_parent_run(self._current_run_id)
+        self._subagent_supervisor.update_parent_task(self._durable_task_id)
+        try:
+            asyncio.get_running_loop().create_task(
+                self._subagent_supervisor.recover_for_run()
+            )
+        except RuntimeError:
+            pass
         self._bind_workspace_context()
+        # History child writes need sessions/{id}/runs/{run_id}. Durable
+        # production_tasks runs do not create that doc — schedule ensure.
+        if self.history_repository and run_id:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._ensure_history_run(run_id, task_id=task_id))
+            except RuntimeError:
+                pass
+
+    async def _ensure_history_run(self, run_id: str, *, task_id: str | None = None) -> None:
+        """Make sure the history run doc exists before steps/artifacts write."""
+        if not self.history_repository:
+            return
+        try:
+            await self.history_repository.ensure_run(
+                session_id=self.session.id,
+                run_id=run_id,
+                owner_id=self.session.owner_id,
+                title=getattr(self.session, "initial_title", None) or "Agent Turn",
+                task_id=task_id or getattr(self.session, "task_id", None),
+                status=getattr(self.session, "run_status", None) or "queued",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to ensure history run %s for session %s",
+                run_id,
+                self.session.id,
+            )
 
     async def start_desktop(self) -> None:
         """Start or resume the sandbox because the user opened the desktop."""
@@ -279,6 +432,7 @@ class NexusOrchestrator:
                 self.session.owner_id
             )
             self._integration_tools = build_mcp_adk_tools(connections)
+            self._integration_tools.extend(self._native_connector_tools(connections))
 
             # Extract MCP tool metadata for the skill prompt so the LLM knows
             # which external tools are available.
@@ -307,23 +461,76 @@ class NexusOrchestrator:
                 self.session.id,
             )
 
+    @staticmethod
+    def _native_connector_tools(connections: list) -> list:
+        """Native SaaS tools injected only when the matching connector is connected.
+
+        Keeps the planner's default tool surface small (docs/AGENT_V2_PLAN.md §4).
+        """
+        providers = {
+            str(getattr(conn, "provider", "") or "").lower() for conn in connections
+        }
+        tools: list = []
+        if any(p.startswith("google") or p in {"gmail"} for p in providers):
+            from nexus.tools.integrations import (
+                calendar_create,
+                calendar_list,
+                create_drive_doc,
+                gmail_read,
+                gmail_search,
+                gmail_send,
+                read_drive_file,
+                search_drive,
+                tasks_create,
+                tasks_list,
+                upload_drive_file,
+            )
+
+            tools.extend([
+                search_drive, read_drive_file, create_drive_doc, upload_drive_file,
+                gmail_search, gmail_read, gmail_send,
+                tasks_list, tasks_create, calendar_list, calendar_create,
+            ])
+        if "github" in providers:
+            from nexus.tools.integrations import (
+                github_create_issue,
+                github_list_issues,
+                github_read_file,
+                github_search_repos,
+                github_summarize_pr,
+            )
+
+            tools.extend([
+                github_search_repos, github_read_file, github_list_issues,
+                github_create_issue, github_summarize_pr,
+            ])
+        if "tinyfish" in providers:
+            from nexus.tools.integrations import tinyfish_web_agent
+
+            tools.append(tinyfish_web_agent)
+        return tools
+
     def _rebuild_runner(self) -> None:
-        if settings.use_multi_agent:
-            kwargs = {
-                "integration_tools": self._integration_tools,
-                "skill_instruction": self._skill_instruction,
-            }
-            self._agent = create_multi_agent(self.runtime_config, **kwargs)
-        else:
-            kwargs = {
-                "integration_tools": self._integration_tools,
-                "skill_instruction": self._skill_instruction,
-            }
-            self._agent = create_agent(self.runtime_config, **kwargs)
+        kwargs = {
+            "integration_tools": self._integration_tools,
+            "skill_instruction": self._skill_instruction,
+        }
+        self._agent = create_planner_agent(self.runtime_config, **kwargs)
         self._runner, self._session_service = create_runner(
             self._agent,
             session_service=self._session_service,
         )
+        self._subagent_supervisor.runtime_config = self.runtime_config
+        self._subagent_supervisor.session_service = self._session_service
+
+    def _select_turn_runner(self):
+        """Return the single planner runner + default turn cap.
+
+        The former per-mode selection (artifact / deep / work) and fast-path
+        gating were removed in the full-agent-only migration — every turn now
+        goes through the planner. See ``docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md``.
+        """
+        return self._runner, settings.max_agent_turns
 
     async def handle_user_audio(self, pcm_data: bytes) -> None:
         """Forward mic audio to Gemini Live."""
@@ -392,16 +599,41 @@ class NexusOrchestrator:
         emit_user_transcript: bool = True,
     ) -> None:
         """Handle direct text input (bypass voice)."""
+        original_request = text
         if emit_user_transcript:
             await self._send_json({"type": "transcript", "role": "user", "text": text})
+
+        trimmed = text.strip()
+        if trimmed.startswith("/"):
+            parts = trimmed.split(maxsplit=1)
+            command = parts[0][1:]
+            from nexus.skills import list_agent_skills
+            user_settings = await self.history_repository.get_user_settings(self.session.owner_id)
+            skills = list_agent_skills(user_settings)
+            matching_skill = next((s for s in skills if s["skill_id"] == command and s["enabled"]), None)
+            if matching_skill:
+                text = (
+                    f"[SYSTEM DIRECTIVE: User has explicitly triggered skill '{matching_skill['name']}'. "
+                    f"You MUST call read_skill('{command}') as your very first step to load its custom instructions, "
+                    f"then apply them to solve the user prompt: '{parts[1] if len(parts) > 1 else ''}']\n\n"
+                    f"User request: {text}"
+                )
+
+        # Parse tool mentions in format @[tool_id] or @tool_id
+        import re
+        matches = re.findall(r"@(?:\[([^\]]+)\]|(\w+))", text)
+        mentioned_tools = [m[0] or m[1] for m in matches if m[0] or m[1]]
+        if mentioned_tools:
+            directives = []
+            for tool in mentioned_tools:
+                directives.append(
+                    f"User has explicitly requested tool '{tool}'. "
+                    f"You MUST call '{tool}' as part of your execution plan to satisfy the request."
+                )
+            directive_prompt = "[SYSTEM DIRECTIVES:\n" + "\n".join(directives) + "]\n\n"
+            text = directive_prompt + text
+
         await self._persist_message(role="user", source="typed", text=text)
-        if await self._try_fast_route(
-            text,
-            source="typed",
-            has_connectors=bool(connector_ids),
-            has_uploads=bool(uploaded_files),
-        ):
-            return
         await self._run_agent_tracked(
             await self._build_turn_input(
                 text,
@@ -409,348 +641,125 @@ class NexusOrchestrator:
                 uploaded_files=uploaded_files,
             ),
             source="typed",
+            completion_request=original_request,
         )
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
         """Route a permission_response from the frontend to the bg task manager."""
         self.bg_task_manager.handle_permission_response(task_id, approved)
 
+    async def _ask_user_and_wait(self, question: str) -> str | None:
+        """ask_user tool callback: surface a question card and await the reply."""
+        import uuid as _uuid
+
+        question_id = f"q_{_uuid.uuid4().hex[:10]}"
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_user_questions[question_id] = future
+
+        await self._send_json({
+            "type": "user_question",
+            "question_id": question_id,
+            "question": question,
+        })
+        await self._persist_message(role="agent", source="ask_user", text=question)
+        step_id = await self._create_step(
+            step_type="ask_user",
+            title="Waiting for your answer",
+            detail=question,
+            source=getattr(self, "_active_agent", "nexus_planner"),
+            metadata={"question_id": question_id, "question": question},
+        )
+
+        try:
+            answer = await self._await_question_answer(question_id, future)
+        except asyncio.TimeoutError:
+            await self._fail_step(
+                step_id,
+                detail="No answer before timeout.",
+                error="ask_user timed out",
+                status="cancelled",
+            )
+            await self._send_json({
+                "type": "user_question_resolved",
+                "question_id": question_id,
+                "answered": False,
+            })
+            return None
+        finally:
+            self._pending_user_questions.pop(question_id, None)
+
+        answer_text = str(answer or "").strip()
+        await self._persist_message(role="user", source="ask_user_response", text=answer_text)
+        await self._complete_step(
+            step_id,
+            detail=f"Q: {question}\nA: {answer_text}",
+            metadata={"question_id": question_id, "answer": answer_text},
+        )
+        await self._send_json({
+            "type": "user_question_resolved",
+            "question_id": question_id,
+            "answered": True,
+        })
+        return answer_text
+
+    def handle_user_question_response(self, question_id: str, answer: str) -> None:
+        """Resolve a pending ask_user future from a frontend reply."""
+        future = self._pending_user_questions.get(str(question_id or "").strip())
+        if future is None or future.done():
+            logger.info("Ignoring stale user_question_response %s", question_id)
+            return
+        future.set_result(str(answer or ""))
+
+    async def _await_question_answer(self, question_id: str, future: asyncio.Future) -> str:
+        """Wait for an ask_user answer via the live WS future or the durable event log.
+
+        Durable (worker-owned) runs have no live WebSocket: the user's reply
+        lands as a ``user_question_response`` event on the durable task, so we
+        poll the event log alongside the in-process future.
+        """
+        timeout = settings.ask_user_timeout_seconds
+        if not (self._durable_task_id and self.production_task_repository is not None):
+            return await asyncio.wait_for(future, timeout=timeout)
+
+        deadline = asyncio.get_running_loop().time() + timeout
+        last_seq = 0
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(future), timeout=min(2.0, remaining)
+                )
+            except asyncio.TimeoutError:
+                pass
+            try:
+                events = await self.production_task_repository.list_events(
+                    task_id=self._durable_task_id,
+                    owner_id=self.session.owner_id,
+                    after_seq=last_seq,
+                    limit=100,
+                )
+            except Exception:
+                logger.debug("Durable question poll failed", exc_info=True)
+                continue
+            for event in events:
+                last_seq = max(last_seq, int(getattr(event, "seq", 0) or 0))
+                if getattr(event, "event_type", "") != "user_question_response":
+                    continue
+                payload = getattr(event, "payload", None) or {}
+                if str(payload.get("question_id") or "") == question_id:
+                    return str(payload.get("answer") or "")
+
     async def handle_user_utterance(self, text: str) -> None:
         """Called when Gemini Live produces a final user transcript."""
         await self._send_json({"type": "transcript", "role": "user", "text": text})
         await self._persist_message(role="user", source="voice", text=text)
-        if await self._try_fast_route(text, source="voice"):
-            return
-        await self._run_agent_tracked(await self._build_turn_input(text), source="voice")
-
-    async def _try_fast_route(
-        self,
-        text: str,
-        *,
-        source: str,
-        has_connectors: bool = False,
-        has_uploads: bool = False,
-    ) -> bool:
-        if not settings.simple_task_fast_path:
-            return False
-
-        decision = await classify_request(
-            text,
-            self.runtime_config,
-            has_connectors=has_connectors,
-            has_uploads=has_uploads,
+        await self._run_agent_tracked(
+            await self._build_turn_input(text),
+            source="voice",
+            completion_request=text,
         )
-        if decision.needs_full_agent:
-            return False
-
-        logger.info(
-            "Fast route selected for session %s: %s (%s)",
-            self.session.id,
-            decision.mode,
-            decision.reason,
-        )
-
-        if decision.mode == "clarify":
-            await self._send_agent_fast_response(
-                decision.clarification or "What should I do next?",
-                source="clarification",
-            )
-            return True
-        if decision.mode == "search":
-            return await self._run_fast_search(text)
-        if decision.mode == "current":
-            await self._run_fast_current_lookup(text)
-            return True
-        if decision.mode == "capability" or decision.mode == "ask" or decision.mode == "chat":
-            return await self._run_fast_answer(text, source=source)
-        return False
-
-    async def _send_agent_fast_response(self, text: str, *, source: str) -> None:
-        answer = text.strip()
-        if not answer:
-            return
-        await self._send_json({"type": "transcript", "role": "agent", "text": answer})
-        await self._persist_message(role="agent", source=source, text=answer)
-        if self._is_voice_ready():
-            try:
-                await self.voice.send_text(answer)
-            except Exception:
-                logger.warning("Failed to send fast-path response to voice", exc_info=True)
-        await self._send_json({"type": "agent_complete", "summary": answer[:200]})
-
-    async def _run_fast_answer(self, text: str, *, source: str) -> bool:
-        if not self.runtime_config.gemini_available:
-            return False
-        await self._send_json({"type": "agent_thinking", "content": "Answering directly..."})
-        model = self.runtime_config.gemini_light_model or self.runtime_config.gemini_agent_model
-        
-        # Load up to 6 previous messages to give context to simple queries
-        history_text = ""
-        try:
-            from nexus.server import get_history_repository
-            history_repo = get_history_repository()
-            messages = await history_repo.get_session_messages(self.session.id)
-            if messages:
-                # Include the last 6 messages
-                recent_messages = messages[-6:]
-                history_text = "Previous conversation context:\n"
-                for msg in recent_messages:
-                    role = "User" if msg.get("role") == "user" else "Assistant"
-                    history_text += f"{role}: {msg.get('text', '')}\n"
-                history_text += "\n"
-        except Exception:
-            logger.warning("Could not load history for fast answer context", exc_info=True)
-
-        prompt = (
-            "You are CoComputer, a highly capable AI agent. Answer the user directly and concisely. Do not use tools.\n\n"
-            "COCOMPUTER KNOWLEDGE:\n"
-            "- You have native tools for Google Drive, Gmail, Google Calendar, and Google Tasks.\n"
-            "- These tools are used via OAuth when the Google connector is connected.\n"
-            "- You do not have a personal account; you use the user's connected account.\n"
-            "- You have full Linux desktop control (clicking, typing, screenshots, terminal).\n"
-            "- You can write code, run commands, and create artifacts in a sandbox.\n\n"
-            "If the answer needs current web information, say that a web search is needed.\n\n"
-            f"{history_text}"
-            f"User: {text.strip()}"
-        )
-
-        def _generate() -> Any:
-            from google.genai import types
-
-            client = build_genai_client(self.runtime_config)
-            return client.models.generate_content(
-                model=model,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(text=prompt)],
-                    )
-                ],
-            )
-
-        try:
-            response = await asyncio.to_thread(_generate)
-            for usage in extract_token_usage_records(
-                response,
-                default_source="agent.fast_answer",
-                default_model=model,
-            ):
-                await self._persist_token_usage(usage)
-            answer = self._clip_text(getattr(response, "text", "") or "", 1200)
-            if not answer:
-                return False
-            await self._send_agent_fast_response(answer, source=f"fast_answer:{source}")
-            return True
-        except Exception:
-            logger.warning("Fast answer failed; falling back to normal agent flow", exc_info=True)
-            return False
-
-    async def _fetch_fast_search_results(
-        self,
-        query: str,
-        *,
-        max_results: int = 4,
-        timeout: float = 15.0,
-    ) -> list[dict[str, str]]:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-            timeout=timeout,
-        ) as client:
-            response = await client.get("https://duckduckgo.com/html/", params={"q": query})
-            response.raise_for_status()
-            return parse_duckduckgo_results(response.text, max_results=max_results)
-
-    async def _run_fast_search(self, text: str) -> bool:
-        query = extract_search_query(text)
-        start = time.monotonic()
-        key = cache_key("fast_search", query)
-        cached = get_cached_value(key)
-        if cached:
-            answer, metadata = cached
-            if str(answer).startswith("No clear web results found for:"):
-                return False
-            logger.info(
-                "Fast route completed session=%s route=search cache=hit latency_ms=%d results=%s",
-                self.session.id,
-                int((time.monotonic() - start) * 1000),
-                metadata.get("result_count", "?"),
-            )
-            await self._send_agent_fast_response(str(answer), source="fast_search_cache")
-            return True
-        await self._send_json({"type": "agent_thinking", "content": "Searching web..."})
-        try:
-            results = await self._fetch_fast_search_results(query, max_results=4)
-            if not results:
-                logger.info(
-                    "Fast route found no parsed web results for session=%s query=%s; falling back to normal agent",
-                    self.session.id,
-                    query,
-                )
-                return False
-            answer = self._format_fast_results(query, results)
-            set_cached_value(
-                key,
-                answer,
-                ttl_seconds=settings.fast_search_cache_ttl_seconds,
-                metadata={"result_count": len(results)},
-            )
-            logger.info(
-                "Fast route completed session=%s route=search cache=miss latency_ms=%d results=%d",
-                self.session.id,
-                int((time.monotonic() - start) * 1000),
-                len(results),
-            )
-            await self._send_agent_fast_response(answer, source="fast_search")
-            return True
-        except Exception as exc:
-            logger.warning("Fast web search failed", exc_info=True)
-            await self._send_agent_fast_response(
-                f"Web search failed: {self._clip_text(str(exc), 240)}",
-                source="fast_search_error",
-            )
-            return True
-
-    def _format_fast_results(self, query: str, results: list[dict[str, str]]) -> str:
-        lines = [f"Top results for: {query}"]
-        for index, result in enumerate(results, start=1):
-            title = self._clip_text(str(result.get("title") or "Untitled"), 120)
-            snippet = self._clip_text(str(result.get("snippet") or ""), 180)
-            url = str(result.get("url") or "").strip()
-            line = f"{index}. {title}"
-            if snippet:
-                line += f" - {snippet}"
-            if url:
-                line += f"\n{url}"
-            lines.append(line)
-        return "\n\n".join(lines)
-
-    async def _run_fast_current_lookup(self, text: str) -> None:
-        start = time.monotonic()
-        date_label = datetime.now(timezone.utc).date().isoformat()
-        queries = build_current_lookup_queries(text, date_label=date_label)
-        query = queries[0] if queries else extract_search_query(text)
-        key = cache_key("current_lookup", query, bucket=date_label)
-        cached = get_cached_value(key)
-        if cached:
-            answer, metadata = cached
-            logger.info(
-                "Fast route completed session=%s route=current cache=hit latency_ms=%d results=%s fallbacks=%s",
-                self.session.id,
-                int((time.monotonic() - start) * 1000),
-                metadata.get("result_count", "?"),
-                metadata.get("fallback_count", "?"),
-            )
-            await self._send_agent_fast_response(str(answer), source="fast_current_cache")
-            return
-
-        await self._send_json({"type": "agent_thinking", "content": "Checking current sources..."})
-        search_tasks = [
-            self._fetch_fast_search_results(item, max_results=4, timeout=12.0)
-            for item in queries
-        ]
-        raw_results = await asyncio.gather(*search_tasks, return_exceptions=True)
-        merged: list[dict[str, str]] = []
-        seen_urls: set[str] = set()
-        fallback_count = 0
-        failures = 0
-        for query_index, item in enumerate(raw_results):
-            if isinstance(item, Exception):
-                failures += 1
-                continue
-            if query_index > 0:
-                fallback_count += 1
-            for result in item:
-                url = str(result.get("url") or "").strip()
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                merged.append(result)
-                if len(merged) >= 8:
-                    break
-            if len(merged) >= 8:
-                break
-
-        if merged:
-            answer = await self._synthesize_fast_current_answer(query, merged, date_label=date_label)
-        else:
-            answer = f"I could not find reliable current results for: {query}"
-
-        set_cached_value(
-            key,
-            answer,
-            ttl_seconds=settings.current_lookup_cache_ttl_seconds,
-            metadata={
-                "result_count": len(merged),
-                "fallback_count": fallback_count,
-                "failure_count": failures,
-            },
-        )
-        logger.info(
-            "Fast route completed session=%s route=current cache=miss latency_ms=%d results=%d fallbacks=%d failures=%d",
-            self.session.id,
-            int((time.monotonic() - start) * 1000),
-            len(merged),
-            fallback_count,
-            failures,
-        )
-        await self._send_agent_fast_response(answer, source="fast_current")
-
-    async def _synthesize_fast_current_answer(
-        self,
-        query: str,
-        results: list[dict[str, str]],
-        *,
-        date_label: str,
-    ) -> str:
-        fallback = self._format_fast_results(query, results[:4])
-        if not self.runtime_config.gemini_available:
-            return fallback
-
-        model = self.runtime_config.gemini_light_model or self.runtime_config.gemini_agent_model
-        evidence_lines: list[str] = []
-        for index, result in enumerate(results[:8], start=1):
-            title = self._clip_text(str(result.get("title") or "Untitled"), 160)
-            snippet = self._clip_text(str(result.get("snippet") or ""), 260)
-            url = self._clip_text(str(result.get("url") or ""), 220)
-            evidence_lines.append(f"{index}. {title}\nSnippet: {snippet}\nURL: {url}")
-        prompt = (
-            "Answer this current lookup using only the search evidence below. "
-            "Be concise. If the evidence is insufficient or conflicting, say so. "
-            "Include 1-3 source URLs. Do not mention browser, screenshots, workspace, or agent workflow.\n\n"
-            f"Date: {date_label}\n"
-            f"Question: {query}\n\n"
-            "Evidence:\n"
-            + "\n\n".join(evidence_lines)
-        )
-
-        def _generate() -> Any:
-            from google.genai import types
-
-            client = build_genai_client(self.runtime_config)
-            return client.models.generate_content(
-                model=model,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(text=prompt)],
-                    )
-                ],
-            )
-
-        try:
-            response = await asyncio.to_thread(_generate)
-            for usage in extract_token_usage_records(
-                response,
-                default_source="agent.fast_current",
-                default_model=model,
-            ):
-                await self._persist_token_usage(usage)
-            answer = self._clip_text(getattr(response, "text", "") or "", 1400)
-            return answer or fallback
-        except Exception:
-            logger.warning("Fast current synthesis failed; returning raw search results", exc_info=True)
-            return fallback
 
     async def handle_analyze_screen(self) -> None:
         """Take screenshot and send analysis to frontend."""
@@ -1049,51 +1058,40 @@ class NexusOrchestrator:
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
     def _task_model_candidates(self) -> tuple[str, ...]:
-        primary = self.runtime_config.gemini_agent_model
-        ordered: list[str] = []
-        seen: set[str] = set()
-        for model in (primary, *self.runtime_config.gemini_agent_fallback_models):
-            if not model or model in seen:
-                continue
-            seen.add(model)
-            ordered.append(model)
-        return tuple(ordered) or (primary,)
+        from nexus.model_select import model_candidates
+
+        return model_candidates("planner", self.runtime_config)
 
     def _rate_limit_source_label(self) -> str:
-        return "Vertex AI" if self.runtime_config.use_vertex_ai else "Gemini API"
+        return "Qwen/DashScope"
 
     def _rebuild_agent_for_task_model(self, task_model: str) -> None:
-        if task_model == self.runtime_config.gemini_agent_model:
+        if task_model == self._active_task_model:
             return
 
-        self.runtime_config = replace(self.runtime_config, gemini_agent_model=task_model)
+        self.runtime_config = replace(
+            self.runtime_config,
+            qwen_planner_model=task_model,
+        )
         self.session.runtime_config = self.runtime_config
         set_runtime_config(self.runtime_config)
 
-        if settings.use_multi_agent:
-            kwargs = {
-                "integration_tools": self._integration_tools,
-                "skill_instruction": self._skill_instruction,
-            }
-            self._agent = create_multi_agent(
-                self.runtime_config,
-                task_model_override=task_model,
-                **kwargs,
-            )
-        else:
-            kwargs = {
-                "integration_tools": self._integration_tools,
-                "skill_instruction": self._skill_instruction,
-            }
-            self._agent = create_agent(
-                self.runtime_config,
-                task_model_override=task_model,
-                **kwargs,
-            )
+        kwargs = {
+            "integration_tools": self._integration_tools,
+            "skill_instruction": self._skill_instruction,
+        }
+        self._agent = create_planner_agent(
+            self.runtime_config,
+            task_model_override=task_model,
+            **kwargs,
+        )
         self._runner, self._session_service = create_runner(
             self._agent,
             session_service=self._session_service,
         )
+        self._subagent_supervisor.runtime_config = self.runtime_config
+        self._subagent_supervisor.session_service = self._session_service
+        self._active_task_model = task_model
         logger.info(
             "Switched task model for session %s to %s",
             self.session.id,
@@ -1109,21 +1107,46 @@ class NexusOrchestrator:
         """
         last_exc: Exception | None = None
         model_candidates = self._task_model_candidates()
+        turn_runner, turn_cap = self._select_turn_runner()
+        reset_worker_call_count()
 
         for model_index, task_model in enumerate(model_candidates, start=1):
-            if task_model != self.runtime_config.gemini_agent_model:
+            self._trace_context = replace(
+                self._trace_context,
+                provider=settings.model_provider,
+                model=task_model,
+            )
+            set_trace_context(self._trace_context)
+            if task_model != self._active_task_model:
                 self._rebuild_agent_for_task_model(task_model)
+                turn_runner = self._runner
 
             for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
                 try:
+                    # region agent log
+                    emit_debug_trace(
+                        run_id=self._debug_run_id(),
+                        hypothesis_id="H3",
+                        location="orchestrator.py:1052",
+                        message="agent_attempt_started",
+                        data={
+                            "model": task_model,
+                            "model_index": model_index,
+                            "attempt": attempt,
+                            "turn_cap": turn_cap,
+                            "planner_mode": "planner_v2",
+                        },
+                    )
+                    # endregion agent log
                     return await run_agent_turn(
-                        runner=self._runner,
+                        runner=turn_runner,
                         session_service=self._session_service,
                         session_id=self._adk_session_id,
                         user_id=self._user_id,
                         message=message,
                         runtime_config=self.runtime_config,
                         event_callback=self._on_agent_event,
+                        max_turns=turn_cap,
                     )
                 except _AgentStopped:
                     raise
@@ -1154,13 +1177,28 @@ class NexusOrchestrator:
                                 next_model,
                                 exc,
                             )
+                            quota_content = (
+                                f"Task model {task_model} hit quota limits. "
+                                f"Switching to fallback model {next_model}."
+                            )
+                            await self._send_json({
+                                "type": "agent_model_fallback",
+                                "from_model": task_model,
+                                "to_model": next_model,
+                                "provider": settings.model_provider,
+                                "reason": self._clip_text(str(exc), 500),
+                                "attempt": attempt,
+                                "step_id": new_step_id("fallback"),
+                            })
                             await self._send_json({
                                 "type": "agent_thinking",
-                                "content": (
-                                    f"Task model {task_model} hit quota limits. "
-                                    f"Switching to fallback model {next_model}."
-                                ),
+                                "content": quota_content,
                             })
+                            await self._persist_message(
+                                role="thinking",
+                                source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                                text=quota_content,
+                            )
                             break
                         continue
 
@@ -1174,14 +1212,30 @@ class NexusOrchestrator:
                         wait,
                         exc,
                     )
+                    rate_content = (
+                        f"Temporarily rate-limited by {self._rate_limit_source_label()} "
+                        f"on {task_model} — backing off {wait:.0f}s "
+                        f"(attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})..."
+                    )
+                    await self._send_json({
+                        "type": "agent_retry",
+                        "provider": settings.model_provider,
+                        "model": task_model,
+                        "attempt": attempt,
+                        "max_attempts": self._RATE_LIMIT_MAX_RETRIES,
+                        "delay_ms": int(wait * 1000),
+                        "reason": self._clip_text(str(exc), 500),
+                        "step_id": new_step_id("retry"),
+                    })
                     await self._send_json({
                         "type": "agent_thinking",
-                        "content": (
-                            f"Temporarily rate-limited by {self._rate_limit_source_label()} "
-                            f"on {task_model} — backing off {wait:.0f}s "
-                            f"(attempt {attempt}/{self._RATE_LIMIT_MAX_RETRIES})..."
-                        ),
+                        "content": rate_content,
                     })
+                    await self._persist_message(
+                        role="thinking",
+                        source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                        text=rate_content,
+                    )
                     await asyncio.sleep(wait)
 
         raise RuntimeError(
@@ -1242,10 +1296,10 @@ class NexusOrchestrator:
     ) -> str:
         """Build the next turn input with compact resume context injected once."""
         self._last_user_message = text.strip()
-        parts: list[str] = []
+        builder = TurnContextBuilder()
 
         if self._seed_context:
-            parts.append(self._seed_context)
+            builder.add("seed_context", self._seed_context, priority=PRIORITY_RESUME)
 
         if self._prior_context_packet:
             serialized, action = self._format_context_packet_for_budget(
@@ -1261,7 +1315,7 @@ class NexusOrchestrator:
                     projected_total_tokens=estimated_tokens,
                 )
             if serialized:
-                parts.append(serialized)
+                builder.add("resume_packet", serialized, priority=PRIORITY_RESUME)
                 await self._emit_context_packet(
                     stage="resume_injected",
                     packet=self._prior_context_packet,
@@ -1272,7 +1326,7 @@ class NexusOrchestrator:
             self._prior_context_fallback = None
             self._seed_context = ""
         elif self._prior_context_fallback:
-            parts.append(self._prior_context_fallback)
+            builder.add("resume_fallback", self._prior_context_fallback, priority=PRIORITY_RESUME)
             self._prior_context_fallback = None
             self._seed_context = ""
         elif self._seed_context:
@@ -1280,12 +1334,31 @@ class NexusOrchestrator:
 
         turn_context = self._format_turn_context(connector_ids, uploaded_files)
         if turn_context:
-            parts.append(turn_context)
+            builder.add("turn_context", turn_context, priority=PRIORITY_TURN)
 
-        if parts:
-            joined = "\n\n".join(part for part in parts if part.strip())
-            return f"{joined}\n\nUser: {text}"
-        return text
+        memory_block = await self._load_memory_block()
+        if memory_block:
+            builder.add("user_memory", memory_block, priority=PRIORITY_MEMORY)
+
+        return builder.build(text).text
+
+    async def _load_memory_block(self) -> str:
+        """Fetch recent user memory facts as a context block. Best-effort."""
+        if not settings.memory_enabled or not self.session.owner_id:
+            return ""
+        try:
+            from nexus.memory import format_memory_block, get_memory_store
+
+            facts = await get_memory_store().list_facts(
+                owner_id=self.session.owner_id,
+                limit=settings.memory_max_facts,
+            )
+            return format_memory_block(facts)
+        except Exception:
+            logger.debug(
+                "Skipping memory injection for session %s", self.session.id, exc_info=True
+            )
+            return ""
 
     @staticmethod
     def _format_history_context(messages: list[dict]) -> str:
@@ -1337,6 +1410,11 @@ class NexusOrchestrator:
         digest_source = "|".join(recent_turns) or packet["summary"]
         packet["digest"] = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
         return packet
+
+    @staticmethod
+    def _should_load_cached_context(resume_mode: str) -> bool:
+        """Return whether this session was explicitly created as a continuation."""
+        return str(resume_mode or "").strip().lower() in _RESUME_CONTEXT_MODES
 
     @classmethod
     def _estimate_tokens(cls, text: str) -> int:
@@ -1402,8 +1480,8 @@ class NexusOrchestrator:
             "stage": stage,
             "action": action or "full",
             "packet": self._context_packet_for_client(packet),
-            "reasoning_model": self.runtime_config.gemini_agent_model,
-            "vision_model": self.runtime_config.gemini_vision_model,
+            "reasoning_model": self.runtime_config.qwen_planner_model or settings.planner_model,
+            "vision_model": self.runtime_config.qwen_vision_model or settings.qwen_vision_model,
         }
         if estimated_tokens is not None:
             payload["estimated_tokens"] = estimated_tokens
@@ -1535,25 +1613,54 @@ class NexusOrchestrator:
 
     async def _ensure_sandbox_ready(self, reason: str) -> bool:
         """Create/resume sandbox only when a user action actually needs it."""
-        if self.session.sandbox.is_alive and self.session.stream_url:
-            if not self._sandbox_ready_reported:
+        sandbox = getattr(self.session, "sandbox", None)
+        stream_url = getattr(self.session, "stream_url", None)
+
+        def trace_sandbox(outcome: str, error_type: str = "") -> None:
+            current_sandbox = getattr(self.session, "sandbox", None)
+            # region agent log
+            emit_debug_trace(
+                run_id=self._debug_run_id(),
+                hypothesis_id="H2",
+                location="orchestrator.py:1510",
+                message="sandbox_readiness",
+                data={
+                    "reason": reason,
+                    "outcome": outcome,
+                    "error_type": error_type,
+                    "sandbox_present": current_sandbox is not None,
+                    "sandbox_alive": bool(getattr(current_sandbox, "is_alive", False)),
+                    "stream_url_present": bool(getattr(self.session, "stream_url", None)),
+                    "activation_callback_bound": self._ensure_sandbox_ready_callback is not None,
+                },
+            )
+            # endregion agent log
+
+        if sandbox is None:
+            logger.warning("No sandbox attached for session %s while preparing %s", self.session.id, reason)
+            trace_sandbox("missing_sandbox")
+            return False
+        if sandbox.is_alive and stream_url:
+            if not getattr(self, "_sandbox_ready_reported", False):
                 await self._send_json({"type": "sandbox_status", "status": "ready"})
-                await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
+                await self._send_json({"type": "vnc_url", "url": stream_url})
                 self._sandbox_ready_reported = True
+            trace_sandbox("already_ready")
             return True
 
         await self._send_json({"type": "sandbox_status", "status": "connecting", "reason": reason})
         try:
-            if self._ensure_sandbox_ready_callback:
-                await self._ensure_sandbox_ready_callback()
+            ensure_callback = getattr(self, "_ensure_sandbox_ready_callback", None)
+            if ensure_callback:
+                await ensure_callback()
             elif not await self._reconnect_sandbox():
                 return False
 
             set_sandbox(self.session.sandbox)
-            set_owner_id(self.session.owner_id)
-            set_history_repository(self.history_repository)
-            set_production_task_repository(self.production_task_repository)
-            set_task_id(self._durable_task_id)
+            set_owner_id(getattr(self.session, "owner_id", ""))
+            set_history_repository(getattr(self, "history_repository", None))
+            set_production_task_repository(getattr(self, "production_task_repository", None))
+            set_task_id(getattr(self, "_durable_task_id", None))
             self._bind_workspace_context()
             workspace_root_ready = await self._ensure_session_workspace_root()
             if not workspace_root_ready:
@@ -1562,11 +1669,13 @@ class NexusOrchestrator:
                     self.session.id,
                 )
             await self._send_json({"type": "sandbox_status", "status": "ready"})
-            if self.session.stream_url:
+            if getattr(self.session, "stream_url", None):
                 await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
             self._sandbox_ready_reported = True
+            trace_sandbox("activated")
             return True
         except Exception as exc:
+            trace_sandbox("activation_failed", type(exc).__name__)
             logger.exception("Sandbox activation failed for session %s", self.session.id)
             await self._send_json({
                 "type": "error",
@@ -1580,7 +1689,13 @@ class NexusOrchestrator:
             })
             return False
 
-    async def _run_agent_tracked(self, message: str, *, source: str) -> None:
+    async def _run_agent_tracked(
+        self,
+        message: str,
+        *,
+        source: str,
+        completion_request: str | None = None,
+    ) -> None:
         """Wrap _run_agent in a cancellable task and await it."""
         if not self._ws_connected:
             logger.info("Skipping agent turn start for session %s because the WebSocket is disconnected", self.session.id)
@@ -1588,26 +1703,92 @@ class NexusOrchestrator:
         self._stop_requested = False
         self._turn_screenshot_count = 0
         self._turn_tool_summaries = []
+        self._tool_trace_steps = {}
+        resume_checkpoint = dict(getattr(self, "_resume_checkpoint", {}) or {})
+        self._action_ledger = ActionLedger.from_dict(
+            resume_checkpoint.get("action_ledger")
+            if isinstance(resume_checkpoint.get("action_ledger"), dict)
+            else None
+        )
+        self._resume_checkpoint = {}
+        self.last_turn_result = None
+        self._current_thinking = ""
         self._budget_stop_requested = False
         self._budget_stop_reason = ""
-        await self._prepare_workspace_for_turn(message)
+        if self._trace_context.run_id != (self._current_run_id or ""):
+            self._trace_context = TraceContext(
+                trace_id=new_trace_id(self._current_run_id or ""),
+                run_id=self._current_run_id or "",
+                provider=settings.model_provider,
+                model=settings.planner_model,
+            )
+        set_trace_context(self._trace_context)
+        # Bind run/workspace context only — do NOT boot the sandbox or create
+        # a workspace here. Pure Q&A / HTML / search turns must stay sandbox-free.
+        # Sandbox-backed tools call ensure_sandbox() lazily; prepare_task_workspace
+        # is invoked by the planner when it actually needs a workspace.
+        # See docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md.
+        self._bind_workspace_context()
+        # region agent log
+        emit_debug_trace(
+            run_id=self._debug_run_id(),
+            hypothesis_id="H1,H3,H5",
+            location="orchestrator.py:1602",
+            message="agent_turn_started",
+            data={
+                "source": source,
+                "input_chars": len(message),
+                "websocket_connected": self._ws_connected,
+                "durable_run_bound": bool(self._durable_task_id),
+                "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
+                "planner_mode": "planner_v2",
+            },
+        )
+        # endregion agent log
         self._current_turn_step_id = await self._create_step(
             step_type="agent_turn",
             title="Process request",
             detail=self._clip_text(message, 320),
             source=source,
-            metadata={"input": self._clip_text(message, 1200), "source": source},
+            metadata={
+                "input": self._clip_text(message, 1200),
+                "source": source,
+                "trace_id": self._trace_context.trace_id,
+            },
         )
         await self._set_run_status("running")
-        self._agent_task = asyncio.create_task(self._run_agent(message))
+        self._agent_task = asyncio.create_task(
+            self._run_agent(message, completion_request=completion_request)
+        )
         try:
             result = await self._agent_task
+            self.last_turn_result = dict(result)
             if result["status"] == "completed":
                 await self._complete_step(
                     self._current_turn_step_id,
-                    detail=self._clip_text(result.get("summary") or "Turn completed.", 1500),
+                    detail=self._clip_text(result.get("summary") or "Turn cancelled.", 1500),
                 )
                 await self._set_run_status("completed")
+            elif result["status"] in {"partial", "blocked"}:
+                durable_status = (
+                    "waiting_approval"
+                    if result["status"] == "blocked"
+                    else "paused"
+                )
+                await self._fail_unfinished_tool_steps(
+                    status="cancelled",
+                    error=result.get("summary"),
+                )
+                await self._fail_step(
+                    self._current_turn_step_id,
+                    detail=self._clip_text(
+                        result.get("summary") or "Turn paused.",
+                        1500,
+                    ),
+                    error=result.get("summary"),
+                    status="cancelled",
+                )
+                await self._set_run_status(durable_status)
             elif result["status"] == "cancelled":
                 await self._fail_unfinished_tool_steps(status="cancelled", error=result.get("summary"))
                 await self._fail_step(
@@ -1642,10 +1823,16 @@ class NexusOrchestrator:
             await self._set_run_status("cancelled")
         finally:
             self._tool_step_ids = {}
+            self._tool_trace_steps = {}
             self._active_agent = "nexus_orchestrator"
             self._current_turn_step_id = None
 
-    async def _run_agent(self, message: str) -> dict[str, str]:
+    async def _run_agent(
+        self,
+        message: str,
+        *,
+        completion_request: str | None = None,
+    ) -> dict[str, Any]:
         """Run an ADK agent turn and stream events to frontend."""
         self.session.touch()
 
@@ -1677,30 +1864,46 @@ class NexusOrchestrator:
             except Exception:
                 logger.debug("Quota check failed, allowing turn", exc_info=True)
 
-        # Extend sandbox timeout before each agent turn to prevent mid-task death
-        try:
-            self.session.sandbox.extend_timeout(900)
-        except Exception:
-            logger.debug("Could not extend sandbox timeout", exc_info=True)
-
-        # Auto-reconnect sandbox if it died before this turn
-        if not self.session.sandbox.is_alive:
-            reconnected = await self._reconnect_sandbox()
-            if not reconnected:
-                await self._send_json({
-                    "type": "error",
-                    "code": "SANDBOX_DEAD",
-                    "message": "Sandbox is not running and could not be reconnected. Please start a new session.",
-                })
-                return {
-                    "status": "failed",
-                    "summary": "Sandbox is not running and could not be reconnected.",
-                }
+        # If a sandbox is already alive, extend its lease. Do NOT require one
+        # for every turn — Q&A / HTML / search / connector reads must work
+        # without E2B. Tools marked needs_sandbox=True boot it lazily via
+        # ensure_sandbox() (docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md).
+        sandbox = getattr(self.session, "sandbox", None)
+        if sandbox is not None and getattr(sandbox, "is_alive", False):
+            try:
+                sandbox.extend_timeout(900)
+            except Exception:
+                logger.debug("Could not extend sandbox timeout", exc_info=True)
 
         try:
             result = await self._run_agent_with_retry(message)
             for usage in result.usage_records:
                 await self._persist_token_usage(usage)
+            # region agent log
+            emit_debug_trace(
+                run_id=self._debug_run_id(),
+                hypothesis_id="H3,H4",
+                location="orchestrator.py:1700",
+                message="agent_turn_returned",
+                data={
+                    "error_present": bool(result.error),
+                    "error_type": type(result.error).__name__ if result.error else "",
+                    "response_present": result.response is not None,
+                    "response_chars": len(result.response or ""),
+                    "usage_record_count": len(result.usage_records),
+                    "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
+                    "will_use_missing_final_summary": result.response is None and not result.error,
+                },
+            )
+            # endregion agent log
+
+            if self._current_thinking:
+                await self._persist_message(
+                    role="thinking",
+                    source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                    text=self._current_thinking,
+                )
+                self._current_thinking = ""
 
             if result.error:
                 logger.error(
@@ -1729,18 +1932,57 @@ class NexusOrchestrator:
                 logger.warning("Sandbox died during agent turn for session %s — reconnecting", self.session.id)
                 await self._reconnect_sandbox()
 
-            if result.response:
+            final_response = result.response
+            completion_verification = await self._verify_turn_completion(
+                request=completion_request if completion_request is not None else message,
+                final_response=final_response,
+            )
+            if not completion_verification.verified:
+                failure_summary = completion_verification.summary
+                if completion_verification.remaining_work:
+                    failure_summary += "\nRemaining: " + "; ".join(
+                        completion_verification.remaining_work[:4]
+                    )
+                await self._send_json({
+                    "type": "transcript",
+                    "role": "agent",
+                    "text": failure_summary,
+                })
+                await self._persist_message(
+                    role="agent",
+                    source="completion_verifier",
+                    text=failure_summary,
+                )
+                await self._mark_summary(
+                    failure_summary,
+                    status=completion_verification.status,
+                    error_code=completion_verification.error_code,
+                )
+                await self._send_json({
+                    "type": "error",
+                    "code": completion_verification.error_code,
+                    "message": completion_verification.summary,
+                    "detail": failure_summary,
+                })
+                return {
+                    "status": completion_verification.status,
+                    "summary": failure_summary,
+                    "final_response": final_response or "",
+                    "verification": completion_verification.to_dict(),
+                }
+
+            if final_response:
                 # Send agent text response
                 await self._send_json({
                     "type": "transcript",
                     "role": "agent",
-                    "text": result.response,
+                    "text": final_response,
                 })
-                await self._persist_message(role="agent", source="agent", text=result.response)
+                await self._persist_message(role="agent", source="agent", text=final_response)
                 # Feed to Gemini Live for TTS
                 if self._is_voice_ready():
                     try:
-                        await self.voice.send_text(result.response)
+                        await self.voice.send_text(final_response)
                     except Exception as exc:
                         if self._is_voice_connection_error(exc):
                             self._voice_connected = False
@@ -1754,41 +1996,74 @@ class NexusOrchestrator:
 
                 await self._send_json({
                     "type": "agent_complete",
-                    "summary": result.response[:200],
+                    "summary": final_response[:200],
                 })
-                await self._save_final_response(result.response)
-                await self._mark_summary(result.response)
+                await self._save_final_response(final_response)
+                await self._mark_summary(final_response)
                 await self._create_artifact(
                     kind="summary",
                     title="Agent summary",
-                    preview=self._clip_text(result.response, 280),
+                    preview=self._clip_text(final_response, 280),
                     source_step_id=self._current_turn_step_id,
                     metadata={"source": "agent_complete"},
                 )
                 return {
                     "status": "completed",
-                    "summary": result.response,
+                    "summary": final_response,
+                    "final_response": final_response,
+                    "verification": completion_verification.to_dict(),
                 }
             return {
-                "status": "completed",
-                "summary": "Turn completed.",
+                "status": "failed",
+                "summary": "The model ended without a final response.",
+                "final_response": "",
+                "verification": completion_verification.to_dict(),
             }
 
         except _AgentStopped:
             if self._budget_stop_requested:
                 summary = self._build_budget_partial_summary()
+                if self._current_thinking:
+                    await self._persist_message(
+                        role="thinking",
+                        source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                        text=self._current_thinking,
+                    )
+                    self._current_thinking = ""
                 await self._send_json({
                     "type": "transcript",
                     "role": "agent",
                     "text": summary,
                 })
                 await self._persist_message(role="agent", source="agent", text=summary)
+                guard = get_task_budget_guard()
+                verification = {
+                    "verified": False,
+                    "status": "partial",
+                    "method": "budget",
+                    "summary": self._budget_stop_reason,
+                    "error_code": (
+                        guard.exhausted_code
+                        if guard is not None
+                        else "BUDGET_EXHAUSTED"
+                    ),
+                    "evidence": self._turn_tool_summaries[:4],
+                    "remaining_work": [
+                        "Resume from the durable checkpoint with a renewed budget."
+                    ],
+                    "retryable": False,
+                }
                 await self._send_json({
-                    "type": "agent_complete",
-                    "summary": summary[:200],
+                    "type": "verification_result",
+                    **verification,
+                    "action_count": len(self._action_ledger.records),
                 })
                 await self._save_final_response(summary)
-                await self._mark_summary(summary)
+                await self._mark_summary(
+                    summary,
+                    status="paused",
+                    error_code=verification["error_code"],
+                )
                 await self._create_artifact(
                     kind="summary",
                     title="Budget-safe partial summary",
@@ -1796,15 +2071,35 @@ class NexusOrchestrator:
                     source_step_id=self._current_turn_step_id,
                     metadata={"source": "budget_stop"},
                 )
+                await self._save_durable_checkpoint(
+                    reason="budget_exhausted",
+                    verification=verification,
+                )
                 return {
-                    "status": "completed",
+                    "status": "partial",
                     "summary": summary,
+                    "final_response": summary,
+                    "verification": verification,
+                    "checkpoint": self._durable_checkpoint_payload(
+                        reason="budget_exhausted",
+                        verification=verification,
+                    ),
                 }
             logger.info("Agent stopped via _AgentStopped for session %s", self.session.id)
             raise
 
         except Exception as exc:
             logger.exception("Agent turn failed")
+            if self._current_thinking:
+                try:
+                    await self._persist_message(
+                        role="thinking",
+                        source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                        text=self._current_thinking,
+                    )
+                except Exception:
+                    pass
+                self._current_thinking = ""
             await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
             await self._send_json({
                 "type": "error",
@@ -1819,6 +2114,8 @@ class NexusOrchestrator:
 
     async def _on_agent_event(self, event: Any) -> None:
         """Callback for each ADK agent event — stream to frontend."""
+        if not hasattr(self, "_action_ledger"):
+            self._action_ledger = ActionLedger()
         # Bail out early if stop was requested
         self._raise_if_agent_should_stop()
 
@@ -1834,11 +2131,67 @@ class NexusOrchestrator:
                 self._active_agent = author
 
             function_calls = self._extract_function_calls(event)
+            event_parts = getattr(getattr(event, "content", None), "parts", None) or []
+            response_statuses: list[dict[str, str]] = []
+            for event_part in event_parts:
+                event_response = getattr(event_part, "function_response", None)
+                if not event_response:
+                    continue
+                event_response_mapping = self._coerce_mapping(
+                    self._get_attr(event_response, "response")
+                )
+                response_statuses.append(
+                    {
+                        "tool": str(self._get_attr(event_response, "name") or "unknown")[:80],
+                        "status": str(event_response_mapping.get("status") or ""),
+                        "error_code": str(event_response_mapping.get("error_code") or ""),
+                    }
+                )
+            # region agent log
+            emit_debug_trace(
+                run_id=self._debug_run_id(),
+                hypothesis_id="H3,H4",
+                location="orchestrator.py:1845",
+                message="agent_event_observed",
+                data={
+                    "author": str(author or "")[:80],
+                    "function_calls": [
+                        str(self._get_attr(call, "name", "tool_name") or "unknown")[:80]
+                        for call in function_calls[:8]
+                    ],
+                    "function_response_statuses": response_statuses[:8],
+                    "is_final_response": self._is_final_response(event),
+                    "part_count": len(event_parts),
+                },
+            )
+            # endregion agent log
 
             for fc in function_calls:
                 self._raise_if_agent_should_stop()
+                if self._current_thinking:
+                    await self._persist_message(
+                        role="thinking",
+                        source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                        text=self._current_thinking
+                    )
+                    self._current_thinking = ""
                 tool_name = self._get_attr(fc, "name", "tool_name") or str(fc)
                 tool_args = self._get_attr(fc, "args", "tool_input") or {}
+                call_id = str(self._get_attr(fc, "id", "call_id") or "")
+                trace_step_id = call_id or new_step_id("tool")
+                trace_started_ms = monotonic_ms()
+                action_decision = ActionDecision.from_tool_call(
+                    action_id=trace_step_id,
+                    tool_name=str(tool_name),
+                    arguments=self._redact_mapping(self._coerce_mapping(tool_args)),
+                )
+                self._action_ledger.start(action_decision)
+                self._trace_context = replace(
+                    self._trace_context,
+                    step_id=trace_step_id,
+                    parent_step_id=self._current_turn_step_id or "",
+                )
+                set_trace_context(self._trace_context)
                 
                 # Map specific tools to specialized step types for rich visualizers
                 step_type = "tool_call"
@@ -1849,20 +2202,44 @@ class NexusOrchestrator:
                 elif tool_name == "tasks_create":
                     step_type = "tasks"
 
+                step_title = self._tool_step_title(tool_name, tool_args)
                 step_id = await self._create_step(
                     step_type=step_type,
-                    title=f"Tool: {tool_name}",
+                    title=step_title,
                     detail=self._clip_text(self._redact_mapping(self._coerce_mapping(tool_args)), 320),
-                    source=self._active_agent,
-                    metadata={"tool": tool_name, "args": self._redact_mapping(self._coerce_mapping(tool_args))},
+                    source=getattr(self, "_active_agent", "nexus_orchestrator"),
+                    metadata={
+                        "tool": tool_name,
+                        "args": self._redact_mapping(self._coerce_mapping(tool_args)),
+                        "trace_id": self._trace_context.trace_id,
+                        "trace_step_id": trace_step_id,
+                        "provider": self._trace_context.provider,
+                        "model": self._trace_context.model,
+                        "action_decision": {
+                            "expected_outcome": action_decision.expected_outcome,
+                            "verification_method": action_decision.verification_method,
+                            "retry_policy": {
+                                "max_attempts": action_decision.retry_policy.max_attempts,
+                                "backoff_seconds": action_decision.retry_policy.backoff_seconds,
+                                "switch_strategy_on_repeat": action_decision.retry_policy.switch_strategy_on_repeat,
+                            },
+                            "completion_condition": action_decision.completion_condition,
+                        },
+                    },
                 )
                 if step_id:
                     self._tool_step_ids.setdefault(tool_name, []).append(step_id)
+                self._tool_trace_steps.setdefault(tool_name, []).append({
+                    "step_id": trace_step_id,
+                    "workflow_step_id": step_id,
+                    "started_ms": trace_started_ms,
+                    "call_id": call_id,
+                })
                 
                 import json
                 await self._persist_message(
                     role="tool_call",
-                    source=self._active_agent,
+                    source=getattr(self, "_active_agent", "nexus_orchestrator"),
                     text=f"Tool: {tool_name}\nArgs: {json.dumps(self._redact_mapping(self._coerce_mapping(tool_args)))}"
                 )
 
@@ -1870,6 +2247,19 @@ class NexusOrchestrator:
                     "type": "agent_tool_call",
                     "tool": tool_name,
                     "args": self._redact_mapping(self._coerce_mapping(tool_args)),
+                    "step_id": trace_step_id,
+                    "workflow_step_id": step_id,
+                    "status": "started",
+                    "provider": self._trace_context.provider,
+                    "model": self._trace_context.model,
+                    "expected_outcome": action_decision.expected_outcome,
+                    "verification_method": action_decision.verification_method,
+                    "retry_policy": {
+                        "max_attempts": action_decision.retry_policy.max_attempts,
+                        "backoff_seconds": action_decision.retry_policy.backoff_seconds,
+                        "switch_strategy_on_repeat": action_decision.retry_policy.switch_strategy_on_repeat,
+                    },
+                    "completion_condition": action_decision.completion_condition,
                 })
 
             content = getattr(event, "content", None)
@@ -1880,6 +2270,7 @@ class NexusOrchestrator:
                 self._raise_if_agent_should_stop()
                 text = getattr(part, "text", None)
                 if text and not is_final:
+                    self._current_thinking += text
                     await self._send_json({
                         "type": "agent_thinking",
                         "content": text,
@@ -1901,21 +2292,84 @@ class NexusOrchestrator:
                         step_id = pending_steps.pop(0)
                         if not pending_steps:
                             self._tool_step_ids.pop(tool_name, None)
+                    trace_step: dict[str, Any] = {}
+                    pending_trace_steps = self._tool_trace_steps.get(tool_name, [])
+                    if pending_trace_steps:
+                        trace_step = pending_trace_steps.pop(0)
+                        if not pending_trace_steps:
+                            self._tool_trace_steps.pop(tool_name, None)
+                    trace_step_id = str(
+                        trace_step.get("step_id") or self._get_attr(fn_resp, "id") or new_step_id("tool")
+                    )
+                    latency_ms = max(
+                        0,
+                        monotonic_ms() - int(trace_step.get("started_ms") or monotonic_ms()),
+                    )
+                    tool_status, error_code, retry_reason = result_status(output_mapping)
+                    action_observation = ActionObservation.from_tool_result(
+                        action_id=trace_step_id,
+                        tool_name=str(tool_name),
+                        result=output_mapping,
+                        fallback_summary=output_str,
+                    )
+                    self._action_ledger.finish(action_observation)
+                    result_metadata = self._build_tool_result_metadata(
+                        tool_name=tool_name,
+                        output_mapping=output_mapping,
+                        output_str=output_str,
+                    )
+                    result_metadata.update({
+                        "trace_id": self._trace_context.trace_id,
+                        "trace_step_id": trace_step_id,
+                        "status": tool_status,
+                        "error_code": error_code,
+                        "retry_reason": retry_reason,
+                        "latency_ms": latency_ms,
+                        "provider": self._trace_context.provider,
+                        "model": self._trace_context.model,
+                        "action_observation": {
+                            "status": action_observation.status,
+                            "evidence": action_observation.evidence,
+                            "artifacts": action_observation.artifacts,
+                            "remaining_work": action_observation.remaining_work,
+                            "retryable": action_observation.retryable,
+                            "verified": action_observation.verified,
+                        },
+                    })
 
                     await self._send_json({
                         "type": "agent_tool_result",
                         "tool": tool_name,
                         "output": output_str,
+                        "result_summary": safe_trace_value(output_mapping),
+                        "step_id": trace_step_id,
+                        "workflow_step_id": step_id,
+                        "status": tool_status,
+                        "error_code": error_code,
+                        "retry_reason": retry_reason,
+                        "latency_ms": latency_ms,
+                        "evidence": action_observation.evidence,
+                        "artifacts": action_observation.artifacts,
+                        "remaining_work": action_observation.remaining_work,
+                        "retryable": action_observation.retryable,
+                        "verified": action_observation.verified,
                     })
-                    await self._complete_step(
-                        step_id,
-                        detail=self._clip_text(output_str, 1500),
-                        metadata=self._build_tool_result_metadata(
-                            tool_name=tool_name,
-                            output_mapping=output_mapping,
-                            output_str=output_str,
-                        ),
-                    )
+                    if tool_status in {"error", "failed", "cancelled", "denied"}:
+                        await self._fail_step(
+                            step_id,
+                            detail=self._clip_text(output_str or retry_reason, 1500),
+                            error=self._clip_text(retry_reason or output_str or error_code, 500),
+                            metadata=result_metadata,
+                            status="cancelled" if tool_status in {"cancelled", "denied"} else "failed",
+                        )
+                    else:
+                        await self._complete_step(
+                            step_id,
+                            detail=self._clip_text(output_str, 1500),
+                            metadata=result_metadata,
+                        )
+                    self._trace_context = replace(self._trace_context, step_id="")
+                    set_trace_context(self._trace_context)
 
                     if tool_name == "take_screenshot":
                         from nexus.tools.screen import get_last_screenshot_b64
@@ -1959,6 +2413,10 @@ class NexusOrchestrator:
                             url=artifact_ref.get("url"),
                             metadata=artifact_ref.get("metadata"),
                         )
+                    await self._save_durable_checkpoint(
+                        reason=f"tool_result:{tool_name}",
+                        last_step_id=trace_step_id,
+                    )
 
         except _AgentStopped:
             raise
@@ -2169,6 +2627,11 @@ class NexusOrchestrator:
     def _raise_if_agent_should_stop(self) -> None:
         if self._stop_requested:
             raise _AgentStopped()
+        guard = get_task_budget_guard()
+        if guard is not None and guard.exhausted:
+            self._budget_stop_requested = True
+            self._budget_stop_reason = guard.exhausted_reason
+            raise _AgentStopped()
         if self._ws_is_open():
             return
         if self._ws_connected:
@@ -2198,6 +2661,8 @@ class NexusOrchestrator:
 
     async def _send_json(self, data: dict) -> None:
         """Emit an orchestrator event through the configured sinks."""
+        context = getattr(self, "_trace_context", None)
+        data = prepare_correlated_event(data, context)
         event_sink = getattr(self, "_event_sink", None)
         if event_sink is None:
             await self._send_json_to_ws(data)
@@ -2207,32 +2672,64 @@ class NexusOrchestrator:
     async def _send_json_to_ws(self, data: dict) -> None:
         """Send JSON message to the frontend WebSocket."""
         message_type = data.get("type")
+
+        def trace_delivery(outcome: str, error_type: str = "") -> None:
+            if message_type not in {
+                "agent_tool_call",
+                "agent_tool_result",
+                "agent_complete",
+                "error",
+                "run_status",
+            }:
+                return
+            # region agent log
+            emit_debug_trace(
+                run_id=self._debug_run_id(),
+                hypothesis_id="H4",
+                location="orchestrator.py:2282",
+                message="websocket_event_delivery",
+                data={
+                    "message_type": message_type,
+                    "outcome": outcome,
+                    "error_type": error_type,
+                    "websocket_open": self._ws_is_open(),
+                    "durable_run_bound": bool(getattr(self, "_durable_task_id", None)),
+                },
+            )
+            # endregion agent log
+
         try:
             async with self._ws_send_lock:
                 if not self._ws_is_open():
                     logger.debug("Skipping WS message %s — connection not open", message_type)
+                    trace_delivery("skipped_closed")
                     return
                 await self.ws.send_json(data)
+                trace_delivery("sent")
         except RuntimeError as exc:
             if "websocket.close" in str(exc) or "response already completed" in str(exc):
                 logger.debug("Skipping WS message %s — connection closed", message_type)
                 self.mark_ws_disconnected()
+                trace_delivery("closed_runtime_error", type(exc).__name__)
             else:
                 logger.warning(
                     "Failed to send WS message: %s",
                     message_type,
                     exc_info=True,
                 )
+                trace_delivery("runtime_error", type(exc).__name__)
         except Exception:
             if not self._ws_is_open():
                 logger.debug("Skipping WS message %s — connection closed", message_type)
                 self.mark_ws_disconnected()
+                trace_delivery("closed_exception")
                 return
             logger.warning(
                 "Failed to send WS message: %s",
                 message_type,
                 exc_info=True,
             )
+            trace_delivery("exception")
 
     @staticmethod
     def _quota_update_payload(quota: dict[str, Any]) -> dict[str, Any]:
@@ -2275,6 +2772,162 @@ class NexusOrchestrator:
         lines.append("Continue if you want deeper research or more browsing.")
         return "\n".join(lines)
 
+    async def _verify_turn_completion(
+        self,
+        *,
+        request: str,
+        final_response: str | None,
+    ):
+        """Persist and emit deterministic completion-verification evidence."""
+        verification = verify_completion(
+            request=request,
+            final_response=final_response,
+            ledger=self._action_ledger,
+        )
+        active_subagents = [
+            record
+            for record in self._subagent_supervisor.list()
+            if record.status in {"queued", "running"}
+            or (
+                record.status == "completed"
+                and not record.result_consumed
+            )
+        ]
+        if active_subagents:
+            verification = CompletionVerification(
+                verified=False,
+                status="partial",
+                method="subagent_lifecycle",
+                summary=(
+                    "Background work is still running or has uncollected "
+                    "results; it must be consumed before this turn can complete."
+                ),
+                error_code="SUBAGENTS_PENDING",
+                evidence=[
+                    f"{record.subagent_id}:{record.status}"
+                    for record in active_subagents[:12]
+                ],
+                remaining_work=[
+                    "Await the durable subagents and consume their results "
+                    "before final synthesis."
+                ],
+                retryable=True,
+            )
+        payload = {
+            "type": "verification_result",
+            **verification.to_dict(),
+            "action_count": len(self._action_ledger.records),
+        }
+        await self._send_json(payload)
+        step_id = await self._create_step(
+            step_type="verification",
+            title="Verify requested outcome",
+            detail=self._clip_text(verification.summary, 1500),
+            source="completion_verifier",
+            metadata={
+                "verification": verification.to_dict(),
+                "action_ledger": self._action_ledger.to_dict(),
+            },
+        )
+        if verification.verified:
+            await self._complete_step(
+                step_id,
+                detail=verification.summary,
+                metadata={
+                    "verification": verification.to_dict(),
+                    "action_ledger": self._action_ledger.to_dict(),
+                },
+            )
+        else:
+            await self._fail_step(
+                step_id,
+                detail=verification.summary,
+                error=verification.error_code,
+                metadata={
+                    "verification": verification.to_dict(),
+                    "action_ledger": self._action_ledger.to_dict(),
+                },
+                status=(
+                    "cancelled"
+                    if verification.status == "blocked"
+                    else "failed"
+                ),
+            )
+        await self._save_durable_checkpoint(
+            reason="completion_verification",
+            last_step_id=step_id or "",
+            verification=verification.to_dict(),
+        )
+        return verification
+
+    def _durable_checkpoint_payload(
+        self,
+        *,
+        reason: str,
+        last_step_id: str = "",
+        verification: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        guard = get_task_budget_guard()
+        return {
+            "version": 1,
+            "reason": reason,
+            "trace_id": self._trace_context.trace_id,
+            "run_id": self._current_run_id or "",
+            "last_step_id": last_step_id,
+            "action_ledger": self._action_ledger.to_dict(),
+            "subagents": self._subagent_supervisor.checkpoint_snapshot(),
+            "budget": guard.checkpoint() if guard is not None else {},
+            "verification": verification or {},
+        }
+
+    async def _save_durable_checkpoint(
+        self,
+        *,
+        reason: str,
+        last_step_id: str = "",
+        verification: dict[str, Any] | None = None,
+    ) -> None:
+        if (
+            self.production_task_repository is None
+            or not self._durable_task_id
+            or not self._durable_run_id
+        ):
+            return
+        try:
+            await self.production_task_repository.save_checkpoint(
+                task_id=self._durable_task_id,
+                run_id=self._durable_run_id,
+                owner_id=self.session.owner_id,
+                checkpoint=self._durable_checkpoint_payload(
+                    reason=reason,
+                    last_step_id=last_step_id,
+                    verification=verification,
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist durable checkpoint for %s/%s",
+                self._durable_task_id,
+                self._durable_run_id,
+                exc_info=True,
+            )
+
+    def _build_missing_final_response_summary(self, message: str) -> str:
+        findings = self._turn_tool_summaries[:6]
+        lines = [
+            "Tool work completed, but the model did not produce a final answer.",
+        ]
+        task = self._clip_text(message or self._last_user_message, 240)
+        if task:
+            lines.append(f"Task: {task}")
+        if findings:
+            lines.append("Findings so far:")
+            lines.extend(f"- {item}" for item in findings)
+            lines.append("Ask me to continue if you want a deeper synthesis.")
+        else:
+            lines.append("No usable tool summary was returned, so I cannot safely claim a result.")
+        return "\n".join(lines)
+
     async def _record_tool_memory(
         self,
         *,
@@ -2285,6 +2938,18 @@ class NexusOrchestrator:
     ) -> None:
         summary = ""
         metadata: dict[str, Any] = {"tool": tool_name}
+        turn_summary = self._clip_text(
+            str(
+                output_mapping.get("summary")
+                or output_mapping.get("description")
+                or output_mapping.get("error")
+                or output_str
+            ),
+            180,
+        )
+        if turn_summary:
+            self._turn_tool_summaries.append(f"{tool_name}: {turn_summary}")
+            self._turn_tool_summaries = self._turn_tool_summaries[-6:]
 
         if tool_name == "take_screenshot":
             summary = self._clip_text(str(output_mapping.get("description") or output_str), 180)
@@ -2314,8 +2979,6 @@ class NexusOrchestrator:
             return
 
         entry = f"{tool_name}: {summary}"
-        self._turn_tool_summaries.append(entry)
-        self._turn_tool_summaries = self._turn_tool_summaries[-6:]
 
         if not self.history_repository:
             return
@@ -2333,12 +2996,13 @@ class NexusOrchestrator:
             logger.exception("Failed to persist tool memory for session %s", self.session.id)
 
     async def _persist_message(self, *, role: str, source: str, text: str) -> None:
-        if not self.history_repository or not text.strip():
+        history_repository = getattr(self, "history_repository", None)
+        if not history_repository or not text.strip():
             return
         try:
-            await self.history_repository.append_message(
+            await history_repository.append_message(
                 session_id=self.session.id,
-                owner_id=self.session.owner_id,
+                owner_id=getattr(self.session, "owner_id", ""),
                 role=role,
                 source=source,
                 text=text.strip(),
@@ -2347,6 +3011,16 @@ class NexusOrchestrator:
             logger.exception("Failed to persist %s message for session %s", role, self.session.id)
 
     async def _persist_token_usage(self, usage: TokenUsageRecord) -> None:
+        budget_guard = get_task_budget_guard()
+        estimated_credits = calculate_usage_credits(
+            source=usage.source,
+            model=usage.model,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+        )
+        if budget_guard is not None:
+            budget_guard.consume_credits(estimated_credits)
         if not self.history_repository:
             return
         try:
@@ -2366,6 +3040,10 @@ class NexusOrchestrator:
                     usage.total_tokens,
                 )
             if credits_charged > 0:
+                if budget_guard is not None and credits_charged > estimated_credits:
+                    budget_guard.consume_credits(
+                        credits_charged - estimated_credits
+                    )
                 quota = await self.history_repository.increment_user_credit_usage(
                     self.session.owner_id,
                     credits_charged,
@@ -2379,17 +3057,20 @@ class NexusOrchestrator:
             )
 
     async def _charge_screenshot_credits(self, *, analysis_mode: str | None) -> None:
-        if not self.history_repository:
-            return
         credits = calculate_screenshot_credits(analysis_mode)
         if credits <= 0:
+            return
+        budget_guard = get_task_budget_guard()
+        if budget_guard is not None:
+            budget_guard.consume_credits(credits)
+        if not self.history_repository:
             return
         try:
             await self.history_repository.record_credit_charge(
                 session_id=self.session.id,
                 owner_id=self.session.owner_id,
-                source="vision.screenshot",
-                model=self.runtime_config.gemini_vision_model,
+                source="vision.qwen_screenshot",
+                model=self.runtime_config.qwen_vision_model or settings.qwen_vision_model,
                 credits=credits,
                 metadata={"analysis_mode": analysis_mode or "vision_full"},
             )
@@ -2514,6 +3195,16 @@ class NexusOrchestrator:
             "metadata": artifact.metadata or {},
         }
 
+    async def _send_artifact_created(self, artifact_payload: dict[str, Any]) -> None:
+        try:
+            self.session.artifact_count += 1
+        except Exception:
+            pass
+        await self._send_json({
+            "type": "artifact_created",
+            "artifact": artifact_payload,
+        })
+
     def _bind_workspace_context(self) -> None:
         if not self._current_run_id:
             return
@@ -2524,7 +3215,7 @@ class NexusOrchestrator:
     async def _prepare_workspace_for_turn(self, task_summary: str) -> None:
         if not self._current_run_id:
             return
-        if not await self._ensure_sandbox_ready("workspace_prep"):
+        if hasattr(self.session, "sandbox") and not await self._ensure_sandbox_ready("workspace_prep"):
             logger.warning("Sandbox not available for workspace preparation in session %s", self.session.id)
             return
         self._bind_workspace_context()
@@ -2647,6 +3338,10 @@ class NexusOrchestrator:
             })
             return
         try:
+            await self._ensure_history_run(
+                self._current_run_id,
+                task_id=getattr(self.session, "task_id", None),
+            )
             run = await self.history_repository.set_run_status(
                 session_id=self.session.id,
                 run_id=self._current_run_id,
@@ -2675,6 +3370,16 @@ class NexusOrchestrator:
         if not self.history_repository or not self._current_run_id:
             return None
         try:
+            correlated_metadata = dict(metadata or {})
+            trace_context = getattr(self, "_trace_context", None)
+            if trace_context is not None:
+                correlated_metadata.setdefault("trace_id", trace_context.trace_id)
+                correlated_metadata.setdefault("provider", trace_context.provider)
+                correlated_metadata.setdefault("model", trace_context.model)
+            await self._ensure_history_run(
+                self._current_run_id,
+                task_id=getattr(self.session, "task_id", None),
+            )
             step = await self.history_repository.create_step(
                 session_id=self.session.id,
                 run_id=self._current_run_id,
@@ -2683,7 +3388,7 @@ class NexusOrchestrator:
                 detail=detail,
                 source=source,
                 external_ref=external_ref,
-                metadata=metadata,
+                metadata=correlated_metadata,
             )
             await self._send_json({"type": "step_started", "step": self._step_payload(step)})
             return step.step_id
@@ -2771,6 +3476,10 @@ class NexusOrchestrator:
             path = None
 
         try:
+            await self._ensure_history_run(
+                self._current_run_id,
+                task_id=getattr(self.session, "task_id", None),
+            )
             artifact = await self.history_repository.create_artifact(
                 session_id=self.session.id,
                 run_id=self._current_run_id,
@@ -2851,6 +3560,8 @@ class NexusOrchestrator:
         output_mapping: dict[str, Any],
         output_str: str,
     ) -> dict[str, Any] | None:
+        if tool_name == "publish_html_artifact":
+            return None
         if tool_name == "take_screenshot":
             description = output_mapping.get("description") if isinstance(output_mapping.get("description"), str) else output_str
             return {
@@ -2906,6 +3617,23 @@ class NexusOrchestrator:
                     }
         return None
 
+    @staticmethod
+    def _tool_step_title(tool_name: str, tool_args: Any) -> str:
+        args = tool_args if isinstance(tool_args, dict) else {}
+        if tool_name == "publish_html_artifact":
+            title = args.get("title")
+            if isinstance(title, str) and title.strip():
+                return f"HTML artifact: {title.strip()[:120]}"
+            return "HTML artifact"
+        if tool_name == "render_ui":
+            title = args.get("title")
+            component_type = args.get("component_type")
+            if isinstance(title, str) and title.strip():
+                prefix = f"{component_type} " if isinstance(component_type, str) and component_type.strip() else ""
+                return f"C1 {prefix}visual: {title.strip()[:120]}"
+            return "C1 visual"
+        return f"Tool: {tool_name}"
+
     def _build_tool_result_metadata(
         self,
         *,
@@ -2921,6 +3649,11 @@ class NexusOrchestrator:
         if isinstance(clipped_result, dict):
             metadata["result"] = clipped_result
 
+        sources: list[dict[str, Any]] = [output_mapping]
+        detail = output_mapping.get("detail")
+        if isinstance(detail, dict):
+            sources.append(detail)
+
         for key in (
             "command",
             "stdout_excerpt",
@@ -2931,15 +3664,19 @@ class NexusOrchestrator:
             "saved_path",
             "url",
             "title",
+            "artifact_id",
+            "filename",
             "workspace_file",
             "relative_path",
             "content",
             "bytes_written",
             "append",
             "output_path",
+            "component_type",
         ):
-            if key in output_mapping:
-                metadata[key] = self._clip_metadata_value(output_mapping[key])
+            for source in sources:
+                if key in source and key not in metadata:
+                    metadata[key] = self._clip_metadata_value(source[key])
         return metadata
 
     def _clip_metadata_value(self, value: Any, *, text_limit: int = 12000) -> Any:

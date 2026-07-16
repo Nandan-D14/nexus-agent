@@ -18,6 +18,7 @@ from nexus.tools.screen import take_screenshot
 from nexus.tools.browser import open_browser
 from nexus.tools.bg_task import request_background_task
 from nexus.tools.monitor import schedule_monitoring_task
+from nexus.tools.skills import read_skill
 from nexus.tools.workspace import (
     prepare_task_workspace,
     initialize_task_state,
@@ -34,6 +35,7 @@ from nexus.tools.docs import (
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    publish_html_artifact,
     save_as_artifact,
 )
 from nexus.tools.web import web_search, scrape_web_page
@@ -49,6 +51,7 @@ from nexus.tools.integrations import (
     github_summarize_pr,
     tavily_search,
     tinyfish_web_agent,
+    render_ui,
     gmail_search,
     gmail_read,
     gmail_send,
@@ -69,12 +72,14 @@ ALL_TOOLS = [
     write_workspace_file,
     read_workspace_file,
     list_workspace_files,
+    read_skill,
     web_search,
     scrape_web_page,
     extract_pdf_text,
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    publish_html_artifact,
     save_as_artifact,
     search_drive,
     read_drive_file,
@@ -87,6 +92,7 @@ ALL_TOOLS = [
     github_summarize_pr,
     tavily_search,
     tinyfish_web_agent,
+    render_ui,
     gmail_search,
     gmail_read,
     gmail_send,

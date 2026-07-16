@@ -89,6 +89,7 @@ test_screenshot.png
 # ── Plan / draft files (dev only) ────────────────────────────
 plans/
 *_plan.md
+!docs/AGENT_V2_PLAN.md
 *-plan.md
 next-step.md
 cloudflare-gcp.md

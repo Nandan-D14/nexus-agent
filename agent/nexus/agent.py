@@ -1,36 +1,27 @@
 # Copyright (c) 2026 Agentic Company. All rights reserved.
 # Proprietary and non-commercial use only.
 
-"""ADK agent definition — the CoComputer brain.
-
-Supports two modes:
-  1. Single agent (default fallback) — one agent with all tools.
-  2. Multi-agent orchestrator — hierarchical: Orchestrator → sub-agents.
-"""
+"""ADK planner construction and turn execution."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import logging
-from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService
-from nexus.session_service import FirestoreSessionService
 from google.genai import types
 
-from nexus.credentialed_gemini import CredentialedGemini
 from nexus.config import settings
-from nexus.prompts.system import SYSTEM_PROMPT
+from nexus.debug_trace import emit_debug_trace
 from nexus.runtime_config import SessionRuntimeConfig
-# from google.adk.tools import google_search  # Gemini-only; use web_search (DuckDuckGo) or tavily_search instead
-from nexus.tool_gateway import gate_tools
-from nexus.tools import ALL_TOOLS
-from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
-
-if TYPE_CHECKING:
-    from nexus.sandbox import SandboxManager
+from nexus.session_service import FirestoreSessionService
+from nexus.usage import (
+    TokenUsageRecord,
+    extract_token_usage_records,
+    get_agent_usage_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,200 +33,48 @@ class AgentTurnResult:
     error: str | None = None
 
 
-def _get_model(runtime_config: SessionRuntimeConfig):
-    """Return the Qwen router model."""
-    from nexus.qwen_router import create_qwen_model
-    return create_qwen_model("qwen3.7-max")
-
-
 def _runtime_for_task_model(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
 ) -> SessionRuntimeConfig:
-    if not task_model_override or task_model_override == runtime_config.gemini_agent_model:
+    """Apply a Qwen planner-tier override to one turn."""
+    if (
+        not task_model_override
+        or task_model_override == runtime_config.qwen_planner_model
+    ):
         return runtime_config
-    return replace(runtime_config, gemini_agent_model=task_model_override)
+    return replace(
+        runtime_config,
+        qwen_planner_model=task_model_override,
+    )
 
 
-def create_agent(
+def create_planner_agent(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
     integration_tools: list | None = None,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the single CoComputer ADK agent with all desktop control tools."""
-    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
-    instruction = SYSTEM_PROMPT if not skill_instruction else f"{SYSTEM_PROMPT}\n\n{skill_instruction}"
-    # Gate every tool through the central policy enforcer so destructive
-    # commands and external side-effects cannot bypass policy. The gateway
-    # is a no-op for ``allow`` decisions, so well-behaved tools see no
-    # behavior change.
-    gated_tools = gate_tools([*ALL_TOOLS, *(integration_tools or [])])
-    agent = Agent(
-        name="nexus",
-        model=_get_model(effective_runtime_config),
-        instruction=instruction,
-        tools=gated_tools,
+    """Create the sole production planner with AgentTool workers."""
+    from nexus.agents.planner_agent import create_planner_agent as _build
+
+    effective_runtime_config = _runtime_for_task_model(
+        runtime_config,
+        task_model_override,
     )
-    return agent
-
-
-def create_multi_agent(
-    runtime_config: SessionRuntimeConfig,
-    task_model_override: str | None = None,
-    integration_tools: list | None = None,
-    skill_instruction: str = "",
-) -> Agent:
-    """Create a hierarchical multi-agent system.
-
-    Returns the top-level orchestrator agent which delegates to:
-      - computer_agent (GUI interactions)
-      - browser_agent (web browsing)
-      - code_agent (terminal & code)
-      - deepresearcher (coordinated research workflows)
-    """
-    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
-    from nexus.agents import (
-        create_browser_agent,
-        create_code_agent,
-        create_computer_agent,
-        create_deepresearcher_agent,
-        create_orchestrator_agent,
-    )
-    from nexus.tools.bg_task import request_background_task
-    from nexus.tools.integrations import (
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-        tavily_search,
-        tinyfish_web_agent,
-        render_ui,
-    )
-    from nexus.tools.workspace import (
-        prepare_task_workspace,
-        initialize_task_state,
-        update_task_state,
-        read_task_state,
-        write_todo_list,
-        update_todo_item,
-        write_workspace_file,
-        read_workspace_file,
-        list_workspace_files,
-    )
-    from nexus.tools.web import web_search, scrape_web_page
-
-    orchestrator_tools = [
-        prepare_task_workspace,
-        initialize_task_state,
-        update_task_state,
-        read_task_state,
-        write_todo_list,
-        update_todo_item,
-        read_workspace_file,
-        list_workspace_files,
-        request_background_task,
-        # google_search,  # Gemini-only; web_search (DuckDuckGo) and tavily_search cover search
-        web_search,
-        scrape_web_page,
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-        tavily_search,
-        tinyfish_web_agent,
-        render_ui,
-        *(integration_tools or []),
-    ]
-    deepresearcher_tools = [
-        prepare_task_workspace,
-        initialize_task_state,
-        update_task_state,
-        read_task_state,
-        write_todo_list,
-        update_todo_item,
-        write_workspace_file,
-        read_workspace_file,
-        list_workspace_files,
-        request_background_task,
-        # google_search,  # Gemini-only; web_search (DuckDuckGo) and tavily_search cover search
-        web_search,
-        scrape_web_page,
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-        tavily_search,
-        tinyfish_web_agent,
-        render_ui,
-        *(integration_tools or []),
-    ]
-
-    computer = create_computer_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    browser = create_browser_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    code = create_code_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    deepresearcher = create_deepresearcher_agent(
+    return _build(
         effective_runtime_config,
-        extra_tools=deepresearcher_tools,
+        integration_tools=integration_tools,
         skill_instruction=skill_instruction,
+        model_override=task_model_override,
     )
-
-    orchestrator = create_orchestrator_agent(
-        runtime_config=effective_runtime_config,
-        computer_agent=computer,
-        browser_agent=browser,
-        code_agent=code,
-        deepresearcher_agent=deepresearcher,
-        extra_tools=orchestrator_tools,
-        skill_instruction=skill_instruction,
-    )
-    logger.info(
-        "Multi-agent orchestrator created with sub-agents: computer, browser, code, deepresearcher"
-    )
-    return orchestrator
 
 
 def create_runner(
     agent: Agent,
     session_service: BaseSessionService | None = None,
 ) -> tuple[Runner, BaseSessionService]:
-    """Create a Runner for executing agent turns."""
+    """Create a Runner for executing planner turns."""
     session_service = session_service or FirestoreSessionService()
     runner = Runner(
         agent=agent,
@@ -253,34 +92,44 @@ async def run_agent_turn(
     message: str,
     runtime_config: SessionRuntimeConfig,
     event_callback=None,
+    max_turns: int | None = None,
 ) -> AgentTurnResult:
-    """Execute a single agent turn with a user message.
-
-    Calls event_callback(event) for each intermediate event so the caller
-    can stream tool calls, thoughts, etc. to the frontend.
-
-    Returns the agent's final text response, or None.
-    """
-    # Ensure ADK session exists
+    """Execute one planner turn and return its final text and usage."""
     adk_session = await session_service.get_session(
-        app_name="nexus", user_id=user_id, session_id=session_id
+        app_name="nexus",
+        user_id=user_id,
+        session_id=session_id,
     )
     if adk_session is None:
-        adk_session = await session_service.create_session(
-            app_name="nexus", user_id=user_id, session_id=session_id
+        await session_service.create_session(
+            app_name="nexus",
+            user_id=user_id,
+            session_id=session_id,
         )
 
     content = types.Content(
         role="user",
         parts=[types.Part(text=message)],
     )
-
     final_response = None
     usage_records: list[TokenUsageRecord] = []
     usage_seen: set[tuple[str, str, int, int, int]] = set()
     turn_count = 0
-    max_turns = settings.max_agent_turns
+    function_response_count = 0
+    max_turns = max_turns or settings.max_agent_turns
     usage_source, usage_model = get_agent_usage_source(runtime_config)
+    emit_debug_trace(
+        run_id=f"session:{session_id[-12:]}",
+        hypothesis_id="H3",
+        location="agent.py:run_agent_turn",
+        message="agent_runner_started",
+        data={
+            "max_turns": max_turns,
+            "usage_source": usage_source,
+            "usage_model": usage_model,
+            "event_callback_bound": event_callback is not None,
+        },
+    )
 
     async for event in runner.run_async(
         user_id=user_id,
@@ -307,23 +156,47 @@ async def run_agent_turn(
         if event_callback:
             await event_callback(event)
 
-        # Count tool call rounds
         if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.function_call:
-                    turn_count += 1
-                    break
+            if any(part.function_call for part in event.content.parts):
+                turn_count += 1
+            function_response_count += sum(
+                1
+                for part in event.content.parts
+                if getattr(part, "function_response", None)
+            )
 
-        if event.is_final_response() and event.content and event.content.parts:
+        if (
+            event.is_final_response()
+            and event.content
+            and event.content.parts
+        ):
             for part in event.content.parts:
                 if part.text:
                     final_response = part.text
                     break
 
         if turn_count >= max_turns:
-            logger.warning("Max turns (%d) reached, stopping agent loop", max_turns)
-            if not final_response:
-                final_response = "I've taken many steps on this task. Here's what I've done so far — let me know if you'd like me to continue."
+            logger.warning(
+                "Max turns (%d) reached, stopping agent loop",
+                max_turns,
+            )
             break
 
-    return AgentTurnResult(response=final_response, usage_records=usage_records)
+    emit_debug_trace(
+        run_id=f"session:{session_id[-12:]}",
+        hypothesis_id="H3,H4",
+        location="agent.py:run_agent_turn",
+        message="agent_runner_finished",
+        data={
+            "function_call_rounds": turn_count,
+            "function_response_count": function_response_count,
+            "hit_turn_cap": turn_count >= max_turns,
+            "final_response_present": final_response is not None,
+            "final_response_chars": len(final_response or ""),
+            "usage_record_count": len(usage_records),
+        },
+    )
+    return AgentTurnResult(
+        response=final_response,
+        usage_records=usage_records,
+    )

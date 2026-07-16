@@ -216,6 +216,10 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         detail = result["detail"]
 
         self.assertTrue(detail["created"])
+        self.assertEqual(
+            detail["workspace_path"],
+            "/home/user/CoComputer/Workspaces/session123/run456",
+        )
         self.assertIn("task.md", detail["touched_files"])
         self.assertIn("todo.md", detail["touched_files"])
         self.assertIn("notes.md", detail["touched_files"])
@@ -226,6 +230,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.assertIn(detail["workspace_path"], self.sandbox.directories)
         self.assertIn(f"{detail['workspace_path']}/sources", self.sandbox.directories)
         self.assertIn(f"{detail['workspace_path']}/outputs", self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/todo.md", self.sandbox.files)
 
     async def test_task_state_tools_track_stage_review_evidence_and_artifacts(self) -> None:
         await prepare_task_workspace("Compare agent frameworks and write a report")
@@ -275,7 +280,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.assertNotIn("output_path", note_result["metadata"])
         self.assertEqual(
             output_result["metadata"]["output_path"],
-            "/home/user/CoComputer/Workspaces/session123/outputs/final.md",
+            "/home/user/CoComputer/Workspaces/session123/run456/outputs/final.md",
         )
 
     async def test_write_workspace_file_rejects_path_escape(self) -> None:

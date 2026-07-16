@@ -15,6 +15,7 @@ from google.genai import Client, types
 
 from nexus.config import settings
 from nexus.crypto import decrypt_secret, encrypt_secret
+from nexus.policy import normalize_autonomy_mode
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,17 @@ class SessionRuntimeConfig:
     kilo_api_key: str
     kilo_model_id: str
     kilo_gateway_url: str
+    qwen_planner_model: str = ""
+    qwen_planner_fallback_models: tuple[str, ...] = ()
+    qwen_worker_model: str = ""
+    qwen_worker_fallback_models: tuple[str, ...] = ()
+    qwen_visual_model: str = ""
+    qwen_visual_fallback_models: tuple[str, ...] = ()
+    qwen_micro_model: str = ""
+    qwen_micro_fallback_models: tuple[str, ...] = ()
+    qwen_vision_model: str = ""
+    qwen_vision_fallback_models: tuple[str, ...] = ()
+    autonomy_mode: str = "manual"
 
     def __repr__(self) -> str:
         return (
@@ -88,7 +100,9 @@ class SessionRuntimeConfig:
             f"use_kilo={self.use_kilo}, "
             f"kilo_api_key='***', "
             f"kilo_model_id='{self.kilo_model_id}', "
-            f"kilo_gateway_url='{self.kilo_gateway_url}')"
+            f"kilo_gateway_url='{self.kilo_gateway_url}', "
+            f"qwen_planner_model='{self.qwen_planner_model}', "
+            f"qwen_vision_model='{self.qwen_vision_model}')"
         )
 
     @property
@@ -98,6 +112,10 @@ class SessionRuntimeConfig:
     @property
     def gemini_available(self) -> bool:
         return self.use_vertex_ai or bool(self.gemini_api_key)
+
+    @property
+    def qwen_available(self) -> bool:
+        return bool(settings.qwen_api_key)
 
 
 def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict[str, Any]:
@@ -121,6 +139,18 @@ def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict
         "e2b_api_key_set": bool(runtime_config.e2b_api_key),
         "gemini_api_key_set": bool(runtime_config.gemini_api_key),
         "kilo_api_key_set": bool(runtime_config.kilo_api_key),
+        "qwen_planner_model": runtime_config.qwen_planner_model,
+        "qwen_planner_fallback_models": list(runtime_config.qwen_planner_fallback_models),
+        "qwen_worker_model": runtime_config.qwen_worker_model,
+        "qwen_worker_fallback_models": list(runtime_config.qwen_worker_fallback_models),
+        "qwen_visual_model": runtime_config.qwen_visual_model,
+        "qwen_visual_fallback_models": list(runtime_config.qwen_visual_fallback_models),
+        "qwen_micro_model": runtime_config.qwen_micro_model,
+        "qwen_micro_fallback_models": list(runtime_config.qwen_micro_fallback_models),
+        "qwen_vision_model": runtime_config.qwen_vision_model,
+        "qwen_vision_fallback_models": list(runtime_config.qwen_vision_fallback_models),
+        "qwen_api_key_set": bool(settings.qwen_api_key),
+        "autonomy_mode": runtime_config.autonomy_mode,
     }
 
 
@@ -139,7 +169,10 @@ def server_e2b_configured() -> bool:
 
 
 def shared_access_code_configured() -> bool:
+    if settings.model_provider in ("qwen", "bynara"):
+        return False
     return bool(settings.shared_access_code.strip())
+
 
 
 def _parse_model_list(value: str, *, exclude: str | None = None) -> tuple[str, ...]:
@@ -170,7 +203,7 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     e2b_key_set = bool(_decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD)))
     gemini_key_set = bool(_decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD)))
     vertex_configured = server_vertex_configured()
-    shared_access_enabled = _shared_access_enabled(payload)
+    shared_access_enabled = _shared_access_enabled(payload) or settings.model_provider in ("qwen", "bynara")
     shared_access_code_is_configured = shared_access_code_configured()
     server_e2b_is_configured = server_e2b_configured()
 
@@ -182,14 +215,15 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     if not (e2b_key_set or (shared_access_enabled and server_e2b_is_configured)):
         missing.append("e2b")
 
-    if gemini_provider == "vertex":
-        if not (shared_access_enabled and vertex_configured) and not can_fallback_to_api_key:
-            if not shared_access_enabled:
-                missing.append("accessCode" if shared_access_code_is_configured else "vertex")
-            else:
-                missing.append("vertex")
-    elif not gemini_key_set:
-        missing.append("gemini")
+    if settings.model_provider not in ("qwen", "bynara"):
+        if gemini_provider == "vertex":
+            if not (shared_access_enabled and vertex_configured) and not can_fallback_to_api_key:
+                if not shared_access_enabled:
+                    missing.append("accessCode" if shared_access_code_is_configured else "vertex")
+                else:
+                    missing.append("vertex")
+        elif not gemini_key_set:
+            missing.append("gemini")
 
     return ByokStatus(
         e2b_key_set=e2b_key_set,
@@ -215,8 +249,11 @@ def build_public_user_settings(user_settings: Mapping[str, Any] | None) -> dict[
         if isinstance(user_settings, Mapping)
         else None
     )
+    require_byok = settings.require_byok or settings.beta_enforce_byok
+    if settings.model_provider in ("qwen", "bynara"):
+        require_byok = False
     return {
-        "requireByok": settings.require_byok or settings.beta_enforce_byok,
+        "requireByok": require_byok,
         "googleDriveConnected": google_drive_connected,
         "settings": raw_settings,
         "byok": {
@@ -273,6 +310,12 @@ def resolve_session_runtime_config(
 ) -> SessionRuntimeConfig:
     payload = get_byok_payload(user_settings)
     status = get_byok_status(user_settings)
+    public_settings = (
+        user_settings.get("settings", {})
+        if isinstance(user_settings, Mapping)
+        and isinstance(user_settings.get("settings"), Mapping)
+        else {}
+    )
 
     user_e2b_api_key = _decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD))
     user_gemini_api_key = _decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD))
@@ -339,6 +382,34 @@ def resolve_session_runtime_config(
         kilo_api_key=settings.kilo_api_key,
         kilo_model_id=settings.kilo_model_id,
         kilo_gateway_url=settings.kilo_gateway_url,
+        qwen_planner_model=settings.planner_model,
+        qwen_planner_fallback_models=_parse_model_list(
+            settings.planner_fallback_models,
+            exclude=settings.planner_model,
+        ),
+        qwen_worker_model=settings.worker_model,
+        qwen_worker_fallback_models=_parse_model_list(
+            settings.worker_fallback_models,
+            exclude=settings.worker_model,
+        ),
+        qwen_visual_model=settings.worker_visual_model,
+        qwen_visual_fallback_models=_parse_model_list(
+            settings.worker_visual_fallback_models,
+            exclude=settings.worker_visual_model,
+        ),
+        qwen_micro_model=settings.micro_model,
+        qwen_micro_fallback_models=_parse_model_list(
+            settings.micro_fallback_models,
+            exclude=settings.micro_model,
+        ),
+        qwen_vision_model=settings.qwen_vision_model,
+        qwen_vision_fallback_models=_parse_model_list(
+            settings.qwen_vision_fallback_models,
+            exclude=settings.qwen_vision_model,
+        ),
+        autonomy_mode=normalize_autonomy_mode(
+            public_settings.get("autonomyMode") or settings.default_autonomy_mode
+        ),
     )
 
 
@@ -396,6 +467,8 @@ def build_genai_client(
 def ensure_selected_gemini_provider_available(
     user_settings: Mapping[str, Any] | None,
 ) -> None:
+    if settings.model_provider in ("qwen", "bynara"):
+        return
     status = get_byok_status(user_settings)
     if status.gemini_provider != "vertex" or status.shared_vertex_available:
         return

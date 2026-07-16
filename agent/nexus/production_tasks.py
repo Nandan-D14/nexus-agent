@@ -11,6 +11,8 @@ tasks, runs, events, approvals, and worker leases.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 
 from firebase_admin import firestore
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1 import FieldFilter
 
 from nexus.config import settings
@@ -119,6 +122,9 @@ def history_run_projection_from_durable(run: "DurableTaskRun") -> dict[str, Any]
         "summary": run.summary,
         "error": run.error,
         "executionPayload": run.execution_payload or {},
+        "verification": run.verification or {},
+        "checkpoint": run.checkpoint or {},
+        "finalResponse": run.final_response,
         "schemaVersion": 2,
         "canonicalSource": "production_tasks",
     }
@@ -203,6 +209,18 @@ def _uuid(prefix: str = "") -> str:
     return f"{prefix}{uuid.uuid4().hex[:12]}"
 
 
+def approval_action_hash(tool_name: str, arguments: dict[str, Any] | None) -> str:
+    """Return a stable opaque fingerprint without persisting raw arguments."""
+    canonical = json.dumps(
+        {"tool": tool_name, "arguments": arguments or {}},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class DurableTask:
     task_id: str
@@ -234,10 +252,15 @@ class DurableTaskRun:
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     attempt: int = 1
+    claim_token: str | None = None
+    claim_generation: int = 0
     session_id: str | None = None
     error: str | None = None
     summary: str | None = None
     execution_payload: dict[str, Any] | None = None
+    checkpoint: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
+    final_response: str | None = None
 
 
 @dataclass
@@ -276,6 +299,7 @@ class ProductionTaskRepository:
     def __init__(self) -> None:
         self._db = get_firestore_client()
         self._has_seq_cache: set[str] = set()
+        self._stale_runs_index_warning_emitted = False
 
     def _task_ref(self, task_id: str):
         return self._db.collection("tasks").document(task_id)
@@ -322,12 +346,21 @@ class ProductionTaskRepository:
             lease_owner=data.get("leaseOwner") if isinstance(data.get("leaseOwner"), str) else None,
             lease_expires_at=_coerce_datetime(data.get("leaseExpiresAt")),
             attempt=int(data.get("attempt", 1) or 1),
+            claim_token=data.get("claimToken") if isinstance(data.get("claimToken"), str) else None,
+            claim_generation=int(data.get("claimGeneration", 0) or 0),
             session_id=data.get("sessionId") if isinstance(data.get("sessionId"), str) else None,
             error=data.get("error") if isinstance(data.get("error"), str) else None,
             summary=data.get("summary") if isinstance(data.get("summary"), str) else None,
             execution_payload=(
                 data.get("executionPayload")
                 if isinstance(data.get("executionPayload"), dict)
+                else None
+            ),
+            checkpoint=data.get("checkpoint") if isinstance(data.get("checkpoint"), dict) else None,
+            verification=data.get("verification") if isinstance(data.get("verification"), dict) else None,
+            final_response=(
+                data.get("finalResponse")
+                if isinstance(data.get("finalResponse"), str)
                 else None
             ),
         )
@@ -505,8 +538,11 @@ class ProductionTaskRepository:
             "ownerId": owner_id,
             "status": canonicalize_task_status("queued"),
             "attempt": 1,
+            "claimToken": _uuid("claim_"),
+            "claimGeneration": 0,
             "sessionId": session_id,
             "executionPayload": execution_payload,
+            "checkpoint": {},
             "createdAt": now,
             "updatedAt": now,
         }
@@ -644,44 +680,66 @@ class ProductionTaskRepository:
         if not task or task.owner_id != owner_id:
             return []
 
+        cap = int(limit or settings.task_event_replay_limit)
+        # Over-fetch a little so client-side filtering on visible/runId still
+        # returns up to ``cap`` matches. Firestore charges per read either way,
+        # but we bound the extra work so a pathological task can't blow up.
+        fetch_cap = max(cap, min(cap * 4, cap + 200))
+
         # Prefer seq-based ordering when available.
         if after_seq is not None or self._task_has_seq_field(task_id):
-            query = (
-                self._task_ref(task_id)
-                .collection("events")
-                .where(filter=FieldFilter("visible", "==", True))
-                .order_by("seq")
-            )
+            # Single-field query only: Firestore auto-indexes ``seq``. Filtering
+            # by ``visible`` / ``runId`` here would require a composite index,
+            # so we do those checks in Python below.
+            query = self._task_ref(task_id).collection("events").order_by("seq")
             if after_seq is not None and after_seq > 0:
                 query = query.where(filter=FieldFilter("seq", ">", int(after_seq)))
-            if run_id:
-                query = query.where(filter=FieldFilter("runId", "==", run_id))
-            query = query.limit(limit or settings.task_event_replay_limit)
-            return [
-                self._build_event(doc.id, doc.to_dict() or {})
-                for doc in query.stream()
-            ]
+            query = query.limit(fetch_cap)
+            events = self._filter_events_client_side(
+                query, run_id=run_id, cap=cap
+            )
+            if events:
+                return events
+            # No matching events under the seq path — fall through to the
+            # createdAt path only when the task has never emitted a seq at all.
+            if self._task_has_seq_field(task_id):
+                return []
 
-        # Legacy path: order by createdAt, paginate by event id.
-        query = (
-            self._task_ref(task_id)
-            .collection("events")
-            .where(filter=FieldFilter("visible", "==", True))
-            .order_by("createdAt")
-        )
-        if run_id:
-            query = query.where(filter=FieldFilter("runId", "==", run_id))
+        # Legacy path: order by createdAt (also single-field indexed).
+        query = self._task_ref(task_id).collection("events").order_by("createdAt")
         if after_event_id:
             after_doc = self._event_ref(task_id, after_event_id).get()
             if after_doc.exists:
                 after_created_at = (after_doc.to_dict() or {}).get("createdAt")
                 if isinstance(after_created_at, datetime):
                     query = query.where(filter=FieldFilter("createdAt", ">", after_created_at))
-        query = query.limit(limit or settings.task_event_replay_limit)
-        return [
-            self._build_event(doc.id, doc.to_dict() or {})
-            for doc in query.stream()
-        ]
+        query = query.limit(fetch_cap)
+        return self._filter_events_client_side(query, run_id=run_id, cap=cap)
+
+    def _filter_events_client_side(self, query, *, run_id: str | None, cap: int) -> list[DurableTaskEvent]:
+        """Stream a Firestore query and apply ``visible`` / ``runId`` filters in memory.
+
+        Keeps the Firestore queries single-field so they never require a manual
+        composite index. Deployments that want server-side filtering can still
+        create the composite index from ``firestore.indexes.json`` — this code
+        simply doesn't rely on it.
+        """
+        results: list[DurableTaskEvent] = []
+        try:
+            iterator = query.stream()
+        except Exception:
+            logger.warning("Firestore event query failed for task events", exc_info=True)
+            return results
+        for doc in iterator:
+            data = doc.to_dict() or {}
+            if data.get("visible") is False:
+                continue
+            if run_id and data.get("runId") != run_id:
+                continue
+            results.append(self._build_event(doc.id, data))
+            if len(results) >= cap:
+                break
+        return results
 
     def _task_has_seq_field(self, task_id: str) -> bool:
         """Best-effort check for whether the task has begun emitting seq numbers."""
@@ -697,10 +755,29 @@ class ProductionTaskRepository:
         except Exception:
             return False
 
-    async def claim_run(self, *, task_id: str, run_id: str, worker_id: str) -> DurableTaskRun | None:
-        return await asyncio.to_thread(self._claim_run_sync, task_id, run_id, worker_id)
+    async def claim_run(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        worker_id: str,
+        claim_token: str | None = None,
+    ) -> DurableTaskRun | None:
+        return await asyncio.to_thread(
+            self._claim_run_sync,
+            task_id,
+            run_id,
+            worker_id,
+            claim_token,
+        )
 
-    def _claim_run_sync(self, task_id: str, run_id: str, worker_id: str) -> DurableTaskRun | None:
+    def _claim_run_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        worker_id: str,
+        claim_token: str | None = None,
+    ) -> DurableTaskRun | None:
         now = utcnow()
         lease_expires_at = now + timedelta(seconds=settings.task_worker_lease_seconds)
         run_ref = self._run_ref(task_id, run_id)
@@ -715,6 +792,14 @@ class ProductionTaskRepository:
                 return None
             task_data = task_doc.to_dict() or {}
             run_data = run_doc.to_dict() or {}
+            expected_claim_token = str(run_data.get("claimToken") or "")
+            if expected_claim_token and claim_token != expected_claim_token:
+                logger.warning(
+                    "Rejected stale or missing claim token for %s/%s",
+                    task_id,
+                    run_id,
+                )
+                return None
             if bool(task_data.get("cancelRequested")):
                 return None
             status = canonicalize_task_status(str(run_data.get("status") or "queued"))
@@ -723,10 +808,12 @@ class ProductionTaskRepository:
                 return None
             if status in {"completed", "failed", "cancelled"}:
                 return None
+            claim_generation = int(run_data.get("claimGeneration", 0) or 0) + 1
             updates = {
                 "status": canonicalize_task_status("running"),
                 "leaseOwner": worker_id,
                 "leaseExpiresAt": lease_expires_at,
+                "claimGeneration": claim_generation,
                 "startedAt": run_data.get("startedAt") or now,
                 "updatedAt": now,
             }
@@ -741,6 +828,352 @@ class ProductionTaskRepository:
 
         return transactional_claim(transaction)
 
+    async def renew_lease(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        worker_id: str,
+        claim_generation: int,
+    ) -> bool:
+        """Extend only the lease held by the current claim generation."""
+        return await asyncio.to_thread(
+            self._renew_lease_sync,
+            task_id,
+            run_id,
+            worker_id,
+            claim_generation,
+        )
+
+    def _renew_lease_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        worker_id: str,
+        claim_generation: int,
+    ) -> bool:
+        now = utcnow()
+        run_ref = self._run_ref(task_id, run_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_renew(txn):
+            run_doc = run_ref.get(transaction=txn)
+            if not run_doc.exists:
+                return False
+            data = run_doc.to_dict() or {}
+            if canonicalize_task_status(data.get("status")) != "running":
+                return False
+            if data.get("leaseOwner") != worker_id:
+                return False
+            if int(data.get("claimGeneration", 0) or 0) != int(claim_generation):
+                return False
+            txn.set(
+                run_ref,
+                {
+                    "leaseExpiresAt": now
+                    + timedelta(seconds=settings.task_worker_lease_seconds),
+                    "lastHeartbeatAt": now,
+                    "updatedAt": now,
+                },
+                merge=True,
+            )
+            return True
+
+        return bool(transactional_renew(transaction))
+
+    async def save_checkpoint(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        owner_id: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """Persist a bounded resumable checkpoint for a non-terminal run."""
+        return await asyncio.to_thread(
+            self._save_checkpoint_sync,
+            task_id,
+            run_id,
+            owner_id,
+            checkpoint,
+        )
+
+    def _save_checkpoint_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        owner_id: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        run_ref = self._run_ref(task_id, run_id)
+        doc = run_ref.get()
+        if not doc.exists:
+            return False
+        data = doc.to_dict() or {}
+        if data.get("ownerId") != owner_id:
+            return False
+        if canonicalize_task_status(data.get("status")) in TERMINAL_TASK_STATUSES:
+            return False
+        now = utcnow()
+        clean_checkpoint = dict(checkpoint)
+        clean_checkpoint["updated_at"] = now.isoformat()
+        batch = self._db.batch()
+        batch.set(
+            run_ref,
+            {"checkpoint": clean_checkpoint, "updatedAt": now},
+            merge=True,
+        )
+        batch.set(
+            self._task_ref(task_id),
+            {"lastCheckpoint": clean_checkpoint, "updatedAt": now},
+            merge=True,
+        )
+        batch.commit()
+        return True
+
+    async def pause_run(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        status: Literal["paused", "waiting_approval"],
+        summary: str,
+        checkpoint: dict[str, Any],
+        verification: dict[str, Any] | None = None,
+        final_response: str = "",
+    ) -> None:
+        await asyncio.to_thread(
+            self._pause_run_sync,
+            task_id,
+            run_id,
+            status,
+            summary,
+            checkpoint,
+            verification,
+            final_response,
+        )
+
+    def _pause_run_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        status: str,
+        summary: str,
+        checkpoint: dict[str, Any],
+        verification: dict[str, Any] | None,
+        final_response: str,
+    ) -> None:
+        now = utcnow()
+        updates = {
+            "status": canonicalize_task_status(status),
+            "summary": summary,
+            "checkpoint": checkpoint,
+            "verification": verification or {},
+            "finalResponse": final_response,
+            "updatedAt": now,
+            "leaseOwner": None,
+            "leaseExpiresAt": None,
+        }
+        batch = self._db.batch()
+        batch.set(self._run_ref(task_id, run_id), updates, merge=True)
+        batch.set(
+            self._task_ref(task_id),
+            {
+                "status": canonicalize_task_status(status),
+                "lastSummary": summary,
+                "lastCheckpoint": checkpoint,
+                "lastVerification": verification or {},
+                "updatedAt": now,
+            },
+            merge=True,
+        )
+        batch.commit()
+
+    async def requeue_run(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        reason: str,
+        expected_generation: int | None = None,
+        worker_id: str | None = None,
+    ) -> DurableTaskRun | None:
+        """Atomically create the next bounded claim attempt."""
+        return await asyncio.to_thread(
+            self._requeue_run_sync,
+            task_id,
+            run_id,
+            reason,
+            expected_generation,
+            worker_id,
+        )
+
+    def _requeue_run_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        reason: str,
+        expected_generation: int | None,
+        worker_id: str | None,
+    ) -> DurableTaskRun | None:
+        now = utcnow()
+        run_ref = self._run_ref(task_id, run_id)
+        task_ref = self._task_ref(task_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_requeue(txn):
+            run_doc = run_ref.get(transaction=txn)
+            task_doc = task_ref.get(transaction=txn)
+            if not run_doc.exists or not task_doc.exists:
+                return None
+            data = run_doc.to_dict() or {}
+            task_data = task_doc.to_dict() or {}
+            if bool(task_data.get("cancelRequested")):
+                return None
+            status = canonicalize_task_status(data.get("status"))
+            if status in TERMINAL_TASK_STATUSES or status == "queued":
+                return None
+            generation = int(data.get("claimGeneration", 0) or 0)
+            if expected_generation is not None and generation != int(expected_generation):
+                return None
+            lease_expiry = _coerce_datetime(data.get("leaseExpiresAt"))
+            if worker_id:
+                if data.get("leaseOwner") != worker_id:
+                    return None
+            elif status == "running" and lease_expiry and lease_expiry > now:
+                return None
+            attempt = int(data.get("attempt", 1) or 1)
+            if attempt >= max(1, settings.task_worker_max_attempts):
+                return None
+            updates = {
+                "status": canonicalize_task_status("queued"),
+                "attempt": attempt + 1,
+                "claimToken": _uuid("claim_"),
+                "leaseOwner": None,
+                "leaseExpiresAt": None,
+                "lastRetryReason": reason[:1000],
+                "updatedAt": now,
+            }
+            txn.set(run_ref, updates, merge=True)
+            txn.set(
+                task_ref,
+                {
+                    "status": canonicalize_task_status("queued"),
+                    "currentRunId": run_id,
+                    "updatedAt": now,
+                },
+                merge=True,
+            )
+            data.update(updates)
+            return self._build_run(run_id, data)
+
+        return transactional_requeue(transaction)
+
+    async def list_stale_runs(self, *, limit: int = 100) -> list[DurableTaskRun]:
+        return await asyncio.to_thread(self._list_stale_runs_sync, limit)
+
+    def _list_stale_runs_sync(self, limit: int) -> list[DurableTaskRun]:
+        now = utcnow()
+        try:
+            query = (
+                self._db.collection_group("runs")
+                .where(filter=FieldFilter("status", "==", "running"))
+                .where(filter=FieldFilter("leaseExpiresAt", "<=", now))
+                .limit(max(1, min(int(limit), 500)))
+            )
+            stale: list[DurableTaskRun] = []
+            for doc in query.stream():
+                stale.append(self._build_run(doc.id, doc.to_dict() or {}))
+            return stale
+        except FailedPrecondition as exc:
+            message = str(exc).lower()
+            is_missing_stale_runs_index = (
+                "index" in message
+                and "runs" in message
+                and "leaseexpiresat" in message
+            )
+            if is_missing_stale_runs_index:
+                if not getattr(self, "_stale_runs_index_warning_emitted", False):
+                    self._stale_runs_index_warning_emitted = True
+                    logger.warning(
+                        "Skipping stale durable-run cleanup because Firestore index "
+                        "runs(status ASC, leaseExpiresAt ASC) is missing or still building. "
+                        "Deploy firestore.indexes.json and wait for the index to become READY; "
+                        "further warnings are suppressed until process restart."
+                    )
+                return []
+            logger.warning("Failed to query stale durable runs", exc_info=True)
+            return []
+        except Exception:
+            logger.warning("Failed to query stale durable runs", exc_info=True)
+            return []
+
+    async def fail_stale_run(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        expected_generation: int,
+        summary: str,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._fail_stale_run_sync,
+            task_id,
+            run_id,
+            expected_generation,
+            summary,
+        )
+
+    def _fail_stale_run_sync(
+        self,
+        task_id: str,
+        run_id: str,
+        expected_generation: int,
+        summary: str,
+    ) -> bool:
+        now = utcnow()
+        run_ref = self._run_ref(task_id, run_id)
+        task_ref = self._task_ref(task_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_fail(txn):
+            run_doc = run_ref.get(transaction=txn)
+            if not run_doc.exists:
+                return False
+            data = run_doc.to_dict() or {}
+            if canonicalize_task_status(data.get("status")) != "running":
+                return False
+            if int(data.get("claimGeneration", 0) or 0) != int(expected_generation):
+                return False
+            lease_expiry = _coerce_datetime(data.get("leaseExpiresAt"))
+            if lease_expiry and lease_expiry > now:
+                return False
+            updates = {
+                "status": canonicalize_task_status("failed"),
+                "summary": summary,
+                "error": summary,
+                "completedAt": now,
+                "updatedAt": now,
+                "leaseOwner": None,
+                "leaseExpiresAt": None,
+            }
+            txn.set(run_ref, updates, merge=True)
+            txn.set(
+                task_ref,
+                {
+                    "status": canonicalize_task_status("failed"),
+                    "lastSummary": summary,
+                    "updatedAt": now,
+                },
+                merge=True,
+            )
+            return True
+
+        return bool(transactional_fail(transaction))
+
     async def finish_run(
         self,
         *,
@@ -749,8 +1182,21 @@ class ProductionTaskRepository:
         status: Literal["completed", "failed", "cancelled"],
         summary: str = "",
         error: str | None = None,
+        verification: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
+        final_response: str = "",
     ) -> None:
-        await asyncio.to_thread(self._finish_run_sync, task_id, run_id, status, summary, error)
+        await asyncio.to_thread(
+            self._finish_run_sync,
+            task_id,
+            run_id,
+            status,
+            summary,
+            error,
+            verification,
+            checkpoint,
+            final_response,
+        )
 
     def _finish_run_sync(
         self,
@@ -759,6 +1205,9 @@ class ProductionTaskRepository:
         status: str,
         summary: str,
         error: str | None,
+        verification: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
+        final_response: str = "",
     ) -> None:
         now = utcnow()
         updates = {
@@ -769,12 +1218,22 @@ class ProductionTaskRepository:
             "updatedAt": now,
             "leaseOwner": None,
             "leaseExpiresAt": None,
+            "verification": verification or {},
+            "checkpoint": checkpoint or {},
+            "finalResponse": final_response,
         }
         batch = self._db.batch()
         batch.set(self._run_ref(task_id, run_id), updates, merge=True)
         batch.set(
             self._task_ref(task_id),
-            {"status": canonicalize_task_status(status), "updatedAt": now, "lastSummary": summary},
+            {
+                "status": canonicalize_task_status(status),
+                "updatedAt": now,
+                "lastSummary": summary,
+                "lastVerification": verification or {},
+                "lastCheckpoint": checkpoint or {},
+                "lastFinalResponse": final_response,
+            },
             merge=True,
         )
         batch.commit()
@@ -847,6 +1306,22 @@ class ProductionTaskRepository:
             merge=True,
         )
         batch.commit()
+        run_id = (
+            str((metadata or {}).get("run_id") or "").strip() or None
+        )
+        self._append_event_sync(
+            task_id,
+            owner_id,
+            "approval_requested",
+            {
+                "approval_id": approval_id,
+                "description": description,
+                "risk": risk,
+                "metadata": metadata or {},
+            },
+            run_id,
+            True,
+        )
         return self._build_approval(approval_id, payload)
 
     async def get_approval(
@@ -876,6 +1351,44 @@ class ProductionTaskRepository:
         if data.get("ownerId") != owner_id:
             return None
         return self._build_approval(approval_id, data)
+
+    async def list_approvals(
+        self,
+        *,
+        task_id: str,
+        owner_id: str,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[DurableApproval]:
+        return await asyncio.to_thread(
+            self._list_approvals_sync,
+            task_id,
+            owner_id,
+            status,
+            limit,
+        )
+
+    def _list_approvals_sync(
+        self,
+        task_id: str,
+        owner_id: str,
+        status: str | None,
+        limit: int,
+    ) -> list[DurableApproval]:
+        task = self._get_task_sync(task_id)
+        if task is None or task.owner_id != owner_id:
+            return []
+        query = self._task_ref(task_id).collection("approvals")
+        if status:
+            query = query.where(filter=FieldFilter("status", "==", status))
+        query = query.limit(max(1, min(int(limit), 200)))
+        approvals = []
+        for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("ownerId") == owner_id:
+                approvals.append(self._build_approval(doc.id, data))
+        approvals.sort(key=lambda item: item.created_at, reverse=True)
+        return approvals
 
     async def resolve_approval(
         self,
@@ -919,4 +1432,92 @@ class ProductionTaskRepository:
             merge=True,
         )
         data.update(updates)
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        run_id = str(metadata.get("run_id") or "").strip() or None
+        self._append_event_sync(
+            task_id,
+            owner_id,
+            "approval_resolved",
+            {
+                "approval_id": approval_id,
+                "approved": approved,
+                "status": updates["status"],
+                "action_hash": metadata.get("action_hash"),
+            },
+            run_id,
+            True,
+        )
         return self._build_approval(approval_id, data)
+
+    async def consume_approved_action(
+        self,
+        *,
+        task_id: str,
+        owner_id: str,
+        action_hash: str,
+        approval_id: str | None = None,
+    ) -> DurableApproval | None:
+        """Atomically consume one exact approved or denied tool decision."""
+        return await asyncio.to_thread(
+            self._consume_approved_action_sync,
+            task_id,
+            owner_id,
+            action_hash,
+            approval_id,
+        )
+
+    def _consume_approved_action_sync(
+        self,
+        task_id: str,
+        owner_id: str,
+        action_hash: str,
+        approval_id: str | None,
+    ) -> DurableApproval | None:
+        candidates = []
+        if approval_id:
+            candidates = [self._approval_ref(task_id, approval_id).get()]
+        else:
+            query = self._task_ref(task_id).collection("approvals")
+            candidates = list(query.stream())
+        selected = None
+        for doc in candidates:
+            if not doc.exists:
+                continue
+            data = doc.to_dict() or {}
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            if data.get("ownerId") != owner_id:
+                continue
+            if data.get("status") not in {"approved", "denied"}:
+                continue
+            if str(metadata.get("action_hash") or "") != action_hash:
+                continue
+            if data.get("consumedAt") is not None:
+                continue
+            selected = doc
+            break
+        if selected is None:
+            return None
+
+        approval_ref = self._approval_ref(task_id, selected.id)
+        transaction = self._db.transaction()
+        now = utcnow()
+
+        @firestore.transactional
+        def transactional_consume(txn):
+            current = approval_ref.get(transaction=txn)
+            if not current.exists:
+                return None
+            data = current.to_dict() or {}
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            if (
+                data.get("ownerId") != owner_id
+                or data.get("status") not in {"approved", "denied"}
+                or data.get("consumedAt") is not None
+                or str(metadata.get("action_hash") or "") != action_hash
+            ):
+                return None
+            txn.set(approval_ref, {"consumedAt": now}, merge=True)
+            data["consumedAt"] = now
+            return self._build_approval(selected.id, data)
+
+        return transactional_consume(transaction)

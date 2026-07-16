@@ -214,9 +214,8 @@ async def test_build_session_event_sink_handles_missing_pieces():
 
 @pytest.mark.asyncio
 async def test_orchestrator_event_sink_binds_durable_task(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "create_agent", lambda runtime_config: object())
-    monkeypatch.setattr(orchestrator_module, "create_multi_agent", lambda runtime_config: object())
-    monkeypatch.setattr(orchestrator_module, "create_runner", lambda agent: (object(), object()))
+    monkeypatch.setattr(orchestrator_module, "create_planner_agent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(orchestrator_module, "create_runner", lambda agent, session_service=None: (object(), object()))
 
     repo = _FakeRepo()
     ws = SimpleNamespace(send_json=AsyncMock())
@@ -249,9 +248,8 @@ async def test_orchestrator_event_sink_binds_durable_task(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_orchestrator_event_sink_skips_legacy_session_task_ids(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "create_agent", lambda runtime_config: object())
-    monkeypatch.setattr(orchestrator_module, "create_multi_agent", lambda runtime_config: object())
-    monkeypatch.setattr(orchestrator_module, "create_runner", lambda agent: (object(), object()))
+    monkeypatch.setattr(orchestrator_module, "create_planner_agent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(orchestrator_module, "create_runner", lambda agent, session_service=None: (object(), object()))
 
     repo = _FakeRepo()
     ws = SimpleNamespace(send_json=AsyncMock())
@@ -274,4 +272,9 @@ async def test_orchestrator_event_sink_skips_legacy_session_task_ids(monkeypatch
     await orchestrator._send_json({"type": "agent_thinking", "content": "working"})
 
     assert repo.calls == []
-    ws.send_json.assert_awaited_once_with({"type": "agent_thinking", "content": "working"})
+    ws.send_json.assert_awaited_once()
+    payload = ws.send_json.await_args.args[0]
+    assert payload["type"] == "agent_thinking"
+    assert payload["content"] == "working"
+    assert payload["run_id"] == "legacy_run_1"
+    assert payload["trace_id"]

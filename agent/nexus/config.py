@@ -12,6 +12,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 AGENT_DIR = MODULE_DIR.parent
 WORKSPACE_DIR = AGENT_DIR.parent
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,16 +48,16 @@ class Settings(BaseSettings):
 
     # Gemini models
     # Note: Gemini 3.x models require the "global" endpoint, not regional endpoints
-    brain_model: str = "gemini-3.5-flash"
-    gemini_agent_model: str = "gemini-3.5-flash"
-    gemini_api_key_agent_model: str = "gemini-3.5-flash"
+    brain_model: str = "tencent-hy3"
+    gemini_agent_model: str = "tencent-hy3"
+    gemini_api_key_agent_model: str = "tencent-hy3"
     gemini_api_key_agent_fallback_models: str = (
         "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-3.1-pro-preview"
     )
     gemini_light_model: str = "gemini-3.1-flash-lite-preview"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"  # Live API still uses 2.5 series
     gemini_live_region: str = "us-central1"  # Live API needs a regional endpoint, not "global"
-    gemini_vision_model: str = "gemini-3.5-flash"
+    gemini_vision_model: str = "tencent-hy3"
     # Fallback vision models tried in order when the primary hits quota/errors
     gemini_vision_fallback_models: str = "gemini-3-flash-preview,gemini-3.1-flash-lite-preview"
 
@@ -68,9 +69,27 @@ class Settings(BaseSettings):
     kilo_model_id: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     kilo_gateway_url: str = "https://api.kilo.ai/api/gateway"
 
-    # Qwen settings
+    # Alibaba Model Studio settings (Qwen text/vision and GLM text)
+    # Kept for future use — activate by setting MODEL_PROVIDER=qwen
     qwen_api_key: str = ""
     qwen_api_base: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    qwen_vision_model: str = "qwen3-vl-plus"
+    qwen_vision_fallback_models: str = "qwen-vl-max,qwen-vl-plus"
+    qwen_capability_probe_on_startup: bool = True
+
+    # Bynara OpenAI-compatible gateway
+    bynara_api_key: str = ""
+    bynara_api_base: str = "https://router.bynara.id/v1"
+
+    # Model roles (shared across providers)
+    planner_model: str = "tencent-hy3"
+    planner_fallback_models: str = "tencent-hy3"
+    worker_model: str = "tencent-hy3"
+    worker_fallback_models: str = "tencent-hy3"
+    worker_visual_model: str = "tencent-hy3"
+    worker_visual_fallback_models: str = "tencent-hy3"
+    micro_model: str = "tencent-hy3"
+    micro_fallback_models: str = "tencent-hy3"
 
     @property
     def use_kilo(self) -> bool:
@@ -79,8 +98,8 @@ class Settings(BaseSettings):
 
     @property
     def use_vision(self) -> bool:
-        """True when Gemini vision is available for screenshot analysis."""
-        return bool(self.google_api_key or self.google_project_id)
+        """True when Qwen multimodal screenshot analysis is available."""
+        return bool(self.qwen_api_key)
 
     # Server
     app_env: str = "development"
@@ -98,12 +117,27 @@ class Settings(BaseSettings):
 
     # Session
     session_timeout_minutes: int = 120
-    jwt_secret: str = "dev-secret-change-in-production"
+    jwt_secret: str = "dev-secret-change-in-production-min-32b"
 
     # Durable production task runtime
     task_worker_enabled: bool = False
+    # When the durable worker is enabled but Cloud Tasks is not configured,
+    # run durable turns on an in-process asyncio queue so runs survive the
+    # WebSocket (browser close) without requiring GCP infrastructure.
+    task_queue_local_fallback: bool = True
     task_worker_auth_token: str = ""
     task_worker_lease_seconds: int = 600
+    task_worker_heartbeat_interval_seconds: int = 120
+    task_worker_max_attempts: int = 3
+    task_worker_retry_base_seconds: int = 10
+    stale_run_sweep_interval_seconds: int = 60
+    durable_subagents_enabled: bool = True
+    subagent_lease_seconds: int = 600
+    subagent_heartbeat_interval_seconds: int = 120
+    subagent_max_mailbox_messages: int = 32
+    subagent_parent_wait_seconds: int = 300
+    deep_research_workflow_enabled: bool = False
+    deep_research_workflow_max_sources: int = 6
     task_event_replay_limit: int = 200
     default_autonomy_mode: str = "manual"  # manual | auto
     default_task_budget_credits: int = 1_000
@@ -126,13 +160,33 @@ class Settings(BaseSettings):
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0
     agent_workspace_root: str = "/home/user/CoComputer/Workspaces"
+    browser_cdp_port: int = 9222
+    browser_startup_timeout_seconds: int = 90
+    browser_startup_retry_initial_seconds: float = 0.25
+    browser_startup_retry_max_seconds: float = 5.0
 
-    # Multi-agent orchestration
-    use_multi_agent: bool = True
+    # Single production orchestration path.
     max_agent_turns: int = 30
-    simple_task_fast_path: bool = True
-    fast_search_cache_ttl_seconds: int = 600
-    current_lookup_cache_ttl_seconds: int = 120
+
+    # Single planner + AgentTool workers (docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md).
+    # Fast path / mode router / artifact mini-agent were removed — every turn
+    # now goes through the planner. The model tiers below control the planner
+    # loop, workers, and (later) an optional turn-budget hint.
+    model_provider: str = "bynara"
+    # Reserved for the optional Phase B turn-budget classifier
+    # (docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md §5). Currently unused; kept so
+    # env-based overrides don't need re-plumbing when we ship the hint.
+    routing_model: str = "tencent-hy3"
+    routing_fallback_model: str = "tencent-hy3"
+    max_worker_calls_per_turn: int = 8
+    ask_user_timeout_seconds: float = 300.0
+
+    # Context builder + memory (production stack Layers 1 and 4)
+    memory_enabled: bool = True
+    memory_max_facts: int = 12
+    memory_injection_max_chars: int = 2000
+    turn_context_max_chars: int = 24000
+    retrieval_max_results: int = 5
 
     # Development-only starter entitlement
     default_plan_id: str = "starter_5"
@@ -155,6 +209,21 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
 
+    @field_validator("jwt_secret")
+    @classmethod
+    def pad_jwt_secret(cls, v: str) -> str:
+        if len(v) < 32:
+            v = v.ljust(32, "x")
+        return v
+
+    @field_validator("model_provider")
+    @classmethod
+    def validate_model_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in ("qwen", "bynara"):
+            raise ValueError("MODEL_PROVIDER must be 'qwen' or 'bynara'")
+        return normalized
+
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production" or bool(os.environ.get("K_SERVICE"))
@@ -171,20 +240,23 @@ def validate_startup_settings() -> None:
     issues: list[str] = []
     parsed_frontend = urlparse(settings.frontend_url)
 
-    if settings.jwt_secret in {"dev-secret-change-in-production", "change-this-in-production"}:
+    if settings.jwt_secret in {
+        "dev-secret-change-in-production",
+        "change-this-in-production",
+        "dev-secret-change-in-production-min-32b",
+        "dev-secret-change-in-production-min-32-bytes-long",
+    }:
         issues.append("JWT_SECRET must be set to a non-default value")
+    if len(settings.jwt_secret.encode("utf-8")) < 32:
+        issues.append("JWT_SECRET must be at least 32 bytes for HS256")
     if parsed_frontend.scheme not in {"http", "https"} or not parsed_frontend.netloc:
         issues.append("FRONTEND_URL must be a valid absolute http(s) URL")
     if not settings.firebase_project_id and not settings.firebase_auth_emulator_host:
         issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
     if not settings.require_byok and not settings.e2b_api_key:
         issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
-    if not settings.require_byok and not (
-        settings.google_api_key
-        or settings.google_project_id
-        or settings.kilo_api_key
-    ):
-        issues.append("A server-side model provider must be configured when REQUIRE_BYOK is false")
+    if not settings.qwen_api_key:
+        issues.append("QWEN_API_KEY is required for Model Studio Qwen/GLM reasoning and Qwen vision")
     if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
         issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
     if settings.beta_access_enabled and not settings.beta_admin_emails.strip():
@@ -193,6 +265,40 @@ def validate_startup_settings() -> None:
         issues.append("BETA_GOOGLE_SHEET_ID must be configured for beta application sync")
     if not settings.byok_encryption_key.strip():
         issues.append("BYOK_ENCRYPTION_KEY must be configured for credential safety")
+    if settings.is_production:
+        if not settings.task_worker_enabled:
+            issues.append("TASK_WORKER_ENABLED must be true in production")
+        elif not (
+            settings.gcp_tasks_project_id
+            and settings.gcp_tasks_location
+            and settings.gcp_tasks_queue
+            and settings.gcp_tasks_worker_url
+        ):
+            issues.append(
+                "Cloud Tasks project, location, queue, and worker URL are required "
+                "when TASK_WORKER_ENABLED is true in production"
+            )
+        if settings.task_queue_local_fallback:
+            issues.append("TASK_QUEUE_LOCAL_FALLBACK must be false in production")
+        if settings.task_worker_enabled and not settings.task_worker_auth_token:
+            issues.append("TASK_WORKER_AUTH_TOKEN is required in production")
+        if not settings.durable_subagents_enabled:
+            issues.append("DURABLE_SUBAGENTS_ENABLED must be true in production")
+        if settings.subagent_lease_seconds <= 0:
+            issues.append("SUBAGENT_LEASE_SECONDS must be positive")
+        if not (
+            0
+            < settings.subagent_heartbeat_interval_seconds
+            < settings.subagent_lease_seconds
+        ):
+            issues.append(
+                "SUBAGENT_HEARTBEAT_INTERVAL_SECONDS must be positive and "
+                "less than SUBAGENT_LEASE_SECONDS"
+            )
+        if settings.subagent_max_mailbox_messages < 4:
+            issues.append("SUBAGENT_MAX_MAILBOX_MESSAGES must be at least 4")
+        if settings.subagent_parent_wait_seconds <= 0:
+            issues.append("SUBAGENT_PARENT_WAIT_SECONDS must be positive")
 
     if issues:
         joined = "; ".join(issues)

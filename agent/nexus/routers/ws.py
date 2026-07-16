@@ -128,7 +128,11 @@ async def websocket_endpoint(
             owner_id=valid_uid,
             runtime_config=resolve_session_runtime_config(user_settings),
             created_at=stored_session.created_at,
-            resume_mode="continue_latest_workspace" if exact_workspace_resume_available else "fresh",
+            resume_mode=(
+                "continue_latest_workspace"
+                if exact_workspace_resume_available
+                else "continue_conversation"
+            ),
             seed_context="",
             initial_title=stored_session.title or "Continued session",
             task_id=stored_session.task_id,

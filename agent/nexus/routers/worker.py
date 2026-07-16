@@ -17,6 +17,7 @@ router = APIRouter()
 class WorkerRunRequest(BaseModel):
     task_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+    claim_token: str | None = None
 
 
 def _validate_worker_token(token: str | None) -> None:
@@ -34,5 +35,9 @@ async def run_task_from_queue(
     if not settings.task_worker_enabled:
         raise HTTPException(status_code=503, detail="Durable task worker is disabled")
     _validate_worker_token(x_worker_token)
-    result = await task_worker.run_once(task_id=payload.task_id, run_id=payload.run_id)
+    result = await task_worker.run_once(
+        task_id=payload.task_id,
+        run_id=payload.run_id,
+        claim_token=payload.claim_token,
+    )
     return {"status": result.status, "summary": result.summary}

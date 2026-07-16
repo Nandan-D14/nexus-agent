@@ -279,7 +279,7 @@ export function useSession(): UseSessionReturn {
       const body = (await res.json()) as {
         messages: Array<{
           id: string;
-          role: "user" | "agent" | "tool_call" | "tool_result";
+          role: "user" | "agent" | "tool_call" | "tool_result" | "thinking" | "agent_thinking";
           source?: string;
           text: string;
           createdAt?: string | null;

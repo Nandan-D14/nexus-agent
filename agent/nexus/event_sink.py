@@ -33,6 +33,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Iterable, Optional, Protocol, runtime_checkable
 
+from nexus.tracing import TraceContext, safe_trace_value, trace_metadata
+
 logger = logging.getLogger(__name__)
 
 # A concrete WebSocket-like object only needs a ``send_json`` coroutine.
@@ -47,6 +49,33 @@ EPHEMERAL_EVENT_TYPES: frozenset[str] = frozenset(
         "sandbox_status",  # current sandbox status is recomputed on resume
     }
 )
+
+TRACE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "agent_tool_call",
+        "agent_tool_result",
+        "agent_retry",
+        "agent_model_fallback",
+        "mcp_http_request",
+        "mcp_http_response",
+        "mcp_http_error",
+        "verification_result",
+    }
+)
+
+
+def prepare_correlated_event(
+    event: dict[str, Any],
+    context: TraceContext | None,
+) -> dict[str, Any]:
+    """Copy an event, attach correlation fields, and sanitize trace payloads."""
+
+    prepared = dict(event)
+    for key, value in trace_metadata(context).items():
+        prepared.setdefault(key, value)
+    if str(prepared.get("type") or "") in TRACE_EVENT_TYPES:
+        prepared = safe_trace_value(prepared)
+    return prepared
 
 
 @runtime_checkable

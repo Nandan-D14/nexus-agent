@@ -9,7 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from nexus.agent import create_agent, create_runner, run_agent_turn
+from nexus.agent import create_planner_agent, create_runner, run_agent_turn
+from nexus.runtime_config import resolve_session_runtime_config
 from nexus.sandbox import SandboxManager
 from nexus.tools._context import set_sandbox
 
@@ -26,7 +27,8 @@ async def main():
 
     # Create agent
     print("[2/3] Creating ADK agent...")
-    agent = create_agent()
+    runtime_config = resolve_session_runtime_config({})
+    agent = create_planner_agent(runtime_config)
     runner, session_service = create_runner(agent)
     print("  Agent ready.\n")
 
@@ -51,6 +53,7 @@ async def main():
         session_id="test-session",
         user_id="test-user",
         message=task,
+        runtime_config=runtime_config,
         event_callback=on_event,
     )
 

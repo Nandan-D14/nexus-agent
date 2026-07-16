@@ -5,17 +5,92 @@
 
 from __future__ import annotations
 
+import base64
+import inspect
 import logging
 import os
+import re
 import shlex
 import textwrap
 from typing import Any
 
 from nexus.tools.base import normalized_tool
-from nexus.tools._context import get_sandbox, get_session_id, get_run_id, get_history_repository, get_workspace_path
+from nexus.tools._context import (
+    get_artifact_callback,
+    get_history_repository,
+    get_run_id,
+    get_sandbox,
+    get_session_id,
+    get_workspace_path,
+)
 from nexus.storage import artifact_storage_metadata, upload_artifact_async
 
 logger = logging.getLogger(__name__)
+
+_HTML_DATA_URI_LIMIT_BYTES = 500_000
+
+
+def _safe_html_filename(value: str | None, *, fallback: str = "artifact.html") -> str:
+    cleaned = (value or fallback).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", cleaned).strip(" .-")
+    if not cleaned:
+        cleaned = fallback
+    if not cleaned.lower().endswith(".html"):
+        cleaned = f"{cleaned}.html"
+    return cleaned
+
+
+def _ensure_full_html_document(title: str, html_content: str) -> str:
+    body = html_content.strip()
+    if re.search(r"<!doctype\s+html|<html[\s>]", body, flags=re.IGNORECASE):
+        return body
+    safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"  <title>{safe_title}</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{body}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _html_preview_text(html_content: str) -> str:
+    compact = re.sub(r"<(script|style)[\s\S]*?</\1>", " ", html_content, flags=re.IGNORECASE)
+    compact = re.sub(r"<[^>]+>", " ", compact)
+    compact = " ".join(compact.split())
+    return compact[:240] if compact else "Interactive HTML artifact ready."
+
+
+def _artifact_payload(artifact) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "run_id": artifact.run_id,
+        "session_id": artifact.session_id,
+        "task_id": getattr(artifact, "task_id", None),
+        "kind": artifact.kind,
+        "title": artifact.title,
+        "preview": artifact.preview,
+        "created_at": artifact.created_at.isoformat() if getattr(artifact, "created_at", None) else None,
+        "source_step_id": artifact.source_step_id,
+        "path": artifact.path,
+        "url": artifact.url,
+        "metadata": artifact.metadata or {},
+    }
+
+
+async def _notify_artifact_created(artifact) -> None:
+    callback = get_artifact_callback()
+    if callback is None:
+        return
+    result = callback(_artifact_payload(artifact))
+    if inspect.isawaitable(result):
+        await result
 
 
 def _resolve_workspace_or_absolute_path(path: str) -> str:
@@ -404,6 +479,95 @@ sys.exit(1)
             "detail": {"filename": filename, "path": output_path},
         }
 
+
+@normalized_tool
+async def publish_html_artifact(
+    title: str,
+    html: str,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Publish a self-contained HTML/CSS/JS artifact directly to the UI preview panel.
+
+    Use this for simple calculators, dashboards, interactive reports, charts, and
+    single-page tools that do not require a React/Next dev server.
+    """
+    session_id = get_session_id()
+    run_id = get_run_id()
+    history_repo = get_history_repository()
+    if history_repo is None:
+        return {
+            "status": "error",
+            "summary": "Artifact history repository is not available.",
+            "detail": None,
+            "error_code": "ARTIFACT_HISTORY_UNAVAILABLE",
+        }
+    clean_title = (title or "HTML Artifact").strip()[:160]
+    html_content = _ensure_full_html_document(clean_title, str(html or ""))
+    if len(html_content.strip()) < 20:
+        return {
+            "status": "error",
+            "summary": "HTML content is too short to publish.",
+            "detail": None,
+            "error_code": "INVALID_HTML_ARTIFACT",
+        }
+
+    output_filename = _safe_html_filename(filename or clean_title)
+    relative_path = f"outputs/{output_filename}"
+    content_bytes = html_content.encode("utf-8")
+    gcs_url = await upload_artifact_async(
+        session_id=session_id,
+        run_id=run_id,
+        relative_path=relative_path,
+        content=html_content,
+    )
+
+    url = gcs_url
+    if not url and len(content_bytes) <= _HTML_DATA_URI_LIMIT_BYTES:
+        encoded = base64.b64encode(content_bytes).decode("ascii")
+        url = f"data:text/html;charset=utf-8;base64,{encoded}"
+    if not url:
+        return {
+            "status": "error",
+            "summary": "Failed to store HTML artifact and it is too large for inline fallback.",
+            "detail": {"filename": output_filename, "size": len(content_bytes)},
+            "error_code": "HTML_ARTIFACT_STORAGE_FAILED",
+        }
+
+    metadata = {
+        **artifact_storage_metadata(session_id, run_id, relative_path),
+        "relative_path": relative_path,
+        "content_type": "text/html; charset=utf-8",
+        "size": len(content_bytes),
+        "render_mode": "iframe",
+        "artifact_role": "html_preview",
+        "storage": "gcs" if gcs_url else "data_uri",
+    }
+    artifact = await history_repo.create_artifact(
+        session_id=session_id,
+        run_id=run_id,
+        kind="html",
+        title=clean_title,
+        preview=_html_preview_text(html_content),
+        path=relative_path,
+        url=url,
+        metadata=metadata,
+    )
+    await _notify_artifact_created(artifact)
+
+    return {
+        "status": "success",
+        "summary": f"Published HTML artifact: {clean_title}",
+        "detail": {
+            "artifact_id": artifact.artifact_id,
+            "title": clean_title,
+            "filename": output_filename,
+            "path": relative_path,
+            "url": url,
+            "metadata": artifact.metadata or metadata,
+        },
+    }
+
+
 @normalized_tool(needs_sandbox=True)
 async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any]:
     """
@@ -430,6 +594,8 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
         kind = "image"
     elif path.endswith(".pdf"):
         kind = "pdf"
+    elif path.endswith((".html", ".htm")):
+        kind = "html"
     elif path.endswith((".csv", ".json")):
         kind = "data"
         
@@ -442,6 +608,13 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             content=content
         )
         
+        metadata = artifact_storage_metadata(session_id, run_id, path)
+        if kind == "html":
+            metadata.update({
+                "content_type": "text/html; charset=utf-8",
+                "render_mode": "iframe",
+                "artifact_role": "html_preview",
+            })
         artifact = await history_repo.create_artifact(
             session_id=session_id,
             run_id=run_id,
@@ -450,7 +623,7 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             preview=f"Promoted {kind}: {path}",
             path=path,
             url=gcs_url,
-            metadata=artifact_storage_metadata(session_id, run_id, path),
+            metadata=metadata,
         )
         
         return {

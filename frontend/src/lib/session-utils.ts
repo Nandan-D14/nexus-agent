@@ -35,7 +35,14 @@ export type ChatItem =
       durable_task_id?: string;
       ts: number;
     }
-  | { kind: "delegation"; from: string; to: string; ts: number };
+  | { kind: "delegation"; from: string; to: string; ts: number }
+  | {
+      kind: "user_question";
+      question_id: string;
+      question: string;
+      answered?: boolean;
+      ts: number;
+    };
 
 export type PendingTurnInput = {
   text: string;
@@ -217,6 +224,32 @@ export function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatI
     }
 
     if (message.role === "tool_result") {
+      if (message.source === "generative_ui") {
+        try {
+          const parsed = JSON.parse(message.text) as {
+            component_type?: string;
+            title?: string;
+            component?: unknown;
+          };
+          return {
+            kind: "event" as const,
+            type: "generative_ui",
+            component_type: parsed.component_type,
+            title: parsed.title || "Generated visual",
+            component: parsed.component,
+            ts,
+          };
+        } catch {
+          return {
+            kind: "event" as const,
+            type: "generative_ui",
+            title: "Generated visual",
+            component: message.text,
+            ts,
+          };
+        }
+      }
+
       return {
         kind: "event" as const,
         type: "agent_tool_result",
@@ -226,9 +259,18 @@ export function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatI
       };
     }
 
+    if (message.role === "thinking" || message.role === "agent_thinking") {
+      return {
+        kind: "event" as const,
+        type: "agent_thinking",
+        content: message.text,
+        ts,
+      };
+    }
+
     return {
       kind: "message" as const,
-      role: message.role,
+      role: message.role as "user" | "agent",
       text: message.text,
       ts,
     };

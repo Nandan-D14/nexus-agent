@@ -4,6 +4,7 @@
 """GCS artifact storage helpers."""
 
 import logging
+import mimetypes
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
@@ -171,10 +172,14 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
         blob_name = artifact_blob_name(session_id, run_id, relative_path)
         blob = bucket.blob(blob_name)
 
+        guessed_type = mimetypes.guess_type(relative_path)[0]
         if isinstance(content, str):
-            blob.upload_from_string(content, content_type="text/plain; charset=utf-8")
+            content_type = guessed_type or "text/plain"
+            if content_type.startswith("text/") and "charset=" not in content_type:
+                content_type = f"{content_type}; charset=utf-8"
+            blob.upload_from_string(content, content_type=content_type)
         else:
-            blob.upload_from_string(content)
+            blob.upload_from_string(content, content_type=guessed_type or "application/octet-stream")
 
         # Try signed URL first (requires service account key).
         # Fall back to public URL when running with user credentials (local dev).
@@ -207,7 +212,6 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
         # Fallback: Save as a data URI directly in the database if GCS fails
         try:
             import base64
-            import mimetypes
             mime, _ = mimetypes.guess_type(relative_path)
             mime = mime or "application/octet-stream"
             

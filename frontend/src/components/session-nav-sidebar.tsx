@@ -19,6 +19,7 @@ import { SettingsModal } from "./settings-modal";
 import { useSettings } from "@/lib/settings-context";
 import { useSession } from "@/lib/use-session";
 import { useToast } from "./toast-provider";
+import { useLiveDesktop } from "./live-desktop-provider";
 
 /* ------------------------------------------------------------------ */
 /*  Nav items                                                          */
@@ -34,6 +35,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const { isSettingsOpen, setIsSettingsOpen } = useSettings();
   const { listSessions, destroySession } = useSession();
+  const { clearDesktop } = useLiveDesktop();
   const { toast } = useToast();
   const pathname = usePathname();
   const router = useRouter();
@@ -77,8 +79,9 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
         setQuota(DEFAULT_PLAN_QUOTA);
       });
 
-    // Fetch Recent Sessions
-    fetchSessions();
+    // Defer the local loading-state update until after this effect completes.
+    const sessionsTimer = window.setTimeout(fetchSessions, 0);
+    return () => window.clearTimeout(sessionsTimer);
   }, [user, fetchSessions]);
 
   const handleSignOut = async () => {
@@ -104,6 +107,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
     const success = await destroySession(sid);
     if (success) {
+      clearDesktop(sid);
       setSessions(prev => prev.filter(s => s.session_id !== sid));
       toast("Conversation deleted", "success");
       if (pathname.includes(sid)) {

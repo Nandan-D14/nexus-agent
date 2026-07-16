@@ -363,9 +363,17 @@ export function LiveDesktopProvider({ children }: { children: ReactNode }) {
     }
   }, [user]);
 
-  const isShowingPiP =
-    !!activeDesktop &&
-    (isMinimized || pathname !== `/session/${activeDesktop.sessionId}`);
+  // Auto-clear a stale minimized flag once the user is back on the desktop's
+  // own session page, so the PiP can never float over the live view itself.
+  useEffect(() => {
+    if (activeDesktop && pathname === `/session/${activeDesktop.sessionId}`) {
+      setIsMinimized(false);
+    }
+  }, [activeDesktop, pathname]);
+
+  // Only show the PiP when something explicitly minimized it. Merely
+  // navigating to a different route must never pop it up on its own.
+  const isShowingPiP = !!activeDesktop && isMinimized;
 
   const value = useMemo<LiveDesktopContextValue>(
     () => ({

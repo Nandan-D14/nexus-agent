@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
+import logging
 import re
+from html import escape
 from typing import Any
 
 import httpx
 
+from nexus.config import settings
 from nexus.google_drive import decode_base64_upload, get_google_drive_client_from_context
 from nexus.google_services import (
     GmailClient,
@@ -18,8 +23,15 @@ from nexus.google_services import (
     CalendarClient,
     get_google_services_token_from_context,
 )
-from nexus.tools._context import get_history_repository, get_owner_id
+from nexus.tools._context import (
+    get_history_repository,
+    get_owner_id,
+    get_send_json,
+    get_session_id,
+)
 from nexus.tools.base import normalized_tool, tool_error, tool_success
+
+logger = logging.getLogger(__name__)
 
 
 _GOOGLE_NOT_CONNECTED = "Google services are not connected."
@@ -711,4 +723,325 @@ async def tinyfish_web_agent(url: str, goal: str) -> dict[str, Any]:
         return tool_error(
             f"Tinyfish web agent failed: {exc}",
             suggested_alternatives=["open_browser"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Thesys Generative UI (C1)
+# ---------------------------------------------------------------------------
+
+async def _thesys_api_key() -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, "thesys")
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+def _extract_c1_response_content(raw_content: Any) -> str:
+    """Normalize Thesys/OpenAI content shapes into a C1 response string."""
+    if isinstance(raw_content, str):
+        content = raw_content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:xml|html|c1|json)?\s*", "", content, flags=re.IGNORECASE)
+            content = re.sub(r"\s*```$", "", content).strip()
+        if content.startswith("{") or content.startswith("["):
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                return content
+            text = _extract_c1_response_content(parsed)
+            return text or content
+        return content
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for part in raw_content:
+            text = _extract_c1_response_content(part)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    if isinstance(raw_content, dict):
+        for key in ("c1Response", "c1_response", "response", "text", "content", "output_text", "value"):
+            value = raw_content.get(key)
+            text = _extract_c1_response_content(value)
+            if text:
+                return text
+        return json.dumps(raw_content, ensure_ascii=False)
+    return str(raw_content)
+
+
+# Props the Thesys SDK destructures and calls .map() on — they MUST be arrays.
+_C1_ARRAY_PROPS: frozenset[str] = frozenset({
+    "children",
+    "items", "cards", "tiles", "metrics", "infoItems", "actions",
+    "rows", "columns", "headers",
+    "slides", "pages", "paragraphs", "fields",
+    "data", "series", "labels", "datasets", "options", "points",
+    "sources", "followUpText",
+})
+
+
+def _coerce_to_array(prop: str, value: Any) -> list[Any]:
+    """Turn *value* into a list suitable for the given *prop* name."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        result: list[Any] = []
+        for item in value:
+            if isinstance(item, str) and prop == "sources":
+                result.append({"title": item})
+            else:
+                result.append(_sanitize_json_structure(item))
+        return result
+    if isinstance(value, dict):
+        return [_sanitize_json_structure(value)]
+    if isinstance(value, str):
+        if prop == "sources":
+            return [{"title": value}]
+        return [value]
+    return []
+
+
+def _sanitize_json_structure(data: Any) -> Any:
+    """Ensure every prop the Thesys SDK calls ``.map()`` on is actually an array."""
+    if isinstance(data, dict):
+        new_dict: dict[str, Any] = {}
+        for k, v in data.items():
+            if k in _C1_ARRAY_PROPS:
+                new_dict[k] = _coerce_to_array(k, v)
+            else:
+                new_dict[k] = _sanitize_json_structure(v)
+        return new_dict
+    if isinstance(data, list):
+        return [_sanitize_json_structure(item) for item in data]
+    return data
+
+
+def _sanitize_c1_response(c1_response: str) -> str:
+    """Patch common weak-model C1 mistakes that crash the SDK renderer."""
+    normalized = c1_response.strip()
+
+    def replace_content(match: re.Match) -> str:
+        tag_open, inner_json, tag_close = match.groups()
+        try:
+            parsed = json.loads(inner_json.strip())
+            sanitized_json = _sanitize_json_structure(parsed)
+            return f"{tag_open}{json.dumps(sanitized_json, ensure_ascii=False, separators=(',', ':'))}{tag_close}"
+        except Exception:
+            return match.group(0)
+
+    sanitized = re.sub(
+        r'(<content\b[^>]*>)(.*?)(</content>)',
+        replace_content,
+        normalized,
+        flags=re.DOTALL,
+    )
+
+    if sanitized.startswith("{") or sanitized.startswith("["):
+        try:
+            parsed = json.loads(sanitized)
+            sanitized_json = _sanitize_json_structure(parsed)
+            return json.dumps(sanitized_json, ensure_ascii=False, separators=(',', ':'))
+        except Exception:
+            pass
+
+    sanitized = re.sub(
+        r'("sources"\s*:\s*)(\{[^{}\[\]]*\})',
+        r"\1[\2]",
+        sanitized,
+    )
+    return sanitized
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = int(raw)
+    except ValueError:
+        return None
+    return max(1, min(seconds, 300))
+
+
+def _c1_custom_markdown(markdown: str) -> str:
+    return f"<custommarkdown>{escape(markdown, quote=True)}</custommarkdown>"
+
+
+async def _emit_generative_ui(
+    *,
+    component_type: str,
+    title: str,
+    c1_response: str,
+) -> None:
+    send_json = get_send_json()
+    if send_json:
+        await send_json({
+            "type": "generative_ui",
+            "component_type": component_type,
+            "title": title,
+            "component": c1_response,
+        })
+
+    repo = get_history_repository()
+    session_id = get_session_id()
+    if repo and session_id:
+        try:
+            await repo.append_message(
+                session_id=session_id,
+                owner_id=get_owner_id(),
+                role="tool_result",
+                source="generative_ui",
+                text=json.dumps({
+                    "component_type": component_type,
+                    "title": title,
+                    "component": c1_response,
+                }),
+            )
+        except Exception:
+            logger.warning("Failed to persist generative_ui component for session %s", session_id)
+
+
+async def _emit_thesys_rate_limit_card(
+    *,
+    component_type: str,
+    title: str,
+    retry_after: int | None,
+    detail: str = "",
+) -> None:
+    wait_text = f" Try again after about {retry_after} seconds." if retry_after else " Try again shortly."
+    c1_response = _c1_custom_markdown(
+        "### Thesys rate limit\n\n"
+        "Thesys returned HTTP 429, so live UI generation could not complete."
+        f"{wait_text}\n\n"
+        f"**Thesys API Response:**\n```json\n{detail}\n```\n\n"
+        "The app did call Thesys. No setup code was generated."
+    )
+    await _emit_generative_ui(
+        component_type=component_type,
+        title=title or "Thesys rate limit",
+        c1_response=c1_response,
+    )
+
+
+@normalized_tool
+async def render_ui(
+    component_type: str,
+    title: str,
+    data: str,
+    description: str = "",
+) -> dict[str, Any]:
+    """Generate an interactive Thesys C1 UI component (chart, table, form, dashboard, card, report) from data.
+
+    Use this when Thesys is connected and the user asks to visualize data, compare items,
+    create dashboards, or build interactive cards/forms. The component renders in the Workflow
+    panel. If Thesys is not connected, fall back to publish_html_artifact.
+
+    Args:
+        component_type: Type of component — "chart", "table", "form", "dashboard", "card", or "report".
+        title: A short descriptive title for the component.
+        data: JSON string containing the data to visualize or use in the component.
+        description: Optional additional context about what the component should show.
+
+    Returns:
+        NormalizedToolResult confirming the component was rendered.
+    """
+    api_key = await _thesys_api_key()
+    if not api_key:
+        return tool_error(
+            "Thesys is not connected. Use publish_html_artifact for the visual instead, "
+            "or ask the user to add their Thesys API key in the Connectors page.",
+            error_code="AUTH_REQUIRED",
+            suggested_alternatives=["publish_html_artifact"],
+        )
+
+    prompt = (
+        f"Create a {component_type} titled '{title}'.\n\n"
+        f"Data:\n{data}\n"
+    )
+    if description:
+        prompt += f"\nAdditional context: {description}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            request_kwargs = {
+                "headers": {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                "json": {
+                    "model": settings.thesys_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only valid Thesys C1 response markup. "
+                                "Do not wrap it in Markdown code fences, JSON, or setup code. "
+                                "Do not include citations or a sources prop."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                },
+            }
+            response = await client.post(
+                "https://api.thesys.dev/v1/visualize/chat/completions",
+                **request_kwargs,
+            )
+            if response.status_code == 429:
+                retry_after = _retry_after_seconds(response)
+                await asyncio.sleep(min(retry_after or 2, 60))
+                response = await client.post(
+                    "https://api.thesys.dev/v1/visualize/chat/completions",
+                    **request_kwargs,
+                )
+                if response.status_code == 429:
+                    retry_after = _retry_after_seconds(response) or retry_after
+                    await _emit_thesys_rate_limit_card(
+                        component_type=component_type,
+                        title=title,
+                        retry_after=retry_after,
+                        detail=response.text,
+                    )
+                    return tool_error(
+                        "Thesys API rate limited this request (HTTP 429).",
+                        error_code="HTTP_429",
+                        retry_after=retry_after,
+                        rendered_fallback=True,
+                    )
+            if response.status_code >= 400:
+                return tool_error(
+                    f"Thesys API returned HTTP {response.status_code}: {response.text}",
+                    error_code=f"HTTP_{response.status_code}",
+                )
+
+            result = response.json()
+            raw_content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            c1_response = _sanitize_c1_response(_extract_c1_response_content(raw_content))
+
+            if not c1_response.strip():
+                return tool_error(
+                    "Thesys C1 returned an empty response.",
+                    error_code="EMPTY_RESPONSE",
+                )
+
+            await _emit_generative_ui(
+                component_type=component_type,
+                title=title,
+                c1_response=c1_response,
+            )
+
+            return tool_success(
+                f"Rendered {component_type}: {title}",
+                component_type=component_type,
+                title=title,
+            )
+    except Exception as exc:
+        return tool_error(
+            f"Thesys render_ui failed: {exc}",
         )

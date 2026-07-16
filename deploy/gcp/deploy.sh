@@ -38,6 +38,7 @@ JWT_SECRET="${JWT_SECRET:?Set JWT_SECRET}"
 
 AGENT_SECRET_FLAGS=(
   "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
+  "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
   "--set-secrets=JWT_SECRET=jwt-secret:latest"
   "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
   "--set-secrets=TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
@@ -51,6 +52,7 @@ fi
 
 AGENT_ENV_VARS=(
   "APP_ENV=production"
+  "MODEL_PROVIDER=qwen"
   "FIREBASE_PROJECT_ID=${FB_PROJECT_ID}"
   "GOOGLE_PROJECT_ID=${PROJECT_ID}"
   "GOOGLE_CLOUD_REGION=${GEMINI_REGION}"
@@ -65,6 +67,12 @@ AGENT_ENV_VARS=(
   "BETA_GOOGLE_SHEET_ID=${BETA_GOOGLE_SHEET_ID}"
   "BETA_GOOGLE_SHEET_NAME=${BETA_GOOGLE_SHEET_NAME}"
   "TASK_WORKER_ENABLED=true"
+  "TASK_QUEUE_LOCAL_FALLBACK=false"
+  "DURABLE_SUBAGENTS_ENABLED=true"
+  "SUBAGENT_LEASE_SECONDS=600"
+  "SUBAGENT_HEARTBEAT_INTERVAL_SECONDS=120"
+  "SUBAGENT_MAX_MAILBOX_MESSAGES=32"
+  "SUBAGENT_PARENT_WAIT_SECONDS=300"
   "GCP_TASKS_PROJECT_ID=${PROJECT_ID}"
   "GCP_TASKS_LOCATION=${TASKS_LOCATION}"
   "GCP_TASKS_QUEUE=${TASKS_QUEUE}"
@@ -114,6 +122,10 @@ AGENT_URL="$(gcloud run services describe nexus-agent \
   --format='value(status.url)')"
 
 echo "Agent URL: ${AGENT_URL}"
+echo "Rollback (deployment/version level only; no second runtime mesh):"
+echo "  gcloud run services update-traffic nexus-agent --region=${REGION} --to-revisions=PREVIOUS_REVISION=100"
+echo "List revisions with:"
+echo "  gcloud run revisions list --service=nexus-agent --region=${REGION}"
 AGENT_WS_URL="${AGENT_URL/https:/wss:}"
 
 echo "Deploying worker service..."

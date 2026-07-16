@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ from nexus.firebase import get_firestore_client
 
 if TYPE_CHECKING:
     from nexus.session import Session
+
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
@@ -1305,6 +1308,33 @@ class FirestoreHistoryRepository:
             source_session_id,
         )
 
+    async def ensure_run(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        owner_id: str,
+        title: str = "Agent Turn",
+        task_id: str | None = None,
+        status: str = "queued",
+    ) -> StoredRun:
+        """Create the history run doc if missing. Idempotent.
+
+        Durable workers bind a ``run_*`` id that lives under production_tasks
+        but history child writes (steps/artifacts/messages) require the same
+        id under ``sessions/{sessionId}/runs/{runId}``. Call this before any
+        child write when the run id came from outside history.
+        """
+        return await asyncio.to_thread(
+            self._ensure_run_sync,
+            session_id,
+            run_id,
+            owner_id,
+            title,
+            task_id,
+            status,
+        )
+
     async def get_session_run(self, session_id: str) -> StoredRun | None:
         return await asyncio.to_thread(self._get_session_run_sync, session_id)
 
@@ -1736,6 +1766,78 @@ class FirestoreHistoryRepository:
         batch.commit()
         return self._build_stored_run(session_id, run_id, payload)
 
+    def _ensure_run_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        owner_id: str,
+        title: str,
+        task_id: str | None,
+        status: str,
+    ) -> StoredRun:
+        now = utcnow()
+        session_ref = self._db.collection("sessions").document(session_id)
+        run_ref = session_ref.collection("runs").document(run_id)
+        existing = run_ref.get()
+        if existing.exists:
+            return self._build_stored_run(session_id, run_id, existing.to_dict() or {})
+
+        session_data = session_ref.get().to_dict() or {}
+        effective_owner = owner_id or (
+            session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+        )
+        effective_task = task_id or (
+            session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+        )
+        payload: dict[str, Any] = {
+            "ownerId": effective_owner,
+            "sessionId": session_id,
+            "taskId": effective_task,
+            "status": status or "queued",
+            "title": title or "Agent Turn",
+            "createdAt": now,
+            "updatedAt": now,
+            "stepCount": 0,
+            "artifactCount": 0,
+        }
+        task_ref = self._task_ref(effective_owner, effective_task) if effective_owner else None
+        batch = self._db.batch()
+        batch.set(run_ref, payload, merge=True)
+        if task_ref is not None:
+            batch.set(task_ref.collection("runs").document(run_id), payload, merge=True)
+            batch.set(
+                task_ref,
+                {
+                    "ownerId": effective_owner,
+                    "taskId": effective_task,
+                    "currentSessionId": session_id,
+                    "currentRunId": run_id,
+                    "runStatus": payload["status"],
+                    "status": payload["status"],
+                    "title": payload["title"],
+                    "updatedAt": now,
+                    "schemaVersion": 1,
+                },
+                merge=True,
+            )
+        batch.set(
+            session_ref,
+            {
+                "taskId": effective_task,
+                "currentRunId": run_id,
+                "runStatus": payload["status"],
+                "updatedAt": now,
+            },
+            merge=True,
+        )
+        batch.commit()
+        logger.info(
+            "Ensured history run %s for session %s (was missing)",
+            run_id,
+            session_id,
+        )
+        return self._build_stored_run(session_id, run_id, payload)
+
     def _get_session_run_sync(self, session_id: str) -> StoredRun | None:
         session = self._get_session_sync(session_id)
         if not session:
@@ -1762,14 +1864,31 @@ class FirestoreHistoryRepository:
 
     def _set_run_status_sync(self, session_id: str, run_id: str, status: str) -> StoredRun | None:
         now = utcnow()
-        run_ref = self._db.collection("sessions").document(session_id).collection("runs").document(run_id)
+        session_ref = self._db.collection("sessions").document(session_id)
+        run_ref = session_ref.collection("runs").document(run_id)
         run_doc = run_ref.get()
-        if not run_doc.exists:
-            return None
+        session_doc = session_ref.get()
+        session_data = session_doc.to_dict() or {} if session_doc.exists else {}
 
-        current = run_doc.to_dict() or {}
+        if not run_doc.exists:
+            owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+            task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+            current = {
+                "ownerId": owner_id,
+                "sessionId": session_id,
+                "taskId": task_id,
+                "status": "queued",
+                "title": "Agent Turn",
+                "createdAt": now,
+                "updatedAt": now,
+                "stepCount": 0,
+                "artifactCount": 0,
+            }
+        else:
+            current = run_doc.to_dict() or {}
+
         owner_id = current.get("ownerId") if isinstance(current.get("ownerId"), str) else ""
-        task_id = current.get("taskId") if isinstance(current.get("taskId"), str) else session_id
+        task_id = current.get("taskId") if isinstance(current.get("taskId"), str) else (session_data.get("taskId") or session_id)
         updates: dict[str, Any] = {
             "status": status,
             "updatedAt": now,
@@ -1926,12 +2045,33 @@ class FirestoreHistoryRepository:
         @firestore.transactional
         def transactional_create(txn):
             run_snapshot = run_ref.get(transaction=txn)
-            if not run_snapshot.exists:
-                raise ValueError(f"Run {run_id} does not exist for session {session_id}")
+            session_snapshot = session_ref.get(transaction=txn)
+            session_data = session_snapshot.to_dict() or {} if session_snapshot.exists else {}
 
-            run_data = run_snapshot.to_dict() or {}
+            if not run_snapshot.exists:
+                owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+                task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+                run_payload = {
+                    "ownerId": owner_id,
+                    "sessionId": session_id,
+                    "taskId": task_id,
+                    "status": "running",
+                    "title": "Agent Turn",
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "stepCount": 0,
+                    "artifactCount": 0,
+                }
+                txn.set(run_ref, run_payload, merge=True)
+                if owner_id:
+                    task_run_ref = self._task_run_ref(owner_id, task_id, run_id)
+                    txn.set(task_run_ref, run_payload, merge=True)
+                run_data = run_payload
+            else:
+                run_data = run_snapshot.to_dict() or {}
+
             owner_id = run_data.get("ownerId") if isinstance(run_data.get("ownerId"), str) else ""
-            task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_id
+            task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_data.get("taskId") or session_id
             step_index = int(run_data.get("stepCount", 0) or 0) + 1
             payload: dict[str, Any] = {
                 "sessionId": session_id,
@@ -2234,12 +2374,31 @@ class FirestoreHistoryRepository:
         @firestore.transactional
         def transactional_create(txn):
             run_snapshot = run_ref.get(transaction=txn)
-            if not run_snapshot.exists:
-                raise ValueError(f"Run {run_id} does not exist for session {session_id}")
-
             session_snapshot = session_ref.get(transaction=txn)
-            session_data = session_snapshot.to_dict() or {}
-            run_data = run_snapshot.to_dict() or {}
+            session_data = session_snapshot.to_dict() or {} if session_snapshot.exists else {}
+
+            if not run_snapshot.exists:
+                owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+                task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+                run_payload = {
+                    "ownerId": owner_id,
+                    "sessionId": session_id,
+                    "taskId": task_id,
+                    "status": "running",
+                    "title": "Agent Turn",
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "stepCount": 0,
+                    "artifactCount": 0,
+                }
+                txn.set(run_ref, run_payload, merge=True)
+                if owner_id:
+                    task_run_ref = self._task_run_ref(owner_id, task_id, run_id)
+                    txn.set(task_run_ref, run_payload, merge=True)
+                run_data = run_payload
+            else:
+                run_data = run_snapshot.to_dict() or {}
+
             owner_id = run_data.get("ownerId") if isinstance(run_data.get("ownerId"), str) else ""
             task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_data.get("taskId") or session_id
             run_artifact_count = int(run_data.get("artifactCount", 0) or 0) + 1

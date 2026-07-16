@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 
 import { UsageChart, type UsageChartPoint } from "@/components/usage-chart";
+import { useLiveDesktop } from "@/components/live-desktop-provider";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "@/lib/message-types";
@@ -176,6 +177,7 @@ function StatCard({
 
 export default function DashboardPage() {
   const { user } = useAuth();
+  const { clearDesktop } = useLiveDesktop();
   const router = useRouter();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [usage, setUsage] = useState<UsageChartPoint[]>([]);
@@ -244,6 +246,7 @@ export default function DashboardPage() {
     try {
       const res = await authenticatedFetch(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
       if (!res.ok) throw new Error(await parseApiError(res));
+      clearDesktop(sessionId);
       await refreshDashboard();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to end session");

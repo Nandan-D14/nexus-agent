@@ -76,6 +76,7 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "show_workflow_panel",
     # Document generation
     "generate_pdf_report",
+    "publish_html_artifact",
     "save_as_artifact",
     # Web automation
     "tinyfish_web_agent",

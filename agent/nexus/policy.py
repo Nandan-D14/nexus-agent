@@ -60,6 +60,11 @@ _SECRET_EXFIL_RE = re.compile(
     r"\.config/rclone|"
     r"userPrivate)"
 )
+_MCP_SIDE_EFFECT_RE = re.compile(
+    r"(?:^|_)(create|update|delete|remove|destroy|write|drop|deploy|"
+    r"send|upload|insert|execute|run|publish|post|put|patch)(?:_|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,26 @@ def evaluate_tool_policy(
     normalized_tool = (tool_name or "").strip()
     mode = normalize_autonomy_mode(autonomy_mode)
     args = args or {}
+
+    if normalized_tool.startswith("mcp__"):
+        remote_name = normalized_tool.rsplit("__", 1)[-1]
+        if _MCP_SIDE_EFFECT_RE.search(remote_name):
+            return ToolPolicyDecision(
+                "require_approval",
+                "Remote MCP side effects require user confirmation.",
+                "high",
+            )
+        if mode == "manual":
+            return ToolPolicyDecision(
+                "require_approval",
+                "Manual mode requires approval for remote MCP connector calls.",
+                "medium",
+            )
+        return ToolPolicyDecision(
+            "allow",
+            "Read-only MCP call allowed in Auto Mode.",
+            "low",
+        )
 
     if normalized_tool == "run_command":
         command = str(args.get("command") or "")

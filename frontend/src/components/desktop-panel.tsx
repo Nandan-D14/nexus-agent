@@ -185,14 +185,15 @@ export function DesktopPanel({ streamUrl, analysis, action, sessionId, isAgentId
 
   useEffect(() => {
     if (!showResize && sessionId && (currentResolution.w !== SCREEN_W || currentResolution.h !== SCREEN_H)) {
-      setCurrentResolution({ w: SCREEN_W, h: SCREEN_H });
       authenticatedFetch(`/api/sessions/${sessionId}/resize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ width: SCREEN_W, height: SCREEN_H }),
-      }).catch(() => {});
+      })
+        .catch(() => {})
+        .finally(() => setCurrentResolution({ w: SCREEN_W, h: SCREEN_H }));
     }
-  }, [showResize, sessionId]);
+  }, [showResize, sessionId, currentResolution.w, currentResolution.h]);
 
   if (!streamUrl) {
     return (

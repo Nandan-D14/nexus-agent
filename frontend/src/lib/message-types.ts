@@ -70,6 +70,11 @@ export type WsEventMeta = {
   event_id?: string;
   task_id?: string;
   run_id?: string;
+  trace_id?: string;
+  step_id?: string;
+  parent_step_id?: string;
+  provider?: string;
+  model?: string;
   seq?: number;
 };
 
@@ -83,11 +88,81 @@ export type WsMessage = WsEventMeta & (
   | { type: "step_failed"; step: RunStep }
   | { type: "artifact_created"; artifact: RunArtifact }
   | { type: "agent_thinking"; content: string }
-  | { type: "agent_tool_call"; tool: string; args: Record<string, unknown> }
-  | { type: "agent_tool_result"; tool: string; output: string }
+  | {
+      type: "agent_tool_call";
+      tool: string;
+      args: Record<string, unknown>;
+      workflow_step_id?: string | null;
+      status?: string;
+      expected_outcome?: string;
+      verification_method?: string;
+      retry_policy?: Record<string, unknown>;
+      completion_condition?: string;
+    }
+  | {
+      type: "agent_tool_result";
+      tool: string;
+      output: string;
+      workflow_step_id?: string | null;
+      result_summary?: Record<string, unknown>;
+      status?: string;
+      error_code?: string;
+      retry_reason?: string;
+      latency_ms?: number;
+      evidence?: string[];
+      artifacts?: Array<Record<string, unknown>>;
+      remaining_work?: string[];
+      retryable?: boolean;
+      verified?: boolean;
+    }
+  | {
+      type: "agent_retry";
+      attempt: number;
+      max_attempts: number;
+      delay_ms: number;
+      reason: string;
+    }
+  | {
+      type: "agent_model_fallback";
+      from_model: string;
+      to_model: string;
+      reason: string;
+      attempt: number;
+    }
+  | {
+      type: "mcp_http_request" | "mcp_http_response" | "mcp_http_error";
+      operation: string;
+      tool?: string;
+      server: string;
+      method?: string;
+      status_code?: number;
+      latency_ms?: number;
+      error_type?: string;
+      error?: string;
+    }
+  | {
+      type: "verification_result";
+      verified: boolean;
+      status: "completed" | "failed" | "partial" | "blocked";
+      method: string;
+      summary: string;
+      error_code?: string;
+      evidence?: string[];
+      remaining_work?: string[];
+      retryable?: boolean;
+      action_count?: number;
+    }
   | { type: "agent_screenshot"; image_b64: string; analysis: string }
   | { type: "agent_complete"; summary: string }
   | { type: "agent_delegation"; from: string; to: string }
+  | {
+      type: "generative_ui";
+      component_type?: string;
+      title?: string;
+      component?: unknown;
+    }
+  | { type: "user_question"; question_id: string; question: string }
+  | { type: "user_question_resolved"; question_id: string; answered: boolean }
   | {
       type: "permission_request";
       task_id: string;
@@ -146,6 +221,7 @@ export type WsCommand =
   | { type: "start_voice" }
   | { type: "start_desktop" }
   | { type: "permission_response"; task_id: string; approved: boolean }
+  | { type: "user_question_response"; question_id: string; answer: string }
   | { type: "ping" };
 
 // ── Session data returned by the REST API ──────────────────────────
@@ -348,7 +424,7 @@ export type WorkspaceResumeState = {
 
 export type ArchivedMessage = {
   id: string;
-  role: "user" | "agent" | "tool_call" | "tool_result";
+  role: "user" | "agent" | "tool_call" | "tool_result" | "thinking" | "agent_thinking";
   text: string;
   source?: string;
   turn_index: number;

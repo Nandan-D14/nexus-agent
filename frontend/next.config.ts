@@ -12,7 +12,13 @@ const nextConfig: NextConfig = {
     "@heroui/react",
     "react-aria-components",
     "react-aria",
-    "@react-aria/utils"
+    "@react-aria/utils",
+    // Thesys C1 Generative UI SDK: react-ui is ESM and imports the CJS
+    // react-core, so both must be transpiled for webpack to resolve them.
+    "@thesysai/genui-sdk",
+    "@crayonai/react-ui",
+    "@crayonai/react-core",
+    "@crayonai/stream",
   ],
   webpack: (config) => {
     config.resolve.alias["@react-aria/ssr"] = path.resolve(

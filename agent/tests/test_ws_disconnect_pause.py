@@ -109,6 +109,7 @@ class QueuedProductionRepo:
         self.run = None
         self.events: list[SimpleNamespace] = []
         self.create_run_kwargs: dict | None = None
+        self.finish_run_kwargs: dict | None = None
 
     async def create_task(self, **kwargs):
         self.task = SimpleNamespace(
@@ -136,6 +137,11 @@ class QueuedProductionRepo:
             execution_payload={"input_text": kwargs["input_text"]},
         )
         return self.run
+
+    async def finish_run(self, **kwargs):
+        self.finish_run_kwargs = kwargs
+        if self.run is not None:
+            self.run.status = kwargs.get("status") or "failed"
 
     async def append_event(self, **kwargs):
         seq = len(self.events) + 1
@@ -166,12 +172,19 @@ class QueuedProductionRepo:
 
 
 class QueuedTaskQueue:
-    def __init__(self) -> None:
+    def __init__(self, *, queued: bool = True, reason: str = "") -> None:
         self.enqueue_kwargs: dict | None = None
+        self.queued = queued
+        self.reason = reason
 
     async def enqueue_task_run(self, **kwargs):
         self.enqueue_kwargs = kwargs
-        return SimpleNamespace(queued=True, provider="test", name="queued", reason="")
+        return SimpleNamespace(
+            queued=self.queued,
+            provider="test",
+            name="queued",
+            reason=self.reason,
+        )
 
 
 @pytest.mark.asyncio
@@ -333,6 +346,55 @@ async def test_text_input_queues_durable_run_when_worker_available(monkeypatch) 
     assert "run_queued" in sent_types
     assert "transcript" in sent_types
     session_manager.schedule_idle_pause.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_text_input_does_not_live_fallback_when_enqueue_rejects(monkeypatch) -> None:
+    repo = QueuedProductionRepo()
+    queue = QueuedTaskQueue(queued=False, reason="Cloud Tasks unavailable")
+    session = SimpleNamespace(
+        id="session-123",
+        owner_id="firebase-uid",
+        task_id=None,
+        current_run_id=None,
+        runtime_config=None,
+    )
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+    ws = FakeWebSocket(
+        [
+            {"text": json.dumps({"type": "text_input", "text": "work"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    created: list[FakeOrchestrator] = []
+
+    class RejectingFakeOrchestrator(FakeOrchestrator):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handle_text_input = AsyncMock()
+            self.bind_durable_run = Mock()
+            created.append(self)
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", RejectingFakeOrchestrator)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(ws_handler, "get_task_queue", lambda: queue)
+    monkeypatch.setattr(ws_handler.settings, "task_worker_enabled", True)
+
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    assert repo.finish_run_kwargs["status"] == "failed"
+    assert any(event.event_type == "enqueue_rejected" for event in repo.events)
+    assert session.current_run_id is None
+    created[0].handle_text_input.assert_not_awaited()
+    sent_types = [call.args[0]["type"] for call in ws.send_json.call_args_list]
+    assert "error" in sent_types
+    assert "run_queued" not in sent_types
 
 
 @pytest.mark.asyncio

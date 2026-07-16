@@ -43,7 +43,7 @@ import { TodoList } from "@/components/todo-list";
 import { useLiveDesktop } from "@/components/live-desktop-provider";
 import { WorkflowDesktopContainer } from "@/components/workflow-desktop-container";
 import type { WorkflowRun } from "@/components/agent-workflow-panel";
-import type { StepType } from "@/components/workflow-step";
+import type { StepType, WorkflowStepData } from "@/components/workflow-step";
 import { useAuth } from "@/lib/auth-context";
 import { AudioPlayer } from "@/lib/audio-playback";
 import type {
@@ -68,6 +68,7 @@ import { useSettings } from "@/lib/settings-context";
 import {
   classifyAgentTool,
   displayAgentToolName,
+  isWorkflowVisualTool,
   surfaceForAgentTool,
 } from "@/lib/agent-tool-classification";
 
@@ -132,8 +133,9 @@ export default function SessionPage() {
   const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
   const [runSteps, setRunSteps] = useState<RunStep[]>([]);
   const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null);
-  const [forcedTab, setForcedTab] = useState<"workflow" | "desktop" | null>(null);
+  const [forcedTab, setForcedTab] = useState<"workflow" | "desktop" | "artifacts" | null>(null);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
+  const [genUiSteps, setGenUiSteps] = useState<WorkflowStepData[]>([]);
   const [viewMode, setViewMode] = useState<"live" | "archived">("live");
   const [pageError, setPageError] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
@@ -165,13 +167,10 @@ export default function SessionPage() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const landingInputRef = useRef<HTMLTextAreaElement>(null);
-  const streamUrlRef = useRef<string | null>(null);
-  const viewModeRef = useRef<"live" | "archived">("live");
   const autoActionHandledRef = useRef(false);
   const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
   const autoResumeTriggeredRef = useRef(false);
-  const { registerDesktop, clearDesktop, minimizeDesktop } = useLiveDesktop();
-  const minimizeDesktopRef = useRef(minimizeDesktop);
+  const { registerDesktop, clearDesktop } = useLiveDesktop();
   const wsUrl =
     typeof window !== "undefined"
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}?ticket=${sessionData?.ws_ticket || ""}`
@@ -186,11 +185,6 @@ export default function SessionPage() {
     sessionData?.task_id && sessionData.task_id.startsWith("task_")
       ? sessionData.task_id
       : null;
-
-  // Keep refs in sync for unmount cleanup
-  streamUrlRef.current = streamUrl;
-  viewModeRef.current = viewMode;
-  minimizeDesktopRef.current = minimizeDesktop;
 
   const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
     useWebSocket(shouldConnectWs ? wsUrl : null, durableTaskId);
@@ -340,8 +334,49 @@ export default function SessionPage() {
         );
         break;
 
+      case "generative_ui": {
+        const genMsg = msg as unknown as {
+          component_type?: string;
+          title?: string;
+          component?: unknown;
+        };
+        const nowIso = new Date().toISOString();
+        const genStep: WorkflowStepData = {
+          step_id: `genui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          step_type: "generative_ui",
+          status: "completed",
+          title: genMsg.title || "Generated visual",
+          created_at: nowIso,
+          completed_at: nowIso,
+          tool: "render_ui",
+          metadata: {
+            tool: "render_ui",
+            component_type: genMsg.component_type || "card",
+            component: genMsg.component,
+            title: genMsg.title || "Generated visual",
+          },
+        };
+        setGenUiSteps((prev) => [...prev, genStep]);
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "event",
+            type: "generative_ui",
+            component_type: genMsg.component_type || "card",
+            title: genMsg.title || "Generated visual",
+            component: genMsg.component,
+            ts,
+          },
+        ]);
+        setForcedTab("workflow");
+        break;
+      }
+
       case "artifact_created":
         setRunArtifacts((prev) => upsertArtifact(prev, msg.artifact));
+        if (msg.artifact.kind === "html" || msg.artifact.metadata?.render_mode === "iframe") {
+          setForcedTab("workflow");
+        }
         setRunInfo((prev) =>
           prev
             ? { ...prev, artifact_count: prev.artifact_count + 1 }
@@ -388,16 +423,78 @@ export default function SessionPage() {
         setAgentStatus(`Running ${displayAgentToolName(msg.tool)}...`);
         setAgentAction(toolAction(msg.tool, msg.args));
         setForcedTab(surfaceForAgentTool(msg.tool));
-        setChatItems((prev) => [
-          ...prev,
-          { kind: "event", type: msg.type, tool: msg.tool, args: msg.args, ts },
-        ]);
+        if (!isWorkflowVisualTool(msg.tool)) {
+          setChatItems((prev) => [
+            ...prev,
+            { kind: "event", type: msg.type, tool: msg.tool, args: msg.args, ts },
+          ]);
+        }
         break;
 
       case "agent_tool_result":
+        if (!isWorkflowVisualTool(msg.tool)) {
+          setChatItems((prev) => [
+            ...prev,
+            { kind: "event", type: msg.type, tool: msg.tool, output: msg.output, ts },
+          ]);
+        }
+        break;
+
+      case "agent_retry":
+        setAgentStatus(`Retrying${msg.model ? ` ${msg.model}` : ""}...`);
         setChatItems((prev) => [
           ...prev,
-          { kind: "event", type: msg.type, tool: msg.tool, output: msg.output, ts },
+          {
+            kind: "event",
+            type: msg.type,
+            reason: msg.reason,
+            attempt: msg.attempt,
+            model: msg.model,
+            delay_ms: msg.delay_ms,
+            trace_id: msg.trace_id,
+            ts,
+          },
+        ]);
+        break;
+
+      case "agent_model_fallback":
+        setAgentStatus(`Switching to ${msg.to_model}...`);
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "event",
+            type: msg.type,
+            reason: msg.reason,
+            attempt: msg.attempt,
+            from_model: msg.from_model,
+            to_model: msg.to_model,
+            trace_id: msg.trace_id,
+            ts,
+          },
+        ]);
+        break;
+
+      case "mcp_http_request":
+      case "mcp_http_response":
+      case "mcp_http_error":
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "event",
+            ...msg,
+            ts,
+          },
+        ]);
+        break;
+
+      case "verification_result":
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "event",
+            ...msg,
+            ts,
+          },
         ]);
         break;
 
@@ -432,6 +529,31 @@ export default function SessionPage() {
           ...prev,
           { kind: "delegation", from: msg.from, to: msg.to, ts },
         ]);
+        break;
+
+      case "user_question":
+        setPhase("idle");
+        setAgentStatus("Waiting for your answer...");
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "user_question",
+            question_id: msg.question_id,
+            question: msg.question,
+            answered: false,
+            ts,
+          },
+        ]);
+        break;
+
+      case "user_question_resolved":
+        setChatItems((prev) =>
+          prev.map((item) =>
+            item.kind === "user_question" && item.question_id === msg.question_id
+              ? { ...item, answered: true }
+              : item,
+          ),
+        );
         break;
 
       case "permission_request":
@@ -608,12 +730,6 @@ export default function SessionPage() {
     return () => {
       player.stop();
       stopMic();
-      // Minimize to PiP when navigating away from an active live session
-      const url = streamUrlRef.current;
-      const mode = viewModeRef.current;
-      if (url && mode === "live") {
-        minimizeDesktopRef.current({ sessionId, streamUrl: url });
-      }
     };
   }, [sessionId, stopMic]);
 
@@ -626,7 +742,12 @@ export default function SessionPage() {
   /* ---- Convert runInfo/runSteps to workflowRun ---- */
   useEffect(() => {
     if (!runInfo) {
-      setWorkflowRun(null);
+      setWorkflowRun(genUiSteps.length ? {
+        run_id: "genui",
+        title: "Agent Workflow",
+        status: "running",
+        steps: [...genUiSteps],
+      } : null);
       return;
     }
 
@@ -635,6 +756,7 @@ export default function SessionPage() {
       "running": "running",
       "completed": "completed",
       "failed": "failed",
+      "cancelled": "failed",
       "success": "completed",
       "error": "failed",
     };
@@ -644,6 +766,7 @@ export default function SessionPage() {
       "in_progress": "in_progress",
       "completed": "completed",
       "failed": "failed",
+      "cancelled": "failed",
       "success": "completed",
       "error": "failed",
     };
@@ -655,6 +778,8 @@ export default function SessionPage() {
       if (provider === "tasks") return "tasks";
       if (provider === "mcp") return "mcp";
       if (tool === "run_command") return "terminal";
+      if (tool === "publish_html_artifact") return "html_artifact";
+      if (tool === "render_ui") return "generative_ui";
       if (tool === "web_search" || tool === "scrape_web_page" || tool === "open_browser") return "browser";
       if (
         tool === "write_workspace_file" ||
@@ -673,18 +798,16 @@ export default function SessionPage() {
         stepType === "error" ||
         stepType === "terminal" ||
         stepType === "observation" ||
-        stepType === "completion"
+        stepType === "completion" ||
+        stepType === "generative_ui" ||
+        stepType === "html_artifact"
       ) {
         return stepType;
       }
       return "observation";
     };
 
-    setWorkflowRun({
-      run_id: runInfo.run_id,
-      title: runInfo.title || "Agent Workflow",
-      status: runStatusMap[runInfo.status] || "running",
-      steps: runSteps.map((step) => {
+    const mappedSteps: WorkflowStepData[] = runSteps.map((step) => {
         const metadata = step.metadata ?? {};
         const args = metadata.args;
         const result = metadata.result;
@@ -709,9 +832,19 @@ export default function SessionPage() {
           metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : undefined,
           tool,
         };
-      }),
+      });
+
+    const combinedSteps = [...mappedSteps, ...genUiSteps].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    );
+
+    setWorkflowRun({
+      run_id: runInfo.run_id,
+      title: runInfo.title || "Agent Workflow",
+      status: runStatusMap[runInfo.status] || "running",
+      steps: combinedSteps,
     });
-  }, [runInfo, runSteps]);
+  }, [runInfo, runSteps, genUiSteps]);
 
   /* ---- Session lifecycle ---- */
   useEffect(() => {
@@ -764,7 +897,13 @@ export default function SessionPage() {
         getSessionArtifacts(sessionId),
       ]);
       if (cancelled) return;
-      setChatItems(mapStoredMessagesToChatItems(messages));
+      const nextChatItems = mapStoredMessagesToChatItems(messages);
+      setChatItems((prev) => {
+        if (nextChatItems.length > 0) {
+          return nextChatItems;
+        }
+        return prev.length > 0 ? prev : [];
+      });
       setRunInfo(run);
       setRunSteps(steps);
       setRunArtifacts(artifacts);
@@ -1316,6 +1455,22 @@ export default function SessionPage() {
     [sendJson, toast],
   );
 
+  const handleQuestionRespond = useCallback(
+    (questionId: string, answer: string) => {
+      setChatItems((prev) =>
+        prev.map((item) =>
+          item.kind === "user_question" && item.question_id === questionId
+            ? { ...item, answered: true }
+            : item,
+        ),
+      );
+      setAgentStatus("");
+      setPhase("acting");
+      sendJson({ type: "user_question_response", question_id: questionId, answer });
+    },
+    [sendJson],
+  );
+
   const handleStopAgent = useCallback(() => {
     sendJson({ type: "stop_agent" });
     setPhase("done");
@@ -1323,7 +1478,7 @@ export default function SessionPage() {
   }, [sendJson]);
 
   useEffect(() => {
-    if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
+    if (isNewSession || !sessionId) {
       return;
     }
     if (autoActionHandledRef.current) {
@@ -1331,7 +1486,7 @@ export default function SessionPage() {
     }
 
     try {
-      const key = pendingActionKeyRef.current;
+      const key = `nexus.pendingSessionAction:${sessionId}`;
       const raw = sessionStorage.getItem(key);
       if (!raw) {
         return;
@@ -1360,11 +1515,20 @@ export default function SessionPage() {
         setHasActivatedSession(true);
         setPendingText(payload);
         setPhase("thinking");
+        // Optimistically add user's message to chatItems to avoid empty flash
+        setChatItems([
+          {
+            kind: "message",
+            role: "user",
+            text: payload.text,
+            ts: Date.now(),
+          },
+        ]);
       }
     } catch {
       // Ignore invalid storage payloads.
     }
-  }, [isNewSession, sessionData?.session_id, viewMode]);
+  }, [isNewSession, sessionId]);
 
   useEffect(() => {
     if (
@@ -1572,6 +1736,7 @@ export default function SessionPage() {
                       isThinking={phase === "thinking"}
                       phase={phase}
                       onPermissionRespond={handlePermissionRespond}
+                      onQuestionRespond={handleQuestionRespond}
                     />
                   )}
                 </div>
@@ -1672,4 +1837,3 @@ export default function SessionPage() {
             </>
             );
             }
-

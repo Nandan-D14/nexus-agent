@@ -196,8 +196,9 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
     """Create or reuse the per-run workspace scaffold inside the sandbox."""
     try:
         sandbox = get_sandbox()
-        workspace_path = derive_session_workspace_path(get_session_id())
-        set_workspace_path(workspace_path)
+        # Keep setup in the run-scoped directory that subsequent tools read.
+        # Direct calls without a bound run still fall back to the session root.
+        workspace_path = get_active_workspace_path()
 
         created = not sandbox.path_exists(workspace_path)
         sandbox.ensure_directory(workspace_path)

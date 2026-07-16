@@ -19,7 +19,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Search the web, read sources, and collect citations.",
         "trigger": "Use for web research, current facts, docs, and source-backed answers.",
         "instructions": "Gather evidence from reliable sources and summarize with source links.",
-        "agent_scope": ["browser_agent", "research_browser_agent", "deepresearcher", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "desktop_worker", "researcher"],
     },
     {
         "skill_id": "web-automation",
@@ -28,7 +28,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Navigate sites, forms, and browser workflows.",
         "trigger": "Use when the task requires web pages, forms, logins, or browser-only UI.",
         "instructions": "Use browser tools for navigation and keep user credentials scoped.",
-        "agent_scope": ["browser_agent", "research_browser_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "desktop_worker"],
     },
     {
         "skill_id": "codebase-engineering",
@@ -37,7 +37,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Inspect repos, edit files, run tests, and fix bugs.",
         "trigger": "Use for code changes, debugging, refactors, tests, and repo analysis.",
         "instructions": "Read the code first, keep edits scoped, and verify with relevant commands.",
-        "agent_scope": ["code_agent", "research_code_agent", "deepresearcher", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "coder"],
     },
     {
         "skill_id": "terminal-ops",
@@ -46,7 +46,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Run shell commands, scripts, package tools, and process checks.",
         "trigger": "Use for CLI tasks, environment checks, logs, installs, and command output.",
         "instructions": "Prefer precise commands, avoid destructive actions, and report key output.",
-        "agent_scope": ["code_agent", "research_code_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "coder"],
     },
     {
         "skill_id": "desktop-control",
@@ -55,7 +55,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Interact with GUI apps, screenshots, menus, and dialogs.",
         "trigger": "Use for visible desktop state, native apps, file pickers, and mouse/keyboard work.",
         "instructions": "Use computer control only when visual GUI interaction is required.",
-        "agent_scope": ["computer_agent", "research_computer_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "desktop_worker"],
     },
     {
         "skill_id": "workspace-files",
@@ -64,7 +64,14 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Create, read, and organize workspace artifacts.",
         "trigger": "Use when the task needs files, reports, exports, or saved artifacts.",
         "instructions": "Create durable files in the session workspace and name outputs clearly.",
-        "agent_scope": ["code_agent", "browser_agent", "computer_agent", "deepresearcher", "research_code_agent", "research_browser_agent", "research_computer_agent", "research_reviewer_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": [
+            "nexus_planner",
+            "terminal_worker",
+            "desktop_worker",
+            "researcher",
+            "coder",
+            "writer",
+        ],
     },
     {
         "skill_id": "data-analysis",
@@ -73,7 +80,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Analyze CSV, JSON, logs, metrics, and structured data.",
         "trigger": "Use for calculations, comparisons, charts, metrics, and dataset summaries.",
         "instructions": "Use structured parsing where possible and explain assumptions.",
-        "agent_scope": ["code_agent", "deepresearcher", "research_code_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "coder", "researcher"],
     },
     {
         "skill_id": "spreadsheet-work",
@@ -82,7 +89,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Create and edit spreadsheets, formulas, tables, and charts.",
         "trigger": "Use for XLSX/CSV work, financial tables, formulas, and spreadsheet exports.",
         "instructions": "Preserve formulas and formatting, and validate generated sheets.",
-        "agent_scope": ["code_agent", "computer_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker"],
     },
     {
         "skill_id": "document-work",
@@ -91,7 +98,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Draft, edit, summarize, and format documents.",
         "trigger": "Use for DOCX, Markdown, reports, summaries, and written deliverables.",
         "instructions": "Produce concise, well-structured documents with clear filenames.",
-        "agent_scope": ["code_agent", "deepresearcher", "research_code_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "writer", "researcher"],
     },
     {
         "skill_id": "presentation-work",
@@ -100,7 +107,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Create slide decks, outlines, and presentation content.",
         "trigger": "Use for PPTX, slide plans, pitch decks, and visual summaries.",
         "instructions": "Keep slides scannable and organize content into strong sections.",
-        "agent_scope": ["code_agent", "computer_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker", "writer"],
     },
     {
         "skill_id": "github-review",
@@ -109,7 +116,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Review PRs, issues, diffs, and repository changes.",
         "trigger": "Use for GitHub issues, pull requests, code review, and CI context.",
         "instructions": "Prioritize correctness, security, regressions, and test gaps.",
-        "agent_scope": ["code_agent", "deepresearcher", "research_code_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "coder", "researcher"],
     },
     {
         "skill_id": "qa-testing",
@@ -118,7 +125,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Run checks, inspect failures, and verify app behavior.",
         "trigger": "Use for test plans, smoke tests, failing tests, and validation.",
         "instructions": "Prefer targeted verification first, then broader checks when risk is high.",
-        "agent_scope": ["code_agent", "computer_agent", "research_code_agent", "research_computer_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker", "coder"],
     },
     {
         "skill_id": "mcp-tool-use",
@@ -127,7 +134,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Use enabled MCP connectors and remote tool servers.",
         "trigger": "Use when external MCP tools are selected or clearly useful.",
         "instructions": "Choose the smallest useful external tool and request permission for risky actions.",
-        "agent_scope": ["browser_agent", "code_agent", "computer_agent", "deepresearcher", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker"],
     },
     {
         "skill_id": "email-calendar",
@@ -136,7 +143,7 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Work with Gmail, Calendar, Tasks, and Drive when connected.",
         "trigger": "Use for email search/send, calendar events, tasks, and Drive files.",
         "instructions": "Confirm recipients, dates, and irreversible sends before acting.",
-        "agent_scope": ["browser_agent", "code_agent", "nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner", "desktop_worker", "terminal_worker"],
     },
     {
         "skill_id": "workflow-templates",
@@ -145,8 +152,44 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Reuse saved task workflows and repeatable operating procedures.",
         "trigger": "Use when a task matches a saved workflow or should become repeatable.",
         "instructions": "Follow the saved process and adapt only the user-provided inputs.",
-        "agent_scope": ["nexus_orchestrator", "nexus"],
+        "agent_scope": ["nexus_planner"],
     },
+]
+
+
+_V2_AGENT_SCOPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "nexus": ("nexus_planner",),
+    "nexus_orchestrator": ("nexus_planner",),
+    "code_agent": ("terminal_worker",),
+    "research_code_agent": ("terminal_worker", "coder"),
+    "browser_agent": ("desktop_worker",),
+    "research_browser_agent": ("desktop_worker", "researcher"),
+    "computer_agent": ("desktop_worker",),
+    "research_computer_agent": ("desktop_worker",),
+    "deepresearcher": ("nexus_planner", "researcher"),
+    "research_reviewer_agent": ("nexus_planner", "writer"),
+}
+
+
+def _expand_default_skill_scopes(skill: dict[str, Any]) -> dict[str, Any]:
+    scope = skill.get("agent_scope")
+    if not isinstance(scope, list):
+        return skill
+    expanded = list(scope)
+    seen = set(expanded)
+    for legacy_name, aliases in _V2_AGENT_SCOPE_ALIASES.items():
+        if legacy_name not in seen:
+            continue
+        for alias in aliases:
+            if alias not in seen:
+                expanded.append(alias)
+                seen.add(alias)
+    return {**skill, "agent_scope": expanded}
+
+
+DEFAULT_AGENT_SKILLS = [
+    _expand_default_skill_scopes(skill)
+    for skill in DEFAULT_AGENT_SKILLS
 ]
 
 
@@ -191,6 +234,13 @@ def _custom_skill(raw: dict[str, Any]) -> dict[str, Any] | None:
         "created_at": raw.get("created_at") or _now_iso(),
         "updated_at": raw.get("updated_at") or _now_iso(),
     }
+
+
+def _clip_prompt_text(value: Any, limit: int = 700) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}…"
 
 
 def get_agent_skill_state(user_settings: dict[str, Any] | None) -> dict[str, Any]:
@@ -245,13 +295,19 @@ def build_enabled_skills_prompt(
         return ""
     lines = [
         "Enabled CoComputer skills:",
-        "Before choosing an agent or tool, scan these skills and apply every skill whose trigger matches the user's request.",
+        "Before choosing an agent or tool, scan this skill catalog and apply every matching skill's instructions.",
+        "Call read_skill(skill_id) when you need the full instructions or exact custom workflow.",
         "A skill is reusable instructions and routing guidance, not a connector by itself. Use the matching callable tools only when they are available.",
         "If no skill matches, continue with the normal routing policy.",
     ]
     for skill in enabled[:limit]:
         trigger = skill.get("trigger") or skill.get("description") or ""
-        lines.append(f"- {skill['name']} ({skill['category']}): {trigger} Instructions: {skill['instructions']}")
+        description = skill.get("description") or ""
+        scope = ", ".join(skill.get("agent_scope") or [])
+        lines.append(
+            f"- {skill['skill_id']}: {skill['name']} ({skill['category']}): "
+            f"{trigger} Description: {description} Scope: {scope}."
+        )
 
     if mcp_tools:
         lines.append("")
@@ -301,13 +357,20 @@ def build_skill_prompt_for_agent(
 
     lines = [
         "Enabled CoComputer skills:",
-        "Before choosing an agent or tool, scan these skills and apply every skill whose trigger matches the user's request.",
+        "Before choosing an agent or tool, scan this skill catalog and apply every matching skill's instructions.",
+        "Call read_skill(skill_id) when you need the full instructions or exact custom workflow.",
         "A skill is reusable instructions and routing guidance, not a connector by itself. Use the matching callable tools only when they are available.",
         "If no skill matches, continue with the normal routing policy.",
     ]
     for skill in scoped[:limit]:
         trigger = skill.get("trigger") or skill.get("description") or ""
-        lines.append(f"- {skill['name']} ({skill['category']}): {trigger} Instructions: {skill['instructions']}")
+        description = skill.get("description") or ""
+        scope = ", ".join(skill.get("agent_scope") or [])
+        lines.append(
+            f"- {skill['skill_id']}: {skill['name']} ({skill['category']}): "
+            f"{trigger} Description: {description} Scope: {scope}. "
+            f"Instructions: {_clip_prompt_text(skill.get('instructions'))}"
+        )
 
     if mcp_tools:
         lines.append("")

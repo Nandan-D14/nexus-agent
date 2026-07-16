@@ -10,6 +10,7 @@ from unittest import TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
+from google.api_core.exceptions import DeadlineExceeded
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -84,6 +85,38 @@ class BetaServerSmokeTests(TestCase):
         self.assertEqual(body["state"], "pending_review")
         self.assertFalse(body["can_access_app"])
         self.assertTrue(body["can_apply"] is False)
+
+    def test_beta_status_skips_firestore_when_beta_gate_is_disabled(self) -> None:
+        server.settings.beta_access_enabled = False
+        repo = MagicMock()
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.get("/api/v1/beta/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "none")
+        repo.upsert_user.assert_not_called()
+        repo.get_user_settings.assert_not_called()
+        repo.get_beta_application.assert_not_called()
+
+    def test_google_api_deadline_returns_retryable_response(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock(side_effect=DeadlineExceeded("Firestore unavailable"))
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.get("/api/v1/beta/status")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "5")
+        self.assertEqual(response.json()["detail"]["code"], "GOOGLE_SERVICE_UNAVAILABLE")
 
     def test_create_session_rejects_pending_beta_user(self) -> None:
         repo = MagicMock()

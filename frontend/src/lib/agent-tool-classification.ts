@@ -13,6 +13,9 @@ export type AgentToolProvider =
   | "terminal"
   | "file"
   | "workflow"
+  | "skill"
+  | "subagent"
+  | "worker"
   | "generic";
 
 export type AgentSurface = "workflow" | "desktop";
@@ -29,15 +32,45 @@ const DESKTOP_TOOLS = new Set([
   "take_screenshot",
 ]);
 
-const BROWSER_TOOLS = new Set(["web_search", "search_web", "scrape_web_page", "open_browser"]);
+const BROWSER_TOOLS = new Set(["web_search", "search_web", "scrape_web_page", "open_browser", "tavily_search"]);
 const FILE_TOOLS = new Set(["write_workspace_file", "read_workspace_file", "list_workspace_files"]);
-const WORKFLOW_TOOLS = new Set(["write_todo_list", "prepare_task_workspace", "update_todo_item"]);
+const WORKFLOW_TOOLS = new Set([
+  "write_todo_list",
+  "update_todo_item",
+  "prepare_task_workspace",
+  "initialize_task_state",
+  "update_task_state",
+  "read_task_state",
+  "publish_html_artifact",
+  "render_ui",
+  "ask_user",
+  "request_background_task",
+]);
+const SKILL_TOOLS = new Set(["read_skill"]);
+const SUBAGENT_TOOLS = new Set([
+  "invoke_subagent",
+  "send_message",
+  "get_subagent_result",
+  "list_subagents",
+  "cancel_subagent",
+  "await_subagents",
+]);
+const WORKER_TOOLS = new Set(["terminal_worker", "desktop_worker"]);
+
+const WORKFLOW_VISUAL_TOOLS = new Set(["publish_html_artifact", "render_ui"]);
+
+export function isWorkflowVisualTool(tool = ""): boolean {
+  return WORKFLOW_VISUAL_TOOLS.has(tool);
+}
 
 export function classifyAgentTool(tool = ""): AgentToolProvider {
   if (tool.startsWith("gmail_")) return "gmail";
   if (tool.startsWith("calendar_")) return "calendar";
   if (tool.startsWith("tasks_")) return "tasks";
   if (tool.startsWith("mcp__")) return "mcp";
+  if (SKILL_TOOLS.has(tool)) return "skill";
+  if (SUBAGENT_TOOLS.has(tool)) return "subagent";
+  if (WORKER_TOOLS.has(tool)) return "worker";
   if (DESKTOP_TOOLS.has(tool)) return "desktop";
   if (BROWSER_TOOLS.has(tool)) return "browser";
   if (tool === "run_command") return "terminal";
@@ -59,6 +92,38 @@ export function displayAgentToolName(tool = ""): string {
     const [, server, remoteTool] = tool.split("__");
     return `MCP: ${formatToolPart(server)}${remoteTool ? ` / ${formatToolPart(remoteTool)}` : ""}`;
   }
+
+  const named: Record<string, string> = {
+    read_skill: "Read Skill",
+    invoke_subagent: "Spawn Subagent",
+    send_message: "Message Subagent",
+    get_subagent_result: "Check Subagent",
+    list_subagents: "List Subagents",
+    cancel_subagent: "Cancel Subagent",
+    await_subagents: "Await Subagents",
+    terminal_worker: "Terminal Worker",
+    desktop_worker: "Desktop Worker",
+    render_ui: "Render C1 UI",
+    publish_html_artifact: "Publish HTML",
+    ask_user: "Ask User",
+    prepare_task_workspace: "Prepare Workspace",
+    write_todo_list: "Update Todo List",
+    update_todo_item: "Update Todo Item",
+    read_task_state: "Read Task State",
+    update_task_state: "Update Task State",
+    initialize_task_state: "Init Task State",
+    request_background_task: "Background Task",
+    web_search: "Web Search",
+    search_web: "Web Search",
+    scrape_web_page: "Read Web Page",
+    tavily_search: "Tavily Search",
+    run_command: "Terminal Command",
+    read_workspace_file: "Read File",
+    write_workspace_file: "Write File",
+    list_workspace_files: "List Files",
+  };
+  if (named[tool]) return named[tool];
+
   const provider = classifyAgentTool(tool);
   const action = tool.replace(/^(gmail|calendar|tasks)_/, "");
   if (provider === "gmail") return `Gmail: ${formatToolPart(action)}`;
@@ -71,7 +136,7 @@ export function displayAgentToolName(tool = ""): string {
   return formatToolPart(tool);
 }
 
-export function providerLabel(provider: AgentToolProvider): string {
+export function providerLabel(provider: AgentToolProvider, tool?: string): string {
   if (provider === "gmail") return "Gmail";
   if (provider === "calendar") return "Calendar";
   if (provider === "tasks") return "Tasks";
@@ -80,13 +145,49 @@ export function providerLabel(provider: AgentToolProvider): string {
   if (provider === "desktop") return "Desktop";
   if (provider === "terminal") return "Terminal";
   if (provider === "file") return "Files";
-  if (provider === "workflow") return "Workflow";
+  if (provider === "skill") return "Skill";
+  if (provider === "subagent") return "Subagent";
+  if (provider === "worker") return "Worker";
+  if (provider === "workflow") {
+    if (tool === "render_ui") return "C1 Visual";
+    if (tool === "publish_html_artifact") return "HTML Artifact";
+    if (tool === "ask_user") return "Question";
+    return "Workflow";
+  }
   return "Tool";
+}
+
+/** Short verb label shown in the chat activity log before the detail. */
+export function toolActionLabel(tool = ""): string {
+  const provider = classifyAgentTool(tool);
+  if (tool === "read_skill") return "Reading skill";
+  if (tool === "render_ui") return "Rendering C1 UI";
+  if (tool === "publish_html_artifact") return "Publishing artifact";
+  if (tool === "ask_user") return "Asking user";
+  if (tool === "terminal_worker") return "Terminal worker";
+  if (tool === "desktop_worker") return "Desktop worker";
+  if (tool === "invoke_subagent") return "Spawning subagent";
+  if (tool === "await_subagents") return "Awaiting subagents";
+  if (tool === "get_subagent_result") return "Checking subagent";
+  if (tool === "list_subagents") return "Listing subagents";
+  if (tool === "send_message") return "Messaging subagent";
+  if (tool === "cancel_subagent") return "Cancelling subagent";
+  if (tool === "prepare_task_workspace") return "Preparing workspace";
+  if (tool === "write_todo_list") return "Updating plan";
+  if (tool === "update_todo_item") return "Updating todo";
+  if (tool === "read_workspace_file") return "Reading file";
+  if (tool === "write_workspace_file") return "Writing file";
+  if (tool === "list_workspace_files") return "Listing files";
+  if (provider === "terminal") return "Running command";
+  if (provider === "browser") return "Web lookup";
+  if (provider === "desktop") return "Desktop action";
+  return displayAgentToolName(tool);
 }
 
 function formatBrowserTool(tool: string): string {
   if (tool === "web_search" || tool === "search_web") return "Web Search";
   if (tool === "scrape_web_page") return "Read Web Page";
+  if (tool === "tavily_search") return "Tavily Search";
   if (tool === "open_browser") return "Open Browser";
   return formatToolPart(tool);
 }

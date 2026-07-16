@@ -141,6 +141,12 @@ def _build_beta_status_response(
 
 @router.get("/api/v1/beta/status", response_model=BetaStatusResponse)
 async def get_beta_status(user: AuthenticatedUser = Depends(require_current_user)):
+    # When the beta gate is disabled, status is entirely configuration-derived.
+    # Avoid a Firestore round trip so local development and the normal app entry
+    # path do not fail just because an optional Firebase service is unavailable.
+    if not beta_access_enabled():
+        return _build_beta_status_response(user_settings=None, application=None)
+
     history_repository = get_history_repository()
     await history_repository.upsert_user(user)
     user_settings = await history_repository.get_user_settings(user.uid)
@@ -152,12 +158,10 @@ async def apply_for_beta(
     payload: BetaApplicationRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
-    history_repository = get_history_repository()
     if not beta_access_enabled():
-        await history_repository.upsert_user(user)
-        user_settings = await history_repository.get_user_settings(user.uid)
-        return _build_beta_status_response(user_settings=user_settings, application=None)
+        return _build_beta_status_response(user_settings=None, application=None)
 
+    history_repository = get_history_repository()
     if not payload.acknowledge_byok:
         raise HTTPException(status_code=400, detail="You must acknowledge the BYOK requirement before applying.")
 
@@ -243,12 +247,10 @@ async def redeem_beta_access_code(
     payload: RedeemBetaAccessCodeRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
-    history_repository = get_history_repository()
     if not beta_access_enabled():
-        await history_repository.upsert_user(user)
-        user_settings = await history_repository.get_user_settings(user.uid)
-        return _build_beta_status_response(user_settings=user_settings, application=None)
+        return _build_beta_status_response(user_settings=None, application=None)
 
+    history_repository = get_history_repository()
     await history_repository.upsert_user(user)
     user_settings = await history_repository.get_user_settings(user.uid)
     profile = normalize_beta_profile(user_settings)

@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from nexus.debug_trace import emit_debug_trace
 from nexus.dependencies import get_production_task_repository, get_task_queue
 from nexus.orchestrator import NexusOrchestrator
 from nexus.production_tasks import TERMINAL_TASK_STATUSES
@@ -21,6 +22,14 @@ from nexus.runtime_config import runtime_config_snapshot
 from nexus.session import Session, SessionManager
 
 logger = logging.getLogger(__name__)
+
+
+class DurableEnqueueError(RuntimeError):
+    """Raised when a durable run was persisted but the queue rejected it.
+
+    Callers must not fall back to live execution for the same user turn —
+    the failed run already owns the durable claim/bindings.
+    """
 
 
 import redis
@@ -34,7 +43,11 @@ class _ActionRateLimiter:
         self._redis: Optional[redis.Redis] = None
         if settings.redis_url:
             try:
-                self._redis = redis.from_url(settings.redis_url)
+                self._redis = redis.from_url(
+                    settings.redis_url,
+                    socket_timeout=2.0,
+                    socket_connect_timeout=2.0,
+                )
             except Exception:
                 logger.warning("Failed to connect to Redis for _ActionRateLimiter '%s'; falling back to in-memory.", name)
         
@@ -91,23 +104,58 @@ async def _stream_durable_task_events(
     send_json,
     after_seq: int = 0,
 ) -> None:
+    """Poll the durable event log and fan out events to a live client.
+
+    Never raises: this coroutine is registered as a background task, and any
+    exception it lets escape shows up in the UI as a scary "server error"
+    frame. Firestore transient failures (missing composite index, timeouts,
+    network blips) should degrade to a longer sleep, not a crash.
+    """
     last_seq = after_seq
     idle_terminal_polls = 0
+    consecutive_errors = 0
     while True:
-        events = await repo.list_events(
-            task_id=task_id,
-            owner_id=owner_id,
-            after_seq=last_seq,
-            run_id=run_id,
-            limit=100,
-        )
+        try:
+            events = await repo.list_events(
+                task_id=task_id,
+                owner_id=owner_id,
+                after_seq=last_seq,
+                run_id=run_id,
+                limit=100,
+            )
+        except Exception:
+            consecutive_errors += 1
+            logger.warning(
+                "Durable event poll failed for task %s (attempt %d)",
+                task_id,
+                consecutive_errors,
+                exc_info=True,
+            )
+            if consecutive_errors >= 20:
+                logger.error(
+                    "Giving up on durable event stream for task %s after repeated failures",
+                    task_id,
+                )
+                return
+            await asyncio.sleep(min(2 ** consecutive_errors, 30))
+            continue
+
+        consecutive_errors = 0
         for event in events:
             last_seq = max(last_seq, int(getattr(event, "seq", 0) or 0))
-            delivered = await send_json(_event_to_ws_frame(event))
+            try:
+                delivered = await send_json(_event_to_ws_frame(event))
+            except Exception:
+                logger.debug("send_json failed while streaming durable events", exc_info=True)
+                return
             if not delivered:
                 return
 
-        task = await repo.get_task(task_id)
+        try:
+            task = await repo.get_task(task_id)
+        except Exception:
+            logger.debug("Durable get_task failed while polling", exc_info=True)
+            task = None
         terminal = bool(task and task.status in TERMINAL_TASK_STATUSES)
         if terminal and not events:
             idle_terminal_polls += 1
@@ -135,10 +183,31 @@ async def _try_start_durable_text_run(
     """
     repo = get_production_task_repository()
     queue = get_task_queue()
-    if not getattr(settings, "task_worker_enabled", False):
-        return False
     is_queue_configured = getattr(queue, "is_configured", None)
-    if callable(is_queue_configured) and not is_queue_configured():
+    queue_configured = bool(is_queue_configured()) if callable(is_queue_configured) else True
+
+    def trace_durable_decision(outcome: str, provider: str = "") -> None:
+        # region agent log
+        emit_debug_trace(
+            run_id=getattr(session, "current_run_id", "") or f"live:{id(session):x}",
+            hypothesis_id="H5",
+            location="ws_handler.py:177",
+            message="durable_execution_decision",
+            data={
+                "outcome": outcome,
+                "task_worker_enabled": bool(getattr(settings, "task_worker_enabled", False)),
+                "queue_configured": queue_configured,
+                "queue_provider": provider,
+                "input_chars": len(text),
+            },
+        )
+        # endregion agent log
+
+    if not getattr(settings, "task_worker_enabled", False):
+        trace_durable_decision("worker_disabled")
+        return False
+    if not queue_configured:
+        trace_durable_decision("queue_unavailable")
         return False
 
     task_id = getattr(session, "task_id", None)
@@ -187,16 +256,69 @@ async def _try_start_durable_text_run(
         },
     )
 
-    enqueue = await queue.enqueue_task_run(task_id=task.task_id, run_id=run.run_id)
+    enqueue_kwargs = {"task_id": task.task_id, "run_id": run.run_id}
+    claim_token = getattr(run, "claim_token", None)
+    if claim_token:
+        enqueue_kwargs["claim_token"] = claim_token
+    enqueue = await queue.enqueue_task_run(**enqueue_kwargs)
     if not enqueue.queued:
+        reason = (
+            str(getattr(enqueue, "reason", "") or "").strip()
+            or "Durable queue rejected the run."
+        )
         logger.info(
             "Durable queue unavailable for session %s task %s run %s: %s",
             session.id,
             task.task_id,
             run.run_id,
-            enqueue.reason,
+            reason,
         )
-        return False
+        try:
+            await repo.finish_run(
+                task_id=task.task_id,
+                run_id=run.run_id,
+                status="failed",
+                summary=reason,
+                error=reason,
+            )
+            await repo.append_event(
+                task_id=task.task_id,
+                owner_id=session.owner_id,
+                run_id=run.run_id,
+                event_type="enqueue_rejected",
+                payload={
+                    "provider": getattr(enqueue, "provider", ""),
+                    "reason": reason,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mark durable run %s/%s failed after enqueue rejection",
+                task.task_id,
+                run.run_id,
+                exc_info=True,
+            )
+        # Keep the durable task id, but clear the failed run binding so the
+        # live fallback cannot execute against the rejected claim generation.
+        session.current_run_id = None
+        if hasattr(orchestrator, "bind_durable_run"):
+            try:
+                orchestrator.bind_durable_run(task_id=None, run_id=None)
+            except TypeError:
+                # Older orchestrators only accept keyword task/run ids.
+                pass
+        await send_json(
+            {
+                "type": "error",
+                "code": "DURABLE_ENQUEUE_FAILED",
+                "message": reason,
+                "task_id": task.task_id,
+                "run_id": run.run_id,
+            }
+        )
+        trace_durable_decision("enqueue_rejected", enqueue.provider)
+        # Do not fall through to live execution with duplicate bindings.
+        raise DurableEnqueueError(reason)
 
     await send_json(
         {
@@ -206,6 +328,7 @@ async def _try_start_durable_text_run(
             "queue": enqueue.__dict__,
         }
     )
+    trace_durable_decision("queued", enqueue.provider)
     return True
 
 
@@ -369,6 +492,13 @@ async def handle_websocket(
                                     uploaded_files=uploaded_files,
                                     send_json=_safe_send_json,
                                 )
+                            except DurableEnqueueError:
+                                logger.warning(
+                                    "Durable enqueue failed for session %s; not falling back to live execution.",
+                                    session.id,
+                                    exc_info=True,
+                                )
+                                continue
                             except Exception:
                                 logger.warning(
                                     "Failed to start durable text run for session %s; using live path.",
@@ -428,13 +558,83 @@ async def handle_websocket(
                     elif msg_type == "stop_agent":
                         _touch_session()
                         await orchestrator.stop_agent()
+                        # Durable runs execute on a detached worker; cancelling
+                        # the live orchestrator is not enough to stop them.
+                        durable_task_id = getattr(session, "task_id", None)
+                        if isinstance(durable_task_id, str) and durable_task_id.startswith("task_"):
+                            try:
+                                await get_production_task_repository().request_cancel(
+                                    task_id=durable_task_id,
+                                    owner_id=session.owner_id,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to request durable cancel for task %s",
+                                    durable_task_id,
+                                    exc_info=True,
+                                )
 
                     elif msg_type == "permission_response":
                         _touch_session()
                         task_id = data.get("task_id", "")
                         approved = data.get("approved", False)
                         if task_id:
-                            orchestrator.handle_permission_response(task_id, approved)
+                            durable_task_id = str(
+                                data.get("durable_task_id")
+                                or getattr(session, "task_id", "")
+                                or ""
+                            )
+                            if (
+                                str(task_id).startswith("appr_")
+                                and durable_task_id.startswith("task_")
+                            ):
+                                try:
+                                    await get_production_task_repository().resolve_approval(
+                                        task_id=durable_task_id,
+                                        approval_id=str(task_id),
+                                        owner_id=session.owner_id,
+                                        approved=bool(approved),
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to resolve durable approval %s",
+                                        task_id,
+                                        exc_info=True,
+                                    )
+                            else:
+                                orchestrator.handle_permission_response(
+                                    task_id,
+                                    approved,
+                                )
+
+                    elif msg_type == "user_question_response":
+                        _touch_session()
+                        question_id = data.get("question_id", "")
+                        answer = data.get("answer", "")
+                        if question_id:
+                            orchestrator.handle_user_question_response(question_id, answer)
+                            # Mirror the answer into the durable event log so a
+                            # detached worker run can pick it up (its ask_user
+                            # future lives in another orchestrator instance).
+                            durable_task_id = getattr(session, "task_id", None)
+                            if isinstance(durable_task_id, str) and durable_task_id.startswith("task_"):
+                                try:
+                                    await get_production_task_repository().append_event(
+                                        task_id=durable_task_id,
+                                        owner_id=session.owner_id,
+                                        run_id=getattr(session, "current_run_id", None),
+                                        event_type="user_question_response",
+                                        payload={
+                                            "question_id": str(question_id),
+                                            "answer": str(answer or ""),
+                                        },
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to persist durable question answer for task %s",
+                                        durable_task_id,
+                                        exc_info=True,
+                                    )
 
                     elif msg_type == "ping":
                         await _safe_send_json({"type": "pong"})

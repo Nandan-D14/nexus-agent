@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from google.adk.agents import Agent
 
-from nexus.credentialed_gemini import CredentialedGemini
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tool_gateway import gate_tools
 from nexus.tools.computer import (
@@ -29,6 +28,8 @@ from nexus.tools.browser_playwright import (
     playwright_type,
     playwright_get_text,
     playwright_wait_for,
+    playwright_snapshot,
+    playwright_verify,
 )
 # from google.adk.tools import google_search  # Gemini-only; use web_search (DuckDuckGo) or tavily_search instead
 from nexus.tools.web import web_search, scrape_web_page
@@ -57,7 +58,15 @@ from nexus.tools.workspace import (
     read_workspace_file,
     list_workspace_files,
 )
-from nexus.tools.docs import extract_pdf_text, generate_pdf_report, save_as_artifact
+from nexus.tools.docs import (
+    extract_pdf_text,
+    generate_docx_report,
+    generate_excel_report,
+    generate_pdf_report,
+    publish_html_artifact,
+    save_as_artifact,
+)
+from nexus.tools.skills import read_skill
 
 GOOGLE_WORKSPACE_TOOLS = [
     search_drive,
@@ -116,6 +125,7 @@ Rules:
 - After taking a screenshot, act on it. Do not only describe the screen.
 - Do not reason from an old screenshot after any UI-changing action.
 - If coordinates seem slightly off, adjust and try again instead of blindly re-screenshoting.
+- On a tool error, read the error and its suggested_alternatives, then retry with corrected arguments or an alternative approach before returning control. Do not hand the task back on the first failure.
 - If the task turns out to be better answered by terminal output or browser state, say so clearly.
 
 Tools:
@@ -134,7 +144,7 @@ When opening a finished local report or artifact:
 
 Be decisive, but stay within GUI-only work."""
 
-BROWSER_AGENT_PROMPT = """You are the Browser Agent. You handle website and browser tasks in Firefox.
+BROWSER_AGENT_PROMPT = """You are the Browser Agent. You handle website and browser tasks in Chromium via CDP.
 You are only for browser and website tasks.
 
 SCREEN: 1324x968 pixels. (0,0) = top-left.
@@ -157,12 +167,12 @@ Workflow:
 5. Use scrape_web_page(url) to capture readable content into the workspace before opening pages interactively.
 6. Open the site with open_browser(url), or inspect the already-open browser tab, only when interactive browser state matters or when you must show a finished report in the browser.
 7. Use take_screenshot() only when page state or visible content must be read and scrape_web_page is insufficient.
-8. Use Playwright tools (playwright_navigate, playwright_click, playwright_type, playwright_get_text, playwright_wait_for) for programmatic, reliable DOM interaction via CDP instead of vision-based clicks whenever possible.
+8. Use Playwright tools (playwright_navigate, playwright_click, playwright_type, playwright_get_text, playwright_wait_for, playwright_snapshot, playwright_verify) for programmatic, reliable DOM interaction via Chromium CDP instead of vision-based clicks whenever possible.
 9. After opening, clicking, typing, or scrolling in the browser, treat previous screenshots as stale and let the page settle before observing.
 10. Append concise sourced findings to notes.md or outputs/ with write_workspace_file(...), then mark the step done.
 
 Rules:
-- For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before opening Google apps in Firefox.
+- For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before opening Google apps in Chromium.
 - Prefer web_search and scrape_web_page for discovery and capture before interactive browsing.
 - For research, article summarization, or news gathering, stay in web_search and scrape_web_page unless the site is blocked, highly dynamic, or login-gated.
 - If scrape_web_page returns an error such as 401, 403, or 429, treat that source as blocked instead of failing the whole task.
@@ -175,6 +185,7 @@ Rules:
 - Do not compose the deliverable in browser UI unless the user explicitly asked for a browser-based editor workflow.
 - Prefer action between screenshots. If the page is unchanged, keep browsing or summarize instead of repeatedly observing.
 - Do not use vision for ordinary search results, article reading, or source capture when web_search/scrape_web_page worked.
+- On a tool error, read the error and its suggested_alternatives, then retry with corrected arguments or an alternative tool before returning control. Do not hand the task back on the first failure.
 
 Tools:
 - prepare_task_workspace(task_summary), read_workspace_file(relative_path), list_workspace_files(relative_path)
@@ -211,6 +222,8 @@ Tools:
 - take_screenshot() is a last resort for visible state after shell evidence is insufficient
 - extract_pdf_text(path, max_chars) for reading uploaded PDFs or PDF base64 text files
 - generate_pdf_report(title, markdown_content, filename) for creating professional PDF documents
+- publish_html_artifact(title, html, filename) for simple calculators, dashboards, reports, charts, and single-page tools that should render in CoComputer Outputs instead of the sandbox browser
+- render_ui(component_type, title, data, description) for interactive Thesys C1 visuals (chart, table, form, dashboard, card, report) when Thesys is connected. If render_ui returns AUTH_REQUIRED (Thesys not connected), fall back to publish_html_artifact.
 - save_as_artifact(path, title) to promote any file (CSV, PNG, etc.) to the UI panel
 - type_text(text) and press_key(key) for terminal interaction
 
@@ -222,11 +235,12 @@ Workflow:
 5. Prefer commands such as pwd, ls, find, cat, grep, ps, and log inspection to gather evidence.
 6. Use command output to solve the task whenever possible.
 7. Use generate_pdf_report(...) to create high-quality documents instead of writing complex Python PDF code.
-8. Use save_as_artifact(...) to show important files (like charts or data exports) in the user's dashboard.
-9. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
-10. Use run_command(...) to affect or inspect terminal state.
-11. If you did launch or affect a GUI app in the background, hand off to computer_agent for visual verification.
-12. Mark the step done with update_todo_item(...).
+8. For simple web apps/tools, generate self-contained HTML/CSS/JS and call publish_html_artifact(...). Do not open them in the sandbox browser unless the user asks.
+9. Use save_as_artifact(...) to show important files (like charts or data exports) in the user's dashboard.
+10. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
+11. Use run_command(...) to affect or inspect terminal state.
+12. If you did launch or affect a GUI app in the background, hand off to computer_agent for visual verification.
+13. Mark the step done with update_todo_item(...).
 
 Rules:
 - For Gmail, Google Calendar, Google Tasks, or Google Drive requests, use the native Google Workspace tools before browser or desktop sign-in.
@@ -234,6 +248,7 @@ Rules:
 - Prefer generate_pdf_report for all PDF creation tasks.
 - After generate_pdf_report succeeds, stop and report the artifact/path. Do not base64, cat, copy, or re-read the generated PDF.
 - For uploaded PDFs, call extract_pdf_text(path=...) first. Never cat PDFs or pdf_base64/base64 text files.
+- On a tool error, read the error message and suggested_alternatives, then retry with corrected arguments or an alternative tool before giving up or returning control. Do not hand the task back just because a step is difficult.
 - If the task is actually web navigation or web reading, return control for browser_agent.
 - If the task requires on-screen clicking, dialogs, or visible native app interaction, return control for computer_agent.
 - If the user asks to open a generated local file, create the file first. Use browser_agent or computer_agent only for the final open or visual confirmation step.
@@ -339,6 +354,66 @@ Tools:
 
 
 # ---------------------------------------------------------------------------
+# Agent V2 worker prompts (docs/AGENT_V2_PLAN.md)
+# ---------------------------------------------------------------------------
+
+TERMINAL_WORKER_PROMPT = """You are terminal_worker, a focused CoComputer worker for shell and file work.
+You receive one scoped task brief from the planner, do the work, and return a concise result.
+You never talk to the user directly.
+
+Do:
+- shell commands, repo/file/log/config inspection, installs, scripts, process checks
+- file creation and edits in the workspace, data exports
+- reading uploaded PDFs with extract_pdf_text (never cat PDFs or base64 dumps)
+- generating documents with generate_pdf_report and promoting files with save_as_artifact
+
+Workflow:
+1. Read the brief. If a workspace file list or task state is referenced, read it first.
+2. Work with commands and file tools. Prefer pwd/ls/find/cat/grep/ps evidence over guessing.
+3. Chain dependent commands with &&. Use background=True for processes that keep running.
+4. Write durable outputs into outputs/ with write_workspace_file(...).
+5. Verify commands, tests, or artifact paths before finishing.
+6. Return ONLY one JSON object with this contract:
+   {"status":"success|partial|error|blocked","summary":"short factual result","evidence":["exit codes, test results, or file checks"],"artifacts":[{"path":"...","kind":"..."}],"remaining_work":[],"retryable":false,"error_code":""}
+   Use status=success only when the requested state is verified. Put unfinished steps in remaining_work.
+
+Rules:
+- Never run destructive commands.
+- On a tool error, read the message and suggested_alternatives, fix your arguments, retry.
+  Return a clear failure summary only after real attempts.
+- If the task needs GUI interaction or a browser, say so in your summary instead of improvising.
+- Keep output small: exact paths, exit codes, short excerpts — not full logs."""
+
+DESKTOP_WORKER_PROMPT = """You are desktop_worker, a focused CoComputer worker for GUI, browser, and visual tasks.
+You receive one scoped task brief from the planner, do the work, and return a concise result.
+You never talk to the user directly.
+
+SCREEN: 1324x968 pixels. (0,0) = top-left. Taskbar at bottom (~y=940).
+
+Do:
+- native desktop apps, dialogs, menus, file pickers, drag/drop
+- website interaction: forms, logins, downloads, dynamic pages
+- visual verification of on-screen state
+
+Workflow:
+1. Read the brief. Open the target app or site (open_browser for web).
+2. Prefer Playwright tools (playwright_navigate/click/type/get_text/wait_for/snapshot/verify) for web DOM work;
+   fall back to coordinates only when DOM access fails.
+3. take_screenshot() only when you need visual state to decide the next action.
+4. After any click/type/scroll/drag, the previous screenshot is stale — let the screen settle.
+5. Act on what you observe. Do not describe the screen without acting.
+6. Verify the final DOM or screen state after the last mutation.
+7. Return ONLY one JSON object with this contract:
+   {"status":"success|partial|error|blocked","summary":"short factual result","evidence":["observed DOM or screen state"],"artifacts":[],"remaining_work":[],"retryable":false,"error_code":""}
+   Use status=success only after a fresh Playwright verification or screenshot confirms the expected state. Put unfinished steps in remaining_work.
+
+Rules:
+- No shell commands — that is terminal_worker's job; say so in your summary if needed.
+- On a tool error, read the message and suggested_alternatives, adjust, retry before failing.
+- If coordinates seem off, adjust and retry instead of re-screenshotting repeatedly."""
+
+
+# ---------------------------------------------------------------------------
 # Sub-agent factories
 # ---------------------------------------------------------------------------
 
@@ -348,10 +423,80 @@ def _with_skill_instruction(instruction: str, skill_instruction: str = "") -> st
     return f"{instruction}\n\n{skill_instruction.strip()}"
 
 
-def _get_model(runtime_config: SessionRuntimeConfig, model_name: str = "qwen3.7-max"):
-    """Return the Qwen router model for sub-agents."""
+def _get_model(runtime_config: SessionRuntimeConfig, model_name: str = "qwen3.6-max-preview"):
+    """Return the Qwen router model for legacy (parked) sub-agents."""
     from nexus.qwen_router import create_qwen_model
     return create_qwen_model(model_name)
+
+
+def create_terminal_worker(
+    runtime_config: SessionRuntimeConfig,
+    skill_instruction: str = "",
+) -> Agent:
+    """Agent V2 terminal worker — shell and file surface only (~10 tools)."""
+    from nexus.model_select import create_model
+
+    return Agent(
+        name="terminal_worker",
+        description=(
+            "Runs shell commands and file-system work in the sandbox: repo/file/log "
+            "inspection, installs, scripts, file creation, PDF/report generation. "
+            "No GUI, no browser."
+        ),
+        model=create_model("worker", runtime_config),
+        instruction=_with_skill_instruction(TERMINAL_WORKER_PROMPT, skill_instruction),
+        tools=gate_tools([
+            run_command,
+            write_workspace_file,
+            read_workspace_file,
+            list_workspace_files,
+            extract_pdf_text,
+            generate_pdf_report,
+            generate_excel_report,
+            generate_docx_report,
+            save_as_artifact,
+            read_skill,
+        ]),
+    )
+
+
+def create_desktop_worker(
+    runtime_config: SessionRuntimeConfig,
+    skill_instruction: str = "",
+) -> Agent:
+    """Agent V2 desktop worker — GUI/browser/visual surface only (~16 tools)."""
+    from nexus.model_select import create_model
+
+    return Agent(
+        name="desktop_worker",
+        description=(
+            "Controls the desktop and browser visually: opens sites and apps, clicks, "
+            "types, fills forms, verifies on-screen state, Playwright DOM automation. "
+            "No shell commands."
+        ),
+        model=create_model("worker_visual", runtime_config),
+        instruction=_with_skill_instruction(DESKTOP_WORKER_PROMPT, skill_instruction),
+        tools=gate_tools([
+            take_screenshot,
+            move_mouse,
+            left_click,
+            right_click,
+            double_click,
+            type_text,
+            press_key,
+            scroll_screen,
+            drag,
+            open_browser,
+            playwright_navigate,
+            playwright_click,
+            playwright_type,
+            playwright_get_text,
+            playwright_wait_for,
+            playwright_snapshot,
+            playwright_verify,
+            read_skill,
+        ]),
+    )
 
 
 def _create_computer_agent(
@@ -372,6 +517,7 @@ def _create_computer_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            read_skill,
             *GOOGLE_WORKSPACE_TOOLS,
             take_screenshot,
             move_mouse,
@@ -404,6 +550,7 @@ def _create_browser_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            read_skill,
             *GOOGLE_WORKSPACE_TOOLS,
             # google_search,  # Gemini-only; web_search (DuckDuckGo) covers search
             web_search,
@@ -420,6 +567,8 @@ def _create_browser_agent(
             playwright_type,
             playwright_get_text,
             playwright_wait_for,
+            playwright_snapshot,
+            playwright_verify,
         ]),
     )
 
@@ -432,7 +581,7 @@ def _create_code_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config, "qwen3.7-max"),
+        model=_get_model(runtime_config, "qwen3.6-max-preview"),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -442,13 +591,15 @@ def _create_code_agent(
             write_workspace_file,
             read_workspace_file,
             list_workspace_files,
+            read_skill,
             *GOOGLE_WORKSPACE_TOOLS,
             run_command,
             take_screenshot,
             extract_pdf_text,
             generate_pdf_report,
-            save_as_artifact,
+            publish_html_artifact,
             render_ui,
+            save_as_artifact,
             type_text,
             press_key,
         ]),
@@ -469,6 +620,7 @@ def _create_research_reviewer_agent(
             read_task_state,
             read_workspace_file,
             list_workspace_files,
+            read_skill,
             write_workspace_file,
             update_task_state,
         ]),
@@ -479,11 +631,13 @@ def create_computer_agent(
     runtime_config: SessionRuntimeConfig,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the Computer Agent for GUI interactions."""
-    return _create_computer_agent(
-        runtime_config,
-        name="computer_agent",
-        instruction=_with_skill_instruction(COMPUTER_AGENT_PROMPT, skill_instruction),
+    """Removed legacy transfer-mesh factory.
+
+    Use :func:`create_desktop_worker` via the single planner path instead.
+    """
+    raise RuntimeError(
+        "create_computer_agent was removed; use create_desktop_worker through "
+        "create_planner_agent"
     )
 
 
@@ -491,11 +645,13 @@ def create_browser_agent(
     runtime_config: SessionRuntimeConfig,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the Browser Agent for web browsing and research."""
-    return _create_browser_agent(
-        runtime_config,
-        name="browser_agent",
-        instruction=_with_skill_instruction(BROWSER_AGENT_PROMPT, skill_instruction),
+    """Removed legacy transfer-mesh factory.
+
+    Use :func:`create_desktop_worker` via the single planner path instead.
+    """
+    raise RuntimeError(
+        "create_browser_agent was removed; use create_desktop_worker through "
+        "create_planner_agent"
     )
 
 
@@ -503,11 +659,13 @@ def create_code_agent(
     runtime_config: SessionRuntimeConfig,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the Code Agent for terminal commands and code execution."""
-    return _create_code_agent(
-        runtime_config,
-        name="code_agent",
-        instruction=_with_skill_instruction(CODE_AGENT_PROMPT, skill_instruction),
+    """Removed legacy transfer-mesh factory.
+
+    Use :func:`create_terminal_worker` via the single planner path instead.
+    """
+    raise RuntimeError(
+        "create_code_agent was removed; use create_terminal_worker through "
+        "create_planner_agent"
     )
 
 
@@ -516,36 +674,12 @@ def create_deepresearcher_agent(
     extra_tools: list | None = None,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the DeepResearcher coordinator with research-specific workers."""
-    tools: list = []
-    if extra_tools:
-        tools.extend(extra_tools)
+    """Removed legacy transfer-mesh deepresearcher coordinator.
 
-    research_computer = _create_computer_agent(
-        runtime_config,
-        name="research_computer_agent",
-        instruction=_with_skill_instruction(RESEARCH_COMPUTER_AGENT_PROMPT, skill_instruction),
-    )
-    research_browser = _create_browser_agent(
-        runtime_config,
-        name="research_browser_agent",
-        instruction=_with_skill_instruction(RESEARCH_BROWSER_AGENT_PROMPT, skill_instruction),
-    )
-    research_code = _create_code_agent(
-        runtime_config,
-        name="research_code_agent",
-        instruction=_with_skill_instruction(RESEARCH_CODE_AGENT_PROMPT, skill_instruction),
-    )
-    research_reviewer = _create_research_reviewer_agent(
-        runtime_config,
-        name="research_reviewer_agent",
-        instruction=_with_skill_instruction(RESEARCH_REVIEWER_AGENT_PROMPT, skill_instruction),
-    )
-
-    return Agent(
-        name="deepresearcher",
-        model=_get_model(runtime_config, "qwen3.6-plus"),
-        instruction=_with_skill_instruction(DEEPRESEARCHER_PROMPT, skill_instruction),
-        tools=gate_tools(tools),
-        sub_agents=[research_browser, research_code, research_computer, research_reviewer],
+    Deep research now uses the planner plus durable researcher subagents or the
+    optional Workflow-as-Tool pilot.
+    """
+    raise RuntimeError(
+        "create_deepresearcher_agent was removed; use create_planner_agent with "
+        "researcher subagents or deep_research_workflow"
     )
