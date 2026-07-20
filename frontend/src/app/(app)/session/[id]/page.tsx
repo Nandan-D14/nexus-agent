@@ -173,7 +173,7 @@ export default function SessionPage() {
   const { registerDesktop, clearDesktop } = useLiveDesktop();
   const wsUrl =
     typeof window !== "undefined"
-      ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}?ticket=${sessionData?.ws_ticket || ""}`
+      ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}`
       : null;
 
   const shouldConnectWs =
@@ -187,7 +187,10 @@ export default function SessionPage() {
       : null;
 
   const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
-    useWebSocket(shouldConnectWs ? wsUrl : null, durableTaskId);
+    useWebSocket(shouldConnectWs ? wsUrl : null, {
+      ticket: sessionData?.ws_ticket ?? null,
+      durableTaskId,
+    });
 
   const handleSpeechStart = useCallback(() => {
     // Zero-latency barge-in: stop agent audio the moment the user starts speaking

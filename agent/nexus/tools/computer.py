@@ -128,6 +128,31 @@ def double_click(x: int, y: int) -> dict:
 
 
 @normalized_tool(needs_sandbox=True)
+def triple_click(x: int, y: int) -> dict:
+    """Triple-click at screen coordinates (x, y) to select a whole line or paragraph.
+
+    Args:
+        x: Horizontal position (0-1324).
+        y: Vertical position (0-968).
+
+    Returns:
+        NormalizedToolResult confirming triple-click position.
+    """
+    try:
+        from nexus.tools._context import get_sandbox
+        sandbox = get_sandbox()
+        sandbox.triple_click(x, y)
+        _mark_screen_changed("triple_click")
+        return tool_success(
+            f"Triple clicked at ({x}, {y})",
+            x=x, y=y, action="triple_click",
+        )
+    except Exception as e:
+        logger.error("triple_click failed: %s", e)
+        return tool_error(f"Triple click at ({x}, {y}) failed: {e}")
+
+
+@normalized_tool(needs_sandbox=True)
 def type_text(text: str) -> dict:
     """Type text at the current cursor position.
 

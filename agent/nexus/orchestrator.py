@@ -100,6 +100,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Nudge sent when the model gathered evidence but produced no closing text and
+# completion verification returned a retryable MISSING_FINAL_RESPONSE.
+_FINAL_SYNTHESIS_NUDGE = (
+    "You have already gathered the information needed. Do NOT call any tools. "
+    "Write the final answer or summary for the user now, using only what has "
+    "already been collected."
+)
+
+
 class _AgentStopped(Exception):
     """Raised inside the event callback to break out of the ADK agent loop."""
 
@@ -230,6 +239,32 @@ class NexusOrchestrator:
         self._workspace_path: str | None = None
         # ask_user: question_id -> future resolved by the user's ws reply
         self._pending_user_questions: dict[str, asyncio.Future] = {}
+        # WebSocket I/O is delegated to a bound collaborator (built lazily so
+        # instances created via __new__ in tests still resolve it).
+        self._delegates = None
+
+    def _ensure_delegates(self):
+        delegates = self.__dict__.get("_delegates")
+        if delegates is None:
+            from nexus.orchestrator_collaborators import WsMessenger
+
+            self._ws_messenger = WsMessenger(self)
+            delegates = (self._ws_messenger,)
+            self._delegates = delegates
+        return delegates
+
+    def __getattr__(self, name: str):
+        # Only invoked for methods moved to a bound collaborator (e.g. the
+        # WebSocket send layer). Class-level lookup avoids triggering the
+        # collaborator's own __getattr__ and any recursion.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        for delegate in self._ensure_delegates():
+            if getattr(type(delegate), name, None) is not None:
+                return getattr(delegate, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     def _debug_run_id(self) -> str:
         return getattr(self, "_current_run_id", None) or f"live:{id(self):x}"
@@ -597,8 +632,15 @@ class NexusOrchestrator:
         connector_ids: list[str] | None = None,
         uploaded_files: list[dict[str, Any]] | None = None,
         emit_user_transcript: bool = True,
+        resume_context: str | None = None,
     ) -> None:
-        """Handle direct text input (bypass voice)."""
+        """Handle direct text input (bypass voice).
+
+        The visible/persisted user message is always ``text`` (the original
+        request). ``resume_context`` (e.g. a durable-resume checkpoint block)
+        is fed to the model only and is never shown or persisted, so internal
+        directives cannot leak into the chat as a user bubble.
+        """
         original_request = text
         if emit_user_transcript:
             await self._send_json({"type": "transcript", "role": "user", "text": text})
@@ -633,10 +675,15 @@ class NexusOrchestrator:
             directive_prompt = "[SYSTEM DIRECTIVES:\n" + "\n".join(directives) + "]\n\n"
             text = directive_prompt + text
 
-        await self._persist_message(role="user", source="typed", text=text)
+        if emit_user_transcript:
+            await self._persist_message(role="user", source="typed", text=original_request)
+
+        model_text = text
+        if resume_context:
+            model_text = f"{text}\n\n{resume_context}"
         await self._run_agent_tracked(
             await self._build_turn_input(
-                text,
+                model_text,
                 connector_ids=connector_ids,
                 uploaded_files=uploaded_files,
             ),
@@ -1927,8 +1974,11 @@ class NexusOrchestrator:
                     "summary": result.error,
                 }
 
-            # Check if sandbox died during the agent turn
-            if not self.session.sandbox.is_alive:
+            # Reconnect only if a sandbox was actually booted earlier and then
+            # died/paused (it has a sandbox_id). A never-booted lazy sandbox has
+            # no sandbox_id and must NOT be treated as "died" — reconnecting it
+            # would boot an E2B VM (and run provisioning) for no reason.
+            if self.session.sandbox_id and not self.session.sandbox.is_alive:
                 logger.warning("Sandbox died during agent turn for session %s — reconnecting", self.session.id)
                 await self._reconnect_sandbox()
 
@@ -1937,7 +1987,98 @@ class NexusOrchestrator:
                 request=completion_request if completion_request is not None else message,
                 final_response=final_response,
             )
+
+            # Honor a retryable MISSING_FINAL_RESPONSE: the model gathered
+            # evidence but emitted no closing text. Re-invoke a bounded,
+            # tools-off synthesis turn before surfacing a failure.
+            synthesis_retries = 0
+            while (
+                not completion_verification.verified
+                and completion_verification.error_code == "MISSING_FINAL_RESPONSE"
+                and completion_verification.retryable
+                and synthesis_retries < max(0, settings.max_final_synthesis_retries)
+            ):
+                synthesis_retries += 1
+                logger.warning(
+                    "MISSING_FINAL_RESPONSE; synthesis retry %d/%d for session %s",
+                    synthesis_retries,
+                    settings.max_final_synthesis_retries,
+                    self.session.id,
+                )
+                retry_result = await self._run_agent_with_retry(_FINAL_SYNTHESIS_NUDGE)
+                for usage in retry_result.usage_records:
+                    await self._persist_token_usage(usage)
+                if retry_result.error:
+                    break
+                if retry_result.response and retry_result.response.strip():
+                    final_response = retry_result.response
+                completion_verification = await self._verify_turn_completion(
+                    request=completion_request if completion_request is not None else message,
+                    final_response=final_response,
+                )
+
+            # Last resort: synthesize a grounded partial summary from observed
+            # tool evidence instead of returning an empty failure to the user.
+            if (
+                not completion_verification.verified
+                and completion_verification.error_code == "MISSING_FINAL_RESPONSE"
+                and settings.synthesize_fallback_summary_from_ledger
+            ):
+                fallback_summary = self._build_ledger_fallback_summary()
+                if fallback_summary:
+                    logger.warning(
+                        "Using ledger fallback summary for session %s",
+                        self.session.id,
+                    )
+                    final_response = fallback_summary
+                    completion_verification = await self._verify_turn_completion(
+                        request=completion_request if completion_request is not None else message,
+                        final_response=final_response,
+                    )
+
             if not completion_verification.verified:
+                soft_veto = (
+                    settings.deliver_answer_on_soft_veto
+                    and bool(final_response and final_response.strip())
+                    and completion_verification.status != "blocked"
+                )
+                if soft_veto:
+                    # Advisory veto with a real answer in hand: deliver the
+                    # model's answer and attach the verification caveat as a
+                    # note rather than discarding a correct response.
+                    caveat = completion_verification.summary
+                    if completion_verification.remaining_work:
+                        caveat += "\nRemaining: " + "; ".join(
+                            completion_verification.remaining_work[:4]
+                        )
+                    await self._send_json({
+                        "type": "transcript",
+                        "role": "agent",
+                        "text": final_response,
+                    })
+                    await self._persist_message(
+                        role="agent",
+                        source="agent",
+                        text=final_response,
+                    )
+                    await self._send_json({
+                        "type": "verification_caveat",
+                        "code": completion_verification.error_code,
+                        "message": completion_verification.summary,
+                        "detail": caveat,
+                    })
+                    await self._send_json({
+                        "type": "agent_complete",
+                        "summary": final_response[:200],
+                    })
+                    await self._save_final_response(final_response)
+                    await self._mark_summary(final_response)
+                    return {
+                        "status": "completed_with_caveat",
+                        "summary": final_response,
+                        "final_response": final_response,
+                        "verification": completion_verification.to_dict(),
+                    }
                 failure_summary = completion_verification.summary
                 if completion_verification.remaining_work:
                     failure_summary += "\nRemaining: " + "; ".join(
@@ -2611,19 +2752,6 @@ class NexusOrchestrator:
         self._ws_connected = False
         self._stop_requested = True
 
-    def _ws_is_open(self) -> bool:
-        ws = getattr(self, "ws", None)
-        if ws is None:
-            return False
-
-        client_state = getattr(ws, "client_state", WebSocketState.CONNECTED)
-        application_state = getattr(ws, "application_state", WebSocketState.CONNECTED)
-        return (
-            getattr(self, "_ws_connected", True)
-            and client_state == WebSocketState.CONNECTED
-            and application_state == WebSocketState.CONNECTED
-        )
-
     def _raise_if_agent_should_stop(self) -> None:
         if self._stop_requested:
             raise _AgentStopped()
@@ -2639,123 +2767,28 @@ class NexusOrchestrator:
         self.mark_ws_disconnected()
         raise _AgentStopped()
 
-    async def _send_bytes(self, data: bytes) -> None:
-        try:
-            async with self._ws_send_lock:
-                if not self._ws_is_open():
-                    logger.debug("Skipping WS audio frame — connection not open")
-                    return
-                await self.ws.send_bytes(data)
-        except RuntimeError as exc:
-            if "websocket.close" in str(exc) or "response already completed" in str(exc):
-                logger.debug("Skipping WS audio frame — connection closed")
-                self.mark_ws_disconnected()
-            else:
-                logger.warning("Failed to send WS audio frame", exc_info=True)
-        except Exception:
-            if not self._ws_is_open():
-                logger.debug("Skipping WS audio frame — connection closed")
-                self.mark_ws_disconnected()
-                return
-            logger.warning("Failed to send WS audio frame", exc_info=True)
+    def _build_ledger_fallback_summary(self) -> str:
+        """Synthesize a partial summary from observed tool evidence.
 
-    async def _send_json(self, data: dict) -> None:
-        """Emit an orchestrator event through the configured sinks."""
-        context = getattr(self, "_trace_context", None)
-        data = prepare_correlated_event(data, context)
-        event_sink = getattr(self, "_event_sink", None)
-        if event_sink is None:
-            await self._send_json_to_ws(data)
-            return
-        await event_sink.send(data)
-
-    async def _send_json_to_ws(self, data: dict) -> None:
-        """Send JSON message to the frontend WebSocket."""
-        message_type = data.get("type")
-
-        def trace_delivery(outcome: str, error_type: str = "") -> None:
-            if message_type not in {
-                "agent_tool_call",
-                "agent_tool_result",
-                "agent_complete",
-                "error",
-                "run_status",
-            }:
-                return
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H4",
-                location="orchestrator.py:2282",
-                message="websocket_event_delivery",
-                data={
-                    "message_type": message_type,
-                    "outcome": outcome,
-                    "error_type": error_type,
-                    "websocket_open": self._ws_is_open(),
-                    "durable_run_bound": bool(getattr(self, "_durable_task_id", None)),
-                },
-            )
-            # endregion agent log
-
-        try:
-            async with self._ws_send_lock:
-                if not self._ws_is_open():
-                    logger.debug("Skipping WS message %s — connection not open", message_type)
-                    trace_delivery("skipped_closed")
-                    return
-                await self.ws.send_json(data)
-                trace_delivery("sent")
-        except RuntimeError as exc:
-            if "websocket.close" in str(exc) or "response already completed" in str(exc):
-                logger.debug("Skipping WS message %s — connection closed", message_type)
-                self.mark_ws_disconnected()
-                trace_delivery("closed_runtime_error", type(exc).__name__)
-            else:
-                logger.warning(
-                    "Failed to send WS message: %s",
-                    message_type,
-                    exc_info=True,
-                )
-                trace_delivery("runtime_error", type(exc).__name__)
-        except Exception:
-            if not self._ws_is_open():
-                logger.debug("Skipping WS message %s — connection closed", message_type)
-                self.mark_ws_disconnected()
-                trace_delivery("closed_exception")
-                return
-            logger.warning(
-                "Failed to send WS message: %s",
-                message_type,
-                exc_info=True,
-            )
-            trace_delivery("exception")
-
-    @staticmethod
-    def _quota_update_payload(quota: dict[str, Any]) -> dict[str, Any]:
-        payload = {"type": "quota_update"}
-        payload.update(quota)
-        return payload
-
-    async def _emit_budget_warning(
-        self,
-        *,
-        state: str,
-        action: str,
-        message: str,
-        projected_total_tokens: int | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "type": "budget_warning",
-            "state": state,
-            "action": action,
-            "message": message,
-            "soft_limit": self._RESUME_PACKET_SOFT_TOKENS,
-            "hard_limit": self._RESUME_PACKET_HARD_TOKENS,
-        }
-        if projected_total_tokens is not None:
-            payload["projected_total_tokens"] = projected_total_tokens
-        await self._send_json(payload)
+        Used as a last resort when the model produced no closing text so the
+        user receives a grounded summary instead of an empty failure.
+        """
+        findings = list(self._turn_tool_summaries[:6])
+        if not findings:
+            for record in self._action_ledger.records:
+                observation = record.observation
+                if observation is not None and observation.evidence:
+                    findings.append(
+                        f"{observation.tool}: "
+                        f"{self._clip_text(observation.evidence[0], 200)}"
+                    )
+                if len(findings) >= 6:
+                    break
+        if not findings:
+            return ""
+        lines = ["Here is a summary based on the information gathered:"]
+        lines.extend(f"- {item}" for item in findings)
+        return "\n".join(lines)
 
     def _build_budget_partial_summary(self) -> str:
         findings = self._turn_tool_summaries[:4]
@@ -3194,16 +3227,6 @@ class NexusOrchestrator:
             "url": artifact.url,
             "metadata": artifact.metadata or {},
         }
-
-    async def _send_artifact_created(self, artifact_payload: dict[str, Any]) -> None:
-        try:
-            self.session.artifact_count += 1
-        except Exception:
-            pass
-        await self._send_json({
-            "type": "artifact_created",
-            "artifact": artifact_payload,
-        })
 
     def _bind_workspace_context(self) -> None:
         if not self._current_run_id:

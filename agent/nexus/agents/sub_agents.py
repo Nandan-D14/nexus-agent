@@ -8,12 +8,14 @@ from __future__ import annotations
 from google.adk.agents import Agent
 
 from nexus.runtime_config import SessionRuntimeConfig
+from nexus.context_window import make_context_trimmer
 from nexus.tool_gateway import gate_tools
 from nexus.tools.computer import (
     move_mouse,
     left_click,
     right_click,
     double_click,
+    triple_click,
     type_text,
     press_key,
     scroll_screen,
@@ -133,7 +135,7 @@ Tools:
 - write_todo_list(items), update_todo_item(item_index, status, note)
 - write_workspace_file(relative_path, content, append)
 - take_screenshot() for visual state only when needed
-- move_mouse(x, y), left_click(x, y), right_click(x, y), double_click(x, y)
+- move_mouse(x, y), left_click(x, y), right_click(x, y), double_click(x, y), triple_click(x, y)
 - type_text(text) after focusing the correct field
 - press_key(key), scroll_screen(direction, amount), drag(from_x, from_y, to_x, to_y)
 
@@ -457,6 +459,7 @@ def create_terminal_worker(
             save_as_artifact,
             read_skill,
         ]),
+        before_model_callback=make_context_trimmer(),
     )
 
 
@@ -482,6 +485,7 @@ def create_desktop_worker(
             left_click,
             right_click,
             double_click,
+            triple_click,
             type_text,
             press_key,
             scroll_screen,
@@ -496,6 +500,7 @@ def create_desktop_worker(
             playwright_verify,
             read_skill,
         ]),
+        before_model_callback=make_context_trimmer(),
     )
 
 
@@ -524,6 +529,7 @@ def _create_computer_agent(
             left_click,
             right_click,
             double_click,
+            triple_click,
             type_text,
             press_key,
             scroll_screen,

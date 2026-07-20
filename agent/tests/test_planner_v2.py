@@ -66,6 +66,11 @@ class PlannerV2ShapeTests(TestCase):
     def test_planner_has_no_sub_agents(self) -> None:
         self.assertFalse(getattr(self.planner, "sub_agents", None))
 
+    def test_desktop_worker_registers_triple_click(self) -> None:
+        # Guards against the model hallucinating triple_click and crashing the turn.
+        self.assertIn("triple_click", _tool_names(self.desktop))
+        self.assertIn("double_click", _tool_names(self.desktop))
+
     def test_planner_exposes_worker_agent_tools_not_shell_or_vision(self) -> None:
         tool_names = _tool_names(self.planner)
 

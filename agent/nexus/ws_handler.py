@@ -256,6 +256,29 @@ async def _try_start_durable_text_run(
         },
     )
 
+    # Persist the user turn into session history so it survives a page refresh.
+    # The durable event log above drives the live view, but the
+    # /api/v1/history/{session}/messages endpoint (used on reload) reads only
+    # session messages. We record it once here at enqueue; the run metadata
+    # `user_transcript_recorded=True` makes the worker skip re-persisting it,
+    # so there is exactly one user row and no duplicate.
+    history_repository = getattr(orchestrator, "history_repository", None)
+    if history_repository is not None:
+        try:
+            await history_repository.append_message(
+                session_id=session.id,
+                owner_id=session.owner_id,
+                role="user",
+                source="typed",
+                text=text,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist user transcript to session history for %s",
+                session.id,
+                exc_info=True,
+            )
+
     enqueue_kwargs = {"task_id": task.task_id, "run_id": run.run_id}
     claim_token = getattr(run, "claim_token", None)
     if claim_token:

@@ -26,6 +26,7 @@ from google.adk.agents import Agent
 from google.adk.tools.agent_tool import AgentTool
 
 from nexus.config import settings
+from nexus.context_window import make_context_trimmer
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tool_gateway import gate_tools
 from nexus.tools._context import increment_worker_call_count
@@ -143,7 +144,7 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
 
 a. read_skill                                        — matching skill first, always.
 b. answer directly (no tool)                         — triage step 1 said no tools.
-c. web_search / tavily_search                        — discovery of live evidence.
+c. tavily_search / web_search                        — discovery of live evidence (web_search auto-prefers Tavily when connected).
 d. scrape_web_page                                   — capture important sources fully.
 e. search_sources                                    — retrieve cited chunks from saved sources/.
 f. publish_html_artifact / render_ui                 — HTML deliverables (no sandbox).
@@ -329,6 +330,7 @@ def create_planner_agent(
         ),
         instruction=instruction,
         tools=[*gate_tools(direct_tools), *worker_tools],
+        before_model_callback=make_context_trimmer(),
     )
 
 

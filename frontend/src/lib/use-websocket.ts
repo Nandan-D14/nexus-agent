@@ -104,13 +104,25 @@ function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
   } as WsMessage;
 }
 
+export interface UseWebSocketOptions {
+  /** WS auth ticket. Consumed only at (re)connect time; rotating it does NOT
+   * tear down a healthy socket. */
+  ticket?: string | null;
+  /** Durable task id for event replay/dedupe after reconnect. */
+  durableTaskId?: string | null;
+}
+
+/** Max outbound frames buffered while the socket is not OPEN. */
+const MAX_OUTBOUND_BUFFER = 50;
+
 /**
  * React hook for WebSocket connection management.
  */
 export function useWebSocket(
   url: string | null,
-  durableTaskId?: string | null,
+  options: UseWebSocketOptions = {},
 ): UseWebSocketReturn {
+  const { ticket = null, durableTaskId = null } = options;
   const wsRef = useRef<WebSocket | null>(null);
   const [readyState, setReadyState] = useState<ReadyStateValue>(ReadyState.CLOSED);
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
@@ -125,6 +137,10 @@ export function useWebSocket(
   const connectRef = useRef<(target: string) => void>(() => {});
   /** Keeps the latest url so the reconnect closure always sees it. */
   const urlRef = useRef(url);
+  /** Latest ticket, read at connect time. Updated without reconnecting. */
+  const ticketRef = useRef<string | null>(ticket);
+  /** Outbound frames buffered while the socket is not OPEN; flushed on open. */
+  const pendingOutboundRef = useRef<Array<string | ArrayBuffer>>([]);
   const durableTaskIdRef = useRef<string | null>(
     isDurableTaskId(durableTaskId) ? durableTaskId : null,
   );
@@ -137,6 +153,12 @@ export function useWebSocket(
   useEffect(() => {
     urlRef.current = url;
   }, [url]);
+
+  useEffect(() => {
+    // Rotating the ticket must NOT trigger a reconnect: store it in a ref so the
+    // next (re)connect picks up the fresh value, but the current socket stays up.
+    ticketRef.current = ticket;
+  }, [ticket]);
 
   useEffect(() => {
     const nextTaskId = isDurableTaskId(durableTaskId) ? durableTaskId : null;
@@ -203,6 +225,15 @@ export function useWebSocket(
     [dispatchJsonMessage],
   );
 
+  /** Surface a synthetic error to consumers via the same path as server
+   * messages (onJsonMessageRef) so the page's `case "error"` handler runs and
+   * the UI recovers instead of hanging on a "thinking" state. */
+  const surfaceError = useCallback((code: string, message: string) => {
+    const errorMsg = { type: "error", code, message } as WsMessage;
+    onJsonMessageRef.current?.(errorMsg);
+    setLastMessage(errorMsg);
+  }, []);
+
   const connect = useCallback((target: string) => {
     // Tear down any existing socket first.
     if (wsRef.current) {
@@ -214,10 +245,13 @@ export function useWebSocket(
       wsRef.current = null;
     }
 
-    const wsTarget = resolveWebSocketTarget(target);
-    const ws = wsTarget.protocols
-      ? new WebSocket(wsTarget.url, wsTarget.protocols)
-      : new WebSocket(wsTarget.url);
+    // Read the latest ticket at connect time (subprotocol handshake). Strip any
+    // stale ?ticket= from the url so a rotated ticket can never be sent stale.
+    const { url: cleanUrl } = resolveWebSocketTarget(target);
+    const currentTicket = ticketRef.current;
+    const ws = currentTicket
+      ? new WebSocket(cleanUrl, [currentTicket])
+      : new WebSocket(cleanUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     setReadyState(ReadyState.CONNECTING);
@@ -225,6 +259,20 @@ export function useWebSocket(
     ws.onopen = () => {
       reconnectAttempts.current = 0;
       setReadyState(ReadyState.OPEN);
+
+      // Flush any frames queued while the socket was down (in order).
+      if (pendingOutboundRef.current.length > 0) {
+        const buffered = pendingOutboundRef.current;
+        pendingOutboundRef.current = [];
+        for (const frame of buffered) {
+          try {
+            ws.send(frame);
+          } catch (error) {
+            console.warn("[useWebSocket] Failed to flush buffered frame:", error);
+          }
+        }
+      }
+
       const shouldReplay = hasOpenedRef.current && durableTaskIdRef.current !== null;
       const replayTaskId = durableTaskIdRef.current;
       const replayAfterSeq = lastSeqRef.current;
@@ -257,6 +305,16 @@ export function useWebSocket(
     ws.onclose = (event) => {
       setReadyState(ReadyState.CLOSED);
 
+      const failBufferedSends = () => {
+        if (pendingOutboundRef.current.length > 0) {
+          pendingOutboundRef.current = [];
+          surfaceError(
+            "WS_SEND_FAILED",
+            "Your message could not be delivered. Please resend.",
+          );
+        }
+      };
+
       if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
         setLastMessage({
           type: "error",
@@ -264,6 +322,7 @@ export function useWebSocket(
           message: event.reason || "WebSocket connection was closed.",
         });
         reconnectAttempts.current = MAX_RECONNECT_ATTEMPTS;
+        failBufferedSends();
         return;
       }
 
@@ -278,6 +337,10 @@ export function useWebSocket(
             connectRef.current(urlRef.current);
           }
         }, delay);
+      } else {
+        // Reconnect budget exhausted (or intentionally disconnected): stop
+        // holding queued frames hostage so the UI can surface a retry.
+        failBufferedSends();
       }
     };
 
@@ -301,7 +364,7 @@ export function useWebSocket(
         }
       }
     };
-  }, [dispatchJsonMessage, flushReplayBuffer, replayMissedEvents]);
+  }, [dispatchJsonMessage, flushReplayBuffer, replayMissedEvents, surfaceError]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -336,12 +399,31 @@ export function useWebSocket(
   }, [clearReconnectTimer, connect, url]);
 
   const send = useCallback((data: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(data);
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(data);
+      return;
     }
-  }, []);
+    // Socket not OPEN (connecting / mid-reconnect). Buffer control/text frames
+    // and flush them on reconnect so a prompt sent during a ticket-rotation
+    // reconnect is not silently lost. Drop-oldest past the cap.
+    if (urlRef.current !== null) {
+      const buffer = pendingOutboundRef.current;
+      if (buffer.length >= MAX_OUTBOUND_BUFFER) {
+        buffer.shift();
+      }
+      buffer.push(data);
+    } else {
+      surfaceError(
+        "WS_SEND_FAILED",
+        "Not connected. Your message could not be delivered.",
+      );
+    }
+  }, [surfaceError]);
 
   const sendBinary = useCallback((data: ArrayBuffer) => {
+    // Audio is real-time and ephemeral -- never buffer stale PCM; just drop it
+    // when the socket is not OPEN. The mic stream resumes on reconnect.
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(data);
     }

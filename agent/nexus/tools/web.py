@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
-from nexus.tools.workspace import get_active_workspace_path, write_workspace_file
+from nexus.tools.workspace import get_active_workspace_path, save_source_artifact
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 
 logger = logging.getLogger(__name__)
@@ -175,8 +175,10 @@ def extract_readable_markdown(html_text: str, *, url: str) -> str:
 async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     """Search the web quickly and save normalized results into the workspace.
 
-    Uses DuckDuckGo for fast, privacy-respecting search. Results are saved
-    to the workspace sources/ directory for later reference.
+    Uses the user's Tavily connection when available for higher-quality results,
+    falling back to DuckDuckGo HTML scraping otherwise. Results are saved to the
+    workspace sources/ directory (GCS-backed, no sandbox required) for later
+    reference.
 
     Args:
         query: Search query text.
@@ -192,38 +194,78 @@ async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
         if max_results < 1:
             return tool_error("max_results must be at least 1", error_code="INVALID_INPUT")
 
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-            timeout=20.0,
-        ) as client:
-            response = await client.get("https://duckduckgo.com/html/", params={"q": cleaned_query})
-            response.raise_for_status()
-            html_text = response.text
+        # Prefer the user's Tavily connection when available; fall back to the
+        # DuckDuckGo HTML scraper. A missing connection or any Tavily error
+        # falls through silently so search still works without a connection.
+        results: list[dict[str, str]] = []
+        provider = ""
+        answer = None
+        raw_excerpt = ""
+        try:
+            from nexus.tools.integrations import tavily_search as _tavily_search
 
-        results = parse_duckduckgo_results(html_text, max_results=max_results)
+            tavily_result = await _tavily_search(query=cleaned_query, max_results=max_results)
+        except Exception:
+            tavily_result = None
+        if isinstance(tavily_result, dict) and tavily_result.get("status") == "success":
+            meta = tavily_result.get("metadata") or {}
+            for item in meta.get("results", []) or []:
+                url = str(item.get("url") or "").strip()
+                title = _clean_text(str(item.get("title") or ""))
+                if not url or not title:
+                    continue
+                results.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "snippet": _clean_text(str(item.get("content") or "")),
+                    }
+                )
+                if len(results) >= max_results:
+                    break
+            answer = meta.get("answer")
+            provider = "tavily"
+
+        if not results:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
+                timeout=20.0,
+            ) as client:
+                response = await client.get("https://duckduckgo.com/html/", params={"q": cleaned_query})
+                response.raise_for_status()
+                html_text = response.text
+            results = parse_duckduckgo_results(html_text, max_results=max_results)
+            raw_excerpt = html_text[:4000]
+            provider = "duckduckgo_html"
+
         payload = {
             "query": cleaned_query,
-            "provider": "duckduckgo_html",
+            "provider": provider,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "result_count": len(results),
             "results": results,
-            "raw_html_excerpt": html_text[:4000],
+            "raw_html_excerpt": raw_excerpt,
             "workspace_path": get_active_workspace_path(),
         }
+        if answer:
+            payload["answer"] = answer
         filename = f"sources/search-{_slugify(cleaned_query, fallback='search')}.json"
-        write_result = await write_workspace_file(
-            filename,
-            json.dumps(payload, indent=2, ensure_ascii=True),
-        )
-        if isinstance(write_result, dict) and write_result.get("error"):
-            return tool_error(write_result["error"])
+        try:
+            save_result = await save_source_artifact(
+                filename,
+                json.dumps(payload, indent=2, ensure_ascii=True),
+            )
+        except Exception as exc:
+            return tool_error(f"Failed to save search results: {exc}")
 
         return tool_success(
-            f"Found {len(results)} results for '{cleaned_query}'",
+            f"Found {len(results)} results for '{cleaned_query}' via {provider}",
             query=cleaned_query,
             results=results,
-            saved_path=f"{get_active_workspace_path()}/{filename}",
+            answer=answer,
+            provider=provider,
+            saved_path=save_result.get("saved_path", f"{get_active_workspace_path()}/{filename}"),
             result_count=len(results),
         )
     except httpx.HTTPStatusError as exc:
@@ -276,16 +318,17 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
         base = output_basename.strip() if isinstance(output_basename, str) else ""
         slug = _slugify(base or title, fallback="page")
         relative_path = f"sources/{slug}.md"
-        write_result = await write_workspace_file(relative_path, markdown)
-        if isinstance(write_result, dict) and write_result.get("error"):
-            return tool_error(write_result["error"])
+        try:
+            save_result = await save_source_artifact(relative_path, markdown)
+        except Exception as exc:
+            return tool_error(f"Failed to save scraped page: {exc}")
 
         return tool_success(
             f"Scraped {title} from {cleaned_url}",
             url=cleaned_url,
             title=title,
             content=markdown,
-            saved_path=f"{get_active_workspace_path()}/{relative_path}",
+            saved_path=save_result.get("saved_path", f"{get_active_workspace_path()}/{relative_path}"),
         )
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else None

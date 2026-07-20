@@ -349,6 +349,62 @@ async def test_text_input_queues_durable_run_when_worker_available(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_text_input_persists_user_message_to_session_history(monkeypatch) -> None:
+    """The durable enqueue must record the user turn in session messages so it
+    survives a page refresh (the /history/{id}/messages endpoint reads only
+    session messages, not the durable event log)."""
+    repo = QueuedProductionRepo()
+    queue = QueuedTaskQueue()
+    history_repository = SimpleNamespace(append_message=AsyncMock())
+    session = SimpleNamespace(
+        id="session-123",
+        owner_id="firebase-uid",
+        task_id=None,
+        current_run_id=None,
+        runtime_config=None,
+    )
+    session_manager = SimpleNamespace(
+        history_repository=history_repository,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+    ws = FakeWebSocket(
+        [
+            {"text": json.dumps({"type": "text_input", "text": "hi"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+
+    class QueuedFakeOrchestrator(FakeOrchestrator):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handle_text_input = AsyncMock()
+            self.bind_durable_run = Mock()
+            # ws_handler constructs the orchestrator with the session
+            # manager's history_repository; expose it for the enqueue persist.
+            self.history_repository = kwargs.get("history_repository")
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", QueuedFakeOrchestrator)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(ws_handler, "get_task_queue", lambda: queue)
+    monkeypatch.setattr(ws_handler.settings, "task_worker_enabled", True)
+
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    history_repository.append_message.assert_awaited_once()
+    kwargs = history_repository.append_message.await_args.kwargs
+    assert kwargs["role"] == "user"
+    assert kwargs["source"] == "typed"
+    assert kwargs["text"] == "hi"
+    assert kwargs["session_id"] == "session-123"
+    assert kwargs["owner_id"] == "firebase-uid"
+    # Worker must NOT re-persist (metadata signals it was already recorded).
+    assert repo.create_run_kwargs["metadata"]["user_transcript_recorded"] is True
+
+
+@pytest.mark.asyncio
 async def test_text_input_does_not_live_fallback_when_enqueue_rejects(monkeypatch) -> None:
     repo = QueuedProductionRepo()
     queue = QueuedTaskQueue(queued=False, reason="Cloud Tasks unavailable")

@@ -25,6 +25,7 @@ GUI_MUTATIONS = frozenset(
         "left_click",
         "right_click",
         "double_click",
+        "triple_click",
         "type_text",
         "press_key",
         "scroll_screen",
@@ -60,6 +61,21 @@ SOURCE_TOOLS = frozenset(
         "search_sources",
     }
 )
+
+# Tools that are interchangeable for satisfying the same goal. A failure by one
+# member is considered recovered when a later action by any member (or the same
+# tool) succeeds — not just the identical tool name. This lets the agent work
+# around a failed tool (e.g. web_search -> tavily_search) without the completion
+# verifier vetoing an otherwise-correct turn.
+_CAPABILITY_GROUPS = (SOURCE_TOOLS, ARTIFACT_TOOLS)
+
+
+def _same_capability_group(candidate: str, failed: str) -> bool:
+    if candidate == failed:
+        return True
+    return any(
+        candidate in group and failed in group for group in _CAPABILITY_GROUPS
+    )
 
 
 def _utcnow() -> str:
@@ -368,7 +384,9 @@ class ActionLedger:
                 later.observation is not None
                 and later.observation.status in SUCCESS_STATUSES
                 and (
-                    later.decision.action == record.decision.action
+                    _same_capability_group(
+                        later.decision.action, record.decision.action
+                    )
                     or (
                         observation.error_code == "SCREEN_VERIFICATION_REQUIRED"
                         and later.decision.action in VISUAL_VERIFIERS

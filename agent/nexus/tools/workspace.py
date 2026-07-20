@@ -12,7 +12,7 @@ import re
 from typing import Any, Literal
 
 from nexus.config import settings
-from nexus.storage import artifact_storage_metadata, upload_artifact
+from nexus.storage import artifact_storage_metadata, upload_artifact_async
 from nexus.task_state import (
     build_initial_task_state,
     infer_task_type,
@@ -181,11 +181,11 @@ def _load_task_state(workspace_path: str) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
+async def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
     content = json.dumps(state, indent=2, sort_keys=True)
     path = _task_state_path(workspace_path)
     get_sandbox().write_text_file(path, content)
-    upload_artifact(get_session_id(), get_run_id(), "task_state.json", content)
+    await upload_artifact_async(get_session_id(), get_run_id(), "task_state.json", content)
     return path
 
 
@@ -211,7 +211,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             absolute_path = f"{workspace_path}/{relative_name}"
             if not sandbox.path_exists(absolute_path):
                 sandbox.write_text_file(absolute_path, default_content)
-                upload_artifact(get_session_id(), get_run_id(), relative_name, default_content)
+                await upload_artifact_async(get_session_id(), get_run_id(), relative_name, default_content)
                 touched_files.append(relative_name)
                 continue
             if relative_name == "task.md" and task_summary.strip():
@@ -219,7 +219,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
                 updated = _append_task_summary(existing, task_summary)
                 if updated != existing:
                     sandbox.write_text_file(absolute_path, updated)
-                    upload_artifact(get_session_id(), get_run_id(), relative_name, updated)
+                    await upload_artifact_async(get_session_id(), get_run_id(), relative_name, updated)
                     touched_files.append(relative_name)
 
         state_path = _task_state_path(workspace_path)
@@ -231,7 +231,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             task_summary=task_summary,
             active_agent="nexus_orchestrator",
         )
-        _save_task_state(workspace_path, task_state)
+        await _save_task_state(workspace_path, task_state)
         if not existing_state:
             touched_files.append("task_state.json")
         await _emit_task_state_update(task_state)
@@ -291,11 +291,10 @@ async def initialize_task_state(
                 task_type=resolved_type,
                 active_agent=active_agent,
             )
-        path = _save_task_state(workspace_path, state)
+        path = await _save_task_state(workspace_path, state)
         await _emit_task_state_update(state)
         return tool_success(
-            f"Initialized task state: {resolved_type}",
-            task_state_file=path,
+            f"Initialized task state: {resolved_type}",            task_state_file=path,
             task_id=state["task_id"],
             task_type=state["task_type"],
             stage=state["stage"],
@@ -350,7 +349,7 @@ async def update_task_state(
             artifact_paths=artifact_paths,
             summary=summary,
         )
-        path = _save_task_state(workspace_path, updated)
+        path = await _save_task_state(workspace_path, updated)
         await _emit_task_state_update(updated)
         return tool_success(
             f"Task state updated: stage={updated.get('stage', 'intake')}, agent={updated.get('active_agent', '')}",
@@ -411,7 +410,7 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
         get_sandbox().write_text_file(path, content)
 
         # Mirror to GCS
-        upload_artifact(get_session_id(), get_run_id(), "todo.md", content)
+        await upload_artifact_async(get_session_id(), get_run_id(), "todo.md", content)
 
         # Sync to frontend
         todo_items = _parse_todo_markdown(content)
@@ -469,7 +468,7 @@ async def update_todo_item(
         sandbox.write_text_file(path, formatted)
 
         # Mirror to GCS
-        upload_artifact(get_session_id(), get_run_id(), "todo.md", formatted)
+        await upload_artifact_async(get_session_id(), get_run_id(), "todo.md", formatted)
 
         # Sync to frontend
         await _emit_todo_update(items)
@@ -517,7 +516,7 @@ async def write_workspace_file(
             except Exception:
                 pass
 
-        gcs_url = upload_artifact(get_session_id(), get_run_id(), normalized_relative, full_content)
+        gcs_url = await upload_artifact_async(get_session_id(), get_run_id(), normalized_relative, full_content)
 
         preview = " ".join(content_text.split())
         if len(preview) > 240:
@@ -597,3 +596,35 @@ async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
         )
     except Exception as exc:
         return tool_error(str(exc) or "Failed to list workspace files.")
+
+
+async def save_source_artifact(relative_path: str, content: str) -> dict[str, Any]:
+    """Persist a source/output file without requiring a live sandbox.
+
+    Always uploads to GCS (VM-free) and mirrors into the sandbox workspace FS
+    only when a sandbox is already alive. This lets search/scrape tools save
+    their results without booting E2B on turns that would otherwise be VM-free.
+    """
+    normalized_relative = _normalize_relative_path(relative_path)
+    workspace_path = get_active_workspace_path()
+    absolute_path = f"{workspace_path}/{normalized_relative}"
+    gcs_url = await upload_artifact_async(
+        get_session_id(), get_run_id(), normalized_relative, content
+    )
+    mirrored = False
+    try:
+        sandbox = get_sandbox()
+        if getattr(sandbox, "is_alive", False):
+            sandbox.write_text_file(absolute_path, content)
+            mirrored = True
+    except Exception:
+        # Never fail a search/scrape because the optional FS mirror could not
+        # be written; the GCS copy is the source of truth.
+        pass
+    return {
+        "relative_path": normalized_relative,
+        "workspace_path": workspace_path,
+        "gcs_url": gcs_url,
+        "saved_path": gcs_url or absolute_path,
+        "mirrored_to_sandbox": mirrored,
+    }

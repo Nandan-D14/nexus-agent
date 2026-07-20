@@ -188,6 +188,40 @@ class SandboxManager:
         # Browser tools may race during a new session. One launch attempt per
         # sandbox avoids conflicting Chromium processes sharing the CDP port.
         self._chromium_cdp_lock = threading.Lock()
+        # Display / input / files / browser concerns are delegated to bound
+        # components (built lazily). See __getattr__.
+        self._components = None
+
+    def _ensure_components(self):
+        components = self.__dict__.get("_components")
+        if components is None:
+            from nexus.sandbox_components import (
+                SandboxBrowser,
+                SandboxDisplay,
+                SandboxFiles,
+                SandboxInput,
+            )
+
+            self._display = SandboxDisplay(self)
+            self._input = SandboxInput(self)
+            self._files = SandboxFiles(self)
+            self._browser = SandboxBrowser(self)
+            components = (self._display, self._input, self._files, self._browser)
+            self._components = components
+        return components
+
+    def __getattr__(self, name: str):
+        # Only invoked for methods moved to a bound component (display, input,
+        # files, browser). Method names are unique across components; the
+        # class-level lookup avoids triggering the components' own __getattr__.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        for component in self._ensure_components():
+            if getattr(type(component), name, None) is not None:
+                return getattr(component, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     @property
     def is_alive(self) -> bool:
@@ -224,14 +258,19 @@ class SandboxManager:
         max_backoff = max(settings.sandbox_create_retry_max_seconds, backoff)
 
         def is_transient(exc: Exception) -> bool:
+            # Transient network faults talking to the E2B API must be retried.
+            # WinError 10054 ("connection forcibly closed") surfaces as
+            # httpcore.ReadError (a subclass of httpcore.NetworkError); timeouts
+            # subclass httpcore.TimeoutException; httpx.TransportError is the
+            # base for all httpx connect/read/write/timeout/protocol faults.
             return isinstance(
                 exc,
                 (
                     socket.gaierror,
-                    httpx.ConnectError,
-                    httpx.RemoteProtocolError,
-                    httpx.TimeoutException,
-                    httpcore.ConnectError,
+                    ConnectionError,  # incl. ConnectionResetError (WinError 10054)
+                    httpx.TransportError,
+                    httpcore.NetworkError,
+                    httpcore.TimeoutException,
                     httpcore.RemoteProtocolError,
                 ),
             )
@@ -241,11 +280,14 @@ class SandboxManager:
             try:
                 suffix = f" (attempt {attempt}/{retries})" if retries > 1 else ""
                 logger.info("Creating E2B desktop sandbox%s...", suffix)
-                self._sandbox = Sandbox.create(
+                create_kwargs = dict(
                     api_key=self._e2b_api_key or None,
                     resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
                     timeout=settings.sandbox_timeout_seconds,
                 )
+                if settings.sandbox_template_id:
+                    create_kwargs["template"] = settings.sandbox_template_id
+                self._sandbox = Sandbox.create(**create_kwargs)
                 self._sandbox.stream.start(require_auth=False)
                 self._stream_url = self._sandbox.stream.get_url()
                 logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
@@ -304,22 +346,31 @@ class SandboxManager:
             "true"
         )
         try:
-            self._sandbox.commands.run(cmd, timeout=35)
-            logger.debug("Custom wallpaper applied via curl + xfconf-query")
+            # Background the whole script so boot is not blocked on the curl
+            # download. Wrap in `sh -c` so nohup covers every statement, not
+            # just the leading `sleep`.
+            backgrounded = f"nohup sh -c {shlex.quote(cmd)} >/dev/null 2>&1 & echo scheduled"
+            self._sandbox.commands.run(backgrounded, timeout=10)
+            logger.debug("Custom wallpaper scheduled via curl + xfconf-query (background)")
         except Exception:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
     def _provision_sandbox(self) -> None:
-        """Pre-install task libraries and provision one Chromium CDP target."""
-        libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
-        cmd = f"pip install {' '.join(libs)}"
-        try:
-            # We run this in the background or with a long timeout
-            # For simplicity, we'll just run it with a timeout.
-            logger.info("Provisioning sandbox with libraries: %s", libs)
-            self._sandbox.commands.run(cmd, timeout=300)
-        except Exception as e:
-            logger.warning("Sandbox provisioning failed: %s", e)
+        """Pre-install task libraries and provision one Chromium CDP target.
+
+        When a pre-baked template is configured the libraries are already in the
+        image, so the boot-time ``pip install`` (up to 300s) is skipped.
+        """
+        if settings.sandbox_template_id:
+            logger.info("Skipping runtime provisioning; using pre-baked template %s", settings.sandbox_template_id)
+        else:
+            libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+            cmd = f"pip install {' '.join(libs)}"
+            try:
+                logger.info("Provisioning sandbox with libraries: %s", libs)
+                self._sandbox.commands.run(cmd, timeout=300)
+            except Exception as e:
+                logger.warning("Sandbox provisioning failed: %s", e)
         try:
             self.ensure_chromium_cdp()
         except Exception as exc:
@@ -398,126 +449,6 @@ class SandboxManager:
 
     # -- Screen --------------------------------------------------------------
 
-    def resize_screen(self, width: int, height: int) -> dict:
-        """Resize the sandbox virtual display to the given resolution via xrandr."""
-        self._require_sandbox()
-        mode_label = f"{width}x{height}"
-        cmd = (
-            f"export DISPLAY=:1; "
-            f"xrandr --newmode {mode_label} $(cvt {width} {height} 60 | grep Modeline | cut -d' ' -f3-) 2>/dev/null; "
-            f"xrandr --addmode Virtual-1 {mode_label} 2>/dev/null; "
-            f"xrandr --output Virtual-1 --mode {mode_label}"
-        )
-        result = self.run_command(cmd, timeout=15)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            return {"success": False, "error": result.get("stderr", "xrandr failed")}
-        return {"success": True, "width": width, "height": height}
-
-    def screenshot(self) -> bytes:
-        """Capture the screen as PNG bytes."""
-        self._require_sandbox()
-        try:
-            return bytes(self._sandbox.screenshot())
-        except Exception as e:
-            if "not found" in str(e).lower() or "timeout" in str(e).lower():
-                self._sandbox = None
-                raise SandboxDeadError("Sandbox timed out while taking screenshot.") from e
-            raise
-
-    def screenshot_base64(self) -> str:
-        """Capture the screen as a base64-encoded PNG string."""
-        return base64.b64encode(self.screenshot()).decode()
-
-    def screenshot_jpeg(self, quality: int = 85, max_dim: int = 1024) -> bytes:
-        """Capture the screen as resized JPEG bytes (smaller for Gemini)."""
-        png_bytes = self.screenshot()
-        img = Image.open(io.BytesIO(png_bytes))
-        img.thumbnail((max_dim, max_dim))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        return buf.getvalue()
-
-    def screenshot_jpeg_base64(self, quality: int = 85) -> str:
-        """Capture as base64-encoded JPEG."""
-        return base64.b64encode(self.screenshot_jpeg(quality)).decode()
-
-    def get_screen_size(self) -> tuple[int, int]:
-        """Return (width, height) of the sandbox screen."""
-        self._require_sandbox()
-        return self._sandbox.get_screen_size()
-
-    def get_cursor_position(self) -> tuple[int, int]:
-        """Return (x, y) cursor position."""
-        self._require_sandbox()
-        return self._sandbox.get_cursor_position()
-
-    # -- Mouse ---------------------------------------------------------------
-
-    def left_click(self, x: int, y: int) -> None:
-        """Left-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.left_click(x, y)
-
-    def right_click(self, x: int, y: int) -> None:
-        """Right-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.right_click(x, y)
-
-    def double_click(self, x: int, y: int) -> None:
-        """Double-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.double_click(x, y)
-
-    def move_mouse(self, x: int, y: int) -> None:
-        """Move mouse to coordinates without clicking."""
-        self._require_sandbox()
-        self._sandbox.move_mouse(x, y)
-
-    def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
-        """Drag from one point to another."""
-        self._require_sandbox()
-        self._sandbox.drag(fr=(from_x, from_y), to=(to_x, to_y))
-
-    def scroll(self, direction: str = "down", amount: int = 3) -> None:
-        """Scroll the screen. direction: 'up' or 'down'."""
-        self._require_sandbox()
-        self._sandbox.scroll(direction, amount)
-
-    # -- Keyboard ------------------------------------------------------------
-
-    def type_text(self, text: str) -> None:
-        """Type text at the current cursor position."""
-        self._require_sandbox()
-        self._sandbox.write(text, chunk_size=25, delay_in_ms=75)
-
-    def press_key(self, key: str) -> None:
-        """Press a key or key combination. Examples: 'enter', 'ctrl+c', 'alt+tab'."""
-        self._require_sandbox()
-        key_aliases = {
-            "return": "enter",
-            "esc": "escape",
-            "del": "delete",
-            "control": "ctrl",
-            "command": "meta",
-            "cmd": "meta",
-            "option": "alt",
-            "spacebar": "space",
-            "pgup": "pageup",
-            "pgdn": "pagedown",
-        }
-
-        def normalize(part: str) -> str:
-            lowered = part.strip().lower()
-            return key_aliases.get(lowered, lowered)
-
-        if "+" in key:
-            combo = [normalize(part) for part in key.split("+") if part.strip()]
-            self._sandbox.press(combo)
-        else:
-            self._sandbox.press(normalize(key))
-
-    # -- Terminal ------------------------------------------------------------
-
     def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
         """Run a shell command. Returns {stdout, stderr, exit_code}."""
         self._require_sandbox()
@@ -552,337 +483,3 @@ class SandboxManager:
                 "stderr": stderr,
                 "exit_code": exit_code if exit_code is not None else -1,
             }
-
-    def ensure_directory(self, path: str) -> None:
-        """Create a directory and its parents inside the sandbox."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"mkdir -p {safe_path}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) == 0:
-            return
-
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "pathlib.Path(path).mkdir(parents=True, exist_ok=True)"
-        )
-        fallback = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(fallback.get("exit_code", -1)) == 0:
-            logger.warning(
-                "ensure_directory recovered via python fallback for %s after mkdir failed "
-                "(exit=%s, stderr=%s, stdout=%s)",
-                path,
-                result.get("exit_code"),
-                result.get("stderr") or "",
-                result.get("stdout") or "",
-            )
-            return
-
-        logger.error(
-            "ensure_directory failed for %s: mkdir exit=%s stderr=%s stdout=%s; "
-            "python fallback exit=%s stderr=%s stdout=%s",
-            path,
-            result.get("exit_code"),
-            result.get("stderr") or "",
-            result.get("stdout") or "",
-            fallback.get("exit_code"),
-            fallback.get("stderr") or "",
-            fallback.get("stdout") or "",
-        )
-        raise RuntimeError(
-            fallback.get("stderr")
-            or result.get("stderr")
-            or f"Failed to create directory {path}"
-        )
-
-    def write_text_file(self, path: str, content: str, *, append: bool = False) -> None:
-        """Write UTF-8 text into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        mode = "ab" if append else "wb"
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            f"target.open('{mode}').write(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def write_binary_file(self, path: str, content: bytes) -> None:
-        """Write binary content into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            "target.write_bytes(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def read_binary_file(self, path: str) -> bytes:
-        """Read binary content from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib, sys; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "sys.stdout.write(base64.b64encode(pathlib.Path(path).read_bytes()).decode('ascii'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return base64.b64decode(str(result.get("stdout") or ""))
-
-    def read_text_file(self, path: str) -> str:
-        """Read UTF-8 text from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "print(pathlib.Path(path).read_text(encoding='utf-8'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return str(result.get("stdout") or "")
-
-    def path_exists(self, path: str) -> bool:
-        """Return True when the given sandbox path exists."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"test -e {safe_path}", timeout=15)
-        return _coerce_exit_code(result.get("exit_code", -1)) == 0
-
-    def list_directory(self, path: str) -> list[dict[str, object]]:
-        """Return a shallow directory listing for the given sandbox path."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, json, pathlib; "
-            f"path = pathlib.Path(base64.b64decode('{path_b64}').decode('utf-8')); "
-            "entries = []; "
-            "exists = path.exists(); "
-            "iterable = sorted(path.iterdir(), key=lambda item: item.name.lower()) if exists and path.is_dir() else []; "
-            "for item in iterable: "
-            " entries.append({'name': item.name, 'path': str(item), 'is_dir': item.is_dir(), 'size': item.stat().st_size if item.exists() else 0}); "
-            "print(json.dumps(entries))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to list directory {path}")
-        raw = str(result.get("stdout") or "").strip()
-        if not raw:
-            return []
-        return list(json.loads(raw))
-
-    # -- Applications --------------------------------------------------------
-
-    def _is_chromium_cdp_port_reachable(self, port: int) -> bool:
-        """Probe CDP without allowing a connection refusal to abort provisioning."""
-        command = (
-            f"if curl -fsS --max-time 2 http://127.0.0.1:{port}/json/version "
-            ">/dev/null 2>&1; then printf CDP_READY; fi; exit 0"
-        )
-        try:
-            result = self._sandbox.commands.run(command, timeout=10)
-        except Exception as exc:
-            logger.debug("Chromium CDP readiness probe failed: %s", exc)
-            return False
-        return "CDP_READY" in str(getattr(result, "stdout", ""))
-
-    def _can_connect_to_chromium_cdp(self, port: int) -> bool:
-        """Verify Playwright can attach to the endpoint, not only reach its HTTP port."""
-        script = (
-            "from playwright.sync_api import sync_playwright; "
-            "p = sync_playwright().start(); "
-            f"browser = p.chromium.connect_over_cdp('http://127.0.0.1:{port}'); "
-            "print('CDP_CONNECTED'); browser.close(); p.stop()"
-        )
-        try:
-            result = self._sandbox.commands.run(
-                f"python3 -c {shlex.quote(script)}",
-                timeout=20,
-            )
-        except Exception as exc:
-            logger.debug("Chromium CDP connection probe failed: %s", exc)
-            return False
-        return (
-            _coerce_exit_code(getattr(result, "exit_code", -1)) == 0
-            and "CDP_CONNECTED" in str(getattr(result, "stdout", ""))
-        )
-
-    def _wait_for_chromium_cdp(self, port: int, timeout_seconds: int) -> bool:
-        """Wait for a usable CDP endpoint with bounded exponential backoff."""
-        deadline = time.monotonic() + max(1, timeout_seconds)
-        delay = max(float(settings.browser_startup_retry_initial_seconds), 0.05)
-        max_delay = max(float(settings.browser_startup_retry_max_seconds), delay)
-        attempt = 0
-        port_reachable_logged = False
-
-        while True:
-            if self._is_chromium_cdp_port_reachable(port):
-                if not port_reachable_logged:
-                    logger.info("Chromium CDP port %s reachable", port)
-                    port_reachable_logged = True
-                if self._can_connect_to_chromium_cdp(port):
-                    logger.info("Chromium CDP connected on port %s", port)
-                    return True
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            sleep_for = min(delay, remaining)
-            attempt += 1
-            logger.debug(
-                "Waiting for Chromium CDP on port %s (probe %s, retry in %.2fs)",
-                port,
-                attempt,
-                sleep_for,
-            )
-            time.sleep(sleep_for)
-            delay = min(delay * 2, max_delay)
-
-    def _chromium_log_tail(self) -> str:
-        try:
-            result = self._sandbox.commands.run(
-                "tail -n 40 /tmp/nexus-chromium.log 2>/dev/null || true",
-                timeout=10,
-            )
-            return str(getattr(result, "stdout", "")).strip()[-4000:]
-        except Exception:
-            return ""
-
-    def ensure_chromium_cdp(self) -> dict:
-        """Ensure visible Chromium has a reachable, Playwright-verified CDP endpoint."""
-        self._require_sandbox()
-        port = int(settings.browser_cdp_port)
-
-        with self._chromium_cdp_lock:
-            if self._is_chromium_cdp_port_reachable(port):
-                logger.info("Chromium CDP port %s reachable; reusing browser", port)
-                if self._can_connect_to_chromium_cdp(port):
-                    logger.info("Chromium CDP connected on port %s", port)
-                    return {"status": "ready", "port": port, "reused": True}
-                logger.warning(
-                    "Chromium CDP port %s is reachable but Playwright cannot connect; "
-                    "starting a fresh browser process",
-                    port,
-                )
-
-            import_check = self._sandbox.commands.run(
-                "python3 -c 'import playwright'",
-                timeout=15,
-            )
-            if _coerce_exit_code(getattr(import_check, "exit_code", -1)) != 0:
-                installed = self._sandbox.commands.run(
-                    "pip install playwright && python3 -m playwright install chromium",
-                    timeout=300,
-                )
-                if _coerce_exit_code(getattr(installed, "exit_code", -1)) != 0:
-                    raise RuntimeError(
-                        getattr(installed, "stderr", "")
-                        or "Failed to install Playwright Chromium"
-                    )
-
-            launcher = f"""import json
-import os
-import subprocess
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    executable = p.chromium.executable_path
-
-env = dict(os.environ)
-env["DISPLAY"] = ":1"
-command = [
-    executable,
-    "--remote-debugging-port={port}",
-    "--remote-debugging-address=127.0.0.1",
-    "--user-data-dir=/tmp/nexus-chromium-profile",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "about:blank",
-]
-with open("/tmp/nexus-chromium.log", "ab") as log:
-    process = subprocess.Popen(
-        command,
-        env=env,
-        stdout=log,
-        stderr=log,
-        start_new_session=True,
-    )
-if process.poll() is not None:
-    raise SystemExit("Chromium exited immediately with code %s" % process.returncode)
-print(json.dumps({{"pid": process.pid, "port": {port}}}))
-"""
-            logger.info("Starting Chromium with CDP on port %s", port)
-            self._sandbox.write_text_file("/tmp/nexus_chromium_cdp.py", launcher)
-            result = self._sandbox.commands.run(
-                "python3 /tmp/nexus_chromium_cdp.py",
-                timeout=30,
-            )
-            if _coerce_exit_code(getattr(result, "exit_code", -1)) != 0:
-                raise RuntimeError(
-                    getattr(result, "stderr", "")
-                    or getattr(result, "stdout", "")
-                    or "Chromium CDP launch failed"
-                )
-
-            launch_details: dict[str, object] = {}
-            try:
-                launch_details = json.loads(str(getattr(result, "stdout", "")).strip())
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Chromium launcher returned no process metadata")
-            logger.info(
-                "Chromium process started (pid=%s, cdp_port=%s)",
-                launch_details.get("pid", "unknown"),
-                port,
-            )
-
-            if not self._wait_for_chromium_cdp(
-                port,
-                int(settings.browser_startup_timeout_seconds),
-            ):
-                log_tail = self._chromium_log_tail()
-                detail = f" Chromium log tail: {log_tail}" if log_tail else ""
-                raise RuntimeError(
-                    f"Chromium CDP endpoint on 127.0.0.1:{port} did not become "
-                    f"ready within {settings.browser_startup_timeout_seconds}s.{detail}"
-                )
-            return {"status": "ready", "port": port, "reused": False}
-
-    def open_url(self, url: str) -> None:
-        """Open a URL in the provisioned visible Chromium CDP browser."""
-        self._require_sandbox()
-        self.ensure_chromium_cdp()
-        url_b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
-        port = int(settings.browser_cdp_port)
-        script = (
-            "import base64; "
-            "from playwright.sync_api import sync_playwright; "
-            f"url=base64.b64decode('{url_b64}').decode('utf-8'); "
-            "p=sync_playwright().start(); "
-            f"browser=p.chromium.connect_over_cdp('http://127.0.0.1:{port}'); "
-            "context=browser.contexts[0] if browser.contexts else browser.new_context(); "
-            "page=context.pages[0] if context.pages else context.new_page(); "
-            "page.goto(url, wait_until='domcontentloaded', timeout=30000); "
-            "print(page.url); "
-            "browser.close(); p.stop()"
-        )
-        result = self._sandbox.commands.run(
-            f"python3 -c {shlex.quote(script)}",
-            timeout=45,
-        )
-        if _coerce_exit_code(getattr(result, "exit_code", -1)) != 0:
-            raise RuntimeError(
-                getattr(result, "stderr", "")
-                or "Failed to navigate Chromium"
-            )

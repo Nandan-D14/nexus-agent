@@ -128,3 +128,6 @@ graphify-out/
 *.sublime-workspace
 *.sublime-project
 *.komodoproject
+
+# ── Foglamp (edit token is a secret) ──
+.foglamp/

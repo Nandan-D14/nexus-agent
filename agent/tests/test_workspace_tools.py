@@ -192,7 +192,7 @@ class SandboxEnsureDirectoryTests(TestCase):
 class WorkspaceToolTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.sandbox = FakeSandbox()
-        self.upload_patcher = patch("nexus.tools.workspace.upload_artifact", return_value=None)
+        self.upload_patcher = patch("nexus.tools.workspace.upload_artifact_async", return_value=None)
         self.upload_patcher.start()
         self.session_token = set_session_id("session123")
         self.run_token = set_run_id("run456")

@@ -81,6 +81,24 @@ class Settings(BaseSettings):
     bynara_api_key: str = ""
     bynara_api_base: str = "https://router.bynara.id/v1"
 
+    # Vultr Inference OpenAI-compatible gateway
+    # Activate by setting MODEL_PROVIDER=vultr. Key belongs in .env (VULTR_API_KEY).
+    vultr_api_key: str = ""
+    vultr_api_base: str = "https://api.vultrinference.com/v1"
+    # Append "-normalize" to model names so Vultr smooths non-standard OpenAI
+    # responses (reasoning_content, tool-call IDs, content=None with tool_calls).
+    vultr_normalize: bool = True
+
+    # --- Context-window budget (prevents input > model context limit) ---
+    # Active model context window (Kimi-K2.6 = 262144). The trimmer keeps the
+    # per-turn prompt under context_input_budget_ratio * this limit, leaving
+    # headroom for reasoning + output tokens.
+    model_context_limit: int = 262144
+    context_input_budget_ratio: float = 0.75
+    enforce_context_budget: bool = True
+    # Max characters of a single gmail_read body fed into the prompt/history.
+    gmail_read_max_chars: int = 8000
+
     # Model roles (shared across providers)
     planner_model: str = "tencent-hy3"
     planner_fallback_models: str = "tencent-hy3"
@@ -159,6 +177,10 @@ class Settings(BaseSettings):
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0
+    # E2B template (image) id with task libraries + Chromium pre-baked. When set,
+    # sandbox creation skips the boot-time `pip install` (300s) so cold starts are
+    # near-instant. Leave empty to fall back to runtime provisioning.
+    sandbox_template_id: str = ""
     agent_workspace_root: str = "/home/user/CoComputer/Workspaces"
     browser_cdp_port: int = 9222
     browser_startup_timeout_seconds: int = 90
@@ -167,6 +189,40 @@ class Settings(BaseSettings):
 
     # Single production orchestration path.
     max_agent_turns: int = 30
+
+    # --- Firestore write resilience (Phase 1) ---
+    # Serialize concurrent writes that touch the same shared session/task docs
+    # so a single session fanning out parallel tool results does not self-
+    # contend inside Firestore transactions. Different sessions stay concurrent.
+    serialize_session_writes: bool = True
+    # Bounded jittered-backoff retry applied on top of Firestore's own retry
+    # when a transaction is Aborted due to cross-transaction contention.
+    firestore_write_max_retries: int = 5
+    firestore_write_backoff_base_ms: int = 50
+    firestore_write_backoff_max_ms: int = 2000
+
+    # --- Final-response guarantees (Phase 2) ---
+    # When an agent turn ends with tool calls but no final text, issue one
+    # additional tools-off model call so the model always produces a summary.
+    force_final_synthesis: bool = True
+    # Bounded re-invoke when completion verification returns a retryable
+    # MISSING_FINAL_RESPONSE. 0 disables the orchestrator-level retry.
+    max_final_synthesis_retries: int = 1
+    # Last-resort: synthesize a partial summary from the ActionLedger evidence
+    # instead of surfacing "the model ended without a final response".
+    synthesize_fallback_summary_from_ledger: bool = True
+    # When completion verification soft-vetoes (advisory: unresolved tool error,
+    # remaining work, stale screen, missing artifact/source) but the model still
+    # produced a real final response, deliver that answer with the verification
+    # caveat attached instead of replacing it with the rejection text. Hard
+    # failures (blocked/approval) and empty responses still fail as before.
+    deliver_answer_on_soft_veto: bool = True
+
+    # --- Contention-free message IDs (Phase 3) ---
+    # Generate time-ordered ULID message IDs + epoch-microsecond turnIndex and
+    # bump messageCount via an atomic Increment, removing the shared-doc read
+    # from the append hot path. Flip off to restore the legacy counter scheme.
+    use_time_ordered_message_ids: bool = True
 
     # Single planner + AgentTool workers (docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md).
     # Fast path / mode router / artifact mini-agent were removed — every turn
@@ -220,8 +276,8 @@ class Settings(BaseSettings):
     @classmethod
     def validate_model_provider(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in ("qwen", "bynara"):
-            raise ValueError("MODEL_PROVIDER must be 'qwen' or 'bynara'")
+        if normalized not in ("qwen", "bynara", "vultr"):
+            raise ValueError("MODEL_PROVIDER must be 'qwen', 'bynara', or 'vultr'")
         return normalized
 
     @property
@@ -257,6 +313,8 @@ def validate_startup_settings() -> None:
         issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
     if not settings.qwen_api_key:
         issues.append("QWEN_API_KEY is required for Model Studio Qwen/GLM reasoning and Qwen vision")
+    if settings.model_provider == "vultr" and not settings.vultr_api_key:
+        issues.append("VULTR_API_KEY is required when MODEL_PROVIDER is 'vultr'")
     if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
         issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
     if settings.beta_access_enabled and not settings.beta_admin_emails.strip():

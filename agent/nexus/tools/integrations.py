@@ -48,6 +48,63 @@ def _slugify(value: str, *, fallback: str = "file") -> str:
     return cleaned or fallback
 
 
+def _decode_b64url(data: str) -> str:
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_gmail_body(payload: Any) -> str:
+    """Best-effort plain-text body from a Gmail message payload."""
+    if not isinstance(payload, dict):
+        return ""
+    mime = payload.get("mimeType", "")
+    body = payload.get("body") or {}
+    data = body.get("data") if isinstance(body, dict) else None
+    if mime == "text/plain" and data:
+        return _decode_b64url(data)
+    for part in payload.get("parts") or []:
+        text = _extract_gmail_body(part)
+        if text:
+            return text
+    if data:
+        return _decode_b64url(data)
+    return ""
+
+
+def _slim_gmail_message(message: Any, max_chars: int) -> dict[str, Any]:
+    """Trim a raw Gmail message to key headers + capped text body.
+
+    The raw Gmail API dict embeds the full base64 body and nested payload,
+    which can be hundreds of KB and floods the model context. Return a compact,
+    model-useful shape instead.
+    """
+    if not isinstance(message, dict):
+        return {"raw": str(message)[:max_chars]}
+    payload = message.get("payload") or {}
+    wanted = {"from", "to", "cc", "subject", "date"}
+    headers = {
+        h.get("name", ""): h.get("value", "")
+        for h in (payload.get("headers") or [])
+        if isinstance(h, dict) and str(h.get("name", "")).lower() in wanted
+    }
+    body = _extract_gmail_body(payload)
+    truncated = len(body) > max_chars
+    return {
+        "id": message.get("id"),
+        "threadId": message.get("threadId"),
+        "labelIds": message.get("labelIds"),
+        "snippet": message.get("snippet"),
+        "headers": headers,
+        "body": body[:max_chars],
+        "truncated": truncated,
+    }
+
+
 async def _github_token() -> str | None:
     repo = get_history_repository()
     owner_id = get_owner_id()
@@ -149,9 +206,10 @@ async def gmail_read(message_id: str) -> dict[str, Any]:
     client = GmailClient(token)
     try:
         message = await client.get_message(message_id)
+        slim = _slim_gmail_message(message, settings.gmail_read_max_chars)
         return tool_success(
             f"Read message {message_id}",
-            message=message,
+            message=slim,
         )
     except Exception as e:
         return tool_error(f"Gmail read failed: {e}")

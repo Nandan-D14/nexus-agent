@@ -26,6 +26,19 @@ from nexus.usage import (
 logger = logging.getLogger(__name__)
 
 
+# Instruction used when the model finished a turn on tool calls without ever
+# emitting a closing answer. It is nudged to synthesize from what it already
+# gathered instead of calling more tools.
+_FINAL_SYNTHESIS_INSTRUCTION = (
+    "You have gathered enough information from the previous tool results. "
+    "Do NOT call any tools. Using only the information already collected, "
+    "write the final answer or summary for the user now."
+)
+# Small, bounded turn cap for the forced synthesis pass so a stray tool call
+# cannot re-open an unbounded loop.
+_SYNTHESIS_TURN_CAP = 2
+
+
 @dataclass
 class AgentTurnResult:
     response: str | None
@@ -107,15 +120,9 @@ async def run_agent_turn(
             session_id=session_id,
         )
 
-    content = types.Content(
-        role="user",
-        parts=[types.Part(text=message)],
-    )
     final_response = None
     usage_records: list[TokenUsageRecord] = []
     usage_seen: set[tuple[str, str, int, int, int]] = set()
-    turn_count = 0
-    function_response_count = 0
     max_turns = max_turns or settings.max_agent_turns
     usage_source, usage_model = get_agent_usage_source(runtime_config)
     emit_debug_trace(
@@ -131,56 +138,140 @@ async def run_agent_turn(
         },
     )
 
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=content,
-    ):
-        for record in extract_token_usage_records(
-            event,
-            default_source=usage_source,
-            default_model=usage_model,
-        ):
-            fingerprint = (
-                record.source,
-                record.model,
-                record.input_tokens,
-                record.output_tokens,
-                record.total_tokens,
-            )
-            if fingerprint in usage_seen:
-                continue
-            usage_seen.add(fingerprint)
-            usage_records.append(record)
+    async def _consume(new_message, turn_cap: int):
+        """Drive the runner for one message.
 
-        if event_callback:
-            await event_callback(event)
+        Returns (final_text, last_text, rounds, response_count, hit_cap) where
+        final_text is the strict ``is_final_response`` text and last_text is the
+        last non-empty text part seen (used as a fallback when the model does
+        not flag a final response).
+        """
+        final_text: str | None = None
+        last_text: str | None = None
+        rounds = 0
+        response_count = 0
+        hit_cap = False
+        try:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=new_message,
+            ):
+                for record in extract_token_usage_records(
+                    event,
+                    default_source=usage_source,
+                    default_model=usage_model,
+                ):
+                    fingerprint = (
+                        record.source,
+                        record.model,
+                        record.input_tokens,
+                        record.output_tokens,
+                        record.total_tokens,
+                    )
+                    if fingerprint in usage_seen:
+                        continue
+                    usage_seen.add(fingerprint)
+                    usage_records.append(record)
 
-        if event.content and event.content.parts:
-            if any(part.function_call for part in event.content.parts):
-                turn_count += 1
-            function_response_count += sum(
-                1
-                for part in event.content.parts
-                if getattr(part, "function_response", None)
-            )
+                if event_callback:
+                    await event_callback(event)
 
-        if (
-            event.is_final_response()
-            and event.content
-            and event.content.parts
-        ):
-            for part in event.content.parts:
-                if part.text:
-                    final_response = part.text
+                if event.content and event.content.parts:
+                    if any(part.function_call for part in event.content.parts):
+                        rounds += 1
+                    response_count += sum(
+                        1
+                        for part in event.content.parts
+                        if getattr(part, "function_response", None)
+                    )
+                    for part in event.content.parts:
+                        if getattr(part, "text", None):
+                            last_text = part.text
+
+                if (
+                    event.is_final_response()
+                    and event.content
+                    and event.content.parts
+                ):
+                    for part in event.content.parts:
+                        if part.text:
+                            final_text = part.text
+                            break
+
+                if rounds >= turn_cap:
+                    logger.warning(
+                        "Max turns (%d) reached, stopping agent loop",
+                        turn_cap,
+                    )
+                    hit_cap = True
                     break
+        except ValueError as exc:
+            # A hallucinated / unregistered tool name makes ADK's _get_tool raise
+            # a bare ValueError. Do not let one bad tool call crash the whole turn:
+            # log it, surface a recovery note, and let the caller fall back to
+            # last_text / forced synthesis instead of propagating the exception.
+            message = str(exc)
+            lowered = message.lower()
+            if "tool" in lowered and "not found" in lowered:
+                logger.warning(
+                    "Model requested an unavailable tool (%s); recovering gracefully for session %s",
+                    message,
+                    session_id,
+                )
+                if not (last_text and last_text.strip()):
+                    last_text = (
+                        "A requested tool was unavailable, so that action was skipped. "
+                        "Continue using only the available tools."
+                    )
+            else:
+                raise
+        return final_text, last_text, rounds, response_count, hit_cap
 
-        if turn_count >= max_turns:
-            logger.warning(
-                "Max turns (%d) reached, stopping agent loop",
-                max_turns,
-            )
-            break
+    content = types.Content(
+        role="user",
+        parts=[types.Part(text=message)],
+    )
+    (
+        final_response,
+        last_text,
+        turn_count,
+        function_response_count,
+        hit_turn_cap,
+    ) = await _consume(content, max_turns)
+
+    # Robust capture: if the model never flagged a strict final response, fall
+    # back to the last text it emitted so a summary is not silently dropped.
+    if not (final_response and final_response.strip()) and (
+        last_text and last_text.strip()
+    ):
+        final_response = last_text
+
+    # Forced final synthesis: the model ran tools but produced no closing text.
+    forced_synthesis_used = False
+    if (
+        settings.force_final_synthesis
+        and not (final_response and final_response.strip())
+        and (turn_count > 0 or function_response_count > 0)
+    ):
+        forced_synthesis_used = True
+        logger.warning(
+            "No final text after %d tool round(s); forcing synthesis turn for session %s",
+            turn_count,
+            session_id,
+        )
+        synthesis_message = types.Content(
+            role="user",
+            parts=[types.Part(text=_FINAL_SYNTHESIS_INSTRUCTION)],
+        )
+        synth_final, synth_last, _, _, _ = await _consume(
+            synthesis_message,
+            _SYNTHESIS_TURN_CAP,
+        )
+        if synth_final and synth_final.strip():
+            final_response = synth_final
+        elif synth_last and synth_last.strip():
+            final_response = synth_last
 
     emit_debug_trace(
         run_id=f"session:{session_id[-12:]}",
@@ -190,7 +281,8 @@ async def run_agent_turn(
         data={
             "function_call_rounds": turn_count,
             "function_response_count": function_response_count,
-            "hit_turn_cap": turn_count >= max_turns,
+            "hit_turn_cap": hit_turn_cap,
+            "forced_synthesis_used": forced_synthesis_used,
             "final_response_present": final_response is not None,
             "final_response_chars": len(final_response or ""),
             "usage_record_count": len(usage_records),

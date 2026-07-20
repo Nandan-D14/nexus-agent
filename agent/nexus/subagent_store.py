@@ -15,6 +15,7 @@ from google.cloud.firestore_v1 import FieldFilter
 
 from nexus.config import settings
 from nexus.firebase import get_firestore_client
+from nexus.firestore_concurrency import run_with_write_retry
 
 
 TERMINAL_SUBAGENT_STATUSES = frozenset(
@@ -46,7 +47,11 @@ class FirestoreSubagentRepository:
         return self._db.collection("subagent_records").document(subagent_id)
 
     async def create_record(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._create_record_sync, payload)
+        return await asyncio.to_thread(
+            run_with_write_retry,
+            lambda: self._create_record_sync(payload),
+            description="subagent_create",
+        )
 
     def _create_record_sync(self, payload: dict[str, Any]) -> dict[str, Any]:
         subagent_id = str(payload["subagentId"])
@@ -156,10 +161,9 @@ class FirestoreSubagentRepository:
         worker_id: str,
     ) -> dict[str, Any] | None:
         return await asyncio.to_thread(
-            self._claim_sync,
-            subagent_id,
-            owner_id,
-            worker_id,
+            run_with_write_retry,
+            lambda: self._claim_sync(subagent_id, owner_id, worker_id),
+            description="subagent_claim",
         )
 
     def _claim_sync(
@@ -233,11 +237,11 @@ class FirestoreSubagentRepository:
         claim_generation: int,
     ) -> bool:
         return await asyncio.to_thread(
-            self._renew_lease_sync,
-            subagent_id,
-            owner_id,
-            worker_id,
-            claim_generation,
+            run_with_write_retry,
+            lambda: self._renew_lease_sync(
+                subagent_id, owner_id, worker_id, claim_generation
+            ),
+            description="subagent_renew_lease",
         )
 
     def _renew_lease_sync(
@@ -287,10 +291,9 @@ class FirestoreSubagentRepository:
         text: str,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
-            self._append_message_sync,
-            subagent_id,
-            owner_id,
-            text,
+            run_with_write_retry,
+            lambda: self._append_message_sync(subagent_id, owner_id, text),
+            description="subagent_append_message",
         )
 
     def _append_message_sync(
@@ -361,11 +364,11 @@ class FirestoreSubagentRepository:
         claim_generation: int,
     ) -> dict[str, Any] | None:
         return await asyncio.to_thread(
-            self._claim_next_message_sync,
-            subagent_id,
-            owner_id,
-            worker_id,
-            claim_generation,
+            run_with_write_retry,
+            lambda: self._claim_next_message_sync(
+                subagent_id, owner_id, worker_id, claim_generation
+            ),
+            description="subagent_claim_next_message",
         )
 
     def _claim_next_message_sync(
@@ -423,13 +426,16 @@ class FirestoreSubagentRepository:
         result: str | None,
     ) -> bool:
         return await asyncio.to_thread(
-            self._complete_message_sync,
-            subagent_id,
-            owner_id,
-            worker_id,
-            claim_generation,
-            message_id,
-            result,
+            run_with_write_retry,
+            lambda: self._complete_message_sync(
+                subagent_id,
+                owner_id,
+                worker_id,
+                claim_generation,
+                message_id,
+                result,
+            ),
+            description="subagent_complete_message",
         )
 
     def _complete_message_sync(
@@ -507,10 +513,9 @@ class FirestoreSubagentRepository:
         updates: dict[str, Any],
     ) -> bool:
         return await asyncio.to_thread(
-            self._update_record_sync,
-            subagent_id,
-            owner_id,
-            updates,
+            run_with_write_retry,
+            lambda: self._update_record_sync(subagent_id, owner_id, updates),
+            description="subagent_update_record",
         )
 
     def _update_record_sync(
@@ -541,15 +546,18 @@ class FirestoreSubagentRepository:
         if status not in TERMINAL_SUBAGENT_STATUSES:
             raise ValueError(f"Invalid terminal subagent status: {status}")
         return await asyncio.to_thread(
-            self._mark_terminal_sync,
-            subagent_id,
-            owner_id,
-            status,
-            result,
-            error,
-            terminal_recorded,
-            worker_id,
-            claim_generation,
+            run_with_write_retry,
+            lambda: self._mark_terminal_sync(
+                subagent_id,
+                owner_id,
+                status,
+                result,
+                error,
+                terminal_recorded,
+                worker_id,
+                claim_generation,
+            ),
+            description="subagent_mark_terminal",
         )
 
     def _mark_terminal_sync(

@@ -126,6 +126,9 @@ def create_model(
     elif settings.model_provider == "bynara":
         from nexus.bynara_router import create_bynara_model
         return create_bynara_model(model_name)
+    elif settings.model_provider == "vultr":
+        from nexus.vultr_router import create_vultr_model
+        return create_vultr_model(model_name)
     else:
         raise RuntimeError(f"Unknown model provider: {settings.model_provider}")
 

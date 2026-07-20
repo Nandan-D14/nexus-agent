@@ -131,16 +131,20 @@ class AgentTurnRunner:
         try:
             await orchestrator.initialize(lazy_sandbox=True)
             orchestrator.restore_durable_checkpoint(request.checkpoint)
-            input_text = self._resume_input(
-                request.input_text,
-                request.checkpoint,
+            resume_context = self._resume_context(request.checkpoint)
+            # On resume the user turn already exists (first attempt / ws
+            # transcript event); never re-show or re-persist it, and never let
+            # the checkpoint block leak into the chat as a user message.
+            emit_user_transcript = (
+                request.emit_user_transcript and not resume_context
             )
             turn_task = asyncio.create_task(
                 orchestrator.handle_text_input(
-                    input_text,
+                    request.input_text,
                     connector_ids=request.connector_ids,
                     uploaded_files=request.uploaded_files,
-                    emit_user_transcript=request.emit_user_transcript,
+                    emit_user_transcript=emit_user_transcript,
+                    resume_context=resume_context or None,
                 )
             )
             done, _ = await asyncio.wait(
@@ -239,9 +243,15 @@ class AgentTurnRunner:
             await orchestrator.close()
 
     @staticmethod
-    def _resume_input(input_text: str, checkpoint: dict[str, Any]) -> str:
+    def _resume_context(checkpoint: dict[str, Any]) -> str:
+        """Build the durable-resume checkpoint block for the model.
+
+        Returns only the checkpoint directive (no user text). Callers feed this
+        to the model via ``resume_context`` so it is never shown or persisted
+        as a user message.
+        """
         if not checkpoint:
-            return input_text
+            return ""
         ledger = checkpoint.get("action_ledger")
         records = (
             ledger.get("records", [])
@@ -305,7 +315,6 @@ class AgentTurnRunner:
                 + ". List and collect these records before spawning new work."
             )
         return (
-            f"{input_text}\n\n"
             "[DURABLE RESUME CHECKPOINT]\n"
             "Previously recorded actions: "
             + completed_text

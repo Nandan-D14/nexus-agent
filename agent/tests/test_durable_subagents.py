@@ -14,6 +14,9 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from google.api_core.exceptions import Aborted
+
+from nexus.config import settings
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.subagent_store import FirestoreSubagentRepository
 from nexus.subagents import SubagentSupervisor
@@ -350,4 +353,74 @@ class DurableSubagentTests(IsolatedAsyncioTestCase):
                 role="new persona",
                 type_name="executor",
             )
+
+
+class SubagentSpawnRetryTests(IsolatedAsyncioTestCase):
+    """Parallel spawns must not fail on transient Firestore 409 contention."""
+
+    def setUp(self) -> None:
+        self.transactional = patch(
+            "nexus.subagent_store.firestore.transactional",
+            side_effect=lambda function: function,
+        )
+        self.transactional.start()
+        self.addCleanup(self.transactional.stop)
+        for name, value in (
+            ("firestore_write_max_retries", 3),
+            ("firestore_write_backoff_base_ms", 1),
+            ("firestore_write_backoff_max_ms", 2),
+        ):
+            p = patch.object(settings, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.db = _Firestore()
+        self.repository = FirestoreSubagentRepository(db=self.db)
+
+    async def test_create_record_retries_then_succeeds_on_aborted(self) -> None:
+        original = self.repository._create_record_sync
+        calls = {"n": 0}
+
+        def flaky(payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Aborted("cross-transaction contention")
+            return original(payload)
+
+        with patch.object(
+            self.repository, "_create_record_sync", side_effect=flaky
+        ):
+            record = await self.repository.create_record(
+                _payload("subagent-retry")
+            )
+
+        # First attempt hit 409; the retry wrapper transparently recovered.
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(record["subagentId"], "subagent-retry")
+        stored = await self.repository.get_record(
+            subagent_id="subagent-retry",
+            owner_id="user-1",
+        )
+        self.assertIsNotNone(stored)
+
+    async def test_claim_retries_then_succeeds_on_aborted(self) -> None:
+        await self.repository.create_record(_payload("subagent-claim-retry"))
+        original = self.repository._claim_sync
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Aborted("cross-transaction contention")
+            return original(*args, **kwargs)
+
+        with patch.object(self.repository, "_claim_sync", side_effect=flaky):
+            claimed = await self.repository.claim(
+                subagent_id="subagent-claim-retry",
+                owner_id="user-1",
+                worker_id="worker-a",
+            )
+
+        self.assertEqual(calls["n"], 2)
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["leaseOwner"], "worker-a")
 

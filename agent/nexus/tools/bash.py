@@ -113,6 +113,7 @@ def run_command(command: str, background: bool = False) -> dict:
         stderr = str(result.get("stderr") or "")
         exit_code = _coerce_exit_code(result.get("exit_code", -1))
         compact = {
+            "status": "success" if exit_code == 0 else "error",
             "command": command,
             "summary": _build_summary(command, stdout, stderr, exit_code),
             "stdout_excerpt": _compact_output(stdout),
@@ -121,6 +122,9 @@ def run_command(command: str, background: bool = False) -> dict:
             "truncated": len(stdout) > _MAX_EXCERPT_CHARS or len(stderr) > _MAX_EXCERPT_CHARS,
             "exit_code": exit_code,
         }
+        if exit_code != 0:
+            compact["error_code"] = "NONZERO_EXIT"
+            compact["retryable"] = True
         # Reset screenshot cooldown so agent can screenshot right after
         from nexus.tools.screen import _last_call_time
         _last_call_time.t = 0.0
@@ -129,6 +133,7 @@ def run_command(command: str, background: bool = False) -> dict:
         logger.error("run_command failed: %s", e)
         error_text = str(e)
         return {
+            "status": "error",
             "command": command,
             "summary": _clip_text(f"{command}: {error_text}", _MAX_SUMMARY_CHARS),
             "stdout_excerpt": "",
@@ -136,4 +141,6 @@ def run_command(command: str, background: bool = False) -> dict:
             "line_count": 0,
             "truncated": False,
             "exit_code": -1,
+            "error_code": "COMMAND_EXCEPTION",
+            "retryable": True,
         }

@@ -169,7 +169,7 @@ def server_e2b_configured() -> bool:
 
 
 def shared_access_code_configured() -> bool:
-    if settings.model_provider in ("qwen", "bynara"):
+    if settings.model_provider in ("qwen", "bynara", "vultr"):
         return False
     return bool(settings.shared_access_code.strip())
 
@@ -203,7 +203,7 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     e2b_key_set = bool(_decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD)))
     gemini_key_set = bool(_decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD)))
     vertex_configured = server_vertex_configured()
-    shared_access_enabled = _shared_access_enabled(payload) or settings.model_provider in ("qwen", "bynara")
+    shared_access_enabled = _shared_access_enabled(payload) or settings.model_provider in ("qwen", "bynara", "vultr")
     shared_access_code_is_configured = shared_access_code_configured()
     server_e2b_is_configured = server_e2b_configured()
 
@@ -215,7 +215,7 @@ def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     if not (e2b_key_set or (shared_access_enabled and server_e2b_is_configured)):
         missing.append("e2b")
 
-    if settings.model_provider not in ("qwen", "bynara"):
+    if settings.model_provider not in ("qwen", "bynara", "vultr"):
         if gemini_provider == "vertex":
             if not (shared_access_enabled and vertex_configured) and not can_fallback_to_api_key:
                 if not shared_access_enabled:
@@ -250,7 +250,7 @@ def build_public_user_settings(user_settings: Mapping[str, Any] | None) -> dict[
         else None
     )
     require_byok = settings.require_byok or settings.beta_enforce_byok
-    if settings.model_provider in ("qwen", "bynara"):
+    if settings.model_provider in ("qwen", "bynara", "vultr"):
         require_byok = False
     return {
         "requireByok": require_byok,
@@ -467,7 +467,7 @@ def build_genai_client(
 def ensure_selected_gemini_provider_available(
     user_settings: Mapping[str, Any] | None,
 ) -> None:
-    if settings.model_provider in ("qwen", "bynara"):
+    if settings.model_provider in ("qwen", "bynara", "vultr"):
         return
     status = get_byok_status(user_settings)
     if status.gemini_provider != "vertex" or status.shared_vertex_available:
