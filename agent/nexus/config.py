@@ -218,6 +218,27 @@ class Settings(BaseSettings):
     # failures (blocked/approval) and empty responses still fail as before.
     deliver_answer_on_soft_veto: bool = True
 
+    # --- Reasoning-stream handling (provider-agnostic) ---
+    # How the model's intermediate reasoning/chain-of-thought is surfaced:
+    #   "hidden"  = never emitted to the client
+    #   "compact" = a single lightweight "Thinking..." status per reasoning burst
+    #   "full"    = the sanitized reasoning text (legacy behavior)
+    reasoning_visibility: str = "compact"
+    # Persist raw reasoning as role="thinking" history. Off by default so raw
+    # chain-of-thought never re-enters the model's own context on later turns.
+    persist_reasoning: bool = False
+    # True when the active provider/model folds reasoning_content into plain
+    # message text (reasoning models via OpenAI-compatible / normalize gateways,
+    # e.g. Vultr -normalize + Kimi). Then non-final text is treated as reasoning.
+    # Set False for providers that stream genuine partial answers as non-final.
+    reasoning_is_text: bool = True
+
+    # --- Turn idempotency ---
+    # Drop a duplicate text_input with identical content for the same session
+    # within this window (seconds). Guards against reconnect/replay resubmits
+    # and durable+live double-runs launching the same turn twice. 0 disables.
+    duplicate_turn_window_seconds: float = 10.0
+
     # --- Contention-free message IDs (Phase 3) ---
     # Generate time-ordered ULID message IDs + epoch-microsecond turnIndex and
     # bump messageCount via an atomic Increment, removing the shared-doc read

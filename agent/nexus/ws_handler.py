@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -494,6 +495,26 @@ async def handle_websocket(
                     if msg_type == "text_input":
                         text = data.get("text", "").strip()
                         if text:
+                            # Idempotency: drop an identical resubmission of the
+                            # same turn (WS reconnect replay, durable+live overlap)
+                            # within a short window. State lives on the session so
+                            # it survives reconnects (a new handler instance).
+                            _dupe_window = settings.duplicate_turn_window_seconds
+                            if _dupe_window > 0:
+                                _sig = hashlib.sha256(
+                                    f"{session.id}\x00{text}".encode("utf-8")
+                                ).hexdigest()
+                                _now = time.monotonic()
+                                _last_sig = getattr(session, "_last_turn_signature", None)
+                                _last_at = float(getattr(session, "_last_turn_at", 0.0) or 0.0)
+                                if _sig == _last_sig and (_now - _last_at) < _dupe_window:
+                                    logger.info(
+                                        "Dropping duplicate text_input for session %s (idempotency window)",
+                                        session.id,
+                                    )
+                                    continue
+                                session._last_turn_signature = _sig
+                                session._last_turn_at = _now
                             _touch_session()
                             connector_ids = [
                                 str(item).strip()

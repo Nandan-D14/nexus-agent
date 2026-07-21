@@ -23,6 +23,23 @@ export type ChatEvent = {
   [key: string]: unknown;
 };
 
+/**
+ * Defense in depth for displayed model-influenced text. A model gateway can
+ * leak JS coercion artifacts (a stringified reasoning payload becomes
+ * "[object Object]") into thinking/tool text. The backend sanitizes too, but
+ * the UI must never render this garbage. Also coerces non-strings safely.
+ */
+export function sanitizeDisplayText(value: unknown): string {
+  const text =
+    typeof value === "string" ? value : value == null ? "" : String(value);
+  if (!text) return "";
+  return text
+    .replace(/\s*,?\s*\[object (?:Object|Array|Null|Undefined)\]\s*,?/gi, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/ *\n */g, "\n")
+    .trim();
+}
+
 export type ToolInvocation = {
   kind: "tool_invocation";
   tool: string;
@@ -137,7 +154,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
     }
 
     if (event.type === "agent_thinking") {
-      const content = typeof event.content === "string" ? event.content : "Thinking...";
+      const content = sanitizeDisplayText(event.content) || "Thinking...";
 
       if (!currentTask) {
         taskIndex++;
@@ -203,7 +220,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
 
     if (event.type === "agent_tool_result") {
       const tool = String(event.tool || "");
-      const output = String(event.output || "Success");
+      const output = sanitizeDisplayText(event.output) || "Success";
       const stepId = typeof event.step_id === "string" ? event.step_id : undefined;
       const status = typeof event.status === "string" ? event.status : "success";
 

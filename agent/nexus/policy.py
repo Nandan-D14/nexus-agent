@@ -145,10 +145,22 @@ def evaluate_tool_policy(
         )
 
     if mode == "manual" and normalized_tool.startswith(("gmail_", "calendar_", "tasks_", "github_", "drive_")):
+        # Only gate connector calls that MODIFY data. Read-only connector reads
+        # (gmail_read, gmail_search, calendar_list, read_drive_file, github_read_*,
+        # etc.) are allowed without a per-call prompt so a batch of reads in one
+        # turn does not spam approvals. Mutating verbs still require approval.
+        # (Explicit mutating tools are already caught by _EXTERNAL_SIDE_EFFECT_TOOLS
+        # above; this regex covers any other mutating connector action.)
+        if _MCP_SIDE_EFFECT_RE.search(normalized_tool):
+            return ToolPolicyDecision(
+                "require_approval",
+                "Manual mode requires approval for connector actions that modify data.",
+                "medium",
+            )
         return ToolPolicyDecision(
-            "require_approval",
-            "Manual mode requires approval for connector actions.",
-            "medium",
+            "allow",
+            "Read-only connector call allowed.",
+            "low",
         )
 
     return ToolPolicyDecision("allow", "Allowed by current autonomy policy.", "low")

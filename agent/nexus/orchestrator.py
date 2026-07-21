@@ -52,6 +52,7 @@ from nexus.tools._context import (
     get_task_budget_guard,
 )
 from nexus.config import settings
+from nexus.output_normalization import classify_part, sanitize_stream_text
 from nexus.control_loop import (
     ActionDecision,
     ActionLedger,
@@ -214,7 +215,14 @@ class NexusOrchestrator:
         self._current_turn_step_id: str | None = None
         self._tool_step_ids: dict[str, list[str]] = {}
         self._tool_trace_steps: dict[str, list[dict[str, Any]]] = {}
+        # Correlate tool results to their originating call by function-call id
+        # (robust when the same tool is invoked multiple times in one turn).
+        # Falls back to the tool_name FIFO maps above when an id is absent.
+        self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._current_thinking: str = ""
+        # Compact-reasoning: whether a "Thinking..." status was already emitted
+        # for the current reasoning burst (reset per turn and per tool phase).
+        self._reasoning_status_emitted: bool = False
         self._action_ledger = ActionLedger()
         self.last_turn_result: dict[str, Any] | None = None
         self._resume_checkpoint: dict[str, Any] = {}
@@ -1316,6 +1324,16 @@ class NexusOrchestrator:
         uploaded_files: list[dict[str, Any]] | None,
     ) -> str:
         sections: list[str] = []
+        # Runtime grounding: always tell the model the current date/time so it
+        # never guesses "today" (which caused wrong date-range reasoning). Kept
+        # in the per-turn user context (not the cached system prompt) so the
+        # volatile timestamp does not break KV-cache reuse of the prefix.
+        now = datetime.now(timezone.utc)
+        sections.append(
+            "[RUNTIME CONTEXT]\n"
+            f"Current date/time (UTC): {now.strftime('%Y-%m-%d %H:%M')} "
+            f"({now.strftime('%A, %d %B %Y')})"
+        )
         normalized_connectors = [
             str(item).strip()
             for item in (connector_ids or [])
@@ -1760,6 +1778,8 @@ class NexusOrchestrator:
         self._resume_checkpoint = {}
         self.last_turn_result = None
         self._current_thinking = ""
+        self._reasoning_status_emitted = False
+        self._pending_tool_calls.clear()
         self._budget_stop_requested = False
         self._budget_stop_reason = ""
         if self._trace_context.run_id != (self._current_run_id or ""):
@@ -2253,6 +2273,34 @@ class NexusOrchestrator:
                 "summary": str(exc) or "Agent encountered an error processing your request.",
             }
 
+    async def _emit_reasoning(self, text: str) -> None:
+        """Apply the reasoning visibility + persistence policy to one burst.
+
+        ``settings.reasoning_visibility``:
+          - "hidden":  never emit reasoning to the client.
+          - "compact": emit a single lightweight status per reasoning burst
+            (reset whenever a tool phase starts), never the raw tokens.
+          - "full":    emit the sanitized reasoning text (legacy behavior).
+        Raw reasoning is persisted only when ``settings.persist_reasoning`` is
+        true, so chain-of-thought does not re-enter the model's context later.
+        """
+        if settings.persist_reasoning:
+            self._current_thinking += text
+
+        visibility = settings.reasoning_visibility
+        if visibility == "hidden":
+            return
+        if visibility == "compact":
+            if not self._reasoning_status_emitted:
+                self._reasoning_status_emitted = True
+                await self._send_json({
+                    "type": "agent_thinking",
+                    "content": "Thinking...",
+                })
+            return
+        # "full" (or any unknown value): sanitized reasoning text.
+        await self._send_json({"type": "agent_thinking", "content": text})
+
     async def _on_agent_event(self, event: Any) -> None:
         """Callback for each ADK agent event — stream to frontend."""
         if not hasattr(self, "_action_ledger"):
@@ -2376,6 +2424,16 @@ class NexusOrchestrator:
                     "started_ms": trace_started_ms,
                     "call_id": call_id,
                 })
+                if call_id:
+                    self._pending_tool_calls[call_id] = {
+                        "tool_name": tool_name,
+                        "workflow_step_id": step_id,
+                        "trace_step_id": trace_step_id,
+                        "started_ms": trace_started_ms,
+                    }
+                # New tool phase -> allow one fresh compact "Thinking..." status
+                # for the reasoning burst that follows this call's result.
+                self._reasoning_status_emitted = False
                 
                 import json
                 await self._persist_message(
@@ -2411,11 +2469,22 @@ class NexusOrchestrator:
                 self._raise_if_agent_should_stop()
                 text = getattr(part, "text", None)
                 if text and not is_final:
-                    self._current_thinking += text
-                    await self._send_json({
-                        "type": "agent_thinking",
-                        "content": text,
-                    })
+                    clean = sanitize_stream_text(text)
+                    if not clean:
+                        continue
+                    kind = classify_part(
+                        part, reasoning_is_text=settings.reasoning_is_text
+                    )
+                    if kind == "reasoning":
+                        await self._emit_reasoning(clean)
+                    else:
+                        # Genuine intermediate answer text (non-reasoning
+                        # providers): keep prior behavior, sanitized.
+                        self._current_thinking += clean
+                        await self._send_json({
+                            "type": "agent_thinking",
+                            "content": clean,
+                        })
 
                 fn_resp = getattr(part, "function_response", None)
                 if fn_resp:
@@ -2427,18 +2496,48 @@ class NexusOrchestrator:
                         or output_mapping.get("description")
                         or output if output is not None else ""
                     )[:2000]
+                    resp_id = str(self._get_attr(fn_resp, "id", "call_id") or "")
                     step_id = None
-                    pending_steps = self._tool_step_ids.get(tool_name, [])
-                    if pending_steps:
-                        step_id = pending_steps.pop(0)
-                        if not pending_steps:
-                            self._tool_step_ids.pop(tool_name, None)
                     trace_step: dict[str, Any] = {}
-                    pending_trace_steps = self._tool_trace_steps.get(tool_name, [])
-                    if pending_trace_steps:
-                        trace_step = pending_trace_steps.pop(0)
-                        if not pending_trace_steps:
-                            self._tool_trace_steps.pop(tool_name, None)
+                    matched = (
+                        self._pending_tool_calls.pop(resp_id, None)
+                        if resp_id
+                        else None
+                    )
+                    if matched is not None:
+                        # Precise: pair by function-call id. Keep the tool_name
+                        # FIFO maps in sync by removing the matched entries.
+                        step_id = matched.get("workflow_step_id")
+                        trace_step = {
+                            "step_id": matched.get("trace_step_id"),
+                            "workflow_step_id": matched.get("workflow_step_id"),
+                            "started_ms": matched.get("started_ms"),
+                            "call_id": resp_id,
+                        }
+                        name_steps = self._tool_step_ids.get(tool_name)
+                        if name_steps and step_id in name_steps:
+                            name_steps.remove(step_id)
+                            if not name_steps:
+                                self._tool_step_ids.pop(tool_name, None)
+                        name_traces = self._tool_trace_steps.get(tool_name)
+                        if name_traces:
+                            self._tool_trace_steps[tool_name] = [
+                                t for t in name_traces if t.get("call_id") != resp_id
+                            ]
+                            if not self._tool_trace_steps[tool_name]:
+                                self._tool_trace_steps.pop(tool_name, None)
+                    else:
+                        # Fallback: no id available -> FIFO by tool name.
+                        pending_steps = self._tool_step_ids.get(tool_name, [])
+                        if pending_steps:
+                            step_id = pending_steps.pop(0)
+                            if not pending_steps:
+                                self._tool_step_ids.pop(tool_name, None)
+                        pending_trace_steps = self._tool_trace_steps.get(tool_name, [])
+                        if pending_trace_steps:
+                            trace_step = pending_trace_steps.pop(0)
+                            if not pending_trace_steps:
+                                self._tool_trace_steps.pop(tool_name, None)
                     trace_step_id = str(
                         trace_step.get("step_id") or self._get_attr(fn_resp, "id") or new_step_id("tool")
                     )
