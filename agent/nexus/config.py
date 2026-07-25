@@ -222,8 +222,9 @@ class Settings(BaseSettings):
     # How the model's intermediate reasoning/chain-of-thought is surfaced:
     #   "hidden"  = never emitted to the client
     #   "compact" = a single lightweight "Thinking..." status per reasoning burst
-    #   "full"    = the sanitized reasoning text (legacy behavior)
-    reasoning_visibility: str = "compact"
+    #   "full"    = the sanitized reasoning text (real thinking, artifacts removed)
+    # Default "full": users should see the actual (cleaned) reasoning, not a stub.
+    reasoning_visibility: str = "full"
     # Persist raw reasoning as role="thinking" history. Off by default so raw
     # chain-of-thought never re-enters the model's own context on later turns.
     persist_reasoning: bool = False

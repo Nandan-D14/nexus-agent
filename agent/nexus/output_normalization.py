@@ -79,13 +79,21 @@ def classify_part(part: Any, *, reasoning_is_text: bool = False) -> PartKind:
 
     Defaults to ``"answer"`` so non-reasoning providers keep prior behavior.
     """
+    return "reasoning" if is_reasoning_part(part, reasoning_is_text=reasoning_is_text) else "answer"
+
+
+def is_reasoning_part(part: Any, *, reasoning_is_text: bool = False) -> bool:
+    """Single source of truth for "is this content part reasoning, not answer".
+
+    Used at every consumption point (streaming emit AND final-answer selection)
+    so reasoning is never mistaken for the user-facing answer. See
+    :func:`classify_part` for the signal priority.
+    """
     if bool(getattr(part, "thought", False)):
-        return "reasoning"
+        return True
     if getattr(part, "reasoning_content", None) or getattr(part, "reasoning", None):
-        return "reasoning"
-    if reasoning_is_text:
-        return "reasoning"
-    return "answer"
+        return True
+    return bool(reasoning_is_text)
 
 
-__all__ = ["PartKind", "sanitize_stream_text", "classify_part"]
+__all__ = ["PartKind", "sanitize_stream_text", "classify_part", "is_reasoning_part"]

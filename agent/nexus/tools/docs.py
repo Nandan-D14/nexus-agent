@@ -457,6 +457,10 @@ sys.exit(1)
                 "engine": payload.get("engine", "unknown"),
             },
         )
+        # Emit the durable artifact to the UI directly. The orchestrator excludes
+        # self-persisting document tools from its reference-artifact path, so this
+        # is the single canonical artifact for this file (one id everywhere).
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -473,10 +477,13 @@ sys.exit(1)
         }
     except Exception as e:
         logger.exception("Failed to promote PDF to artifact")
+        # Durable persistence is required: a file only in the ephemeral sandbox
+        # is not a deliverable. Report failure instead of faking success.
         return {
-            "status": "success",
-            "summary": f"PDF generated at {filename} but failed to upload to storage: {e}",
+            "status": "error",
+            "summary": f"PDF generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }
 
 
@@ -581,7 +588,17 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
     session_id = get_session_id()
     run_id = get_run_id()
     history_repo = get_history_repository()
-    
+
+    # Reject path traversal so a promoted artifact always maps to a stable,
+    # workspace-relative GCS blob (never escapes the run's namespace).
+    if ".." in (path or "").replace("\\", "/").split("/"):
+        return {
+            "status": "error",
+            "summary": f"Invalid path (traversal not allowed): {path}",
+            "detail": None,
+            "error_code": "INVALID_ARTIFACT_PATH",
+        }
+
     if not sandbox.path_exists(path):
         return {
             "status": "error",
@@ -625,7 +642,8 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             url=gcs_url,
             metadata=metadata,
         )
-        
+        await _notify_artifact_created(artifact)
+
         return {
             "status": "success",
             "summary": f"Promoted {path} to artifact.",
@@ -781,6 +799,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 "row_count": len(rows),
             },
         )
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -796,9 +815,10 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
     except Exception as e:
         logger.exception("Failed to promote Excel to artifact")
         return {
-            "status": "success",
-            "summary": f"Excel generated at {filename} but failed to upload: {e}",
+            "status": "error",
+            "summary": f"Excel generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }
 
 
@@ -935,6 +955,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 "size": payload.get("size", 0),
             },
         )
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -950,7 +971,8 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
     except Exception as e:
         logger.exception("Failed to promote DOCX to artifact")
         return {
-            "status": "success",
-            "summary": f"DOCX generated at {filename} but failed to upload: {e}",
+            "status": "error",
+            "summary": f"DOCX generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }

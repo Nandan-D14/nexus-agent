@@ -206,8 +206,14 @@ class AgentTurnRunner:
                     if isinstance(turn_result.get("verification"), dict)
                     else {}
                 )
+                # Delivered-with-caveat is terminal success: normalize any legacy
+                # "completed_with_caveat" to "completed" so the durable worker
+                # finishes the run once and never re-enqueues a retry.
+                normalized_status = str(turn_result.get("status") or "failed")
+                if normalized_status == "completed_with_caveat":
+                    normalized_status = "completed"
                 return AgentTurnOutcome(
-                    status=str(turn_result.get("status") or "failed"),
+                    status=normalized_status,
                     summary=str(turn_result.get("summary") or ""),
                     final_response=str(turn_result.get("final_response") or ""),
                     verification=verification,

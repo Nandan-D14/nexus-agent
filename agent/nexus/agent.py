@@ -15,6 +15,7 @@ from google.genai import types
 
 from nexus.config import settings
 from nexus.debug_trace import emit_debug_trace
+from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.session_service import FirestoreSessionService
 from nexus.usage import (
@@ -186,7 +187,12 @@ async def run_agent_turn(
                         if getattr(part, "function_response", None)
                     )
                     for part in event.content.parts:
-                        if getattr(part, "text", None):
+                        # Only genuine answer text may become the response.
+                        # Skip parts EXPLICITLY marked as reasoning (thought=True
+                        # or reasoning fields). Do NOT apply the reasoning_is_text
+                        # blanket here: that heuristic is for routing the live
+                        # think-log stream; final/last answer text is the answer.
+                        if getattr(part, "text", None) and not is_reasoning_part(part):
                             last_text = part.text
 
                 if (
@@ -195,7 +201,7 @@ async def run_agent_turn(
                     and event.content.parts
                 ):
                     for part in event.content.parts:
-                        if part.text:
+                        if part.text and not is_reasoning_part(part):
                             final_text = part.text
                             break
 

@@ -1812,13 +1812,18 @@ class NexusOrchestrator:
             },
         )
         # endregion agent log
+        # Persist ONLY the original user request in the user-visible step. The
+        # composed `message` also carries the resume checkpoint, connector
+        # context, and internal repair directives, which must never surface in
+        # the workflow panel. `completion_request` is the clean original request.
+        display_request = completion_request if completion_request is not None else message
         self._current_turn_step_id = await self._create_step(
             step_type="agent_turn",
             title="Process request",
-            detail=self._clip_text(message, 320),
+            detail=self._clip_text(display_request, 320),
             source=source,
             metadata={
-                "input": self._clip_text(message, 1200),
+                "input": self._clip_text(display_request, 1200),
                 "source": source,
                 "trace_id": self._trace_context.trace_id,
             },
@@ -1829,6 +1834,11 @@ class NexusOrchestrator:
         )
         try:
             result = await self._agent_task
+            # Defensive: a delivered-with-caveat turn is terminal success. Map any
+            # legacy "completed_with_caveat" to the canonical "completed" so it is
+            # never treated as a failure or retried.
+            if isinstance(result, dict) and result.get("status") == "completed_with_caveat":
+                result["status"] = "completed"
             self.last_turn_result = dict(result)
             if result["status"] == "completed":
                 await self._complete_step(
@@ -2093,10 +2103,17 @@ class NexusOrchestrator:
                     })
                     await self._save_final_response(final_response)
                     await self._mark_summary(final_response)
+                    # Canonical terminal success: the answer was delivered. Use
+                    # status="completed" (not a bespoke string) so every layer --
+                    # orchestrator entrypoint, agent_turn_runner, task_worker,
+                    # production_tasks -- treats it as success and NEVER retries.
+                    # The advisory caveat rides along in metadata + the emitted
+                    # verification_caveat event, not as a distinct status.
                     return {
-                        "status": "completed_with_caveat",
+                        "status": "completed",
                         "summary": final_response,
                         "final_response": final_response,
+                        "caveat": caveat,
                         "verification": completion_verification.to_dict(),
                     }
                 failure_summary = completion_verification.summary
@@ -3676,14 +3693,34 @@ class NexusOrchestrator:
             status="cancelled" if "cancel" in result.lower() else "failed",
         )
 
+    # Document tools that create, upload, AND emit their own durable artifact
+    # via the artifact callback. Excluded from reference-artifact minting so one
+    # generated file yields exactly one artifact id.
+    _SELF_PERSISTING_ARTIFACT_TOOLS = frozenset({
+        "publish_html_artifact",
+        "generate_pdf_report",
+        "generate_excel_report",
+        "generate_docx_report",
+        "save_as_artifact",
+    })
+
     def _extract_reference_artifact(
         self,
         tool_name: str,
         output_mapping: dict[str, Any],
         output_str: str,
     ) -> dict[str, Any] | None:
-        if tool_name == "publish_html_artifact":
+        # Tools that create AND emit their own durable artifact (with GCS
+        # bucket/blob metadata) must NOT get a second "reference" artifact minted
+        # here -- that produced duplicate ids and a metadata-poor copy that the
+        # UI showed instead of the durable one.
+        if tool_name in self._SELF_PERSISTING_ARTIFACT_TOOLS:
             return None
+        # Defense in depth: if any tool result already reports an artifact_id, it
+        # has already persisted+emitted its artifact; do not duplicate it.
+        for container in (output_mapping, output_mapping.get("detail"), output_mapping.get("metadata")):
+            if isinstance(container, dict) and str(container.get("artifact_id") or "").strip():
+                return None
         if tool_name == "take_screenshot":
             description = output_mapping.get("description") if isinstance(output_mapping.get("description"), str) else output_str
             return {
