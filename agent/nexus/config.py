@@ -240,6 +240,15 @@ class Settings(BaseSettings):
     # and durable+live double-runs launching the same turn twice. 0 disables.
     duplicate_turn_window_seconds: float = 10.0
 
+    # --- Tool-call boundary integrity ---
+    # Force one tool call per assistant turn (parallel_tool_calls=False) at the
+    # model client, matching the planner's "act with ONE tool" loop. Prevents the
+    # model from batching duplicate/parallel calls that collide on tool-call IDs
+    # at the OpenAI-compatible boundary (the class behind repeated side effects
+    # such as sending the same email twice). Also repairs missing/duplicate
+    # tool-call IDs on materialized (non-streaming) responses as defense-in-depth.
+    disable_parallel_tool_calls: bool = True
+
     # --- Contention-free message IDs (Phase 3) ---
     # Generate time-ordered ULID message IDs + epoch-microsecond turnIndex and
     # bump messageCount via an atomic Increment, removing the shared-doc read

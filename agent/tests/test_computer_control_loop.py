@@ -208,3 +208,70 @@ def test_completion_requires_sources_for_a_structured_deep_research_task() -> No
 
     assert result.verified is False
     assert result.error_code == "MISSING_SOURCE_EVIDENCE"
+
+
+def _deep_research_ledger_with_source() -> ActionLedger:
+    ledger = ActionLedger()
+    _record(
+        ledger,
+        action_id="1",
+        tool="initialize_task_state",
+        metadata={"task_type": "deep_research"},
+    )
+    _record(
+        ledger,
+        action_id="2",
+        tool="web_search",
+        results=[{"title": "Rain today", "url": "https://weather.example.com/rain"}],
+    )
+    # Round-trip through serialization to prove sources survive from_dict.
+    return ActionLedger.from_dict(ledger.to_dict())
+
+
+def test_deep_research_with_sources_but_no_citation_flags_missing_citations() -> None:
+    ledger = _deep_research_ledger_with_source()
+    assert ledger.all_sources(), "structured sources should be aggregated from web_search"
+    result = verify_completion(
+        request="research rain",
+        final_response="It is warm.",
+        ledger=ledger,
+    )
+
+    assert result.verified is False
+    assert result.error_code == "MISSING_FINAL_CITATIONS"
+
+
+def test_deep_research_with_sources_and_cited_url_is_verified() -> None:
+    ledger = _deep_research_ledger_with_source()
+    result = verify_completion(
+        request="research rain",
+        final_response="It will rain. Source: https://weather.example.com/rain",
+        ledger=ledger,
+    )
+
+    assert result.verified is True
+
+
+def test_worker_reported_sources_satisfy_source_evidence() -> None:
+    ledger = ActionLedger()
+    _record(
+        ledger,
+        action_id="1",
+        tool="initialize_task_state",
+        metadata={"task_type": "deep_research"},
+    )
+    # A worker/subagent surfaces structured sources it gathered internally.
+    _record(
+        ledger,
+        action_id="2",
+        tool="terminal_worker",
+        sources=[{"title": "Report", "url": "https://example.com/report"}],
+    )
+    ledger = ActionLedger.from_dict(ledger.to_dict())
+    result = verify_completion(
+        request="research topic",
+        final_response="Findings summarized. See https://example.com/report",
+        ledger=ledger,
+    )
+
+    assert result.verified is True

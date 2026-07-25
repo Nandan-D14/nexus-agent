@@ -18,6 +18,7 @@ from typing import Any
 
 from google.adk.models.lite_llm import LiteLlm
 from nexus.config import settings
+from nexus.router_common import apply_tool_call_policy, repair_tool_call_ids
 
 logger = logging.getLogger(__name__)
 
@@ -34,26 +35,34 @@ class VultrRouterClient:
         model_name = model
         if model_name.startswith("openai/"):
             model_name = model_name[len("openai/"):]
+        kwargs = apply_tool_call_policy(kwargs, tools)
         logger.info("Routing request asynchronously to Vultr model: %s", model_name)
-        return await self.router.acompletion(
+        response = await self.router.acompletion(
             model=model_name,
             messages=messages,
             tools=tools,
             **kwargs,
         )
+        if not kwargs.get("stream"):
+            repair_tool_call_ids(response)
+        return response
 
     def completion(self, model, messages, tools, stream=False, **kwargs):
         model_name = model
         if model_name.startswith("openai/"):
             model_name = model_name[len("openai/"):]
+        kwargs = apply_tool_call_policy(kwargs, tools)
         logger.info("Routing request synchronously to Vultr model: %s", model_name)
-        return self.router.completion(
+        response = self.router.completion(
             model=model_name,
             messages=messages,
             tools=tools,
             stream=stream,
             **kwargs,
         )
+        if not stream:
+            repair_tool_call_ids(response)
+        return response
 
 
 def _configured_vultr_models() -> list[str]:

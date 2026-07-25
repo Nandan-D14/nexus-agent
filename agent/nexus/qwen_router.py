@@ -11,6 +11,7 @@ import os
 from typing import Any
 from google.adk.models.lite_llm import LiteLlm
 from nexus.config import settings
+from nexus.router_common import apply_tool_call_policy, repair_tool_call_ids
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +80,15 @@ class QwenRouterClient:
         sanitized_messages = _sanitize_messages_for_qwen(messages)
         sanitized_tools = _sanitize_tools_for_qwen(tools)
         logger.info("Routing request asynchronously to Qwen model: %s", model_name)
-        return await self.router.acompletion(
+        response = await self.router.acompletion(
             model=model_name,
             messages=sanitized_messages,
             tools=sanitized_tools,
             **kwargs,
         )
+        if not kwargs.get("stream"):
+            repair_tool_call_ids(response)
+        return response
 
     def completion(self, model, messages, tools, stream=False, **kwargs):
         model_name = model
@@ -95,13 +99,16 @@ class QwenRouterClient:
         sanitized_messages = _sanitize_messages_for_qwen(messages)
         sanitized_tools = _sanitize_tools_for_qwen(tools)
         logger.info("Routing request synchronously to Qwen model: %s", model_name)
-        return self.router.completion(
+        response = self.router.completion(
             model=model_name,
             messages=sanitized_messages,
             tools=sanitized_tools,
             stream=stream,
             **kwargs,
         )
+        if not stream:
+            repair_tool_call_ids(response)
+        return response
 
 _qwen_router = None
 
@@ -146,7 +153,7 @@ def _normalize_qwen_request_kwargs(
         # Model Studio reasoning models reject required/object tool_choice. "auto"
         # still permits tool calls and avoids a provider-side 400.
         normalized["tool_choice"] = "auto"
-    return normalized
+    return apply_tool_call_policy(normalized, tools)
 
 def get_qwen_router():
     global _qwen_router

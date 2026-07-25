@@ -105,6 +105,83 @@ def _artifact_list(value: Any) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _citation_key(url: str | None, saved: str | None, idx: int) -> str:
+    from urllib.parse import urlparse
+
+    if url:
+        try:
+            host = urlparse(url).netloc.replace("www.", "")
+            base = re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")
+            if base:
+                return f"{base}-{idx}"
+        except Exception:
+            pass
+    if saved:
+        base = re.sub(r"[^a-z0-9]+", "-", str(saved).lower().rsplit("/", 1)[-1]).strip("-")
+        if base:
+            return f"{base}-{idx}"
+    return f"src-{idx}"
+
+
+def _normalize_sources(
+    *,
+    explicit: Any,
+    results: Any,
+    tool_name: str,
+    scrape_url: str | None,
+    scrape_title: str | None,
+    saved_path: str | None,
+) -> list[dict[str, Any]]:
+    """Build a structured source list {title,url,provider,verification,citation_key,saved_path?}.
+
+    Accepts three shapes, provider-agnostic so any tool/worker/subagent/workflow
+    that reports sources (explicit ``sources``), search results (``results``), or
+    a captured page contributes uniformly.
+    """
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add(title, url, provider, verification, saved):
+        url_s = str(url).strip() if url else ""
+        saved_s = str(saved).strip() if saved else ""
+        key = url_s.lower() or saved_s.lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        idx = len(sources) + 1
+        entry: dict[str, Any] = {
+            "title": str(title or url_s or saved_s or f"source {idx}")[:300],
+            "url": url_s or None,
+            "provider": str(provider or tool_name or "")[:60],
+            "verification": verification,
+            "citation_key": _citation_key(url_s or None, saved_s or None, idx),
+        }
+        if saved_s:
+            entry["saved_path"] = saved_s
+        sources.append(entry)
+
+    if isinstance(explicit, list):
+        for item in explicit:
+            if isinstance(item, Mapping):
+                _add(
+                    item.get("title"),
+                    item.get("url"),
+                    item.get("provider"),
+                    str(item.get("verification") or "search_only"),
+                    item.get("saved_path") or item.get("source"),
+                )
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, Mapping):
+                url = item.get("url")
+                saved = item.get("saved_path") or item.get("source")
+                verification = "captured" if saved and not url else "search_only"
+                _add(item.get("title"), url, tool_name, verification, saved)
+    if scrape_url or saved_path:
+        _add(scrape_title, scrape_url, tool_name, "captured", saved_path)
+    return sources[:30]
+
+
 def _verification_method(tool_name: str) -> str:
     if tool_name in GUI_MUTATIONS:
         return "dom_or_screen_state"
@@ -177,6 +254,7 @@ class ActionObservation:
     status: str
     evidence: list[str] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    sources: list[dict[str, Any]] = field(default_factory=list)
     remaining_work: list[str] = field(default_factory=list)
     retryable: bool = False
     error_code: str = ""
@@ -230,6 +308,38 @@ class ActionObservation:
                 or detail_map.get("url")
             )
             artifacts = _artifact_list(candidate or {"tool": tool_name})
+        # Scrape metadata only counts as a captured source for the scrape tool;
+        # other tools (e.g. web_search) also carry a saved_path for their dump
+        # which must not masquerade as an individually captured page.
+        is_capture_tool = tool_name == "scrape_web_page"
+        sources = _normalize_sources(
+            explicit=(
+                payload.get("sources")
+                or detail_map.get("sources")
+                or metadata_map.get("sources")
+            ),
+            results=(
+                metadata_map.get("results")
+                or detail_map.get("results")
+                or payload.get("results")
+            ),
+            tool_name=tool_name,
+            scrape_url=(
+                (metadata_map.get("url") or detail_map.get("url") or payload.get("url"))
+                if is_capture_tool
+                else None
+            ),
+            scrape_title=(
+                (metadata_map.get("title") or detail_map.get("title"))
+                if is_capture_tool
+                else None
+            ),
+            saved_path=(
+                (metadata_map.get("saved_path") or detail_map.get("saved_path"))
+                if is_capture_tool
+                else None
+            ),
+        )
         remaining = _text_list(
             payload.get("remaining_work") or detail_map.get("remaining_work")
         )
@@ -250,6 +360,7 @@ class ActionObservation:
             status=status,
             evidence=[item[:1000] for item in evidence[:12]],
             artifacts=artifacts[:20],
+            sources=sources,
             remaining_work=[item[:500] for item in remaining[:20]],
             retryable=bool(
                 payload.get("retryable")
@@ -325,6 +436,11 @@ class ActionLedger:
                         status=str(observation_data.get("status") or "error"),
                         evidence=_text_list(observation_data.get("evidence")),
                         artifacts=_artifact_list(observation_data.get("artifacts")),
+                        sources=[
+                            dict(item)
+                            for item in (observation_data.get("sources") or [])
+                            if isinstance(item, Mapping)
+                        ],
                         remaining_work=_text_list(
                             observation_data.get("remaining_work")
                         ),
@@ -427,6 +543,31 @@ class ActionLedger:
             if record.observation:
                 values.extend(record.observation.remaining_work)
         return list(dict.fromkeys(item for item in values if item.strip()))
+
+    def all_sources(self) -> list[dict[str, Any]]:
+        """Structured sources gathered by successful actions, deduped.
+
+        Aggregates ``ActionObservation.sources`` across the ledger so that
+        evidence gathered directly (web_search/scrape) or reported by a
+        worker/subagent/workflow result all count uniformly.
+        """
+        seen: set[str] = set()
+        collected: list[dict[str, Any]] = []
+        for record in self.records:
+            observation = record.observation
+            if observation is None or observation.status not in SUCCESS_STATUSES:
+                continue
+            for source in observation.sources:
+                key = str(
+                    source.get("url")
+                    or source.get("saved_path")
+                    or source.get("citation_key")
+                    or ""
+                ).lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    collected.append(source)
+        return collected
 
     def successful_tools(self) -> set[str]:
         return {
@@ -565,15 +706,40 @@ def verify_completion(
         )
 
     if ledger.requires_source_evidence():
-        successful = ledger.successful_tools()
-        if not (successful & SOURCE_TOOLS) or not re.search(r"https?://", response):
+        sources = ledger.all_sources()
+        if not sources:
             return CompletionVerification(
                 verified=False,
                 status="failed",
                 method="source_result",
-                summary="Research completion requires source-tool evidence and cited URLs.",
+                summary="Research completion requires gathered source evidence.",
                 error_code="MISSING_SOURCE_EVIDENCE",
-                remaining_work=["Gather source evidence and cite the URLs in the final response."],
+                remaining_work=[
+                    "Gather sources with web_search, tavily_search, "
+                    "scrape_web_page, or search_sources before answering."
+                ],
+                retryable=True,
+            )
+        cited = bool(re.search(r"https?://", response)) or any(
+            (source.get("citation_key") and source["citation_key"] in response)
+            or (source.get("url") and source["url"] in response)
+            for source in sources
+        )
+        if not cited:
+            return CompletionVerification(
+                verified=False,
+                status="failed",
+                method="source_result",
+                summary="Sources were gathered but the final response does not cite them.",
+                error_code="MISSING_FINAL_CITATIONS",
+                evidence=[
+                    str(source.get("url") or source.get("citation_key"))
+                    for source in sources[:4]
+                    if source.get("url") or source.get("citation_key")
+                ],
+                remaining_work=[
+                    "Cite the gathered sources (URLs) inline in the final response."
+                ],
                 retryable=True,
             )
 

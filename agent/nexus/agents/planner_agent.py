@@ -82,6 +82,8 @@ def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
     )
     artifacts = payload.get("artifacts")
     artifact_items = artifacts if isinstance(artifacts, list) else []
+    sources = payload.get("sources")
+    source_items = [item for item in sources if isinstance(item, dict)] if isinstance(sources, list) else []
     remaining = payload.get("remaining_work")
     remaining_items = (
         [str(item)[:500] for item in remaining]
@@ -100,6 +102,7 @@ def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
         "summary": summary[:1000],
         "evidence": evidence_items[:12],
         "artifacts": artifact_items[:20],
+        "sources": source_items[:30],
         "remaining_work": remaining_items[:20],
         "retryable": bool(payload.get("retryable", status in {"partial", "error"})),
         "error_code": error_code,
