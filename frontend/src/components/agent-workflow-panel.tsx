@@ -34,6 +34,7 @@ import {
   providerLabel,
 } from "@/lib/agent-tool-classification";
 import { authenticatedFetch } from "@/lib/api-client";
+import { normalizeSearchResults } from "@/lib/search-result-utils";
 import { Download, Eye, LayoutGrid } from "lucide-react";
 
 export type WorkflowRun = {
@@ -853,16 +854,3 @@ function booleanValue(...values: unknown[]): boolean | undefined {
   return undefined;
 }
 
-function normalizeSearchResults(values: unknown[]) {
-  return values
-    .map((value) => {
-      const item = objectValue(value);
-      if (!item) return null;
-      return {
-        title: stringValue(item.title, item.name) ?? "",
-        url: stringValue(item.url, item.href, item.link) ?? "",
-        snippet: stringValue(item.snippet, item.body, item.description, item.summary) ?? "",
-      };
-    })
-    .filter((item): item is { title: string; url: string; snippet: string } => Boolean(item));
-}

@@ -6,6 +6,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Caveat } from "next/font/google";
 import "./globals.css";
+import "@/styles/globals.css";
 // Thesys C1 Generative UI styles (required by C1Component)
 import "@crayonai/react-ui/styles/index.css";
 

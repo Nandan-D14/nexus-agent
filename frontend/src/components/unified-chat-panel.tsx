@@ -9,6 +9,13 @@ import { useMemo, useRef, useEffect, useState, memo, type ReactNode } from "reac
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { StreamingText } from "@/components/streaming-text";
 import { PermissionCard } from "@/components/permission-card";
+import {
+  AgentQuestionCard,
+  TextResponse,
+  ThinkingState,
+  WebSearchCard,
+} from "@/components/agent-ui";
+import { parseSearchToolOutput } from "@/lib/search-result-utils";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -302,14 +309,13 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                 <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center shadow-md shadow-blue-600/20">
                   <MessageSquare className="w-3.5 h-3.5 text-white" />
                 </div>
-                <motion.span
+                <motion.div
                   key={phase}
                   initial={{ opacity: 0, x: 5 }}
                   animate={{ opacity: 1, x: 0 }}
-                  className="text-[14px] font-medium text-zinc-400 dark:text-zinc-500 tracking-wide"
                 >
-                  {phaseLabel}
-                </motion.span>
+                  <ThinkingState label={phaseLabel} />
+                </motion.div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -460,7 +466,7 @@ function TurnBlock({
         if (item.kind === "user_question") {
           return (
             <motion.div layout key={`question-${item.data.question_id}`} className="py-1">
-              <UserQuestionCard
+              <AgentQuestionCard
                 questionId={item.data.question_id}
                 question={item.data.question}
                 answered={item.data.answered}
@@ -497,11 +503,11 @@ function UserMessageCard({ text }: { text: string }) {
 function AgentMessageCard({ text, stream = false }: { text: string; stream?: boolean }) {
   return (
     <motion.div layout className="flex flex-col items-start w-full">
-      <div className="w-full text-[15px] leading-[1.75] text-zinc-800 dark:text-zinc-100 font-medium">
+      <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
         {stream ? (
           <StreamingText text={text} isStreaming={stream} />
         ) : (
-          <ChatMarkdown content={text} />
+          <TextResponse content={text} />
         )}
       </div>
     </motion.div>
@@ -629,11 +635,11 @@ function StepRow({ item }: { item: GroupedEvent }) {
 function ThinkingBlock({ text }: { text: string }) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
+      <div className="flex items-center gap-2 text-body-medium text-text-secondary">
         <BrainCircuit className="w-4 h-4" />
-        Thinking process
+        <ThinkingState label="Thinking process" />
       </div>
-      <div className="pl-6 border-l-2 border-zinc-200 dark:border-zinc-800 text-[14px] leading-[1.8] text-zinc-500 dark:text-zinc-400">
+      <div className="border-l-2 border-separator-border pl-6 text-[14px] leading-[1.8] text-text-secondary">
         <ChatMarkdown content={text} />
       </div>
     </div>
@@ -687,16 +693,13 @@ function ToolLine({
   const summary = getInlineSummary(invocation.tool, invocation.args);
   const output = invocation.result?.output;
 
-  // Try parsing web search results
-  let parsedResults: Array<{ url: string; title: string; snippet?: string }> | null = null;
-  if (output && (invocation.tool === "search_web" || invocation.tool === "web_search" || invocation.tool === "scrape_web_page")) {
-    try {
-      const parsed = JSON.parse(output);
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.url && parsed[0]?.title) {
-        parsedResults = parsed;
-      }
-    } catch { /* not JSON */ }
-  }
+  const parsedResults = parseSearchToolOutput(invocation.tool, output);
+  const searchQuery =
+    typeof invocation.args.query === "string"
+      ? invocation.args.query
+      : typeof invocation.args.q === "string"
+        ? invocation.args.q
+        : null;
 
   // ── Skill ──
   if (provider === "skill") {
@@ -804,47 +807,25 @@ function ToolLine({
     );
   }
 
-  // ── WebFetch with results ──
+  // ── Web search with results ──
   if (parsedResults) {
     return (
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
-          <Globe className="w-4 h-4" />
-          WebFetch {parsedResults.length} results
-        </div>
-        <div className="flex flex-col gap-0 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden ml-6">
-          {parsedResults.map((res, idx) => {
-            let domain = "";
-            try { domain = new URL(res.url).hostname; } catch { /* */ }
-            return (
-              <a
-                key={idx}
-                href={res.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-3 px-4 py-2.5 text-[14px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900/50 transition-colors border-b border-zinc-100 dark:border-zinc-800/60 last:border-b-0"
-              >
-                <Globe className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{domain || res.url}</span>
-              </a>
-            );
-          })}
-        </div>
-      </div>
+      <WebSearchCard
+        query={searchQuery}
+        results={parsedResults}
+        isRunning={isRunning}
+      />
     );
   }
 
   // ── Web browser tool (no parsed results) ──
   if (provider === "browser") {
-    const desc = summary || displayAgentToolName(invocation.tool);
-    const truncated = desc.length > 70 ? desc.slice(0, 70) + "..." : desc;
     return (
-      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
-        <Globe className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">WebFetch</span>
-        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
-        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
-      </div>
+      <WebSearchCard
+        query={searchQuery || summary}
+        results={[]}
+        isRunning={isRunning}
+      />
     );
   }
 
@@ -954,93 +935,6 @@ function ScreenshotCard({
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  User Question Card (ask_user)                                      */
-/* ------------------------------------------------------------------ */
-
-function UserQuestionCard({
-  questionId,
-  question,
-  answered = false,
-  onRespond,
-}: {
-  questionId: string;
-  question: string;
-  answered?: boolean;
-  onRespond?: (questionId: string, answer: string) => void;
-}) {
-  const [answer, setAnswer] = useState("");
-  const [submitted, setSubmitted] = useState(answered);
-
-  const resolved = submitted || answered;
-  const disabled = resolved || !onRespond;
-
-  function handleSubmit() {
-    const trimmed = answer.trim();
-    if (!trimmed || !onRespond) return;
-    setSubmitted(true);
-    onRespond(questionId, trimmed);
-  }
-
-  return (
-    <div
-      className={[
-        "relative rounded-lg border bg-card dark:bg-[#09090b] p-3 space-y-2.5 max-w-md",
-        "transition-all duration-300",
-        resolved
-          ? "border-blue-500/30"
-          : "border-blue-500/40 shadow-[0_0_12px_rgba(59,130,246,0.06)]",
-      ].join(" ")}
-    >
-      <div className="flex items-center gap-2">
-        <div
-          className={[
-            "w-1.5 h-1.5 rounded-full transition-colors duration-300",
-            resolved ? "bg-blue-500" : "bg-blue-500 animate-pulse",
-          ].join(" ")}
-        />
-        <span className="text-[9px] font-black uppercase tracking-[0.15em] text-blue-500">
-          Agent Question
-        </span>
-      </div>
-
-      <p className="text-[14px] leading-relaxed text-zinc-800 dark:text-zinc-200">
-        {question}
-      </p>
-
-      {!resolved ? (
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-            placeholder="Your answer..."
-            className="flex-1 rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-[13px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-          />
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={disabled || !answer.trim()}
-            className="rounded-md bg-blue-600 px-3 py-2 text-[12px] font-semibold text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Send
-          </button>
-        </div>
-      ) : (
-        <p className="text-[12px] text-blue-600 dark:text-blue-400 font-medium">
-          Answer sent
-        </p>
-      )}
     </div>
   );
 }
