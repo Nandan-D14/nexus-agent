@@ -900,7 +900,7 @@ class NexusOrchestrator:
             title="Manual screen capture",
             preview="Screenshot captured and queued for analysis.",
             source_step_id=screen_step_id,
-            metadata={"source": "manual_screen_analysis"},
+            metadata={"source": "manual_screen_analysis", "role": "source"},
         )
         # Feed screenshot context to agent
         await self._run_agent_tracked(
@@ -2184,7 +2184,7 @@ class NexusOrchestrator:
                     title="Agent summary",
                     preview=self._clip_text(final_response, 280),
                     source_step_id=self._current_turn_step_id,
-                    metadata={"source": "agent_complete"},
+                    metadata={"source": "agent_complete", "role": "source"},
                 )
                 return {
                     "status": "completed",
@@ -2248,7 +2248,7 @@ class NexusOrchestrator:
                     title="Budget-safe partial summary",
                     preview=self._clip_text(summary, 280),
                     source_step_id=self._current_turn_step_id,
-                    metadata={"source": "budget_stop"},
+                    metadata={"source": "budget_stop", "role": "source"},
                 )
                 await self._save_durable_checkpoint(
                     reason="budget_exhausted",
@@ -3432,6 +3432,7 @@ class NexusOrchestrator:
                         "workspace_path": self._workspace_path or "",
                         "workspace_relative_path": result.get("relative_path") or "outputs/final.md",
                         "source": "final_response",
+                        "role": "source",
                     },
                 )
         except Exception:
@@ -3595,6 +3596,14 @@ class NexusOrchestrator:
                 status=status,
             )
 
+    # Working files / evidence — shown in Sources panel, never as chat cards.
+    _SOURCE_ARTIFACT_KINDS = frozenset({
+        "summary",
+        "screenshot_reference",
+        "export_reference",
+        "workspace_output",
+    })
+
     async def _create_artifact(
         self,
         *,
@@ -3615,6 +3624,18 @@ class NexusOrchestrator:
                 url = path
             path = None
 
+        # Normalize SaaS-style role: deliverables (PDF/DOCX/HTML/images) vs
+        # sources (search dumps, scrapes, screenshots, agent summaries).
+        normalized_meta: dict[str, Any] = dict(metadata or {})
+        role = normalized_meta.get("role")
+        if role not in ("deliverable", "source"):
+            if kind in self._SOURCE_ARTIFACT_KINDS:
+                normalized_meta["role"] = "source"
+            elif isinstance(path, str) and path.replace("\\", "/").startswith("sources/"):
+                normalized_meta["role"] = "source"
+            else:
+                normalized_meta["role"] = "deliverable"
+
         try:
             await self._ensure_history_run(
                 self._current_run_id,
@@ -3629,7 +3650,7 @@ class NexusOrchestrator:
                 source_step_id=source_step_id,
                 path=path,
                 url=url,
-                metadata=metadata,
+                metadata=normalized_meta,
             )
             self.session.artifact_count += 1
             await self.history_repository.refresh_session_handoff(
@@ -3728,10 +3749,10 @@ class NexusOrchestrator:
                 "kind": "screenshot_reference",
                 "title": "Screenshot capture",
                 "preview": self._clip_text(description, 280),
-                "metadata": {"tool": tool_name},
+                "metadata": {"tool": tool_name, "role": "source"},
             }
 
-        for key in ("path", "file_path", "output_path", "url", "download_url"):
+        for key in ("path", "file_path", "output_path", "saved_path", "url", "download_url"):
             value = output_mapping.get(key)
             if isinstance(value, str) and value.strip():
                 is_url_val = value.startswith(("http:", "https:", "data:"))
@@ -3747,13 +3768,13 @@ class NexusOrchestrator:
                     "preview": self._clip_text(output_str or value, 280),
                     "path": rel_path,
                     "url": value if is_url_val else None,
-                    "metadata": {"tool": tool_name, "ref_key": key},
+                    "metadata": {"tool": tool_name, "ref_key": key, "role": "source"},
                 }
         for container_key in ("detail", "metadata"):
             nested = output_mapping.get(container_key)
             if not isinstance(nested, dict):
                 continue
-            for key in ("path", "file_path", "output_path", "url", "download_url"):
+            for key in ("path", "file_path", "output_path", "saved_path", "url", "download_url"):
                 value = nested.get(key)
                 if isinstance(value, str) and value.strip():
                     is_url_val = value.startswith(("http:", "https:", "data:"))
@@ -3773,6 +3794,7 @@ class NexusOrchestrator:
                             "tool": tool_name,
                             "ref_key": key,
                             "ref_container": container_key,
+                            "role": "source",
                         },
                     }
         return None

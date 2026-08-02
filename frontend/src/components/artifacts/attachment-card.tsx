@@ -91,7 +91,7 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
     }
     setLoading(true);
     try {
-      const url = await resolveArtifactUrl(artifact);
+      const url = await resolveArtifactUrl(artifact, true);
       if (url) {
         setPreviewUrl(url);
         setPreviewOpen(true);
@@ -159,7 +159,7 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
         </div>
       </div>
 
-      {officeOnly && (
+      {officeOnly && !artifact.metadata?.preview_url && (
         <div className="px-3.5 pb-3 text-[12px] text-zinc-500">
           Preview in Word/Excel after download — inline Office preview is not available.
         </div>
@@ -171,7 +171,7 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
             artifact={artifact}
             url={previewUrl}
             onClose={() => setPreviewOpen(false)}
-            heightClassName="h-[420px]"
+            heightClassName="h-[640px]"
           />
         </div>
       )}
@@ -182,6 +182,17 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
             src={previewUrl}
             alt={artifact.title}
             className="w-full max-h-[360px] object-contain rounded-lg border border-zinc-800 bg-black/20"
+          />
+        </div>
+      )}
+
+      {previewOpen && previewUrl && isOfficeArtifact(artifact) && !isPdfArtifact(artifact) && (
+        <div className="px-3 pb-3">
+          <PdfArtifactViewer
+            artifact={artifact}
+            url={previewUrl}
+            onClose={() => setPreviewOpen(false)}
+            heightClassName="h-[640px]"
           />
         </div>
       )}

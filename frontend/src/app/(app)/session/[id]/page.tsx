@@ -90,6 +90,7 @@ import {
   mapStoredMessagesToChatItems,
   buildSessionTemplateDraft,
 } from "@/lib/session-utils";
+import { isDeliverableArtifact } from "@/lib/artifact-url";
 
 import { SessionHeader } from "@/components/session";
 import { SessionLandingView } from "@/components/session/session-landing-view";
@@ -362,10 +363,14 @@ export default function SessionPage() {
 
       case "artifact_created":
         setRunArtifacts((prev) => upsertArtifact(prev, msg.artifact));
-        setChatItems((prev) => [
-          ...prev,
-          { kind: "event", type: "artifact_created", artifact: msg.artifact, ts },
-        ]);
+        // SaaS-style: only deliverables (PDF/DOCX/HTML/images) get chat cards.
+        // Sources (search/scrape/summaries) stay in the Artifacts panel only.
+        if (isDeliverableArtifact(msg.artifact)) {
+          setChatItems((prev) => [
+            ...prev,
+            { kind: "event", type: "artifact_created", artifact: msg.artifact, ts },
+          ]);
+        }
         if (msg.artifact.kind === "html" || msg.artifact.metadata?.render_mode === "iframe") {
           setForcedTab("workflow");
         }
@@ -898,7 +903,13 @@ export default function SessionPage() {
         getSessionArtifacts(sessionId),
       ]);
       if (cancelled) return;
-      const nextChatItems = mapStoredMessagesToChatItems(messages);
+      const nextChatItems = mapStoredMessagesToChatItems(messages).filter((item) => {
+        if (item.kind === "event" && item.type === "artifact_created") {
+          const art = (item as { artifact?: RunArtifact }).artifact;
+          return art ? isDeliverableArtifact(art) : false;
+        }
+        return true;
+      });
       const existingArtifactIds = new Set(
         nextChatItems
           .filter((item) => item.kind === "event" && item.type === "artifact_created")
@@ -909,7 +920,7 @@ export default function SessionPage() {
           .filter(Boolean),
       );
       const artifactChatItems = artifacts
-        .filter((a) => !existingArtifactIds.has(a.artifact_id))
+        .filter((a) => isDeliverableArtifact(a) && !existingArtifactIds.has(a.artifact_id))
         .map((a, index) => ({
           kind: "event" as const,
           type: "artifact_created",

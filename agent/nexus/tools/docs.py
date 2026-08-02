@@ -469,6 +469,7 @@ sys.exit(1)
                 "content_type": "application/pdf",
                 "size": payload.get("size", 0),
                 "engine": payload.get("engine", "unknown"),
+                "role": "deliverable",
             },
         )
         # Emit the durable artifact to the UI directly. The orchestrator excludes
@@ -561,6 +562,7 @@ async def publish_html_artifact(
         "size": len(content_bytes),
         "render_mode": "iframe",
         "artifact_role": "html_preview",
+        "role": "deliverable",
         "storage": "gcs" if gcs_url else "data_uri",
     }
     artifact = await history_repo.create_artifact(
@@ -640,6 +642,7 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
         )
         
         metadata = artifact_storage_metadata(session_id, run_id, path)
+        metadata["role"] = "deliverable"
         if kind == "html":
             metadata.update({
                 "content_type": "text/html; charset=utf-8",
@@ -811,6 +814,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "size": payload.get("size", 0),
                 "row_count": len(rows),
+                "role": "deliverable",
             },
         )
         await _notify_artifact_created(artifact)
@@ -955,6 +959,57 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
             content=content,
         )
 
+        # Generate the PDF sibling for preview
+        pdf_filename = filename[:-5] + ".pdf" if filename.endswith(".docx") else filename + ".pdf"
+        pdf_relative_path = f"outputs/{pdf_filename}"
+        pdf_output_path = f"{get_workspace_path().rstrip('/')}/{pdf_relative_path}"
+        pdf_gcs_url: str | None = None
+        try:
+            pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
+import json, os, sys, pathlib
+
+title = {repr(title)}
+md_path = {repr(md_temp)}
+out_path = {repr(pdf_output_path)}
+
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+md_text = pathlib.Path(md_path).read_text(encoding="utf-8")
+
+def try_weasyprint(md_text, title, out_path):
+    import markdown2
+    from weasyprint import HTML
+    html_body = markdown2.markdown(
+        md_text,
+        extras=["fenced-code-blocks", "tables", "break-on-newline",
+                "header-ids", "strike", "task_list"]
+    )
+    full_html = f\"\"\"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{{title}}</title></head>
+<body><h1>{{title}}</h1>{{html_body}}</body></html>\"\"\"
+    HTML(string=full_html).write_pdf(out_path)
+    return True
+
+try:
+    ok = try_weasyprint(md_text, title, out_path)
+    print(json.dumps({{"status": "success", "size": os.path.getsize(out_path)}}))
+except Exception as e:
+    print(json.dumps({{"status": "error", "message": str(e)}}))
+""")
+            pdf_script_path = f"/tmp/gen_docx_pdf_{run_id}.py"
+            sandbox.write_text_file(pdf_script_path, pdf_script)
+            pdf_res = sandbox.run_command(f"python3 {pdf_script_path}", timeout=120)
+            sandbox.run_command(f"rm -f {shlex.quote(pdf_script_path)}", timeout=10)
+            if pdf_res.get("exit_code") == 0:
+                pdf_content = sandbox.read_binary_file(pdf_output_path)
+                pdf_gcs_url = await upload_artifact_async(
+                    session_id=session_id,
+                    run_id=run_id,
+                    relative_path=pdf_relative_path,
+                    content=pdf_content,
+                )
+        except Exception:
+            logger.warning("Failed to generate PDF sibling for DOCX preview", exc_info=True)
+
         artifact = await history_repo.create_artifact(
             session_id=session_id,
             run_id=run_id,
@@ -967,21 +1022,25 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 **artifact_storage_metadata(session_id, run_id, output_relative_path),
                 "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "size": payload.get("size", 0),
+                "role": "deliverable",
+                **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
+                **({"preview_path": pdf_relative_path} if pdf_gcs_url else {}),
             },
         )
         await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
-            "summary": f"Generated Word document: {filename}",
-            "detail": {
-                "filename": filename,
-                "path": output_path,
-                "relative_path": output_relative_path,
-                "artifact_id": artifact.artifact_id,
-                "url": gcs_url,
-            },
-        }
+        "summary": f"Generated Word document: {filename}",
+        "detail": {
+            "filename": filename,
+            "path": output_path,
+            "relative_path": output_relative_path,
+            "artifact_id": artifact.artifact_id,
+            "url": gcs_url,
+            **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
+        },
+    }
     except Exception as e:
         logger.exception("Failed to promote DOCX to artifact")
         return {

@@ -5,8 +5,8 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
-import { ExternalLink, Loader2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ExternalLink, Loader2, Maximize2, Minimize2, X } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
 import { resolveArtifactUrl } from "@/lib/artifact-url";
 
@@ -23,6 +23,7 @@ type Props = {
 /**
  * In-page PDF preview via blob URL + native browser PDF renderer.
  * Avoids sandboxed iframes that block PDF plugins.
+ * Fullscreen expands to fill the viewport.
  */
 export function PdfArtifactViewer({
   artifact,
@@ -30,11 +31,13 @@ export function PdfArtifactViewer({
   title,
   onClose,
   className,
-  heightClassName = "h-[520px]",
+  heightClassName = "h-[640px]",
 }: Props) {
   const [url, setUrl] = useState<string | null>(initialUrl ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!initialUrl);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (initialUrl) {
@@ -65,16 +68,43 @@ export function PdfArtifactViewer({
     };
   }, [artifact, initialUrl]);
 
+  useEffect(() => {
+    const onFsChange = () => {
+      const fsEl = document.fullscreenElement;
+      setIsFullscreen(fsEl === containerRef.current);
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = containerRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen();
+      } else {
+        await el.requestFullscreen();
+      }
+    } catch {
+      // ignore fullscreen errors (browser policy)
+    }
+  }, []);
+
   const displayTitle = title || artifact.title || "PDF preview";
+  const frameHeight = isFullscreen ? "h-full" : heightClassName;
 
   return (
     <div
+      ref={containerRef}
       className={
-        className ||
-        "mt-3 rounded-xl overflow-hidden border border-zinc-700 bg-black/30"
+        isFullscreen
+          ? "fixed inset-0 z-[9999] flex flex-col bg-black"
+          : className ||
+            "mt-3 rounded-xl overflow-hidden border border-zinc-700 bg-black/30"
       }
     >
-      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 border-b border-zinc-800">
+      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 border-b border-zinc-800 shrink-0">
         <span className="text-xs font-semibold text-zinc-300 truncate">
           {displayTitle}
         </span>
@@ -90,6 +120,18 @@ export function PdfArtifactViewer({
               Open
             </a>
           )}
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
+            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          >
+            {isFullscreen ? (
+              <Minimize2 className="w-3.5 h-3.5" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5" />
+            )}
+          </button>
           {onClose && (
             <button
               type="button"
@@ -104,7 +146,7 @@ export function PdfArtifactViewer({
 
       {loading && (
         <div
-          className={`flex items-center justify-center gap-2 text-sm text-zinc-400 bg-[#111] ${heightClassName}`}
+          className={`flex flex-1 items-center justify-center gap-2 text-sm text-zinc-400 bg-[#111] ${frameHeight}`}
         >
           <Loader2 className="w-4 h-4 animate-spin" />
           Loading preview…
@@ -113,7 +155,7 @@ export function PdfArtifactViewer({
 
       {!loading && error && (
         <div
-          className={`flex items-center justify-center text-sm text-red-400 bg-[#111] px-4 ${heightClassName}`}
+          className={`flex flex-1 items-center justify-center text-sm text-red-400 bg-[#111] px-4 ${frameHeight}`}
         >
           {error}
         </div>
@@ -123,10 +165,10 @@ export function PdfArtifactViewer({
         <object
           data={url}
           type="application/pdf"
-          className={`w-full bg-white ${heightClassName}`}
+          className={`w-full bg-white ${frameHeight} flex-1`}
           aria-label={displayTitle}
         >
-          <embed src={url} type="application/pdf" className={`w-full ${heightClassName}`} />
+          <embed src={url} type="application/pdf" className={`w-full ${frameHeight} flex-1`} />
         </object>
       )}
     </div>

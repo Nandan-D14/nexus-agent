@@ -20,6 +20,34 @@ export function isPdfArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">):
   return contentType.includes("pdf");
 }
 
+const SOURCE_KINDS = new Set([
+  "summary",
+  "screenshot_reference",
+  "export_reference",
+  "workspace_output",
+]);
+
+/**
+ * Source/working artifacts (search dumps, scrapes, screenshots, agent summaries).
+ * These belong in the Sources panel section — never as chat cards.
+ * Heuristic also covers older artifacts minted before `metadata.role` existed.
+ */
+export function isSourceArtifact(artifact: Pick<RunArtifact, "kind" | "path" | "metadata">): boolean {
+  const role = artifact.metadata?.role;
+  if (role === "source") return true;
+  if (role === "deliverable") return false;
+  if (SOURCE_KINDS.has(artifact.kind)) return true;
+  const path = (artifact.path || "").replace(/\\/g, "/");
+  if (path.startsWith("sources/")) return true;
+  return false;
+}
+
+export function isDeliverableArtifact(
+  artifact: Pick<RunArtifact, "kind" | "path" | "metadata">,
+): boolean {
+  return !isSourceArtifact(artifact);
+}
+
 export function isHtmlArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
   return artifact.kind === "html" || artifact.metadata?.render_mode === "iframe";
 }
@@ -37,13 +65,25 @@ export function isOfficeArtifact(artifact: Pick<RunArtifact, "kind" | "metadata"
 }
 
 export function canInlinePreview(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
-  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact)) return false;
+  // Office: previewable if we have a PDF preview sibling (generated alongside)
+  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact)) {
+    return !!artifact.metadata?.preview_url;
+  }
   return (
     isPdfArtifact(artifact) ||
     isHtmlArtifact(artifact) ||
     artifact.kind === "image" ||
     artifact.kind === "screenshot"
   );
+}
+
+export function getPreviewUrl(artifact: RunArtifact): string | null {
+  // Office: use the PDF sibling for preview when present
+  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact)) {
+    const previewUrl = artifact.metadata?.preview_url;
+    if (typeof previewUrl === "string" && previewUrl) return previewUrl;
+  }
+  return artifact.url || null;
 }
 
 function dataURItoBlob(dataURI: string): Blob {
@@ -128,19 +168,42 @@ function toBlobUrlIfDataUri(url: string): string {
 /**
  * Resolve a working preview/download URL.
  * Prefer the authenticated download API for GCS-backed artifacts.
+ * @param forPreview - when true, prefer the PDF preview sibling for Office artifacts
  */
-export async function resolveArtifactUrl(artifact: RunArtifact): Promise<string | null> {
+export async function resolveArtifactUrl(
+  artifact: RunArtifact,
+  forPreview = false,
+): Promise<string | null> {
   // Permanent non-GCS URLs (Drive, http(s) CDN, etc.)
   if (
     artifact.url &&
     !artifact.url.includes("storage.googleapis.com") &&
     !artifact.url.startsWith("data:")
   ) {
+    if (forPreview) {
+      const preview = getPreviewUrl(artifact);
+      if (preview && preview !== artifact.url && preview.startsWith("http")) {
+        return preview;
+      }
+    }
     return artifact.url;
   }
 
   if (artifact.url?.startsWith("data:")) {
     return toBlobUrlIfDataUri(artifact.url);
+  }
+
+  // Office artifacts: use the PDF preview sibling when available
+  if (forPreview) {
+    const officePreview = getPreviewUrl(artifact);
+    if (officePreview && officePreview !== artifact.url) {
+      if (officePreview.startsWith("data:")) {
+        return toBlobUrlIfDataUri(officePreview);
+      }
+      if (officePreview.startsWith("http")) {
+        return officePreview;
+      }
+    }
   }
 
   const fresh = await fetchFreshArtifactUrl(artifact.artifact_id);
