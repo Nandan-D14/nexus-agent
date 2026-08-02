@@ -10,7 +10,6 @@ import {
   type ChangeEvent,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -108,7 +107,7 @@ export default function SessionPage() {
   const searchParams = useSearchParams();
   const sessionId = params.id as string;
   const { user, isLoading: authLoading } = useAuth();
-  const { setIsSettingsOpen, requiresByokSetup } = useSettings();
+  const { setIsSettingsOpen, openSettings, requiresByokSetup } = useSettings();
   const {
     createSession,
     continueSession,
@@ -164,9 +163,9 @@ export default function SessionPage() {
     "available" | "unavailable" | "connecting" | "connected" | "reconnecting" | "disconnected"
   >("disconnected");
   const audioPlayer = useRef(new AudioPlayer());
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const landingInputRef = useRef<HTMLTextAreaElement>(null);
+  const landingInputRef = useRef<HTMLDivElement>(null);
   const autoActionHandledRef = useRef(false);
   const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
   const autoResumeTriggeredRef = useRef(false);
@@ -251,11 +250,11 @@ export default function SessionPage() {
   /* ---- Keyboard shortcut: "/" to focus input ---- */
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      const active = document.activeElement as HTMLElement | null;
       if (
         e.key === "/" &&
-        !["INPUT", "TEXTAREA"].includes(
-          (document.activeElement?.tagName ?? ""),
-        )
+        !["INPUT", "TEXTAREA"].includes(active?.tagName ?? "") &&
+        !active?.isContentEditable
       ) {
         e.preventDefault();
         inputRef.current?.focus();
@@ -265,20 +264,6 @@ export default function SessionPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
-
-  useLayoutEffect(() => {
-    const maxHeight = 200;
-    const el1 = landingInputRef.current;
-    if (el1) {
-      el1.style.height = "auto";
-      el1.style.height = `${Math.min(el1.scrollHeight, maxHeight)}px`;
-    }
-    const el2 = inputRef.current;
-    if (el2) {
-      el2.style.height = "auto";
-      el2.style.height = `${Math.min(el2.scrollHeight, maxHeight)}px`;
-    }
-  }, [textInput]);
 
   useEffect(() => {
     autoActionHandledRef.current = false;
@@ -1209,7 +1194,7 @@ export default function SessionPage() {
   /* ---- Actions ---- */
   const toggleMic = useCallback(() => {
     if (requiresByokSetup) {
-      setIsSettingsOpen(true);
+      openSettings("api");
       toast("Please set up your API keys to continue.", "info");
       return;
     }
@@ -1263,9 +1248,12 @@ export default function SessionPage() {
     isConnected,
     isNewSession,
     isRecording,
+    openSettings,
+    requiresByokSetup,
     sendJson,
     startMic,
     stopMic,
+    toast,
     viewMode,
     voiceStatus,
   ]);
@@ -1350,7 +1338,7 @@ export default function SessionPage() {
     if (!text) return;
 
     if (requiresByokSetup) {
-      setIsSettingsOpen(true);
+      openSettings("api");
       toast("Please set up your API keys to continue.", "info");
       return;
     }
@@ -1368,7 +1356,7 @@ export default function SessionPage() {
     sendTextOrQueue(payload);
     setTextInput("");
     setUploadedFiles([]);
-  }, [createThreadFromPrompt, isNewSession, requiresByokSetup, selectedConnectorIds, sendTextOrQueue, setIsSettingsOpen, textInput, toast, uploadedFiles]);
+  }, [createThreadFromPrompt, isNewSession, openSettings, requiresByokSetup, selectedConnectorIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
 
   const handleShowDesktop = useCallback(() => {
     if (isNewSession) {
@@ -1412,7 +1400,7 @@ export default function SessionPage() {
   const handleDemo = useCallback(
     (text: string) => {
       if (requiresByokSetup) {
-        setIsSettingsOpen(true);
+        openSettings("api");
         toast("Please set up your API keys to continue.", "info");
         return;
       }
@@ -1427,7 +1415,7 @@ export default function SessionPage() {
       }
       sendTextOrQueue(payload);
     },
-    [continueCurrentThread, createThreadFromAction, isNewSession, requiresByokSetup, sendTextOrQueue, setIsSettingsOpen, toast, viewMode],
+    [continueCurrentThread, createThreadFromAction, isNewSession, openSettings, requiresByokSetup, sendTextOrQueue, toast, viewMode],
   );
 
   const handlePermissionRespond = useCallback(

@@ -6,13 +6,12 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { AnimatePresence } from "framer-motion";
-import { SettingsModal } from "./settings-modal";
+import { SettingsModal } from "@/components/application/settings/settings-modal";
 import { useSettings } from "@/lib/settings-context";
 import { SessionNavSidebar } from "./session-nav-sidebar";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { isSettingsOpen, setIsSettingsOpen } = useSettings();
+  const { isSettingsOpen, setIsSettingsOpen, settingsDefaultPage } = useSettings();
   const pathname = usePathname();
   const isSessionPage = pathname.includes("/session/");
 
@@ -32,11 +31,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
 
-      <AnimatePresence>
-        {isSettingsOpen && (
-          <SettingsModal isOpen={true} onClose={() => setIsSettingsOpen(false)} />
-        )}
-      </AnimatePresence>
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        defaultPage={settingsDefaultPage}
+      />
     </div>
   );
 }

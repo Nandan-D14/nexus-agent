@@ -10,6 +10,8 @@ import {
   RiCodeBlock,
   RiDatabase2Line,
   RiGitMergeLine,
+  RiKey2Line,
+  RiMicLine,
   RiOrganizationChart,
   RiPaletteLine,
   RiPlugLine,
@@ -19,10 +21,12 @@ import {
   RiToolsFill,
 } from "@remixicon/react";
 import { cx } from "@/utils/cx";
+import { SettingsApi } from "./settings-api";
 import { SettingsGeneral } from "./settings-general";
 import { SettingsProfile } from "./settings-profile";
 import { SettingsStorage } from "./settings-storage";
 import { SettingsTools } from "./settings-tools";
+import { SettingsVoice } from "./settings-voice";
 
 /**
  * Figma sources: Board UI → "Settings/Profile" (node 4081:13943) and
@@ -45,7 +49,7 @@ import { SettingsTools } from "./settings-tools";
  * and the modal unmounts only after the exit transition finishes.
  */
 
-export type SettingsPage = "general" | "profile" | "storage" | "tools";
+export type SettingsPage = "general" | "profile" | "storage" | "tools" | "api" | "voice";
 
 export interface SettingsModalProps {
   /** Controlled open state, owned by the host page, sidebar, or menu. */
@@ -76,6 +80,8 @@ const NAV_GROUPS: { label: string; items: NavEntry[] }[] = [
     items: [
       { label: "General", icon: RiSettings6Line, page: "general" },
       { label: "Profile", icon: RiSchoolLine, page: "profile" },
+      { label: "API & Keys", icon: RiKey2Line, page: "api" },
+      { label: "Voice", icon: RiMicLine, page: "voice" },
       { label: "Appearance", icon: RiPaletteLine },
       { label: "Billing", icon: RiBankCardLine },
       { label: "Rules and Workflows", icon: RiOrganizationChart },
@@ -105,6 +111,8 @@ const PAGE_TITLES: Record<SettingsPage, string> = {
   profile: "Profile",
   storage: "Storage",
   tools: "Tools",
+  api: "API & Keys",
+  voice: "Voice",
 };
 
 export function SettingsModal({
@@ -306,6 +314,10 @@ export function SettingsModal({
                 <SettingsStorage />
               ) : page === "tools" ? (
                 <SettingsTools />
+              ) : page === "api" ? (
+                <SettingsApi onSaved={showSavedToast} />
+              ) : page === "voice" ? (
+                <SettingsVoice onSaved={showSavedToast} />
               ) : (
                 <SettingsGeneral planArtSrc={planArtSrc} />
               )}

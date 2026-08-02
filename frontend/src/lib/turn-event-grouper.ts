@@ -165,13 +165,16 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           steps: [],
           ts: event.ts,
         };
-      } else {
-        currentTask.steps.push({
-          kind: "thinking",
-          text: content,
-          ts: event.ts,
-        });
       }
+      // Always record thinking as a step — including the first event that opens
+      // the task. Previously the opener only set `title`, so single-chunk (and
+      // the start of multi-chunk) reasoning never reached ThinkingReasoning.
+      const task = currentTask;
+      task.steps.push({
+        kind: "thinking",
+        text: content,
+        ts: event.ts,
+      });
       continue;
     }
 

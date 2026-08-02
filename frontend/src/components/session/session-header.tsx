@@ -36,7 +36,7 @@ export function SessionHeader({
   onEndSession,
 }: Props) {
   return (
-    <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-200 dark:border-zinc-800 bg-transparent shadow-sm z-10">
+    <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-200/60 dark:border-zinc-800/60 bg-transparent z-10">
       <div className="flex items-center gap-4">
         <button className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100 hover:opacity-80 transition-opacity">
           CoComputer

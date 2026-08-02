@@ -6,14 +6,14 @@
 "use client";
 
 import { useMemo, useRef, useEffect, useState, memo, type ReactNode } from "react";
-import { ChatMarkdown } from "@/components/chat-markdown";
 import { StreamingText } from "@/components/streaming-text";
 import { PermissionCard } from "@/components/permission-card";
 import {
   AgentQuestionCard,
-  TextResponse,
+  ThinkingReasoning,
   ThinkingState,
   WebSearchCard,
+  hasRealReasoning,
 } from "@/components/agent-ui";
 import { parseSearchToolOutput } from "@/lib/search-result-utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -31,7 +31,6 @@ import {
   Plug,
   FileText,
   Loader2,
-  BrainCircuit,
   MessageSquare,
   BookOpen,
   Bot,
@@ -267,10 +266,25 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
 
   const totalAgentMessages = turns.reduce((sum, t) => sum + t.agentMessages.length, 0);
 
-  const phaseLabel = phase === "thinking" ? "Reasoning through it..."
+  const phaseLabel = phase === "thinking" ? "Thinking…"
     : phase === "acting" ? "Working through..."
     : phase === "listening" ? "Listening..."
     : "Generating...";
+
+  // Hide bottom ThinkingState when the last active task group already shows ThinkingReasoning.
+  const showPhaseShimmer = useMemo(() => {
+    if (!isThinking || turns.length === 0) return false;
+    const lastTurn = turns[turns.length - 1];
+    if (!lastTurn) return false;
+    const segs = groupTurnEvents(lastTurn.events);
+    const lastGroup = [...segs].reverse().find((s) => s.kind === "task_group");
+    if (!lastGroup || lastGroup.kind !== "task_group") return true;
+    const chunks = lastGroup.data.steps
+      .filter((s): s is Extract<GroupedEvent, { kind: "thinking" }> => s.kind === "thinking")
+      .map((s) => s.text);
+    const show = !hasRealReasoning(chunks);
+    return show;
+  }, [isThinking, turns]);
 
   return (
     <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
@@ -297,9 +311,9 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
             })}
           </AnimatePresence>
 
-          {/* Phase-Aware Status Indicator */}
+          {/* Phase-Aware Status Indicator — only when no live ThinkingReasoning */}
           <AnimatePresence>
-            {isThinking && turns.length > 0 && (
+            {showPhaseShimmer && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -504,11 +518,7 @@ function AgentMessageCard({ text, stream = false }: { text: string; stream?: boo
   return (
     <motion.div layout className="flex flex-col items-start w-full">
       <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
-        {stream ? (
-          <StreamingText text={text} isStreaming={stream} />
-        ) : (
-          <TextResponse content={text} />
-        )}
+        <StreamingText text={text} isStreaming={stream} />
       </div>
     </motion.div>
   );
@@ -565,8 +575,58 @@ function ThoughtAccordion({
   task: TaskGroup;
   isActive: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const summary = useMemo(() => buildSummary(task), [task]);
+
+  // Coalesce adjacent thinking steps into one reasoning block for AICSS ThinkingReasoning.
+  const displayRows = useMemo(() => {
+    type Row =
+      | {
+          kind: "reasoning";
+          chunks: string[];
+          startedAt: number;
+          endedAt: number;
+          key: string;
+        }
+      | { kind: "step"; item: GroupedEvent; key: string };
+
+    const rows: Row[] = [];
+    let buf: Extract<GroupedEvent, { kind: "thinking" }>[] = [];
+
+    const flush = () => {
+      if (buf.length === 0) return;
+      const chunks = buf.map((b) => b.text);
+      if (hasRealReasoning(chunks)) {
+        rows.push({
+          kind: "reasoning",
+          chunks,
+          startedAt: buf[0].ts,
+          endedAt: buf[buf.length - 1].ts,
+          key: `reason-${buf[0].ts}`,
+        });
+      }
+      // Compact stub ("Thinking...") is ignored here — bottom ThinkingState covers it.
+      buf = [];
+    };
+
+    task.steps.forEach((step, index) => {
+      if (step.kind === "thinking") {
+        buf.push(step);
+        return;
+      }
+      flush();
+      rows.push({ kind: "step", item: step, key: `${step.kind}-${index}` });
+    });
+    flush();
+    return rows;
+  }, [task.steps]);
+
+  const lastRow = displayRows[displayRows.length - 1];
+  const hasToolSteps = displayRows.some((r) => r.kind === "step");
+  const hasReasoningRows = displayRows.some((r) => r.kind === "reasoning");
+  const hasRunningTool = task.steps.some(
+    (s) => s.kind === "tool_invocation" && s.status === "running",
+  );
 
   return (
     <motion.div
@@ -574,44 +634,71 @@ function ThoughtAccordion({
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-      className="w-full flex flex-col"
+      className="w-full flex flex-col gap-3"
     >
-      {/* Accordion header */}
-      <button
-        className="flex items-center gap-1.5 w-fit text-left select-none group py-0.5"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <span className="text-[14px] text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
-          {summary}
-        </span>
-        {expanded ? (
-          <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
-        ) : (
-          <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
-        )}
-        {isActive && (
-          <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
-        )}
-      </button>
+      {displayRows.map((row) => {
+        if (row.kind === "reasoning") {
+          const isLive =
+            isActive &&
+            lastRow?.kind === "reasoning" &&
+            lastRow.key === row.key;
+          return (
+            <ThinkingReasoning
+              key={row.key}
+              chunks={row.chunks}
+              isActive={isLive}
+              startedAt={row.startedAt}
+              endedAt={row.endedAt}
+            />
+          );
+        }
+        return null;
+      })}
 
-      {/* Accordion content */}
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
+      {hasToolSteps ? (
+        <>
+          <button
+            type="button"
+            className="flex items-center gap-1.5 w-fit text-left select-none group py-0.5"
+            onClick={() => setExpanded(!expanded)}
           >
-            <div className="flex flex-col gap-4 pt-3 pb-1 pl-1">
-              {task.steps.map((step, index) => (
-                <StepRow key={`${step.kind}-${index}`} item={step} />
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <span className="text-[14px] text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
+              {summary}
+            </span>
+            {expanded ? (
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
+            )}
+            {isActive && !hasReasoningRows && !hasRunningTool && (
+              <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
+            )}
+            {hasRunningTool && (
+              <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
+            )}
+          </button>
+
+          <AnimatePresence>
+            {expanded && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="overflow-hidden"
+              >
+                <div className="flex flex-col gap-4 pt-3 pb-1 pl-1">
+                  {displayRows.map((row) =>
+                    row.kind === "step" ? (
+                      <StepRow key={row.key} item={row.item} />
+                    ) : null,
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      ) : null}
     </motion.div>
   );
 }
@@ -621,29 +708,10 @@ function ThoughtAccordion({
 /* ------------------------------------------------------------------ */
 
 function StepRow({ item }: { item: GroupedEvent }) {
-  if (item.kind === "thinking") return <ThinkingBlock text={item.text} />;
   if (item.kind === "tool_invocation") return <ToolLine invocation={item} />;
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
   if (item.kind === "error") return <ErrorLine message={item.message} />;
   return null;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Thinking Process Block                                             */
-/* ------------------------------------------------------------------ */
-
-function ThinkingBlock({ text }: { text: string }) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-body-medium text-text-secondary">
-        <BrainCircuit className="w-4 h-4" />
-        <ThinkingState label="Thinking process" />
-      </div>
-      <div className="border-l-2 border-separator-border pl-6 text-[14px] leading-[1.8] text-text-secondary">
-        <ChatMarkdown content={text} />
-      </div>
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------------ */

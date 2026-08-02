@@ -4,6 +4,10 @@
  */
 
 export { ThinkingState } from "./thinking-state";
+export {
+  ThinkingReasoning,
+  hasRealReasoning,
+} from "./thinking-reasoning";
 export { WebSearchCard } from "./web-search";
 export { TextResponse } from "./text-response";
 export { InlineCitations, extractMarkdownCitations } from "./inline-citations";

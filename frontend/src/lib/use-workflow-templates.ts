@@ -53,7 +53,7 @@ function buildTemplateBody(payload?: TemplatePayload) {
 export function useWorkflowTemplates(): UseWorkflowTemplatesReturn {
   const router = useRouter();
   const { toast } = useToast();
-  const { setIsSettingsOpen } = useSettings();
+  const { openSettings } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,11 +61,11 @@ export function useWorkflowTemplates(): UseWorkflowTemplatesReturn {
     const apiError = await readApiError(response);
     if (apiError.code === "BYOK_REQUIRED") {
       toast(apiError.message, "error");
-      setIsSettingsOpen(true);
+      openSettings("api");
       return apiError.message;
     }
     return apiError.message;
-  }, [toast, setIsSettingsOpen]);
+  }, [toast, openSettings]);
 
   const listTemplates = useCallback(async (query?: string) => {
     setIsLoading(true);

@@ -35,7 +35,7 @@ type Props = {
   onToggleAllConnectors: (ids: string[]) => void;
   pageError: string | null;
   error: string | null;
-  landingInputRef?: React.RefObject<HTMLTextAreaElement | null>;
+  landingInputRef?: React.RefObject<HTMLDivElement | null>;
 };
 
 export function SessionLandingView({

@@ -16,7 +16,7 @@ import { cx } from "@/utils/cx";
 type Props = {
   content: string;
   className?: string;
-  /** When true, skip the sources footer (e.g. thinking notes). */
+  /** When true, skip the sources footer only (inline numbered badges still render). */
   hideCitations?: boolean;
 };
 
@@ -29,10 +29,7 @@ export function TextResponse({ content, className, hideCitations }: Props) {
 
   return (
     <div className={cx("w-full text-text-primary", className)}>
-      <ChatMarkdown
-        content={content}
-        citationMap={hideCitations ? undefined : citationMap}
-      />
+      <ChatMarkdown content={content} citationMap={citationMap} />
       {!hideCitations ? <InlineCitations refs={refs} /> : null}
     </div>
   );
