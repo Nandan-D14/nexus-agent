@@ -3,5 +3,12 @@
  * Proprietary and non-commercial use only.
  */
 
-export { PdfArtifactViewer } from "./pdf-viewer";
+export { DocumentViewerModal } from "./document-viewer-modal";
 export { ArtifactAttachmentCard } from "./attachment-card";
+export {
+  ArtifactIcon,
+  ArtifactIconTile,
+  artifactAccent,
+  artifactBadge,
+} from "./artifact-icon";
+export type { ArtifactAccent } from "./artifact-icon";

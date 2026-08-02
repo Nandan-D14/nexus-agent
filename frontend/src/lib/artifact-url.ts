@@ -53,28 +53,43 @@ export function isHtmlArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">)
 }
 
 export function isOfficeArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
-  if (artifact.kind === "document" || artifact.kind === "spreadsheet") return true;
+  if (
+    artifact.kind === "document" ||
+    artifact.kind === "spreadsheet" ||
+    artifact.kind === "presentation"
+  ) {
+    return true;
+  }
   const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
   return (
     contentType.includes("wordprocessingml") ||
     contentType.includes("spreadsheetml") ||
+    contentType.includes("presentationml") ||
     contentType.includes("msword") ||
     contentType.includes("ms-excel") ||
+    contentType.includes("ms-powerpoint") ||
     contentType.includes("officedocument")
   );
 }
 
+/** How an artifact renders inside the document viewer. */
+export type PreviewKind = "pdf" | "image" | "html" | "none";
+
+/**
+ * Single source of truth for viewer rendering, card thumbnails, and previewability.
+ * Office files render through the PDF sibling emitted alongside them; without one
+ * there is no reliable in-browser renderer, so they fall back to download-only.
+ */
+export function previewKind(artifact: Pick<RunArtifact, "kind" | "metadata">): PreviewKind {
+  if (artifact.kind === "image" || artifact.kind === "screenshot") return "image";
+  if (isPdfArtifact(artifact)) return "pdf";
+  if (isHtmlArtifact(artifact)) return "html";
+  if (isOfficeArtifact(artifact)) return artifact.metadata?.preview_url ? "pdf" : "none";
+  return "none";
+}
+
 export function canInlinePreview(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
-  // Office: previewable if we have a PDF preview sibling (generated alongside)
-  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact)) {
-    return !!artifact.metadata?.preview_url;
-  }
-  return (
-    isPdfArtifact(artifact) ||
-    isHtmlArtifact(artifact) ||
-    artifact.kind === "image" ||
-    artifact.kind === "screenshot"
-  );
+  return previewKind(artifact) !== "none";
 }
 
 export function getPreviewUrl(artifact: RunArtifact): string | null {

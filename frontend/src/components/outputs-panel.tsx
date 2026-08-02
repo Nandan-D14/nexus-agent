@@ -6,41 +6,34 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
 import {
   FileText,
   Download,
   ExternalLink,
-  Image as ImageIcon,
-  Database,
   File,
   Eye,
-  X,
-  FileSpreadsheet,
-  FileType,
   Loader2,
   ChevronDown,
   ChevronRight,
-  Maximize2,
-  Minimize2,
 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
 import {
   canInlinePreview,
   downloadArtifactFile,
   isDeliverableArtifact,
-  isHtmlArtifact,
-  isOfficeArtifact,
-  isPdfArtifact,
   isSourceArtifact,
+  previewKind,
   resolveArtifactUrl,
 } from "@/lib/artifact-url";
-import { PdfArtifactViewer } from "@/components/artifacts";
+import { ArtifactIcon, DocumentViewerModal } from "@/components/artifacts";
 
 type Props = {
   artifacts: RunArtifact[];
   emptyState?: string;
 };
+
+/** Strips the native PDF chrome so card thumbnails show just the page. */
+const PDF_THUMBNAIL_PARAMS = "#toolbar=0&navpanes=0&scrollbar=0&view=FitH";
 
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return "Unknown time";
@@ -49,147 +42,16 @@ function formatTimestamp(value: string | null | undefined): string {
   return date.toLocaleString();
 }
 
-function ArtifactIcon({ kind, className }: { kind: string; className?: string }) {
-  switch (kind) {
-    case "pdf_report":
-    case "pdf":
-      return <FileText className={className || "w-5 h-5 text-red-400"} />;
-    case "image":
-    case "screenshot":
-      return <ImageIcon className={className || "w-5 h-5 text-blue-400"} />;
-    case "data":
-    case "csv":
-    case "json":
-      return <Database className={className || "w-5 h-5 text-emerald-400"} />;
-    case "spreadsheet":
-      return <FileSpreadsheet className={className || "w-5 h-5 text-green-400"} />;
-    case "document":
-      return <FileType className={className || "w-5 h-5 text-blue-500"} />;
-    case "html":
-      return <FileText className={className || "w-5 h-5 text-amber-400"} />;
-    default:
-      return <File className={className || "w-5 h-5 text-zinc-400"} />;
-  }
-}
-
-function Fullscreenable({
-  title,
-  onClose,
-  openUrl,
-  children,
-}: {
-  title: string;
-  onClose?: () => void;
-  openUrl?: string;
-  children: React.ReactNode;
-}) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
-  useEffect(() => {
-    const onChange = () => setIsFullscreen(document.fullscreenElement === ref.current);
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
-
-  const toggle = async () => {
-    const el = ref.current;
-    if (!el) return;
-    try {
-      if (document.fullscreenElement === el) await document.exitFullscreen();
-      else await el.requestFullscreen();
-    } catch {
-      // ignore
-    }
-  };
-
-  return (
-    <div
-      ref={ref}
-      className={
-        isFullscreen
-          ? "fixed inset-0 z-[9999] flex flex-col bg-black"
-          : "mt-4 rounded-xl overflow-hidden border border-zinc-700 bg-black/30"
-      }
-    >
-      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 border-b border-zinc-800 shrink-0">
-        <span className="text-xs font-semibold text-zinc-300 truncate">{title}</span>
-        <div className="flex items-center gap-2">
-          {openUrl && (
-            <a
-              href={openUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
-            >
-              <ExternalLink className="w-3 h-3" />
-              Open
-            </a>
-          )}
-          <button
-            type="button"
-            onClick={toggle}
-            className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
-            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-          >
-            {isFullscreen ? (
-              <Minimize2 className="w-3.5 h-3.5" />
-            ) : (
-              <Maximize2 className="w-3.5 h-3.5" />
-            )}
-          </button>
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      </div>
-      <div className={isFullscreen ? "flex-1 min-h-0" : ""}>{children}</div>
-    </div>
-  );
-}
-
-function InlineIframeViewer({
-  url,
-  title,
-  onClose,
-}: {
-  url: string;
-  title: string;
-  onClose: () => void;
-}) {
-  let embedUrl = url;
-  if (url.includes("drive.google.com/file/d/")) {
-    embedUrl = url.replace(/\/view.*$/, "/preview");
-  }
-
-  return (
-    <Fullscreenable title={title} onClose={onClose} openUrl={url}>
-      <iframe
-        src={embedUrl}
-        className="w-full h-full min-h-[500px] bg-white"
-        title={title}
-        sandbox="allow-scripts allow-forms allow-modals"
-      />
-    </Fullscreenable>
-  );
-}
-
 export function OutputsPanel({
   artifacts,
   emptyState = "No outputs have been captured for this run yet.",
 }: Props) {
-  const [viewingId, setViewingId] = useState<string | null>(null);
+  const [viewerArtifact, setViewerArtifact] = useState<RunArtifact | null>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const fetchedIds = useRef<Set<string>>(new Set());
-  const autoOpenedIds = useRef<Set<string>>(new Set());
 
   const deliverables = useMemo(
     () => artifacts.filter(isDeliverableArtifact),
@@ -212,26 +74,17 @@ export function OutputsPanel({
     [freshUrls],
   );
 
+  // Prefetch URLs for anything that renders a thumbnail on its card.
   useEffect(() => {
     deliverables.forEach((artifact) => {
-      const wantsEager =
-        artifact.kind === "image" ||
-        artifact.kind === "screenshot" ||
-        isHtmlArtifact(artifact) ||
-        isPdfArtifact(artifact);
-      if (wantsEager && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
-        fetchedIds.current.add(artifact.artifact_id);
-        resolveUrl(artifact).catch(() => {});
+      if (previewKind(artifact) === "none") return;
+      if (freshUrls[artifact.artifact_id] || fetchedIds.current.has(artifact.artifact_id)) {
+        return;
       }
+      fetchedIds.current.add(artifact.artifact_id);
+      resolveUrl(artifact).catch(() => {});
     });
   }, [deliverables, resolveUrl, freshUrls]);
-
-  useEffect(() => {
-    const htmlArtifact = deliverables.find(isHtmlArtifact);
-    if (!htmlArtifact || autoOpenedIds.current.has(htmlArtifact.artifact_id)) return;
-    autoOpenedIds.current.add(htmlArtifact.artifact_id);
-    setViewingId(htmlArtifact.artifact_id);
-  }, [deliverables]);
 
   const handleDownload = useCallback(async (artifact: RunArtifact) => {
     setLoadingId(artifact.artifact_id);
@@ -244,31 +97,30 @@ export function OutputsPanel({
     }
   }, []);
 
-  const handleTogglePreview = useCallback(
+  const handleOpenViewer = useCallback(
     async (artifact: RunArtifact) => {
-      if (viewingId === artifact.artifact_id) {
-        setViewingId(null);
-        return;
-      }
       if (!canInlinePreview(artifact)) {
-        // Office without PDF preview: jump straight to download
-        await handleDownload(artifact);
+        // The viewer explains why and offers a download instead.
+        setViewerUrl(null);
+        setViewerArtifact(artifact);
         return;
       }
       setLoadingId(artifact.artifact_id);
       try {
         const url = await resolveUrl(artifact, true);
-        if (url) {
-          setViewingId(artifact.artifact_id);
-        } else {
-          console.error("No previewable URL found for artifact", artifact.artifact_id);
-        }
+        setViewerUrl(url);
+        setViewerArtifact(artifact);
       } finally {
         setLoadingId(null);
       }
     },
-    [viewingId, resolveUrl, handleDownload],
+    [resolveUrl],
   );
+
+  const closeViewer = useCallback(() => {
+    setViewerArtifact(null);
+    setViewerUrl(null);
+  }, []);
 
   const getUrl = (artifact: RunArtifact): string | null =>
     freshUrls[artifact.artifact_id] || artifact.url || null;
@@ -309,42 +161,46 @@ export function OutputsPanel({
             {deliverables.map((artifact) => {
               const isLoading = loadingId === artifact.artifact_id;
               const currentUrl = getUrl(artifact);
-              const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
-              const isHtml = isHtmlArtifact(artifact);
-              const isPdf = isPdfArtifact(artifact);
-              const isOffice = isOfficeArtifact(artifact) && !isPdf;
-              const previewable = canInlinePreview(artifact);
+              const kind = previewKind(artifact);
+              const previewable = kind !== "none";
 
               return (
                 <div
                   key={artifact.artifact_id}
                   className="group relative rounded-xl border border-zinc-800 bg-[#141414] hover:bg-[#1a1a1c] hover:border-zinc-700 transition-all duration-200 overflow-hidden shadow-sm flex flex-col"
                 >
-                  <div className="relative aspect-video w-full bg-[#1c1c1e] flex items-center justify-center overflow-hidden border-b border-zinc-800">
-                    {isImage && currentUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenViewer(artifact)}
+                    className="relative aspect-video w-full bg-[#1c1c1e] flex items-center justify-center overflow-hidden border-b border-zinc-800 text-left"
+                    aria-label={`Open ${artifact.title || artifact.kind}`}
+                  >
+                    {kind === "image" && currentUrl ? (
                       <img
                         src={currentUrl}
                         alt={artifact.title}
                         className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
                       />
-                    ) : isHtml && currentUrl ? (
+                    ) : kind === "html" && currentUrl ? (
                       <iframe
                         src={currentUrl}
                         title={`${artifact.title} thumbnail`}
                         className="w-[200%] h-[200%] scale-50 origin-top-left bg-white pointer-events-none opacity-80 group-hover:opacity-100 transition-opacity"
                         sandbox="allow-scripts allow-forms allow-modals"
                       />
+                    ) : kind === "pdf" && currentUrl ? (
+                      <object
+                        data={`${currentUrl}${PDF_THUMBNAIL_PARAMS}`}
+                        type="application/pdf"
+                        className="w-[200%] h-[200%] scale-50 origin-top-left bg-white pointer-events-none opacity-80 group-hover:opacity-100 transition-opacity"
+                        aria-label={`${artifact.title} thumbnail`}
+                      />
                     ) : (
-                      <div className="flex flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">
-                        <ArtifactIcon kind={artifact.kind} className="w-12 h-12 text-zinc-500" />
-                        {isOffice && !artifact.metadata?.preview_url && (
+                      <div className="flex w-full flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">
+                        <ArtifactIcon artifact={artifact} className="w-12 h-12" />
+                        {!previewable && (
                           <span className="text-[10px] uppercase tracking-wide text-zinc-500">
                             Download to open
-                          </span>
-                        )}
-                        {isOffice && artifact.metadata?.preview_url && (
-                          <span className="text-[10px] uppercase tracking-wide text-zinc-500">
-                            PDF preview available
                           </span>
                         )}
                       </div>
@@ -355,49 +211,16 @@ export function OutputsPanel({
                     </div>
 
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-3 transition-opacity">
-                      <button
-                        type="button"
-                        onClick={() => handleTogglePreview(artifact)}
-                        disabled={isLoading}
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
-                      >
+                      <span className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold shadow-md">
                         {isLoading ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
                           <Eye className="w-3.5 h-3.5" />
                         )}
-                        {isOffice && !artifact.metadata?.preview_url
-                          ? "Open"
-                          : viewingId === artifact.artifact_id
-                            ? "Hide"
-                            : "Preview"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(artifact)}
-                        disabled={isLoading}
-                        className="p-1.5 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
-                        title="Download"
-                      >
-                        {isLoading ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Download className="w-4 h-4" />
-                        )}
-                      </button>
-                      {currentUrl && previewable && (
-                        <a
-                          href={currentUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="p-1.5 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-xs font-semibold transition-all shadow-md"
-                          title="Open in new tab"
-                        >
-                          <ExternalLink className="w-4 h-4" />
-                        </a>
-                      )}
+                        Open
+                      </span>
                     </div>
-                  </div>
+                  </button>
 
                   <div className="p-4 flex flex-col flex-grow">
                     <h4
@@ -406,60 +229,38 @@ export function OutputsPanel({
                     >
                       {artifact.title || artifact.kind.replace(/_/g, " ")}
                     </h4>
-                    <div className="mt-1 flex items-center gap-2">
+                    <div className="mt-1 flex items-center justify-between gap-2">
                       <p className="text-[12px] text-zinc-500 line-clamp-1">
                         Last edited {formatTimestamp(artifact.created_at)}
                       </p>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleDownload(artifact)}
+                          disabled={isLoading}
+                          className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors disabled:opacity-50"
+                          title="Download"
+                        >
+                          {isLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Download className="w-4 h-4" />
+                          )}
+                        </button>
+                        {currentUrl && previewable && (
+                          <a
+                            href={currentUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+                            title="Open in new tab"
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                          </a>
+                        )}
+                      </div>
                     </div>
                   </div>
-
-                  {viewingId === artifact.artifact_id && previewable && (
-                    <div className="border-t border-zinc-800 bg-[#0a0a0c] p-3">
-                      {artifact.preview && !isImage && !isPdf && (
-                        <div className="text-[13px] leading-relaxed text-zinc-400 line-clamp-4 group-hover:line-clamp-none transition-all mb-4 [&_a]:text-blue-400">
-                          <ReactMarkdown>{artifact.preview}</ReactMarkdown>
-                        </div>
-                      )}
-
-                      {isImage && currentUrl && (
-                        <Fullscreenable title={artifact.title || "Image"} onClose={() => setViewingId(null)} openUrl={currentUrl}>
-                          <div className="rounded-xl overflow-hidden border border-zinc-800 bg-black/20 relative">
-                            <img
-                              src={currentUrl}
-                              alt={artifact.title}
-                              className="w-full h-auto object-contain max-h-[60vh]"
-                            />
-                          </div>
-                        </Fullscreenable>
-                      )}
-
-                      {isPdf && (
-                        <PdfArtifactViewer
-                          artifact={artifact}
-                          url={currentUrl}
-                          title={artifact.title || "PDF preview"}
-                          onClose={() => setViewingId(null)}
-                        />
-                      )}
-
-                      {isOffice && !isPdf && currentUrl && (
-                        <PdfArtifactViewer
-                          artifact={artifact}
-                          url={currentUrl}
-                          title={artifact.title || "PDF preview"}
-                          onClose={() => setViewingId(null)}
-                        />
-                      )}
-
-                      {isHtml && currentUrl && (
-                        <InlineIframeViewer
-                          url={currentUrl}
-                          title={artifact.title || "Preview"}
-                          onClose={() => setViewingId(null)}
-                        />
-                      )}
-                    </div>
-                  )}
                 </div>
               );
             })}
@@ -498,7 +299,7 @@ export function OutputsPanel({
                       key={artifact.artifact_id}
                       className="flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-900/40"
                     >
-                      <ArtifactIcon kind={artifact.kind} className="w-4 h-4 text-zinc-500 shrink-0" />
+                      <ArtifactIcon artifact={artifact} className="w-4 h-4 shrink-0" />
                       <div className="min-w-0 flex-1">
                         <div className="text-[13px] text-zinc-300 truncate">
                           {artifact.title || artifact.kind.replace(/_/g, " ")}
@@ -529,6 +330,12 @@ export function OutputsPanel({
           </div>
         )}
       </div>
+
+      <DocumentViewerModal
+        artifact={viewerArtifact}
+        url={viewerUrl}
+        onClose={closeViewer}
+      />
     </div>
   );
 }
