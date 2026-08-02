@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 _HTML_DATA_URI_LIMIT_BYTES = 500_000
 
+# Prepended to sandbox generator scripts so missing packages self-heal
+# when boot-time provisioning was skipped or failed silently.
+_SANDBOX_DEPS_BOOTSTRAP = textwrap.dedent("""\
+    import importlib, subprocess, sys
+    for pkg, mod in [("python-docx", "docx"), ("openpyxl", "openpyxl"),
+                     ("weasyprint", "weasyprint"), ("fpdf2", "fpdf"),
+                     ("markdown2", "markdown2")]:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg],
+                           check=True, capture_output=True, timeout=240)
+""")
+
 
 def _safe_html_filename(value: str | None, *, fallback: str = "artifact.html") -> str:
     cleaned = (value or fallback).strip().replace("\\", "/").rsplit("/", 1)[-1]
@@ -272,7 +286,7 @@ async def generate_pdf_report(
     sandbox.write_text_file(md_temp, markdown_content)
 
     # Write the PDF generation script
-    pdf_script = textwrap.dedent(f"""\
+    pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib
 
 title = {repr(title)}
@@ -702,7 +716,7 @@ async def generate_excel_report(
         "sheet_name": sheet_name,
     }))
 
-    xlsx_script = textwrap.dedent(f"""\
+    xlsx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -852,7 +866,7 @@ async def generate_docx_report(
     md_temp = f"/tmp/_docx_md_{run_id}.md"
     sandbox.write_text_file(md_temp, markdown_content)
 
-    docx_script = textwrap.dedent(f"""\
+    docx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib, re
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor

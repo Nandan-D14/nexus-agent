@@ -371,6 +371,18 @@ class SandboxManager:
                 self._sandbox.commands.run(cmd, timeout=300)
             except Exception as e:
                 logger.warning("Sandbox provisioning failed: %s", e)
+
+            # Surface silent degradation: boot-time pip can fail without raising,
+            # or packages may still be missing after a partial install.
+            verify = self.run_command(
+                'python3 -c "import docx, openpyxl, fpdf, markdown2"',
+                timeout=60,
+            )
+            if verify.get("exit_code") != 0:
+                logger.error(
+                    "Sandbox doc-generation dependencies missing after provisioning: %s",
+                    verify.get("stderr") or verify.get("stdout") or verify,
+                )
         try:
             self.ensure_chromium_cdp()
         except Exception as exc:

@@ -15,7 +15,11 @@ import {
   WebSearchCard,
   hasRealReasoning,
 } from "@/components/agent-ui";
-import { parseSearchToolOutput } from "@/lib/search-result-utils";
+import {
+  collectSearchRefsFromEventSegments,
+  parseSearchToolOutput,
+  type SearchCiteRef,
+} from "@/lib/search-result-utils";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -45,10 +49,17 @@ import {
 import {
   groupTurnEvents,
   type GenerativeUiSegment,
+  type ArtifactCreatedSegment,
   type TaskGroup,
   type GroupedEvent,
 } from "@/lib/turn-event-grouper";
 import { GenerativeUICard } from "@/components/generative-ui-card";
+import { ArtifactAttachmentCard } from "@/components/artifacts";
+import {
+  DOC_ARTIFACT_TOOLS,
+  artifactFromToolResult,
+} from "@/lib/artifact-url";
+import type { RunArtifact } from "@/lib/message-types";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -73,6 +84,8 @@ type ChatItem =
       question_id: string;
       question: string;
       answered?: boolean;
+      timedOut?: boolean;
+      timeout_seconds?: number;
       ts: number;
     };
 
@@ -185,6 +198,7 @@ function getInlineSummary(
 type TimelineItem =
   | { kind: "taskGroup"; data: TaskGroup; ts: number }
   | { kind: "generative_ui"; data: GenerativeUiSegment; ts: number }
+  | { kind: "artifact_created"; data: ArtifactCreatedSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
   | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
   | { kind: "delegation"; from: string; to: string; ts: number }
@@ -377,6 +391,11 @@ function TurnBlock({
   // Build an interleaved timeline from event segments + messages + cards
   const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
 
+  const turnSearchRefs = useMemo(
+    () => collectSearchRefsFromEventSegments(eventSegments),
+    [eventSegments],
+  );
+
   const timeline = useMemo(() => {
     const items: TimelineItem[] = [];
 
@@ -385,6 +404,8 @@ function TurnBlock({
         items.push({ kind: "taskGroup", data: seg.data, ts: seg.ts });
       } else if (seg.kind === "generative_ui") {
         items.push({ kind: "generative_ui", data: seg, ts: seg.ts });
+      } else if (seg.kind === "artifact_created") {
+        items.push({ kind: "artifact_created", data: seg, ts: seg.ts });
       }
     }
     for (const msg of turn.agentMessages) {
@@ -444,6 +465,21 @@ function TurnBlock({
           );
         }
 
+        if (item.kind === "artifact_created") {
+          const raw = item.data.artifact;
+          const artifact = coerceRunArtifact(raw);
+          if (!artifact) return null;
+          return (
+            <motion.div
+              layout
+              key={`artifact-${artifact.artifact_id}-${idx}`}
+              className="w-full max-w-xl py-1"
+            >
+              <ArtifactAttachmentCard artifact={artifact} compact />
+            </motion.div>
+          );
+        }
+
         if (item.kind === "agentMessage") {
           const msgIdx = turn.agentMessages.findIndex(m => m.ts === item.ts);
           const isLastMsg = isLastTurn && msgIdx === turn.agentMessages.length - 1;
@@ -453,6 +489,7 @@ function TurnBlock({
               key={`msg-${item.ts}-${idx}`}
               text={item.text}
               stream={shouldStream}
+              extraSources={turnSearchRefs}
             />
           );
         }
@@ -484,6 +521,8 @@ function TurnBlock({
                 questionId={item.data.question_id}
                 question={item.data.question}
                 answered={item.data.answered}
+                timedOut={item.data.timedOut}
+                timeoutSeconds={item.data.timeout_seconds}
                 onRespond={onQuestionRespond}
               />
             </motion.div>
@@ -494,6 +533,30 @@ function TurnBlock({
       })}
     </motion.div>
   );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Artifact coercion                                                  */
+/* ------------------------------------------------------------------ */
+
+function coerceRunArtifact(raw: Record<string, unknown>): RunArtifact | null {
+  const artifactId = typeof raw.artifact_id === "string" ? raw.artifact_id : null;
+  if (!artifactId) return null;
+  return {
+    artifact_id: artifactId,
+    run_id: typeof raw.run_id === "string" ? raw.run_id : "",
+    session_id: typeof raw.session_id === "string" ? raw.session_id : "",
+    kind: typeof raw.kind === "string" ? raw.kind : "file",
+    title: typeof raw.title === "string" ? raw.title : "Generated file",
+    preview: typeof raw.preview === "string" ? raw.preview : "",
+    created_at: typeof raw.created_at === "string" ? raw.created_at : null,
+    path: typeof raw.path === "string" ? raw.path : null,
+    url: typeof raw.url === "string" ? raw.url : null,
+    metadata:
+      raw.metadata && typeof raw.metadata === "object"
+        ? (raw.metadata as Record<string, unknown>)
+        : {},
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -514,11 +577,19 @@ function UserMessageCard({ text }: { text: string }) {
 /*  Agent Message                                                      */
 /* ------------------------------------------------------------------ */
 
-function AgentMessageCard({ text, stream = false }: { text: string; stream?: boolean }) {
+function AgentMessageCard({
+  text,
+  stream = false,
+  extraSources,
+}: {
+  text: string;
+  stream?: boolean;
+  extraSources?: SearchCiteRef[];
+}) {
   return (
     <motion.div layout className="flex flex-col items-start w-full">
       <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
-        <StreamingText text={text} isStreaming={stream} />
+        <StreamingText text={text} isStreaming={stream} extraSources={extraSources} />
       </div>
     </motion.div>
   );
@@ -819,14 +890,50 @@ function ToolLine({
     );
   }
 
-  if (invocation.tool === "publish_html_artifact") {
+  // ── Document generation tools: short log + collapsed JSON (card comes from artifact_created) ──
+  if (DOC_ARTIFACT_TOOLS.has(invocation.tool)) {
+    const fromResult = artifactFromToolResult(
+      invocation.tool,
+      invocation.result?.output,
+    );
+    const detail =
+      summary ||
+      fromResult?.title ||
+      (isRunning ? "generating…" : "document");
     return (
-      <ToolLogLine
-        icon={<LayoutGrid className={iconClass} />}
-        label={actionLabel}
-        detail={summary || "HTML page"}
-        isRunning={isRunning}
-      />
+      <div className="flex flex-col gap-1.5 max-w-xl">
+        <ToolLogLine
+          icon={<FileText className={iconClass} />}
+          label={actionLabel}
+          detail={detail}
+          isRunning={isRunning}
+        />
+        {!isRunning && (Object.keys(invocation.args).length > 0 || !!output) && (
+          <details className="ml-6 text-[12px] text-zinc-500">
+            <summary className="cursor-pointer select-none hover:text-zinc-300">
+              Details
+            </summary>
+            <div className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+              {Object.keys(invocation.args).length > 0 && (
+                <div className="px-3 py-2">
+                  <div className="text-[11px] text-zinc-400 mb-1 font-medium">Input</div>
+                  <pre className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+                    {JSON.stringify(invocation.args, null, 2)}
+                  </pre>
+                </div>
+              )}
+              {output && (
+                <div className="px-3 py-2 border-t border-zinc-100 dark:border-zinc-800/60">
+                  <div className="text-[11px] text-zinc-400 mb-1 font-medium">Output</div>
+                  <pre className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+                    {output.length > 500 ? output.slice(0, 500) + "\n..." : output}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </details>
+        )}
+      </div>
     );
   }
 

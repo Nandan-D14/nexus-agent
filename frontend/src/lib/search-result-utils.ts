@@ -9,6 +9,24 @@ export type SearchResult = {
   snippet: string;
 };
 
+/** CiteRef-compatible source without citation index (assigned at merge). */
+export type SearchCiteRef = {
+  label: string;
+  host: string;
+  url: string;
+};
+
+type ToolStepLike = {
+  kind: string;
+  tool?: string;
+  result?: { output?: string };
+};
+
+type EventSegmentLike = {
+  kind: string;
+  data?: { steps?: ToolStepLike[] };
+};
+
 const SEARCH_TOOLS = new Set([
   "search_web",
   "web_search",
@@ -79,4 +97,47 @@ export function parseSearchToolOutput(
   } catch {
     return null;
   }
+}
+
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Walk turn eventSegments / task groups for search tool outputs and
+ * return unique CiteRef-compatible refs (deduped by URL, first-seen order).
+ */
+export function collectSearchRefsFromEventSegments(
+  segments: EventSegmentLike[],
+): SearchCiteRef[] {
+  const seen = new Set<string>();
+  const refs: SearchCiteRef[] = [];
+
+  for (const seg of segments) {
+    if (seg.kind !== "task_group") continue;
+    const steps = seg.data?.steps;
+    if (!steps) continue;
+
+    for (const step of steps) {
+      if (step.kind !== "tool_invocation" || !step.tool) continue;
+      const results = parseSearchToolOutput(step.tool, step.result?.output);
+      if (!results) continue;
+
+      for (const result of results) {
+        if (!result.url || seen.has(result.url)) continue;
+        seen.add(result.url);
+        refs.push({
+          label: result.title || hostname(result.url),
+          host: hostname(result.url),
+          url: result.url,
+        });
+      }
+    }
+  }
+
+  return refs;
 }

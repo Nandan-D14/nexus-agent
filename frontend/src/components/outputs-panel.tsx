@@ -21,7 +21,15 @@ import {
   Loader2,
 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
-import { authenticatedFetch } from "@/lib/api-client";
+import {
+  canInlinePreview,
+  downloadArtifactFile,
+  isHtmlArtifact,
+  isOfficeArtifact,
+  isPdfArtifact,
+  resolveArtifactUrl,
+} from "@/lib/artifact-url";
+import { PdfArtifactViewer } from "@/components/artifacts";
 
 type Props = {
   artifacts: RunArtifact[];
@@ -33,10 +41,6 @@ function formatTimestamp(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Unknown time";
   return date.toLocaleString();
-}
-
-function isHtmlArtifact(artifact: RunArtifact): boolean {
-  return artifact.kind === "html" || artifact.metadata?.render_mode === "iframe";
 }
 
 function ArtifactIcon({ kind, className }: { kind: string; className?: string }) {
@@ -71,7 +75,6 @@ function InlineIframeViewer({
   title: string;
   onClose: () => void;
 }) {
-  // Convert Google Drive view URLs to preview URLs to bypass iframe restrictions
   let embedUrl = url;
   if (url.includes("drive.google.com/file/d/")) {
     embedUrl = url.replace(/\/view.*$/, "/preview");
@@ -80,9 +83,7 @@ function InlineIframeViewer({
   return (
     <div className="mt-4 rounded-xl overflow-hidden border border-zinc-700 bg-black/30">
       <div className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 border-b border-zinc-800">
-        <span className="text-xs font-semibold text-zinc-300 truncate">
-          {title}
-        </span>
+        <span className="text-xs font-semibold text-zinc-300 truncate">{title}</span>
         <div className="flex items-center gap-2">
           <a
             href={url}
@@ -94,6 +95,7 @@ function InlineIframeViewer({
             Open
           </a>
           <button
+            type="button"
             onClick={onClose}
             className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
           >
@@ -111,154 +113,36 @@ function InlineIframeViewer({
   );
 }
 
-/**
- * Helper to convert a Base64 data URI to a Blob.
- */
-function dataURItoBlob(dataURI: string): Blob {
-  const parts = dataURI.split(",");
-  if (parts.length < 2) {
-    throw new Error("Invalid Data URI");
-  }
-  const byteString = atob(parts[1]);
-  const mimeMatch = parts[0].match(/:(.*?);/);
-  const mimeString = mimeMatch ? mimeMatch[1] : "application/octet-stream";
-
-  const ab = new ArrayBuffer(byteString.length);
-  const ia = new Uint8Array(ab);
-  for (let i = 0; i < byteString.length; i++) {
-    ia[i] = byteString.charCodeAt(i);
-  }
-
-  return new Blob([ab], { type: mimeString });
-}
-
-/**
- * Fetch a fresh signed download URL from the backend for a given artifact.
- * Uses the GCS-backed `/api/v1/artifacts/{id}/download` endpoint.
- */
-async function fetchFreshArtifactUrl(artifactId: string): Promise<string | null> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3-second timeout
-
-    const res = await authenticatedFetch(
-      `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
-      { signal: controller.signal }
-    );
-    
-    clearTimeout(timeoutId);
-
-    if (!res.ok) return null;
-    const body = await res.json();
-    return body.url ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Downloads a file directly from the active sandbox workspace.
- * Used as a fallback if GCS durable storage failed to upload.
- */
-async function downloadFromWorkspaceSandbox(sessionId: string, path: string): Promise<string | null> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000); // 4-second timeout
-
-    const res = await authenticatedFetch(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/download?relative_path=${encodeURIComponent(path)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeoutId);
-
-    if (!res.ok) return null;
-    const blob = await res.blob();
-    return window.URL.createObjectURL(blob);
-  } catch (e: unknown) {
-    if (!(e instanceof Error) || e.name !== "AbortError") {
-      console.error("Workspace download failed", e);
-    }
-    return null;
-  }
-}
-
 export function OutputsPanel({
   artifacts,
   emptyState = "No outputs have been captured for this run yet.",
 }: Props) {
   const [viewingId, setViewingId] = useState<string | null>(null);
-  // Cache of fresh URLs fetched from the backend, keyed by artifact_id
   const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const fetchedIds = useRef<Set<string>>(new Set());
   const autoOpenedIds = useRef<Set<string>>(new Set());
 
-  /**
-   * Resolve a working URL for an artifact. Prefers the one already on the
-   * artifact object, but if it's missing (GCS upload returned null, URL expired)
-   * it fetches a fresh signed URL from the backend.
-   * As a final fallback for local debugging, attempts to fetch from the sandbox.
-   */
   const resolveUrl = useCallback(
     async (artifact: RunArtifact): Promise<string | null> => {
-      // Already have a cached fresh URL
       if (freshUrls[artifact.artifact_id]) return freshUrls[artifact.artifact_id];
-      
-      // Use the URL on the artifact if it exists and is not an expired signed URL
-      // (Google Drive URLs are permanent, so we can use them directly)
-      if (artifact.url && !artifact.url.includes("storage.googleapis.com")) {
-        // If it's a data URI, convert it to a Blob URL to bypass browser security restrictions
-        if (artifact.url.startsWith("data:")) {
-          try {
-            const blob = dataURItoBlob(artifact.url);
-            const blobUrl = window.URL.createObjectURL(blob);
-            setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: blobUrl }));
-            return blobUrl;
-          } catch (e) {
-            console.error("Failed to convert data URI to blob URL", e);
-            return artifact.url;
-          }
-        }
-        return artifact.url;
+      const url = await resolveArtifactUrl(artifact);
+      if (url) {
+        setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: url }));
       }
-
-      // Fetch a fresh one from GCS metadata
-      const freshGcsUrl = await fetchFreshArtifactUrl(artifact.artifact_id);
-      if (freshGcsUrl) {
-        // If the backend returns a base64 data URI, convert it to a Blob URL
-        if (freshGcsUrl.startsWith("data:")) {
-          try {
-            const blob = dataURItoBlob(freshGcsUrl);
-            const blobUrl = window.URL.createObjectURL(blob);
-            setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: blobUrl }));
-            return blobUrl;
-          } catch (e) {
-            console.error("Failed to convert fresh data URI to blob URL", e);
-          }
-        }
-        setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: freshGcsUrl }));
-        return freshGcsUrl;
-      }
-      
-      // Fallback: If GCS failed and the file is in the workspace, fetch from sandbox
-      if (artifact.path) {
-        const sandboxUrl = await downloadFromWorkspaceSandbox(artifact.session_id, artifact.path);
-        if (sandboxUrl) {
-          setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: sandboxUrl }));
-          return sandboxUrl;
-        }
-      }
-
-      return artifact.url || null;
+      return url;
     },
     [freshUrls],
   );
 
-  // Auto-fetch fresh URLs for images so their thumbnails load immediately
   useEffect(() => {
     artifacts.forEach((artifact) => {
-      const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
-      if ((isImage || isHtmlArtifact(artifact)) && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
+      const wantsEager =
+        artifact.kind === "image" ||
+        artifact.kind === "screenshot" ||
+        isHtmlArtifact(artifact) ||
+        isPdfArtifact(artifact);
+      if (wantsEager && !freshUrls[artifact.artifact_id] && !fetchedIds.current.has(artifact.artifact_id)) {
         fetchedIds.current.add(artifact.artifact_id);
         resolveUrl(artifact).catch(() => {});
       }
@@ -272,52 +156,32 @@ export function OutputsPanel({
     setViewingId(htmlArtifact.artifact_id);
   }, [artifacts]);
 
-  /** Download an artifact by getting a fresh signed URL and triggering browser download. */
-  const handleDownload = useCallback(
-    async (artifact: RunArtifact) => {
-      setLoadingId(artifact.artifact_id);
-      try {
-        const url = await resolveUrl(artifact);
-        if (!url) {
-          console.error("No downloadable URL found for artifact", artifact.artifact_id);
-          return;
-        }
-        
-        // Standard, robust way to trigger download of Blob/Data URLs in browsers
-        if (url.startsWith("blob:") || url.startsWith("data:")) {
-          const link = document.createElement("a");
-          link.href = url;
-          const filename = artifact.title || artifact.path?.split("/").pop() || "artifact";
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-        } else {
-          // Open the signed URL in a new tab — the browser handles the download
-          window.open(url, "_blank", "noopener,noreferrer");
-        }
-      } catch (e) {
-        console.error("Download failed", e);
-      } finally {
-        setLoadingId(null);
-      }
-    },
-    [resolveUrl],
-  );
+  const handleDownload = useCallback(async (artifact: RunArtifact) => {
+    setLoadingId(artifact.artifact_id);
+    try {
+      await downloadArtifactFile(artifact);
+    } catch (e) {
+      console.error("Download failed", e);
+    } finally {
+      setLoadingId(null);
+    }
+  }, []);
 
-  /** Toggle preview — fetches a fresh URL if needed before opening the viewer. */
   const handleTogglePreview = useCallback(
     async (artifact: RunArtifact) => {
       if (viewingId === artifact.artifact_id) {
         setViewingId(null);
         return;
       }
+      if (!canInlinePreview(artifact)) {
+        // Office: jump straight to download
+        await handleDownload(artifact);
+        return;
+      }
       setLoadingId(artifact.artifact_id);
       try {
         const url = await resolveUrl(artifact);
         if (url) {
-          // Store the fresh URL so the viewer can use it
-          setFreshUrls((prev) => ({ ...prev, [artifact.artifact_id]: url }));
           setViewingId(artifact.artifact_id);
         } else {
           console.error("No previewable URL found for artifact", artifact.artifact_id);
@@ -326,13 +190,11 @@ export function OutputsPanel({
         setLoadingId(null);
       }
     },
-    [viewingId, resolveUrl],
+    [viewingId, resolveUrl, handleDownload],
   );
 
-  /** Get the best available URL for an artifact (from cache or original). */
-  const getUrl = (artifact: RunArtifact): string | null => {
-    return freshUrls[artifact.artifact_id] || artifact.url || null;
-  };
+  const getUrl = (artifact: RunArtifact): string | null =>
+    freshUrls[artifact.artifact_id] || artifact.url || null;
 
   if (artifacts.length === 0) {
     return (
@@ -356,7 +218,7 @@ export function OutputsPanel({
             Generated Artifacts
           </h3>
           <span className="text-xs font-medium text-zinc-500 uppercase tracking-widest">
-            {artifacts.length} {artifacts.length === 1 ? 'Item' : 'Items'}
+            {artifacts.length} {artifacts.length === 1 ? "Item" : "Items"}
           </span>
         </div>
 
@@ -366,16 +228,22 @@ export function OutputsPanel({
             const currentUrl = getUrl(artifact);
             const isImage = artifact.kind === "image" || artifact.kind === "screenshot";
             const isHtml = isHtmlArtifact(artifact);
+            const isPdf = isPdfArtifact(artifact);
+            const isOffice = isOfficeArtifact(artifact) && !isPdf;
+            const previewable = canInlinePreview(artifact);
 
             return (
               <div
                 key={artifact.artifact_id}
                 className="group relative rounded-xl border border-zinc-800 bg-[#141414] hover:bg-[#1a1a1c] hover:border-zinc-700 transition-all duration-200 overflow-hidden shadow-sm flex flex-col"
               >
-                {/* Top Preview Area */}
                 <div className="relative aspect-video w-full bg-[#1c1c1e] flex items-center justify-center overflow-hidden border-b border-zinc-800">
                   {isImage && currentUrl ? (
-                    <img src={currentUrl} alt={artifact.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                    <img
+                      src={currentUrl}
+                      alt={artifact.title}
+                      className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                    />
                   ) : isHtml && currentUrl ? (
                     <iframe
                       src={currentUrl}
@@ -386,33 +254,50 @@ export function OutputsPanel({
                   ) : (
                     <div className="flex flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">
                       <ArtifactIcon kind={artifact.kind} className="w-12 h-12 text-zinc-500" />
+                      {isOffice && (
+                        <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                          Download to open
+                        </span>
+                      )}
                     </div>
                   )}
 
-                  {/* Optional Eye Icon Badge (like in the screenshot) */}
                   <div className="absolute bottom-2 right-2 bg-white/10 backdrop-blur-md px-2 py-0.5 rounded-full text-[10px] font-medium text-white flex items-center gap-1 border border-white/10 shadow-sm">
-                    <Eye className="w-3 h-3" /> Preview
+                    <Eye className="w-3 h-3" /> {previewable ? "Preview" : "File"}
                   </div>
 
-                  {/* Hover Overlay with Actions */}
                   <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-3 transition-opacity">
                     <button
+                      type="button"
                       onClick={() => handleTogglePreview(artifact)}
                       disabled={isLoading}
                       className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
                     >
-                      {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
-                      {viewingId === artifact.artifact_id ? "Hide" : "Preview"}
+                      {isLoading ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
+                      {isOffice
+                        ? "Open"
+                        : viewingId === artifact.artifact_id
+                          ? "Hide"
+                          : "Preview"}
                     </button>
                     <button
+                      type="button"
                       onClick={() => handleDownload(artifact)}
                       disabled={isLoading}
                       className="p-1.5 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-xs font-semibold transition-all shadow-md disabled:opacity-50"
                       title="Download"
                     >
-                      {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                      {isLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
                     </button>
-                    {currentUrl && (
+                    {currentUrl && previewable && (
                       <a
                         href={currentUrl}
                         target="_blank"
@@ -426,9 +311,11 @@ export function OutputsPanel({
                   </div>
                 </div>
 
-                {/* Bottom Info Area */}
                 <div className="p-4 flex flex-col flex-grow">
-                  <h4 className="text-[14px] font-semibold text-zinc-200 line-clamp-1 group-hover:text-white transition-colors" title={artifact.title || artifact.kind}>
+                  <h4
+                    className="text-[14px] font-semibold text-zinc-200 line-clamp-1 group-hover:text-white transition-colors"
+                    title={artifact.title || artifact.kind}
+                  >
                     {artifact.title || artifact.kind.replace(/_/g, " ")}
                   </h4>
                   <div className="mt-1 flex items-center gap-2">
@@ -438,29 +325,46 @@ export function OutputsPanel({
                   </div>
                 </div>
 
-                {/* Inline Preview expansions (Appears below the card content if activated) */}
-                {viewingId === artifact.artifact_id && (
+                {viewingId === artifact.artifact_id && previewable && (
                   <div className="border-t border-zinc-800 bg-[#0a0a0c] p-3">
-                    {/* Markdown Preview */}
-                    {artifact.preview && !isImage && (
-                      <div className="text-[13px] leading-relaxed text-zinc-400 dark:text-zinc-400 line-clamp-4 group-hover:line-clamp-none transition-all mb-4 [&_a]:text-blue-400">
+                    {artifact.preview && !isImage && !isPdf && (
+                      <div className="text-[13px] leading-relaxed text-zinc-400 line-clamp-4 group-hover:line-clamp-none transition-all mb-4 [&_a]:text-blue-400">
                         <ReactMarkdown>{artifact.preview}</ReactMarkdown>
                       </div>
                     )}
-                    
-                    {/* Inline image preview (large) */}
+
                     {isImage && currentUrl && (
                       <div className="rounded-xl overflow-hidden border border-zinc-800 bg-black/20 relative">
-                        <div className="absolute top-2 right-2 bg-black/50 rounded p-1 hover:bg-black/80 cursor-pointer text-zinc-300" onClick={() => setViewingId(null)}>
+                        <button
+                          type="button"
+                          className="absolute top-2 right-2 bg-black/50 rounded p-1 hover:bg-black/80 cursor-pointer text-zinc-300"
+                          onClick={() => setViewingId(null)}
+                        >
                           <X className="w-4 h-4" />
-                        </div>
-                        <img src={currentUrl} alt={artifact.title} className="w-full h-auto object-contain max-h-[300px]" />
+                        </button>
+                        <img
+                          src={currentUrl}
+                          alt={artifact.title}
+                          className="w-full h-auto object-contain max-h-[300px]"
+                        />
                       </div>
                     )}
 
-                    {/* Inline Iframe viewer */}
-                    {!isImage && currentUrl && (
-                      <InlineIframeViewer url={currentUrl} title={artifact.title || "Preview"} onClose={() => setViewingId(null)} />
+                    {isPdf && (
+                      <PdfArtifactViewer
+                        artifact={artifact}
+                        url={currentUrl}
+                        title={artifact.title || "PDF preview"}
+                        onClose={() => setViewingId(null)}
+                      />
+                    )}
+
+                    {isHtml && currentUrl && (
+                      <InlineIframeViewer
+                        url={currentUrl}
+                        title={artifact.title || "Preview"}
+                        onClose={() => setViewingId(null)}
+                      />
                     )}
                   </div>
                 )}

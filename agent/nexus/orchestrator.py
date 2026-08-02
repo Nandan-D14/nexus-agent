@@ -715,6 +715,7 @@ class NexusOrchestrator:
             "type": "user_question",
             "question_id": question_id,
             "question": question,
+            "timeout_seconds": settings.ask_user_timeout_seconds,
         })
         await self._persist_message(role="agent", source="ask_user", text=question)
         step_id = await self._create_step(

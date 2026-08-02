@@ -161,7 +161,12 @@ export type WsMessage = WsEventMeta & (
       title?: string;
       component?: unknown;
     }
-  | { type: "user_question"; question_id: string; question: string }
+  | {
+      type: "user_question";
+      question_id: string;
+      question: string;
+      timeout_seconds?: number;
+    }
   | { type: "user_question_resolved"; question_id: string; answered: boolean }
   | {
       type: "permission_request";

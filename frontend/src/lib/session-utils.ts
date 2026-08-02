@@ -41,6 +41,8 @@ export type ChatItem =
       question_id: string;
       question: string;
       answered?: boolean;
+      timedOut?: boolean;
+      timeout_seconds?: number;
       ts: number;
     };
 

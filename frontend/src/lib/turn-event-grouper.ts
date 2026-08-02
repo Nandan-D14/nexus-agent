@@ -88,9 +88,16 @@ export type GenerativeUiSegment = {
   ts: number;
 };
 
+export type ArtifactCreatedSegment = {
+  kind: "artifact_created";
+  artifact: Record<string, unknown>;
+  ts: number;
+};
+
 export type TurnEventSegment =
   | { kind: "task_group"; data: TaskGroup; ts: number }
-  | GenerativeUiSegment;
+  | GenerativeUiSegment
+  | ArtifactCreatedSegment;
 
 const FILTERED_TYPES = new Set([
   "agent_complete",
@@ -105,7 +112,6 @@ const FILTERED_TYPES = new Set([
   "step_started",
   "step_completed",
   "step_failed",
-  "artifact_created",
   "todo_list_updated",
   "ui_action",
   "vnc_url",
@@ -134,6 +140,22 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
 
   for (const event of events) {
     if (event.type.startsWith("bg_task") || FILTERED_TYPES.has(event.type)) {
+      continue;
+    }
+
+    if (event.type === "artifact_created") {
+      finalizeTask();
+      const artifact =
+        event.artifact && typeof event.artifact === "object"
+          ? (event.artifact as Record<string, unknown>)
+          : null;
+      if (artifact) {
+        segments.push({
+          kind: "artifact_created",
+          artifact,
+          ts: event.ts,
+        });
+      }
       continue;
     }
 

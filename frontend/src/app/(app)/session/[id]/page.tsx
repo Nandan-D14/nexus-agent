@@ -362,6 +362,10 @@ export default function SessionPage() {
 
       case "artifact_created":
         setRunArtifacts((prev) => upsertArtifact(prev, msg.artifact));
+        setChatItems((prev) => [
+          ...prev,
+          { kind: "event", type: "artifact_created", artifact: msg.artifact, ts },
+        ]);
         if (msg.artifact.kind === "html" || msg.artifact.metadata?.render_mode === "iframe") {
           setForcedTab("workflow");
         }
@@ -529,6 +533,8 @@ export default function SessionPage() {
             question_id: msg.question_id,
             question: msg.question,
             answered: false,
+            timedOut: false,
+            timeout_seconds: msg.timeout_seconds,
             ts,
           },
         ]);
@@ -538,10 +544,17 @@ export default function SessionPage() {
         setChatItems((prev) =>
           prev.map((item) =>
             item.kind === "user_question" && item.question_id === msg.question_id
-              ? { ...item, answered: true }
+              ? {
+                  ...item,
+                  answered: msg.answered,
+                  timedOut: !msg.answered,
+                }
               : item,
           ),
         );
+        if (!msg.answered) {
+          setAgentStatus("");
+        }
         break;
 
       case "permission_request":
@@ -886,9 +899,27 @@ export default function SessionPage() {
       ]);
       if (cancelled) return;
       const nextChatItems = mapStoredMessagesToChatItems(messages);
+      const existingArtifactIds = new Set(
+        nextChatItems
+          .filter((item) => item.kind === "event" && item.type === "artifact_created")
+          .map((item) => {
+            const art = (item as { artifact?: { artifact_id?: string } }).artifact;
+            return art?.artifact_id;
+          })
+          .filter(Boolean),
+      );
+      const artifactChatItems = artifacts
+        .filter((a) => !existingArtifactIds.has(a.artifact_id))
+        .map((a, index) => ({
+          kind: "event" as const,
+          type: "artifact_created",
+          artifact: a,
+          // Stagger slightly after messages so cards sort at end of the last turn
+          ts: Date.now() - (artifacts.length - index) * 10,
+        }));
       setChatItems((prev) => {
-        if (nextChatItems.length > 0) {
-          return nextChatItems;
+        if (nextChatItems.length > 0 || artifactChatItems.length > 0) {
+          return [...nextChatItems, ...artifactChatItems];
         }
         return prev.length > 0 ? prev : [];
       });
@@ -1451,7 +1482,7 @@ export default function SessionPage() {
       setChatItems((prev) =>
         prev.map((item) =>
           item.kind === "user_question" && item.question_id === questionId
-            ? { ...item, answered: true }
+            ? { ...item, answered: true, timedOut: false }
             : item,
         ),
       );

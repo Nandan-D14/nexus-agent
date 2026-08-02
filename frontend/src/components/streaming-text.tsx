@@ -18,6 +18,7 @@ import {
   extractMarkdownCitations,
   type CiteRef,
 } from "@/components/agent-ui/inline-citations";
+import type { SearchCiteRef } from "@/lib/search-result-utils";
 import { cx } from "@/utils/cx";
 
 const WORD_MS = 80;
@@ -26,6 +27,8 @@ type Props = {
   text: string;
   isStreaming: boolean;
   className?: string;
+  /** Search / tool results to merge into the Sources UI (markdown citations win on URL clash). */
+  extraSources?: SearchCiteRef[];
 };
 
 type RevealToken =
@@ -109,13 +112,44 @@ function wordPrefix(text: string, count: number): string {
   return words.slice(0, Math.max(0, count)).join("");
 }
 
+/** Markdown citations first; append search-only URLs. Prefer markdown label on clash. */
+function mergeCitationRefs(
+  text: string,
+  extraSources?: SearchCiteRef[],
+): CiteRef[] {
+  const { refs: markdownRefs } = extractMarkdownCitations(text);
+  if (!extraSources?.length) return markdownRefs;
+
+  const seen = new Set(markdownRefs.map((r) => r.url));
+  const merged = [...markdownRefs];
+  for (const src of extraSources) {
+    if (!src.url || seen.has(src.url)) continue;
+    seen.add(src.url);
+    merged.push({
+      n: merged.length + 1,
+      label: src.label || src.host,
+      host: src.host,
+      url: src.url,
+    });
+  }
+  return merged;
+}
+
 /**
  * Agent answer shell — demo-style word fade-in while streaming, then
  * Copy / Retry / thumbs + expandable sources (BoardUI tokens).
  */
-export function StreamingText({ text, isStreaming, className }: Props) {
+export function StreamingText({
+  text,
+  isStreaming,
+  className,
+  extraSources,
+}: Props) {
   const reducedMotion = usePrefersReducedMotion();
-  const refs = useMemo(() => extractMarkdownCitations(text).refs, [text]);
+  const refs = useMemo(
+    () => mergeCitationRefs(text, extraSources),
+    [text, extraSources],
+  );
   const heavyMd = useMemo(() => isMarkdownHeavy(text), [text]);
   const revealTokens = useMemo(() => buildRevealTokens(text, refs), [text, refs]);
   const totalTokens = revealTokens.length;
