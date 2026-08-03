@@ -39,6 +39,7 @@ import { SessionNavSidebar } from "@/components/session-nav-sidebar";
 import { WorkflowTemplateEditorModal } from "@/components/workflow-template-editor-modal";
 import { UnifiedChatPanel } from "@/components/unified-chat-panel";
 import { TodoList } from "@/components/todo-list";
+import { useToast } from "@/components/toast-provider";
 import { useLiveDesktop } from "@/components/live-desktop-provider";
 import { WorkflowDesktopContainer } from "@/components/workflow-desktop-container";
 import type { WorkflowRun } from "@/components/agent-workflow-panel";
@@ -61,7 +62,6 @@ import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useWorkflowTemplates } from "@/lib/use-workflow-templates";
-import { useToast } from "@/components/toast-provider";
 import { useSettings } from "@/lib/settings-context";
 import {
   classifyAgentTool,
@@ -109,6 +109,14 @@ import type { AgentVisualAction } from "@/components/desktop-panel";
 
 /** Connected integrations rarely change mid-session; reuse them this long. */
 const CONNECTORS_TTL_MS = 60_000;
+
+/**
+ * How long the agent may go completely silent while the UI shows a busy phase
+ * before we assume the turn was lost and hand control back to the user. Long
+ * enough to cover a slow model call or a cold sandbox boot.
+ */
+const AGENT_STALL_TIMEOUT_MS = 180_000;
+const AGENT_STALL_POLL_MS = 5_000;
 
 export default function SessionPage() {
   const params = useParams();
@@ -183,6 +191,9 @@ export default function SessionPage() {
   const autoActionHandledRef = useRef(false);
   const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
   const autoResumeTriggeredRef = useRef(false);
+  // Wall clock of the last frame received from the backend. Drives the stall
+  // watchdog so a lost terminal event can never strand the thinking indicator.
+  const lastServerActivityRef = useRef(Date.now());
   const { registerDesktop, clearDesktop } = useLiveDesktop();
   const wsUrl =
     typeof window !== "undefined"
@@ -199,11 +210,50 @@ export default function SessionPage() {
       ? sessionData.task_id
       : null;
 
-  const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef, seedDurableCursor } =
-    useWebSocket(shouldConnectWs ? wsUrl : null, {
-      ticket: sessionData?.ws_ticket ?? null,
-      durableTaskId,
-    });
+  const lastToastedPageErrorRef = useRef<string | null>(null);
+  const lastToastedErrorRef = useRef<string | null>(null);
+  const lastToastedLoadingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (pageError && pageError !== lastToastedPageErrorRef.current) {
+      lastToastedPageErrorRef.current = pageError;
+      toast(pageError, "error");
+    } else if (!pageError) {
+      lastToastedPageErrorRef.current = null;
+    }
+  }, [pageError, toast]);
+
+  useEffect(() => {
+    if (error && error !== lastToastedErrorRef.current) {
+      lastToastedErrorRef.current = error;
+      toast(error, "error");
+    } else if (!error) {
+      lastToastedErrorRef.current = null;
+    }
+  }, [error, toast]);
+
+  useEffect(() => {
+    if (isLoading && !lastToastedLoadingRef.current) {
+      lastToastedLoadingRef.current = true;
+      toast("Loading session...", "info");
+    } else if (!isLoading) {
+      lastToastedLoadingRef.current = false;
+    }
+  }, [isLoading, toast]);
+
+  const {
+    sendBinary,
+    sendJson,
+    isConnected,
+    onBinaryMessageRef,
+    onJsonMessageRef,
+    seedDurableCursor,
+    connectionLost,
+    reconnect,
+  } = useWebSocket(shouldConnectWs ? wsUrl : null, {
+    ticket: sessionData?.ws_ticket ?? null,
+    durableTaskId,
+  });
 
   const handleSpeechStart = useCallback(() => {
     // Zero-latency barge-in: stop agent audio the moment the user starts speaking
@@ -306,6 +356,11 @@ export default function SessionPage() {
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
     const ts = Date.now();
+    // "pong" is a keepalive the client itself triggers, so it must not count as
+    // agent progress — otherwise the stall watchdog would never fire.
+    if (msg.type !== "pong") {
+      lastServerActivityRef.current = ts;
+    }
 
     const applyWorkingLogChat = () => {
       setChatItems((prev) => {
@@ -493,6 +548,7 @@ export default function SessionPage() {
         setAgentStatus("");
         setAgentAction(null);
         applyWorkingLogChat();
+        toast("Task completed successfully!", "success");
         break;
 
       case "agent_delegation":
@@ -513,7 +569,18 @@ export default function SessionPage() {
         }
         break;
 
+      // Both the live request and its durable twin block the run until the user
+      // answers, so stop showing "Thinking..." and point at the approval card.
       case "permission_request":
+      case "approval_requested":
+        setPhase("idle");
+        setAgentStatus("Waiting for your approval...");
+        setAgentAction(null);
+        applyWorkingLogChat();
+        break;
+
+      case "approval_resolved":
+        setAgentStatus("");
         applyWorkingLogChat();
         break;
 
@@ -565,11 +632,54 @@ export default function SessionPage() {
         break;
 
       case "error":
-        setPageError(msg.detail || msg.message);
+        const errDetail = msg.detail || msg.message || "Agent error occurred";
+        setPageError(errDetail);
+        toast(errDetail, "error");
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
         applyWorkingLogChat();
+        break;
+
+      case "worker_failed":
+        const workerErrDetail =
+          msg.error || msg.reason || "The agent run stopped unexpectedly.";
+        setPageError(workerErrDetail);
+        toast(workerErrDetail, "error");
+        setPhase("done");
+        setAgentStatus("");
+        setAgentAction(null);
+        break;
+
+      case "enqueue_rejected": {
+        const rejectDetail =
+          msg.reason || "The request could not be queued. Please try again.";
+        setPageError(rejectDetail);
+        toast(rejectDetail, "error");
+        setPhase("done");
+        setAgentStatus("");
+        setAgentAction(null);
+        break;
+      }
+
+      // Terminal for a durable run: the worker released the turn. Clearing the
+      // phase here keeps the composer usable even if agent_complete was lost.
+      case "worker_finished":
+        setPhase("done");
+        setAgentStatus("");
+        setAgentAction(null);
+        break;
+
+      case "run_queued":
+        setAgentStatus("Queued...");
+        break;
+
+      case "worker_claimed":
+        setAgentStatus("Starting...");
+        break;
+
+      case "agent_status":
+        setAgentStatus(msg.message || msg.status);
         break;
 
       case "token_usage":
@@ -604,6 +714,37 @@ export default function SessionPage() {
   useEffect(() => {
     onJsonMessageRef.current = handleLastMessage;
   }, [handleLastMessage, onJsonMessageRef]);
+
+  /* ---- Stall watchdog ----
+   * The thinking indicator is set optimistically on send and cleared by a
+   * terminal event. If that event never arrives (dropped frame, backend that
+   * bailed out silently, worker that died) the composer would stay locked
+   * forever. After a long quiet period, unlock the UI and say so plainly.
+   */
+  useEffect(() => {
+    if (viewMode !== "live") {
+      return;
+    }
+    if (phase !== "thinking" && phase !== "acting") {
+      return;
+    }
+
+    lastServerActivityRef.current = Date.now();
+    const interval = setInterval(() => {
+      const idleMs = Date.now() - lastServerActivityRef.current;
+      if (idleMs < AGENT_STALL_TIMEOUT_MS) {
+        return;
+      }
+      setPhase("done");
+      setAgentStatus("");
+      setAgentAction(null);
+      setPageError(
+        "The agent stopped sending updates. Your message may not have been processed — please send it again.",
+      );
+    }, AGENT_STALL_POLL_MS);
+
+    return () => clearInterval(interval);
+  }, [phase, viewMode]);
 
   useEffect(() => {
     if (isNewSession || viewMode !== "live" || !streamUrl) {
@@ -1727,21 +1868,57 @@ export default function SessionPage() {
               >
                 {/* Tabs removed to modernize UI */}
 
-                {/* Feed container */}
-                <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar">
+                {/* Feed + sticky composer dock */}
+                <div className="flex-1 min-h-0 overflow-hidden">
                   {viewMode === "archived" && chatItems.length === 0 ? (
-                    <div className="flex h-full flex-col items-center justify-center p-8 text-center bg-transparent">
-                      <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                        Previous chat
-                      </p>
-                      <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
-                        Send a message or open desktop to continue.
-                      </p>
-                      {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
-                        <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-                          {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
+                    <div className="flex h-full flex-col min-h-0">
+                      <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col items-center justify-center p-8 text-center bg-transparent">
+                        <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                          Previous chat
                         </p>
-                      )}
+                        <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
+                          Send a message or open desktop to continue.
+                        </p>
+                        {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
+                          <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                            {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
+                          </p>
+                        )}
+                      </div>
+                      {canShowComposer ? (
+                        <div className="shrink-0 px-6 pb-4 pt-1">
+                          <div className="mx-auto w-full max-w-3xl relative rounded-[24px] border border-border-button-white bg-background-secondary-default p-2 shadow-sidebar">
+                            <TodoList items={todoItems} />
+                            <ChatComposer
+                              inputRef={inputRef}
+                              textInput={textInput}
+                              onChangeText={setTextInput}
+                              onSubmitText={handleTextSubmit}
+                              onOpenFilePicker={handleOpenFilePicker}
+                              uploadDisabled={uploadDisabled}
+                              uploadedFiles={uploadedFiles}
+                              onRemoveFile={handleRemoveUploadedFile}
+                              onToggleMic={toggleMic}
+                              isRecording={isRecording}
+                              voiceStatus={voiceStatus}
+                              phase={phase}
+                              isLoading={isLoading}
+                              isUploadingFile={isUploadingFile}
+                              onStopAgent={handleStopAgent}
+                              onShowDesktop={handleShowDesktop}
+                              availableConnectors={availableConnectors}
+                              selectedConnectorIds={selectedConnectorIds}
+                              onToggleConnector={toggleConnectorSelection}
+                              onToggleAllConnectors={toggleAllConnectors}
+                              selectedToolIds={selectedToolIds}
+                              onToggleTool={toggleToolSelection}
+                              onToggleAllTools={toggleAllTools}
+                              connectorsLoading={connectorsLoading}
+                              onRefreshTools={refreshConnectors}
+                            />
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
                     <UnifiedChatPanel
@@ -1750,45 +1927,43 @@ export default function SessionPage() {
                       phase={phase}
                       onPermissionRespond={handlePermissionRespond}
                       onQuestionRespond={handleQuestionRespond}
+                      footer={
+                        canShowComposer ? (
+                          <div className="rounded-[24px] border border-border-button-white bg-background-secondary-default p-2 shadow-sidebar">
+                            <TodoList items={todoItems} />
+                            <ChatComposer
+                              inputRef={inputRef}
+                              textInput={textInput}
+                              onChangeText={setTextInput}
+                              onSubmitText={handleTextSubmit}
+                              onOpenFilePicker={handleOpenFilePicker}
+                              uploadDisabled={uploadDisabled}
+                              uploadedFiles={uploadedFiles}
+                              onRemoveFile={handleRemoveUploadedFile}
+                              onToggleMic={toggleMic}
+                              isRecording={isRecording}
+                              voiceStatus={voiceStatus}
+                              phase={phase}
+                              isLoading={isLoading}
+                              isUploadingFile={isUploadingFile}
+                              onStopAgent={handleStopAgent}
+                              onShowDesktop={handleShowDesktop}
+                              availableConnectors={availableConnectors}
+                              selectedConnectorIds={selectedConnectorIds}
+                              onToggleConnector={toggleConnectorSelection}
+                              onToggleAllConnectors={toggleAllConnectors}
+                              selectedToolIds={selectedToolIds}
+                              onToggleTool={toggleToolSelection}
+                              onToggleAllTools={toggleAllTools}
+                              connectorsLoading={connectorsLoading}
+                              onRefreshTools={refreshConnectors}
+                            />
+                          </div>
+                        ) : null
+                      }
                     />
                   )}
                 </div>
-
-                {/* Input area */}
-                {canShowComposer ? (
-                  <div className="px-4 pb-6 pt-2 shrink-0">
-                    <div className="mx-auto w-full max-w-3xl relative">
-                      <TodoList items={todoItems} />
-                      <ChatComposer
-                        inputRef={inputRef}
-                        textInput={textInput}
-                        onChangeText={setTextInput}
-                        onSubmitText={handleTextSubmit}
-                        onOpenFilePicker={handleOpenFilePicker}
-                        uploadDisabled={uploadDisabled}
-                        uploadedFiles={uploadedFiles}
-                        onRemoveFile={handleRemoveUploadedFile}
-                        onToggleMic={toggleMic}
-                        isRecording={isRecording}
-                        voiceStatus={voiceStatus}
-                        phase={phase}
-                        isLoading={isLoading}
-                        isUploadingFile={isUploadingFile}
-                        onStopAgent={handleStopAgent}
-                        onShowDesktop={handleShowDesktop}
-                        availableConnectors={availableConnectors}
-                        selectedConnectorIds={selectedConnectorIds}
-                        onToggleConnector={toggleConnectorSelection}
-                        onToggleAllConnectors={toggleAllConnectors}
-                        selectedToolIds={selectedToolIds}
-                        onToggleTool={toggleToolSelection}
-                        onToggleAllTools={toggleAllTools}
-                        connectorsLoading={connectorsLoading}
-                        onRefreshTools={refreshConnectors}
-                      />
-                    </div>
-                  </div>
-                ) : null}
               </div>
 
               {/* Right: Desktop panel */}
@@ -1819,16 +1994,23 @@ export default function SessionPage() {
             {/* ─── Footer ─── */}
             {/* <StatusBar phase={phase} isConnected={viewMode === "live" && isConnected} tokenQuota={tokenQuota} /> */}
 
-            {(pageError || error) && (
-              <div className="border-t border-red-500/20 bg-red-950/20 px-4 py-2 text-sm text-red-300">
-                {pageError || error}
+            {viewMode === "live" && connectionLost && (
+              <div className="flex items-center justify-between gap-3 border-t border-amber-500/25 bg-amber-950/20 px-4 py-2 text-sm text-amber-200">
+                <span>
+                  Disconnected from the agent. Any running task continues on the
+                  server, but live updates have stopped.
+                </span>
+                <button
+                  type="button"
+                  onClick={reconnect}
+                  className="shrink-0 rounded-md border border-amber-400/40 px-2.5 py-1 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-400/15"
+                >
+                  Reconnect
+                </button>
               </div>
             )}
-            {isLoading && (
-              <div className="border-t border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b] px-4 py-2 text-sm text-muted dark:text-zinc-500">
-                Loading session...
-              </div>
-            )}
+
+
             <WorkflowTemplateEditorModal
               open={isTemplateDialogOpen}
               title="Save as Template"

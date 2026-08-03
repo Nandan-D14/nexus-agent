@@ -816,10 +816,10 @@ export function ChatComposer({
     <div
       ref={frameRef}
       className={cx(
-        "relative flex flex-col bg-white/80 dark:bg-white/[0.04] backdrop-blur-md",
-        "border border-zinc-200/80 dark:border-white/8 rounded-[24px] p-1 shadow-2xl",
-        "transition-all focus-within:border-indigo-500/30",
-        isLanding ? "min-h-[120px]" : "min-h-[80px]",
+        "relative flex flex-col transition-all",
+        isLanding
+          ? "min-h-[120px] bg-white/80 dark:bg-white/[0.04] backdrop-blur-md border border-zinc-200/80 dark:border-white/8 rounded-[24px] p-1 shadow-2xl focus-within:border-indigo-500/30"
+          : "min-h-[80px] rounded-[24px] border border-zinc-200/80 dark:border-white/8 bg-transparent p-1 focus-within:border-indigo-500/30",
         enhancing && "opacity-90",
       )}
     >

@@ -5,7 +5,7 @@
 
 "use client";
 
-import { Signal, Monitor, User, Maximize, Minimize, MonitorOff, Save } from "lucide-react";
+import { Signal, Monitor, Maximize, Minimize, MonitorOff, Save } from "lucide-react";
 import { Tooltip } from "@heroui/react";
 import {
   SessionContextUsage,
@@ -38,7 +38,7 @@ export function SessionHeader({
   onOpenSaveTemplate,
 }: Props) {
   return (
-    <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-zinc-200/60 dark:border-zinc-800/60 bg-transparent z-10">
+    <header className="h-14 shrink-0 flex items-center justify-between px-6 bg-white dark:bg-[#0d0d0d] z-10">
       <div className="flex items-center gap-4">
         <button className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100 hover:opacity-80 transition-opacity">
           CoComputer
@@ -123,17 +123,6 @@ export function SessionHeader({
             </Tooltip.Content>
           </Tooltip>
         )}
-
-        <Tooltip>
-          <Tooltip.Trigger>
-            <button className="p-1.5 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors ml-1">
-              <User className="w-4 h-4" />
-            </button>
-          </Tooltip.Trigger>
-          <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
-            User Profile
-          </Tooltip.Content>
-        </Tooltip>
       </div>
     </header>
   );

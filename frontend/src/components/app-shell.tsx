@@ -16,7 +16,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isSessionPage = pathname.includes("/session/");
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden text-foreground">
+    <div className="flex h-screen bg-white dark:bg-[#0d0d0d] overflow-hidden text-foreground">
       {/* Unified Sidebar */}
       <SessionNavSidebar />
 

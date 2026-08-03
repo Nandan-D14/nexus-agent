@@ -17,7 +17,7 @@ import {
 } from "@/components/agent-ui";
 import {
   collectSearchRefsFromEventSegments,
-  parseSearchToolOutput,
+  resolveSearchResults,
   type SearchCiteRef,
 } from "@/lib/search-result-utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -103,6 +103,8 @@ type Props = {
     durableTaskId?: string,
   ) => void;
   onQuestionRespond?: (questionId: string, answer: string) => void;
+  /** Sticky dock rendered inside the chat scroll column (e.g. todos + composer). */
+  footer?: ReactNode;
 };
 
 type Turn = {
@@ -217,6 +219,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   phase = "idle",
   onPermissionRespond,
   onQuestionRespond,
+  footer,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
@@ -307,9 +310,15 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
     <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
       <div
         ref={scrollRef}
-        className="overflow-y-auto h-full custom-scrollbar flex flex-col px-6 py-8"
+        className={`overflow-y-auto h-full custom-scrollbar flex flex-col px-6 pt-8 ${
+          footer ? "pb-0" : "pb-8"
+        }`}
       >
-        <div className="mx-auto max-w-3xl w-full flex flex-col gap-10 pb-48">
+        <div
+          className={`mx-auto max-w-3xl w-full flex flex-col gap-10 ${
+            footer ? "pb-52" : "pb-6"
+          }`}
+        >
           <AnimatePresence initial={false}>
             {turns.map((turn, i) => {
               const isLastTurn = i === turns.length - 1;
@@ -353,15 +362,35 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
         </div>
       </div>
 
-      {/* Scroll to bottom button */}
+      {footer ? (
+        <div className="absolute inset-x-0 bottom-0 z-20 bg-[#0d0d0d] px-6 pt-1 pb-3">
+          <AnimatePresence>
+            {userScrolledUp && (
+              <motion.button
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                onClick={scrollToBottom}
+                className="mx-auto mb-2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+                Scroll to bottom
+              </motion.button>
+            )}
+          </AnimatePresence>
+          <div className="mx-auto w-full max-w-3xl">{footer}</div>
+        </div>
+      ) : null}
+
+      {/* Scroll to bottom button (no footer dock) */}
       <AnimatePresence>
-        {userScrolledUp && (
+        {!footer && userScrolledUp && (
           <motion.button
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}
             onClick={scrollToBottom}
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
           >
             <ChevronDown className="w-3.5 h-3.5" />
             Scroll to bottom
@@ -938,7 +967,10 @@ function ToolLine({
   const summary = getInlineSummary(invocation.tool, invocation.args);
   const output = invocation.result?.output;
 
-  const parsedResults = parseSearchToolOutput(invocation.tool, output);
+  const parsedResults = resolveSearchResults(invocation.tool, {
+    output,
+    resultSummary: invocation.result?.resultSummary,
+  });
   const searchQuery =
     typeof invocation.args.query === "string"
       ? invocation.args.query

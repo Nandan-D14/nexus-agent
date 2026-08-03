@@ -143,16 +143,7 @@ export function SessionLandingView({
         </div>
       </div>
 
-      {(pageError || error) && (
-        <div className="absolute bottom-4 border border-red-500/20 bg-red-950/20 px-4 py-2 text-sm text-red-300 rounded-lg">
-          {pageError || error}
-        </div>
-      )}
-      {isLoading && (
-        <div className="absolute bottom-4 border border-card-border dark:border-[#1c1c1e] bg-card dark:bg-[#09090b] px-4 py-2 text-sm text-muted dark:text-zinc-500 rounded-lg">
-          Loading session...
-        </div>
-      )}
+
     </div>
   );
 }

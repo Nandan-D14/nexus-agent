@@ -5,7 +5,7 @@
 
 .todo {
   width: 100%;
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
   user-select: none;
   color: var(--color-text-primary);
 }
