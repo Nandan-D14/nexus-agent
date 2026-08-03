@@ -13,6 +13,8 @@ export type CiteRef = {
   label: string;
   host: string;
   url: string;
+  /** Optional snippet / summary (e.g. from web search results). */
+  description?: string;
 };
 
 const MD_LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;

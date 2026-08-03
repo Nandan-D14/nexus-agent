@@ -77,6 +77,7 @@ from nexus.tools.workspace import (
     derive_session_workspace_path,
     derive_workspace_path,
     prepare_task_workspace,
+    reconcile_todo_list_at_turn_end,
     write_workspace_file,
 )
 from nexus.usage import TokenUsageRecord, extract_token_usage_records
@@ -638,6 +639,7 @@ class NexusOrchestrator:
         self,
         text: str,
         connector_ids: list[str] | None = None,
+        tool_ids: list[str] | None = None,
         uploaded_files: list[dict[str, Any]] | None = None,
         emit_user_transcript: bool = True,
         resume_context: str | None = None,
@@ -693,10 +695,13 @@ class NexusOrchestrator:
             await self._build_turn_input(
                 model_text,
                 connector_ids=connector_ids,
+                tool_ids=tool_ids,
                 uploaded_files=uploaded_files,
             ),
             source="typed",
             completion_request=original_request,
+            connector_ids=connector_ids,
+            tool_ids=tool_ids,
         )
 
     def handle_permission_response(self, task_id: str, approved: bool) -> None:
@@ -1323,6 +1328,7 @@ class NexusOrchestrator:
         self,
         connector_ids: list[str] | None,
         uploaded_files: list[dict[str, Any]] | None,
+        tool_ids: list[str] | None = None,
     ) -> str:
         sections: list[str] = []
         # Runtime grounding: always tell the model the current date/time so it
@@ -1340,11 +1346,22 @@ class NexusOrchestrator:
             for item in (connector_ids or [])
             if str(item).strip()
         ]
-        if normalized_connectors:
-            sections.append(
-                "[USER-SELECTED CONNECTORS]\n"
-                f"{', '.join(normalized_connectors[:12])}"
-            )
+        normalized_tools = [
+            str(item).strip()
+            for item in (tool_ids or [])
+            if str(item).strip()
+        ]
+        if normalized_connectors or normalized_tools:
+            lines = [
+                "[USER-SELECTED TOOLS — HARD RESTRICTION]",
+                "Only the tools listed below are available this turn.",
+                "Do NOT call any other tool; it will be blocked with TOOL_NOT_SELECTED.",
+            ]
+            if normalized_tools:
+                lines.append(f"Built-in capabilities: {', '.join(normalized_tools[:12])}")
+            if normalized_connectors:
+                lines.append(f"Connectors: {', '.join(normalized_connectors[:12])}")
+            sections.append("\n".join(lines))
         uploaded_block = self._format_uploaded_files_context(uploaded_files or [])
         if uploaded_block:
             sections.append(
@@ -1358,6 +1375,7 @@ class NexusOrchestrator:
         self,
         text: str,
         connector_ids: list[str] | None = None,
+        tool_ids: list[str] | None = None,
         uploaded_files: list[dict[str, Any]] | None = None,
     ) -> str:
         """Build the next turn input with compact resume context injected once."""
@@ -1398,7 +1416,9 @@ class NexusOrchestrator:
         elif self._seed_context:
             self._seed_context = ""
 
-        turn_context = self._format_turn_context(connector_ids, uploaded_files)
+        turn_context = self._format_turn_context(
+            connector_ids, uploaded_files, tool_ids=tool_ids
+        )
         if turn_context:
             builder.add("turn_context", turn_context, priority=PRIORITY_TURN)
 
@@ -1761,6 +1781,8 @@ class NexusOrchestrator:
         *,
         source: str,
         completion_request: str | None = None,
+        connector_ids: list[str] | None = None,
+        tool_ids: list[str] | None = None,
     ) -> None:
         """Wrap _run_agent in a cancellable task and await it."""
         if not self._ws_connected:
@@ -1797,43 +1819,52 @@ class NexusOrchestrator:
         # is invoked by the planner when it actually needs a workspace.
         # See docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md.
         self._bind_workspace_context()
-        # region agent log
-        emit_debug_trace(
-            run_id=self._debug_run_id(),
-            hypothesis_id="H1,H3,H5",
-            location="orchestrator.py:1602",
-            message="agent_turn_started",
-            data={
-                "source": source,
-                "input_chars": len(message),
-                "websocket_connected": self._ws_connected,
-                "durable_run_bound": bool(self._durable_task_id),
-                "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
-                "planner_mode": "planner_v2",
-            },
+        from nexus.tool_catalog import resolve_tool_allowlist
+        from nexus.tools._context import clear_tool_allowlist, set_tool_allowlist
+
+        allowlist = resolve_tool_allowlist(
+            tool_ids,
+            connector_ids,
+            mcp_tools=getattr(self, "_integration_tools", None) or None,
         )
-        # endregion agent log
-        # Persist ONLY the original user request in the user-visible step. The
-        # composed `message` also carries the resume checkpoint, connector
-        # context, and internal repair directives, which must never surface in
-        # the workflow panel. `completion_request` is the clean original request.
-        display_request = completion_request if completion_request is not None else message
-        self._current_turn_step_id = await self._create_step(
-            step_type="agent_turn",
-            title="Process request",
-            detail=self._clip_text(display_request, 320),
-            source=source,
-            metadata={
-                "input": self._clip_text(display_request, 1200),
-                "source": source,
-                "trace_id": self._trace_context.trace_id,
-            },
-        )
-        await self._set_run_status("running")
-        self._agent_task = asyncio.create_task(
-            self._run_agent(message, completion_request=completion_request)
-        )
+        set_tool_allowlist(allowlist)
         try:
+            # region agent log
+            emit_debug_trace(
+                run_id=self._debug_run_id(),
+                hypothesis_id="H1,H3,H5",
+                location="orchestrator.py:1602",
+                message="agent_turn_started",
+                data={
+                    "source": source,
+                    "input_chars": len(message),
+                    "websocket_connected": self._ws_connected,
+                    "durable_run_bound": bool(self._durable_task_id),
+                    "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
+                    "planner_mode": "planner_v2",
+                },
+            )
+            # endregion agent log
+            # Persist ONLY the original user request in the user-visible step. The
+            # composed `message` also carries the resume checkpoint, connector
+            # context, and internal repair directives, which must never surface in
+            # the workflow panel. `completion_request` is the clean original request.
+            display_request = completion_request if completion_request is not None else message
+            self._current_turn_step_id = await self._create_step(
+                step_type="agent_turn",
+                title="Process request",
+                detail=self._clip_text(display_request, 320),
+                source=source,
+                metadata={
+                    "input": self._clip_text(display_request, 1200),
+                    "source": source,
+                    "trace_id": self._trace_context.trace_id,
+                },
+            )
+            await self._set_run_status("running")
+            self._agent_task = asyncio.create_task(
+                self._run_agent(message, completion_request=completion_request)
+            )
             result = await self._agent_task
             # Defensive: a delivered-with-caveat turn is terminal success. Map any
             # legacy "completed_with_caveat" to the canonical "completed" so it is
@@ -1900,6 +1931,9 @@ class NexusOrchestrator:
             )
             await self._set_run_status("cancelled")
         finally:
+            from nexus.tools._context import clear_tool_allowlist
+
+            clear_tool_allowlist()
             self._tool_step_ids = {}
             self._tool_trace_steps = {}
             self._active_agent = "nexus_orchestrator"
@@ -2082,6 +2116,7 @@ class NexusOrchestrator:
                         caveat += "\nRemaining: " + "; ".join(
                             completion_verification.remaining_work[:4]
                         )
+                    await self._reconcile_todos_at_turn_end(mark_complete=True)
                     await self._send_json({
                         "type": "transcript",
                         "role": "agent",
@@ -2122,6 +2157,7 @@ class NexusOrchestrator:
                     failure_summary += "\nRemaining: " + "; ".join(
                         completion_verification.remaining_work[:4]
                     )
+                await self._reconcile_todos_at_turn_end(mark_complete=False)
                 await self._send_json({
                     "type": "transcript",
                     "role": "agent",
@@ -2151,6 +2187,8 @@ class NexusOrchestrator:
                 }
 
             if final_response:
+                # Sync the To-dos panel with todo.md before the user sees the answer.
+                await self._reconcile_todos_at_turn_end(mark_complete=True)
                 # Send agent text response
                 await self._send_json({
                     "type": "transcript",
@@ -2192,6 +2230,7 @@ class NexusOrchestrator:
                     "final_response": final_response,
                     "verification": completion_verification.to_dict(),
                 }
+            await self._reconcile_todos_at_turn_end(mark_complete=False)
             return {
                 "status": "failed",
                 "summary": "The model ended without a final response.",
@@ -2498,7 +2537,8 @@ class NexusOrchestrator:
                     else:
                         # Genuine intermediate answer text (non-reasoning
                         # providers): keep prior behavior, sanitized.
-                        self._current_thinking += clean
+                        if settings.persist_reasoning:
+                            self._current_thinking += clean
                         await self._send_json({
                             "type": "agent_thinking",
                             "content": clean,
@@ -3174,7 +3214,7 @@ class NexusOrchestrator:
         if not self.history_repository:
             return
         try:
-            credits_charged = await self.history_repository.append_token_usage(
+            credits_charged, session_totals = await self.history_repository.append_token_usage(
                 session_id=self.session.id,
                 owner_id=self.session.owner_id,
                 source=usage.source,
@@ -3183,6 +3223,17 @@ class NexusOrchestrator:
                 output_tokens=usage.output_tokens,
                 total_tokens=usage.total_tokens,
             )
+            await self._send_json({
+                "type": "token_usage",
+                "model": usage.model,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "max_tokens": int(settings.model_context_limit),
+                "session_input_tokens": int(session_totals.get("input", 0) or 0),
+                "session_output_tokens": int(session_totals.get("output", 0) or 0),
+                "session_total_tokens": int(session_totals.get("total", 0) or 0),
+            })
             # Tokens remain internal telemetry; credits are the user-facing allowance.
             if usage.total_tokens > 0:
                 await self.history_repository.increment_user_token_usage(
@@ -3411,6 +3462,22 @@ class NexusOrchestrator:
                 metadata={"workspace_path": self._workspace_path or ""},
             )
             raise
+
+    async def _reconcile_todos_at_turn_end(self, *, mark_complete: bool) -> None:
+        """Push the latest todo.md state to the UI at turn end.
+
+        On verified success, remaining pending/in_progress items are marked done
+        so the To-dos panel matches what the agent actually finished.
+        """
+        try:
+            self._bind_workspace_context()
+            await reconcile_todo_list_at_turn_end(mark_complete=mark_complete)
+        except Exception:
+            logger.debug(
+                "Todo reconciliation skipped for session %s",
+                self.session.id,
+                exc_info=True,
+            )
 
     async def _save_final_response(self, text: str) -> None:
         if not text.strip() or not self._current_run_id:

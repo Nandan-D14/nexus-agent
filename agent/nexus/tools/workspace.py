@@ -53,6 +53,39 @@ async def _emit_todo_update(items: list[dict[str, str]]) -> None:
     )
 
 
+async def reconcile_todo_list_at_turn_end(*, mark_complete: bool) -> list[dict[str, str]]:
+    """Re-read todo.md, optionally mark remaining items done, and emit to the UI.
+
+    Called by the orchestrator at turn end so the To-dos panel never stays
+    stuck on stale pending/in_progress items after a verified success.
+    """
+    try:
+        workspace_path = get_active_workspace_path()
+        path = f"{workspace_path}/todo.md"
+        sandbox = get_sandbox()
+        if not sandbox.path_exists(path):
+            return []
+        items = _parse_todo_markdown(sandbox.read_text_file(path))
+        if not items:
+            return []
+        changed = False
+        if mark_complete:
+            for item in items:
+                if item.get("status") in {"pending", "in_progress"}:
+                    item["status"] = "done"
+                    changed = True
+        if changed:
+            formatted = _format_todo_items(items)
+            sandbox.write_text_file(path, formatted)
+            await upload_artifact_async(
+                get_session_id(), get_run_id(), "todo.md", formatted
+            )
+        await _emit_todo_update(items)
+        return items
+    except Exception:
+        return []
+
+
 async def _emit_task_state_update(state: dict[str, Any]) -> None:
     send_json = get_send_json()
     if not send_json:

@@ -34,6 +34,7 @@ from nexus.tools.workspace import (
     prepare_task_workspace,
     read_task_state,
     read_workspace_file,
+    reconcile_todo_list_at_turn_end,
     update_task_state,
     update_todo_item,
     write_todo_list,
@@ -269,6 +270,38 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         todo_text = (await read_workspace_file("todo.md"))["metadata"]["content"]
         self.assertIn("1. [pending] Gather logs", todo_text)
         self.assertIn("2. [done] Compare docs - Compared current docs", todo_text)
+
+    async def test_reconcile_todo_list_marks_remaining_done_and_emits(self) -> None:
+        from nexus.tools._context import set_send_json
+
+        emitted: list[dict] = []
+
+        async def capture(payload: dict) -> None:
+            emitted.append(payload)
+
+        send_token = set_send_json(capture)
+        try:
+            await prepare_task_workspace("Research")
+            await write_todo_list(["Gather logs", "Compare docs", "Write report"])
+            await update_todo_item(1, "done")
+            await update_todo_item(2, "in_progress")
+
+            items = await reconcile_todo_list_at_turn_end(mark_complete=True)
+            self.assertEqual([item["status"] for item in items], ["done", "done", "done"])
+
+            todo_text = (await read_workspace_file("todo.md"))["metadata"]["content"]
+            self.assertIn("1. [done] Gather logs", todo_text)
+            self.assertIn("2. [done] Compare docs", todo_text)
+            self.assertIn("3. [done] Write report", todo_text)
+
+            todo_events = [e for e in emitted if e.get("type") == "todo_list_updated"]
+            self.assertTrue(todo_events)
+            self.assertEqual(
+                [item["status"] for item in todo_events[-1]["items"]],
+                ["done", "done", "done"],
+            )
+        finally:
+            send_token.var.reset(send_token)
 
     async def test_write_workspace_file_only_exposes_output_path_for_outputs(self) -> None:
         await prepare_task_workspace("Research")

@@ -146,6 +146,43 @@ def _resolve_autonomy_mode() -> str | None:
         return None
 
 
+def _tool_not_selected_result(tool_name: str) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "summary": (
+            f"{tool_name} is not in the user-selected tool set for this turn. "
+            "Use only the tools the user enabled, or ask them to enable it."
+        ),
+        "detail": {
+            "tool": tool_name,
+            "reason": "Tool was not selected in the composer tool picker.",
+            "retryable": False,
+        },
+        "metadata": {"policy_action": "deny", "reason": "tool_not_selected"},
+        "error_code": "TOOL_NOT_SELECTED",
+        "suggested_alternatives": [
+            "Continue with an allowed tool from the user-selected set.",
+            "Ask the user to enable this tool in the composer + menu.",
+        ],
+    }
+
+
+def _check_tool_allowlist(tool_name: str, func: Callable | None = None) -> dict[str, Any] | None:
+    """Return a blocked result when the tool is outside the per-turn allowlist."""
+    try:
+        from nexus.tool_catalog import is_tool_allowed
+        from nexus.tools._context import get_tool_allowlist
+
+        allowlist = get_tool_allowlist()
+        connection_id = getattr(func, "_connection_id", None) if func is not None else None
+        if is_tool_allowed(tool_name, allowlist, connection_id=connection_id):
+            return None
+        return _tool_not_selected_result(tool_name)
+    except Exception:
+        # Fail open if context/catalog is unavailable — never brick a turn.
+        return None
+
+
 def _bind_args(func: Callable, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Best-effort: turn (*args, **kwargs) into a name -> value mapping
     so the policy can inspect them by name (e.g. ``command``)."""
@@ -444,6 +481,9 @@ def gated_tool(func: Callable) -> Callable:
 
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        blocked = _check_tool_allowlist(tool_name, func)
+        if blocked is not None:
+            return blocked
         budget_block = _consume_tool_budget(tool_name)
         if budget_block is not None:
             return budget_block

@@ -16,11 +16,15 @@ import type {
 import {
   classifyAgentTool,
   displayAgentToolName,
+  isWorkflowVisualTool,
 } from "@/lib/agent-tool-classification";
+import type { WsMessage } from "@/lib/message-types";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
+
+export type PermissionDecision = "approved" | "denied" | "timed_out";
 
 export type ChatItem =
   | { kind: "message"; role: "user" | "agent"; text: string; ts: number }
@@ -33,6 +37,10 @@ export type ChatItem =
       agent: string;
       approval_id?: string;
       durable_task_id?: string;
+      /** True when this permission was settled (approve/deny/timeout). */
+      resolved?: boolean;
+      /** Restored/live outcome for the approval card chrome. */
+      decision?: PermissionDecision;
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number }
@@ -46,9 +54,20 @@ export type ChatItem =
       ts: number;
     };
 
+export type TodoListItem = {
+  title: string;
+  status: "pending" | "in_progress" | "done";
+  note?: string;
+};
+
+export type HistoryMapMode = "full" | "transcript";
+
+export const DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300;
+
 export type PendingTurnInput = {
   text: string;
   connectorIds?: string[];
+  toolIds?: string[];
   uploadedFiles?: UploadedInputFile[];
 };
 
@@ -184,10 +203,13 @@ export function normalizePendingTurnInput(value: unknown): PendingTurnInput | nu
   const connectorIds = Array.isArray(record.connectorIds)
     ? record.connectorIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
+  const toolIds = Array.isArray(record.toolIds)
+    ? record.toolIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
   const uploadedFiles = Array.isArray(record.uploadedFiles)
     ? record.uploadedFiles.filter((item): item is UploadedInputFile => Boolean(item && typeof item === "object"))
     : [];
-  return { text, connectorIds, uploadedFiles };
+  return { text, connectorIds, toolIds, uploadedFiles };
 }
 
 export function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
@@ -210,19 +232,30 @@ export function upsertArtifact(prev: RunArtifact[], artifact: RunArtifact): RunA
   return updated;
 }
 
-export function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatItem[] {
-  return messages.map((message) => {
+export function mapStoredMessagesToChatItems(
+  messages: ArchivedMessage[],
+  options?: { mode?: HistoryMapMode },
+): ChatItem[] {
+  const mode = options?.mode ?? "full";
+  const items: ChatItem[] = [];
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
     const ts = message.created_at ? new Date(message.created_at).getTime() : Date.now();
 
     if (message.role === "tool_call") {
+      if (mode === "transcript") {
+        continue;
+      }
       const { tool, args } = parseToolCallText(message.text, message.source);
-      return {
-        kind: "event" as const,
+      items.push({
+        kind: "event",
         type: "agent_tool_call",
         tool,
         args,
         ts,
-      };
+      });
+      continue;
     }
 
     if (message.role === "tool_result") {
@@ -233,50 +266,587 @@ export function mapStoredMessagesToChatItems(messages: ArchivedMessage[]): ChatI
             title?: string;
             component?: unknown;
           };
-          return {
-            kind: "event" as const,
+          items.push({
+            kind: "event",
             type: "generative_ui",
             component_type: parsed.component_type,
             title: parsed.title || "Generated visual",
             component: parsed.component,
             ts,
-          };
+          });
         } catch {
-          return {
-            kind: "event" as const,
+          items.push({
+            kind: "event",
             type: "generative_ui",
             title: "Generated visual",
             component: message.text,
             ts,
-          };
+          });
         }
+        continue;
       }
 
-      return {
-        kind: "event" as const,
+      if (mode === "transcript") {
+        continue;
+      }
+
+      items.push({
+        kind: "event",
         type: "agent_tool_result",
         tool: message.source || "tool",
         output: message.text,
         ts,
-      };
+      });
+      continue;
     }
 
     if (message.role === "thinking" || message.role === "agent_thinking") {
-      return {
-        kind: "event" as const,
+      if (mode === "transcript") {
+        continue;
+      }
+      items.push({
+        kind: "event",
         type: "agent_thinking",
         content: message.text,
         ts,
+      });
+      continue;
+    }
+
+    // ask_user is stored as agent + source=ask_user; restore ApprovalCard in full mode.
+    if (message.role === "agent" && message.source === "ask_user") {
+      if (mode === "transcript") {
+        // Durable hydrate supplies user_question cards; skip the plain agent bubble.
+        continue;
+      }
+      const next = messages[index + 1];
+      const answered =
+        next?.role === "user" && next.source === "ask_user_response";
+      const timeoutSeconds = DEFAULT_ASK_USER_TIMEOUT_SECONDS;
+      const elapsedSec = (Date.now() - ts) / 1000;
+      items.push({
+        kind: "user_question",
+        question_id: `history-ask-${message.id}`,
+        question: message.text,
+        answered,
+        timedOut: !answered && elapsedSec >= timeoutSeconds,
+        timeout_seconds: timeoutSeconds,
+        ts,
+      });
+      if (answered) {
+        index += 1; // consume ask_user_response; card already marked answered
+      }
+      continue;
+    }
+
+    if (message.role === "user" && message.source === "ask_user_response") {
+      // Orphan response without a preceding ask_user card — keep as user text in full,
+      // skip in transcript (durable path owns the card).
+      if (mode === "transcript") {
+        continue;
+      }
+      items.push({
+        kind: "message",
+        role: "user",
+        text: message.text,
+        ts,
+      });
+      continue;
+    }
+
+    if (message.role === "user" || message.role === "agent") {
+      items.push({
+        kind: "message",
+        role: message.role,
+        text: message.text,
+        ts,
+      });
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Infer permission card outcome from a bg_task_complete payload.
+ * Timeout completes are explicit; any other complete means the user approved
+ * (denied requests never emit bg_task_complete from request_permission).
+ */
+export function inferPermissionDecisionFromComplete(
+  success: boolean,
+  result: string,
+): PermissionDecision {
+  const text = (result || "").toLowerCase();
+  if (
+    text.includes("timed out") ||
+    text.includes("did not respond") ||
+    text.includes("user did not respond")
+  ) {
+    return "timed_out";
+  }
+  // Task outcome (success) is independent of approval; presence of complete
+  // after a non-timeout path implies the user approved and work ran.
+  void success;
+  return "approved";
+}
+
+/** Map run-step permission_request rows → task_id decisions for hydrate. */
+export function permissionDecisionsFromRunSteps(
+  steps: RunStep[],
+): Map<string, PermissionDecision> {
+  const decisions = new Map<string, PermissionDecision>();
+  for (const step of steps) {
+    if (step.step_type !== "permission_request") {
+      continue;
+    }
+    const taskId = step.external_ref;
+    if (!taskId) {
+      continue;
+    }
+    const approved = step.metadata?.approved;
+    if (approved === true || step.status === "completed") {
+      decisions.set(taskId, "approved");
+      continue;
+    }
+    if (approved === false || step.status === "cancelled" || step.status === "failed") {
+      const detail = `${step.detail || ""} ${step.error || ""}`.toLowerCase();
+      decisions.set(
+        taskId,
+        detail.includes("timed out") ? "timed_out" : "denied",
+      );
+    }
+  }
+  return decisions;
+}
+
+export type ReduceWorkingLogResult = {
+  chatItems: ChatItem[];
+  /** Present only when this message updates todos. */
+  todoItems?: TodoListItem[];
+};
+
+/**
+ * Apply one working-log WS message onto chat/todo state using the same shapes
+ * as live session handling. Returns null when the message is not a working-log
+ * chat/todo mutation (transcript, generative_ui, run APIs, ephemeral, etc.).
+ */
+export function reduceWorkingLogMessage(
+  prevChatItems: ChatItem[],
+  msg: WsMessage,
+  ts: number,
+  options?: {
+    prevTodoItems?: TodoListItem[];
+    /** Precomputed decisions (e.g. from run steps) applied when the card is created. */
+    permissionDecisions?: ReadonlyMap<string, PermissionDecision>;
+  },
+): ReduceWorkingLogResult | null {
+  const permissionDecisions = options?.permissionDecisions;
+
+  switch (msg.type) {
+    case "agent_thinking":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          { kind: "event", type: msg.type, content: msg.content, ts },
+        ],
+      };
+
+    case "agent_tool_call":
+      if (isWorkflowVisualTool(msg.tool)) {
+        return { chatItems: prevChatItems };
+      }
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            tool: msg.tool,
+            args: msg.args,
+            ts,
+          },
+        ],
+      };
+
+    case "agent_tool_result":
+      if (isWorkflowVisualTool(msg.tool)) {
+        return { chatItems: prevChatItems };
+      }
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            tool: msg.tool,
+            output: msg.output,
+            ts,
+          },
+        ],
+      };
+
+    case "agent_retry":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            reason: msg.reason,
+            attempt: msg.attempt,
+            model: msg.model,
+            delay_ms: msg.delay_ms,
+            trace_id: msg.trace_id,
+            ts,
+          },
+        ],
+      };
+
+    case "agent_model_fallback":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            reason: msg.reason,
+            attempt: msg.attempt,
+            from_model: msg.from_model,
+            to_model: msg.to_model,
+            trace_id: msg.trace_id,
+            ts,
+          },
+        ],
+      };
+
+    case "mcp_http_request":
+    case "mcp_http_response":
+    case "mcp_http_error":
+    case "verification_result":
+      return { chatItems: [...prevChatItems, { kind: "event", ...msg, ts }] };
+
+    case "agent_screenshot":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            image_b64: msg.image_b64,
+            analysis: msg.analysis,
+            ts,
+          },
+        ],
+      };
+
+    case "agent_complete":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          { kind: "event", type: msg.type, summary: msg.summary, ts },
+        ],
+      };
+
+    case "agent_delegation":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          { kind: "delegation", from: msg.from, to: msg.to, ts },
+        ],
+      };
+
+    case "user_question": {
+      const timeoutSeconds =
+        typeof msg.timeout_seconds === "number" && msg.timeout_seconds > 0
+          ? msg.timeout_seconds
+          : DEFAULT_ASK_USER_TIMEOUT_SECONDS;
+      const elapsedSec = (Date.now() - ts) / 1000;
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "user_question",
+            question_id: msg.question_id,
+            question: msg.question,
+            answered: false,
+            timedOut: elapsedSec >= timeoutSeconds,
+            timeout_seconds: timeoutSeconds,
+            ts,
+          },
+        ],
       };
     }
 
-    return {
-      kind: "message" as const,
-      role: message.role as "user" | "agent",
-      text: message.text,
-      ts,
-    };
-  });
+    case "user_question_resolved": {
+      return {
+        chatItems: prevChatItems.map((item) =>
+          item.kind === "user_question" && item.question_id === msg.question_id
+            ? {
+                ...item,
+                answered: msg.answered,
+                timedOut: !msg.answered,
+              }
+            : item,
+        ),
+      };
+    }
+
+    case "permission_request": {
+      const decision = permissionDecisions?.get(msg.task_id);
+      const elapsedSec = (Date.now() - ts) / 1000;
+      const budget = Math.max(1, msg.estimated_seconds || 120);
+      const timedOutByClock = !decision && elapsedSec >= budget;
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "permission",
+            task_id: msg.task_id,
+            approval_id: msg.approval_id,
+            durable_task_id: msg.durable_task_id,
+            description: msg.description,
+            estimated_seconds: msg.estimated_seconds,
+            agent: msg.agent,
+            resolved: Boolean(decision) || timedOutByClock,
+            decision: decision ?? (timedOutByClock ? "timed_out" : undefined),
+            ts,
+          },
+        ],
+      };
+    }
+
+    case "bg_task_progress":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            task_id: msg.task_id,
+            progress: msg.progress,
+            message: msg.message,
+            ts,
+          },
+        ],
+      };
+
+    case "bg_task_complete": {
+      const decision = inferPermissionDecisionFromComplete(msg.success, msg.result);
+      const withDecision: ChatItem[] = prevChatItems.map((item) => {
+        if (item.kind !== "permission" || item.task_id !== msg.task_id) {
+          return item;
+        }
+        const nextDecision: PermissionDecision =
+          decision === "timed_out"
+            ? "timed_out"
+            : item.decision === "denied"
+              ? "denied"
+              : decision;
+        return {
+          ...item,
+          resolved: true,
+          decision: nextDecision,
+        };
+      });
+      return {
+        chatItems: [
+          ...withDecision,
+          {
+            kind: "event",
+            type: msg.type,
+            task_id: msg.task_id,
+            success: msg.success,
+            result: msg.result,
+            ts,
+          },
+        ],
+      };
+    }
+
+    case "budget_warning":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            state: msg.state,
+            action: msg.action,
+            message: msg.message,
+            soft_limit: msg.soft_limit,
+            hard_limit: msg.hard_limit,
+            projected_total_tokens: msg.projected_total_tokens,
+            ts,
+          },
+        ],
+      };
+
+    case "resume_recovery":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            state: msg.state,
+            message: msg.message,
+            reused_context_digest: msg.reused_context_digest,
+            ts,
+          },
+        ],
+      };
+
+    case "context_packet":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            stage: msg.stage,
+            action: msg.action,
+            estimated_tokens: msg.estimated_tokens,
+            reasoning_model: msg.reasoning_model,
+            vision_model: msg.vision_model,
+            packet: msg.packet,
+            ts,
+          },
+        ],
+      };
+
+    case "todo_list_updated":
+      return {
+        chatItems: prevChatItems,
+        todoItems: Array.isArray(msg.items) ? msg.items : [],
+      };
+
+    case "error":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            code: msg.code,
+            message: msg.message,
+            detail: msg.detail,
+            ts,
+          },
+        ],
+      };
+
+    // Skipped on purpose (history / REST / ephemeral / page-owned side effects):
+    // transcript, generative_ui, artifact_created, run_status, step_*,
+    // sandbox_status, voice_status, pong, quota_update, ui_action, vnc_url,
+    // token_usage
+    default:
+      return null;
+  }
+}
+
+/**
+ * Fold durable WS working-log events into chat/todo state using the same shapes
+ * as the live session page handler. Skips transcript / generative_ui / run APIs
+ * (history + REST remain source of truth for those).
+ */
+export function foldDurableWorkingLogEvents(
+  events: Array<{ message: WsMessage; ts: number }>,
+  options?: {
+    permissionDecisions?: ReadonlyMap<string, PermissionDecision>;
+  },
+): { chatItems: ChatItem[]; todoItems: TodoListItem[] } {
+  let chatItems: ChatItem[] = [];
+  let todoItems: TodoListItem[] = [];
+  const permissionDecisions = options?.permissionDecisions;
+
+  for (const { message, ts } of events) {
+    const reduced = reduceWorkingLogMessage(chatItems, message, ts, {
+      prevTodoItems: todoItems,
+      permissionDecisions,
+    });
+    if (!reduced) {
+      continue;
+    }
+    chatItems = reduced.chatItems;
+    if (reduced.todoItems) {
+      todoItems = reduced.todoItems;
+    }
+  }
+
+  return { chatItems, todoItems };
+}
+
+/** Best-effort todo restore from history when no durable todo_list_updated exists. */
+export function extractTodoItemsFromHistory(messages: ArchivedMessage[]): TodoListItem[] {
+  let writeIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "tool_call") continue;
+    const { tool } = parseToolCallText(message.text, message.source);
+    if (tool === "write_todo_list") {
+      writeIndex = index;
+      break;
+    }
+  }
+  if (writeIndex < 0) return [];
+
+  const writeMessage = messages[writeIndex];
+  const { args: writeArgs } = parseToolCallText(writeMessage.text, writeMessage.source);
+  const rawItems = writeArgs.items;
+  if (!Array.isArray(rawItems)) return [];
+
+  const items: TodoListItem[] = rawItems
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((title) => ({ title: title.trim(), status: "pending" as const }));
+
+  if (items.length === 0) return [];
+
+  for (let index = writeIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message.role !== "tool_call") continue;
+    const { tool, args } = parseToolCallText(message.text, message.source);
+    if (tool !== "update_todo_item") continue;
+
+    const rawIndex = args.item_index;
+    const itemIndex =
+      typeof rawIndex === "number"
+        ? rawIndex
+        : typeof rawIndex === "string"
+          ? Number.parseInt(rawIndex, 10)
+          : NaN;
+    if (!Number.isFinite(itemIndex) || itemIndex < 1 || itemIndex > items.length) {
+      continue;
+    }
+
+    const status = args.status;
+    if (status !== "pending" && status !== "in_progress" && status !== "done") {
+      continue;
+    }
+
+    const target = items[itemIndex - 1];
+    target.status = status;
+    if (typeof args.note === "string" && args.note.trim()) {
+      target.note = args.note.trim();
+    }
+  }
+
+  return items;
+}
+
+/** Merge transcript history items with durable working-log items by timestamp. */
+export function mergeChatItemsByTimestamp(
+  historyItems: ChatItem[],
+  durableItems: ChatItem[],
+): ChatItem[] {
+  if (durableItems.length === 0) {
+    return historyItems;
+  }
+  if (historyItems.length === 0) {
+    return durableItems;
+  }
+  const merged = [...historyItems, ...durableItems];
+  merged.sort((left, right) => left.ts - right.ts);
+  return merged;
 }
 
 function parseToolCallText(text: string, source?: string): { tool: string; args: Record<string, unknown> } {

@@ -43,6 +43,7 @@ import {
 import {
   classifyAgentTool,
   displayAgentToolName,
+  formatGroupedToolLabel,
   toolActionLabel,
   type AgentToolProvider,
 } from "@/lib/agent-tool-classification";
@@ -76,6 +77,8 @@ type ChatItem =
       agent: string;
       approval_id?: string;
       durable_task_id?: string;
+      resolved?: boolean;
+      decision?: "approved" | "denied" | "timed_out";
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number }
@@ -504,6 +507,9 @@ function TurnBlock({
                 description={item.data.description}
                 estimatedSeconds={item.data.estimated_seconds}
                 agent={item.data.agent}
+                issuedAt={item.data.ts}
+                decision={item.data.decision}
+                timedOut={item.data.decision === "timed_out"}
                 onRespond={onPermissionRespond}
               />
             </motion.div>
@@ -523,6 +529,7 @@ function TurnBlock({
                 answered={item.data.answered}
                 timedOut={item.data.timedOut}
                 timeoutSeconds={item.data.timeout_seconds}
+                issuedAt={item.data.ts}
                 onRespond={onQuestionRespond}
               />
             </motion.div>
@@ -600,7 +607,7 @@ function AgentMessageCard({
 /* ------------------------------------------------------------------ */
 
 function buildSummary(task: TaskGroup): string {
-  const thinkings = task.steps.filter(s => s.kind === "thinking").length;
+  const hasThinking = task.steps.some(s => s.kind === "thinking");
   const toolSteps = task.steps.filter(s => s.kind === "tool_invocation");
 
   let viewedCount = 0;
@@ -626,7 +633,8 @@ function buildSummary(task: TaskGroup): string {
     else otherCount++;
   }
 
-  const parts: string[] = [`Thought ${Math.max(1, thinkings)} time(s)`];
+  const parts: string[] = [];
+  if (hasThinking) parts.push("Thought");
   if (skillCount > 0) parts.push(`Read ${skillCount} skill(s)`);
   if (workerCount > 0) parts.push(`Called ${workerCount} worker(s)`);
   if (subagentCount > 0) parts.push(`Spawned ${subagentCount} subagent(s)`);
@@ -635,6 +643,7 @@ function buildSummary(task: TaskGroup): string {
   if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
   if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
   if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
+  if (parts.length === 0) parts.push("Working");
 
   return parts.join(", ");
 }
@@ -649,8 +658,10 @@ function ThoughtAccordion({
   const [expanded, setExpanded] = useState(true);
   const summary = useMemo(() => buildSummary(task), [task]);
 
-  // Coalesce adjacent thinking steps into one reasoning block for AICSS ThinkingReasoning.
+  // Merge ALL thinking steps into one reasoning row, and group consecutive
+  // identical tool invocations into counted rows (e.g. "Read 7 emails").
   const displayRows = useMemo(() => {
+    type ToolInvocationStep = Extract<GroupedEvent, { kind: "tool_invocation" }>;
     type Row =
       | {
           kind: "reasoning";
@@ -659,41 +670,74 @@ function ThoughtAccordion({
           endedAt: number;
           key: string;
         }
-      | { kind: "step"; item: GroupedEvent; key: string };
+      | { kind: "step"; item: GroupedEvent; key: string }
+      | {
+          kind: "tool_group";
+          tool: string;
+          items: ToolInvocationStep[];
+          key: string;
+        };
 
+    const thinkingSteps = task.steps.filter(
+      (step): step is Extract<GroupedEvent, { kind: "thinking" }> =>
+        step.kind === "thinking",
+    );
     const rows: Row[] = [];
-    let buf: Extract<GroupedEvent, { kind: "thinking" }>[] = [];
 
-    const flush = () => {
-      if (buf.length === 0) return;
-      const chunks = buf.map((b) => b.text);
+    if (thinkingSteps.length > 0) {
+      const chunks = thinkingSteps.map((step) => step.text);
       if (hasRealReasoning(chunks)) {
         rows.push({
           kind: "reasoning",
           chunks,
-          startedAt: buf[0].ts,
-          endedAt: buf[buf.length - 1].ts,
-          key: `reason-${buf[0].ts}`,
+          startedAt: thinkingSteps[0].ts,
+          endedAt: thinkingSteps[thinkingSteps.length - 1].ts,
+          key: `reason-${thinkingSteps[0].ts}`,
         });
       }
-      // Compact stub ("Thinking...") is ignored here — bottom ThinkingState covers it.
-      buf = [];
+    }
+
+    let toolRun: ToolInvocationStep[] = [];
+    const flushTools = () => {
+      if (toolRun.length === 0) return;
+      if (toolRun.length === 1) {
+        rows.push({
+          kind: "step",
+          item: toolRun[0],
+          key: `tool-${toolRun[0].callTs}`,
+        });
+      } else {
+        rows.push({
+          kind: "tool_group",
+          tool: toolRun[0].tool,
+          items: toolRun,
+          key: `tool-group-${toolRun[0].callTs}`,
+        });
+      }
+      toolRun = [];
     };
 
     task.steps.forEach((step, index) => {
-      if (step.kind === "thinking") {
-        buf.push(step);
+      if (step.kind === "thinking") return;
+      if (step.kind === "tool_invocation") {
+        if (toolRun.length > 0 && toolRun[0].tool !== step.tool) {
+          flushTools();
+        }
+        toolRun.push(step);
         return;
       }
-      flush();
+      flushTools();
       rows.push({ kind: "step", item: step, key: `${step.kind}-${index}` });
     });
-    flush();
+    flushTools();
     return rows;
   }, [task.steps]);
 
-  const lastRow = displayRows[displayRows.length - 1];
-  const hasToolSteps = displayRows.some((r) => r.kind === "step");
+  const lastStep = task.steps[task.steps.length - 1];
+  const reasoningIsLive = isActive && lastStep?.kind === "thinking";
+  const hasToolSteps = displayRows.some(
+    (r) => r.kind === "step" || r.kind === "tool_group",
+  );
   const hasReasoningRows = displayRows.some((r) => r.kind === "reasoning");
   const hasRunningTool = task.steps.some(
     (s) => s.kind === "tool_invocation" && s.status === "running",
@@ -709,15 +753,11 @@ function ThoughtAccordion({
     >
       {displayRows.map((row) => {
         if (row.kind === "reasoning") {
-          const isLive =
-            isActive &&
-            lastRow?.kind === "reasoning" &&
-            lastRow.key === row.key;
           return (
             <ThinkingReasoning
               key={row.key}
               chunks={row.chunks}
-              isActive={isLive}
+              isActive={reasoningIsLive}
               startedAt={row.startedAt}
               endedAt={row.endedAt}
             />
@@ -759,11 +799,21 @@ function ThoughtAccordion({
                 className="overflow-hidden"
               >
                 <div className="flex flex-col gap-4 pt-3 pb-1 pl-1">
-                  {displayRows.map((row) =>
-                    row.kind === "step" ? (
-                      <StepRow key={row.key} item={row.item} />
-                    ) : null,
-                  )}
+                  {displayRows.map((row) => {
+                    if (row.kind === "step") {
+                      return <StepRow key={row.key} item={row.item} />;
+                    }
+                    if (row.kind === "tool_group") {
+                      return (
+                        <ToolGroupLine
+                          key={row.key}
+                          tool={row.tool}
+                          items={row.items}
+                        />
+                      );
+                    }
+                    return null;
+                  })}
                 </div>
               </motion.div>
             )}
@@ -783,6 +833,62 @@ function StepRow({ item }: { item: GroupedEvent }) {
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
   if (item.kind === "error") return <ErrorLine message={item.message} />;
   return null;
+}
+
+function ToolGroupLine({
+  tool,
+  items,
+}: {
+  tool: string;
+  items: Extract<GroupedEvent, { kind: "tool_invocation" }>[];
+}) {
+  const [open, setOpen] = useState(false);
+  const provider = classifyAgentTool(tool);
+  const isRunning = items.some((item) => item.status === "running");
+  const label = formatGroupedToolLabel(tool, items.length);
+  const icon = (() => {
+    if (provider === "gmail") return <Mail className="w-3.5 h-3.5" />;
+    if (provider === "calendar") return <Calendar className="w-3.5 h-3.5" />;
+    if (provider === "tasks") return <ListTodo className="w-3.5 h-3.5" />;
+    if (provider === "browser") return <Globe className="w-3.5 h-3.5" />;
+    if (provider === "terminal") return <TerminalIcon className="w-3.5 h-3.5" />;
+    if (provider === "skill") return <BookOpen className="w-3.5 h-3.5" />;
+    if (provider === "worker") return <Bot className="w-3.5 h-3.5" />;
+    if (tool.includes("file") || tool.includes("workspace")) {
+      return <FileText className="w-3.5 h-3.5" />;
+    }
+    return <Plug className="w-3.5 h-3.5" />;
+  })();
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        className="flex items-center gap-2 text-[14px] min-w-0 text-left group"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="shrink-0 text-zinc-400 dark:text-zinc-600">{icon}</span>
+        <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium group-hover:text-zinc-700 dark:group-hover:text-zinc-200 transition-colors">
+          {label}
+        </span>
+        {open ? (
+          <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-600 shrink-0" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-600 shrink-0" />
+        )}
+        {isRunning ? (
+          <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />
+        ) : null}
+      </button>
+      {open ? (
+        <div className="flex flex-col gap-3 pl-5">
+          {items.map((item) => (
+            <ToolLine key={`${item.tool}-${item.callTs}`} invocation={item} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */

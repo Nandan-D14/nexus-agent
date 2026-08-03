@@ -13,6 +13,7 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
+import { CitationInline } from "@/components/agent-ui/citation-inline";
 import { TextResponse } from "@/components/agent-ui/text-response";
 import {
   extractMarkdownCitations,
@@ -61,14 +62,14 @@ function isMarkdownHeavy(text: string): boolean {
 
 /**
  * Build demo-like reveal tokens from real agent text:
- * markdown links → label words + first citation as an inline SourceChip slot.
+ * markdown links → label words + one citation pill per distinct URL.
  */
 function buildRevealTokens(text: string, refs: CiteRef[]): RevealToken[] {
   const tokens: RevealToken[] = [];
   const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
   let last = 0;
   let match: RegExpExecArray | null;
-  let insertedCite = false;
+  const citedUrls = new Set<string>();
 
   const pushPlain = (chunk: string) => {
     const words = chunk.match(/\S+\s*/g) ?? [];
@@ -89,11 +90,11 @@ function buildRevealTokens(text: string, refs: CiteRef[]): RevealToken[] {
     const label = match[1]?.trim() || "";
     const url = match[2]?.trim() || "";
     pushPlain(stripInline(label) + " ");
-    if (!insertedCite && url) {
-      const ref = refs.find((r) => r.url === url) ?? refs[0];
+    if (url && !citedUrls.has(url)) {
+      citedUrls.add(url);
+      const ref = refs.find((r) => r.url === url);
       if (ref) {
         tokens.push({ kind: "cite", ref });
-        insertedCite = true;
       }
     }
     last = match.index + match[0].length;
@@ -112,7 +113,10 @@ function wordPrefix(text: string, count: number): string {
   return words.slice(0, Math.max(0, count)).join("");
 }
 
-/** Markdown citations first; append search-only URLs. Prefer markdown label on clash. */
+/**
+ * Markdown citations first; append search-only URLs.
+ * On URL clash prefer markdown label; keep search description if markdown has none.
+ */
 function mergeCitationRefs(
   text: string,
   extraSources?: SearchCiteRef[],
@@ -120,17 +124,27 @@ function mergeCitationRefs(
   const { refs: markdownRefs } = extractMarkdownCitations(text);
   if (!extraSources?.length) return markdownRefs;
 
-  const seen = new Set(markdownRefs.map((r) => r.url));
-  const merged = [...markdownRefs];
+  const merged: CiteRef[] = markdownRefs.map((r) => ({ ...r }));
+  const byUrl = new Map(merged.map((r) => [r.url, r]));
+
   for (const src of extraSources) {
-    if (!src.url || seen.has(src.url)) continue;
-    seen.add(src.url);
-    merged.push({
+    if (!src.url) continue;
+    const existing = byUrl.get(src.url);
+    if (existing) {
+      if (!existing.description && src.description) {
+        existing.description = src.description;
+      }
+      continue;
+    }
+    const ref: CiteRef = {
       n: merged.length + 1,
       label: src.label || src.host,
       host: src.host,
       url: src.url,
-    });
+      description: src.description,
+    };
+    merged.push(ref);
+    byUrl.set(src.url, ref);
   }
   return merged;
 }
@@ -209,12 +223,17 @@ export function StreamingText({
     <div className={cx("relative w-full", className)}>
       {/* Prose */}
       {revealDone || !shouldAnimate ? (
-        <TextResponse content={text} hideCitations />
+        <TextResponse content={text} hideCitations sources={refs} />
       ) : useWordSpans ? (
         <p className="m-0 text-[15px] leading-[1.75] font-medium text-text-primary">
           {revealTokens.slice(0, visibleCount).map((token, i) =>
             token.kind === "cite" ? (
-              <SourceChip key={`cite-${token.ref.url}-${i}`} refItem={token.ref} />
+              <CitationInline
+                key={`cite-${token.ref.url}-${i}`}
+                active={token.ref}
+                sources={refs}
+                className="animate-pop-in"
+              />
             ) : (
               <span
                 key={`w-${i}`}
@@ -229,7 +248,11 @@ export function StreamingText({
         </p>
       ) : (
         <div>
-          <TextResponse content={wordPrefix(text, visibleCount)} hideCitations />
+          <TextResponse
+            content={wordPrefix(text, visibleCount)}
+            hideCitations
+            sources={refs}
+          />
           {showCaret ? <StreamCaret /> : null}
         </div>
       )}
@@ -357,21 +380,6 @@ function ActionIconButton({
     >
       {children}
     </button>
-  );
-}
-
-function SourceChip({ refItem }: { refItem: CiteRef }) {
-  return (
-    <a
-      href={refItem.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="ml-0 mr-1 inline-flex h-[18px] translate-y-[-1px] items-center gap-1 rounded-[5px] bg-background-secondary-default pr-1.5 pl-[3px] align-middle font-mono text-[10.5px] text-text-secondary shadow-card transition-colors duration-150 hover:bg-background-secondary-hover hover:text-text-primary animate-pop-in"
-      style={{ animationDuration: "250ms" }}
-    >
-      <SourceFavicon host={refItem.host} size="xs" rounded="sm" />
-      <span>{refItem.host}</span>
-    </a>
   );
 }
 

@@ -16,6 +16,10 @@ type Props = {
   description: string;
   estimatedSeconds: number;
   agent: string;
+  /** Epoch ms when the request was issued; countdown continues from this. */
+  issuedAt?: number;
+  /** Restored/live settled outcome. */
+  decision?: "approved" | "denied" | "timed_out";
   timedOut?: boolean;
   onRespond: (
     taskId: string,
@@ -40,21 +44,35 @@ export function PermissionCard({
   description,
   estimatedSeconds,
   agent,
+  issuedAt,
+  decision,
   timedOut: timedOutProp = false,
   onRespond,
 }: Props) {
-  const [response, setResponse] = useState<"approved" | "denied" | null>(null);
+  const [response, setResponse] = useState<"approved" | "denied" | null>(() =>
+    decision === "approved" ? "approved" : decision === "denied" ? "denied" : null,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [open, setOpen] = useState(true);
-  const [localTimedOut, setLocalTimedOut] = useState(false);
+  const [localTimedOut, setLocalTimedOut] = useState(
+    () => decision === "timed_out" || timedOutProp,
+  );
   const [remaining, setRemaining] = useState(estimatedSeconds);
-  const startRef = useRef(Date.now());
+  const startRef = useRef(issuedAt ?? Date.now());
   const cardRef = useRef<HTMLDivElement>(null);
 
   const sent = response !== null;
-  const timedOut = !sent && (timedOutProp || localTimedOut);
+  const timedOut = !sent && (decision === "timed_out" || timedOutProp || localTimedOut);
   const frozen = sent || timedOut || submitting;
   const budget = Math.max(1, estimatedSeconds || 120);
+
+  useEffect(() => {
+    if (decision === "approved" || decision === "denied") {
+      setResponse(decision);
+    } else if (decision === "timed_out") {
+      setLocalTimedOut(true);
+    }
+  }, [decision]);
 
   function handleRespond(approved: boolean) {
     if (response !== null || submitting || timedOut) return;
@@ -64,13 +82,19 @@ export function PermissionCard({
   }
 
   useEffect(() => {
-    if (timedOutProp) setLocalTimedOut(true);
-  }, [timedOutProp]);
+    if (timedOutProp || decision === "timed_out") setLocalTimedOut(true);
+  }, [timedOutProp, decision]);
 
   useEffect(() => {
     if (frozen) return;
-    startRef.current = Date.now();
-    setRemaining(budget);
+    const start = issuedAt ?? Date.now();
+    startRef.current = start;
+    const initialLeft = Math.max(0, budget - (Date.now() - start) / 1000);
+    setRemaining(initialLeft);
+    if (initialLeft <= 0) {
+      setLocalTimedOut(true);
+      return;
+    }
 
     const id = window.setInterval(() => {
       const elapsed = (Date.now() - startRef.current) / 1000;
@@ -83,7 +107,7 @@ export function PermissionCard({
     }, 250);
 
     return () => window.clearInterval(id);
-  }, [budget, frozen, taskId]);
+  }, [budget, frozen, taskId, issuedAt]);
 
   useEffect(() => {
     if (frozen) return;

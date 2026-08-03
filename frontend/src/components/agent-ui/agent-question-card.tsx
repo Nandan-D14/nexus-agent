@@ -16,6 +16,8 @@ type Props = {
   answered?: boolean;
   timedOut?: boolean;
   timeoutSeconds?: number;
+  /** Epoch ms when the question was issued; countdown continues from this. */
+  issuedAt?: number;
   onRespond?: (questionId: string, answer: string) => void;
 };
 
@@ -38,14 +40,15 @@ export function AgentQuestionCard({
   answered = false,
   timedOut: timedOutProp = false,
   timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  issuedAt,
   onRespond,
 }: Props) {
   const [answer, setAnswer] = useState("");
   const [submitted, setSubmitted] = useState(answered);
   const [open, setOpen] = useState(true);
-  const [localTimedOut, setLocalTimedOut] = useState(false);
+  const [localTimedOut, setLocalTimedOut] = useState(timedOutProp);
   const [remaining, setRemaining] = useState(timeoutSeconds);
-  const startRef = useRef(Date.now());
+  const startRef = useRef(issuedAt ?? Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
 
   const sent = submitted || answered;
@@ -64,8 +67,14 @@ export function AgentQuestionCard({
 
   useEffect(() => {
     if (frozen) return;
-    startRef.current = Date.now();
-    setRemaining(budget);
+    const start = issuedAt ?? Date.now();
+    startRef.current = start;
+    const initialLeft = Math.max(0, budget - (Date.now() - start) / 1000);
+    setRemaining(initialLeft);
+    if (initialLeft <= 0) {
+      setLocalTimedOut(true);
+      return;
+    }
 
     const id = window.setInterval(() => {
       const elapsed = (Date.now() - startRef.current) / 1000;
@@ -78,7 +87,7 @@ export function AgentQuestionCard({
     }, 250);
 
     return () => window.clearInterval(id);
-  }, [budget, frozen, questionId]);
+  }, [budget, frozen, questionId, issuedAt]);
 
   function handleSubmit() {
     const trimmed = answer.trim();

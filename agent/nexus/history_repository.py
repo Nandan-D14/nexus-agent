@@ -363,7 +363,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
-    ) -> int:
+    ) -> tuple[int, dict[str, int]]:
         async with guarded_write(session_id):
             return await asyncio.to_thread(
                 run_with_write_retry,
@@ -1747,9 +1747,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
-    ) -> int:
+    ) -> tuple[int, dict[str, int]]:
         if input_tokens < 0 or output_tokens < 0 or total_tokens < 0:
-            return 0
+            return 0, {"input": 0, "output": 0, "total": 0}
 
         credits_charged = calculate_usage_credits(
             source=source,
@@ -1820,6 +1820,13 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             txn.set(usage_ref, usage_payload)
             updates: dict[str, Any] = {
                 "tokenTotals": totals,
+                "lastUsage": {
+                    "model": model,
+                    "source": source,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": total_tokens,
+                },
                 "updatedAt": now,
             }
             if credits_charged > 0:
@@ -1830,9 +1837,13 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             if data.get("tokenTrackingStartedAt") is None:
                 updates["tokenTrackingStartedAt"] = now
             txn.set(session_ref, updates, merge=True)
+            return credits_charged, {
+                "input": int(totals["input"]),
+                "output": int(totals["output"]),
+                "total": int(totals["total"]),
+            }
 
-        transactional_append(transaction)
-        return credits_charged
+        return transactional_append(transaction)
 
     def _record_credit_charge_sync(
         self,

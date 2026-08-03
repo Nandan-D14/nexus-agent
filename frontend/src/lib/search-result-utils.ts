@@ -14,6 +14,8 @@ export type SearchCiteRef = {
   label: string;
   host: string;
   url: string;
+  /** Search snippet / summary for citation hover cards. */
+  description?: string;
 };
 
 type ToolStepLike = {
@@ -134,6 +136,7 @@ export function collectSearchRefsFromEventSegments(
           label: result.title || hostname(result.url),
           host: hostname(result.url),
           url: result.url,
+          description: result.snippet.trim() || undefined,
         });
       }
     }

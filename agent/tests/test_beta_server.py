@@ -10,7 +10,7 @@ from unittest import TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
-from google.api_core.exceptions import DeadlineExceeded
+from google.api_core.exceptions import DeadlineExceeded, ResourceExhausted
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -117,6 +117,22 @@ class BetaServerSmokeTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers["retry-after"], "5")
         self.assertEqual(response.json()["detail"]["code"], "GOOGLE_SERVICE_UNAVAILABLE")
+
+    def test_google_api_quota_exceeded_returns_429(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock(side_effect=ResourceExhausted("Quota exceeded."))
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.get("/api/v1/beta/status")
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "60")
+        self.assertEqual(response.json()["detail"]["code"], "GOOGLE_QUOTA_EXCEEDED")
+        self.assertIn("quota", response.json()["detail"]["detail"].lower())
 
     def test_create_session_rejects_pending_beta_user(self) -> None:
         repo = MagicMock()

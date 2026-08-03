@@ -61,13 +61,11 @@ import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useWorkflowTemplates } from "@/lib/use-workflow-templates";
-import { useWebSocket } from "@/lib/use-websocket";
 import { useToast } from "@/components/toast-provider";
 import { useSettings } from "@/lib/settings-context";
 import {
   classifyAgentTool,
   displayAgentToolName,
-  isWorkflowVisualTool,
   surfaceForAgentTool,
 } from "@/lib/agent-tool-classification";
 
@@ -88,11 +86,18 @@ import {
   upsertRunStep,
   upsertArtifact,
   mapStoredMessagesToChatItems,
+  foldDurableWorkingLogEvents,
+  reduceWorkingLogMessage,
+  permissionDecisionsFromRunSteps,
+  extractTodoItemsFromHistory,
+  mergeChatItemsByTimestamp,
   buildSessionTemplateDraft,
 } from "@/lib/session-utils";
 import { isDeliverableArtifact } from "@/lib/artifact-url";
+import { useWebSocket, replayEventToMessage } from "@/lib/use-websocket";
 
 import { SessionHeader } from "@/components/session";
+import type { SessionContextUsageState } from "@/components/session/session-context-usage";
 import { SessionLandingView } from "@/components/session/session-landing-view";
 import { ChatComposer } from "@/components/session/chat-composer";
 
@@ -102,13 +107,16 @@ import type { AgentVisualAction } from "@/components/desktop-panel";
 /*  Page component                                                     */
 /* ------------------------------------------------------------------ */
 
+/** Connected integrations rarely change mid-session; reuse them this long. */
+const CONNECTORS_TTL_MS = 60_000;
+
 export default function SessionPage() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
   const sessionId = params.id as string;
   const { user, isLoading: authLoading } = useAuth();
-  const { setIsSettingsOpen, openSettings, requiresByokSetup } = useSettings();
+  const { openSettings, requiresByokSetup } = useSettings();
   const {
     createSession,
     continueSession,
@@ -117,8 +125,8 @@ export default function SessionPage() {
     getSessionArtifacts,
     getSessionRun,
     getSessionRunSteps,
+    listDurableTaskEvents,
     refreshTicket,
-    destroySession,
     isLoading,
     error,
   } = useSession();
@@ -144,8 +152,13 @@ export default function SessionPage() {
   const [textInput, setTextInput] = useState("");
   const [availableConnectors, setAvailableConnectors] = useState<SessionConnector[]>([SYSTEM_CONNECTOR]);
   const [selectedConnectorIds, setSelectedConnectorIds] = useState<string[]>([]);
+  const [selectedToolIds, setSelectedToolIds] = useState<string[]>([]);
+  const [connectorsLoading, setConnectorsLoading] = useState(false);
+  const connectorsFetchedAtRef = useRef(0);
+  const connectorsInFlightRef = useRef<Promise<void> | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedInputFile[]>([]);
   const [todoItems, setTodoItems] = useState<Array<{ title: string; status: "pending" | "in_progress" | "done"; note?: string }>>([]);
+  const [contextUsage, setContextUsage] = useState<SessionContextUsageState | null>(null);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [hasActivatedSession, setHasActivatedSession] = useState(false);
   const [isContinuingThread, setIsContinuingThread] = useState(false);
@@ -186,7 +199,7 @@ export default function SessionPage() {
       ? sessionData.task_id
       : null;
 
-  const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef } =
+  const { sendBinary, sendJson, isConnected, onBinaryMessageRef, onJsonMessageRef, seedDurableCursor } =
     useWebSocket(shouldConnectWs ? wsUrl : null, {
       ticket: sessionData?.ws_ticket ?? null,
       durableTaskId,
@@ -200,46 +213,64 @@ export default function SessionPage() {
   const { start: startMic, stop: stopMic, isRecording } =
     useMicrophone(sendBinary, handleSpeechStart);
 
-  useEffect(() => {
-    if (authLoading || !user) {
-      setAvailableConnectors([SYSTEM_CONNECTOR]);
-      return;
-    }
+  const refreshConnectors = useCallback(
+    async (options?: { force?: boolean }) => {
+      if (authLoading || !user) {
+        setAvailableConnectors([SYSTEM_CONNECTOR]);
+        setConnectorsLoading(false);
+        return;
+      }
 
-    let cancelled = false;
+      const isFirstLoad = connectorsFetchedAtRef.current === 0;
+      const isFresh =
+        !isFirstLoad && Date.now() - connectorsFetchedAtRef.current < CONNECTORS_TTL_MS;
+      if (!options?.force && isFresh) return;
+      // Coalesce concurrent callers (menu open racing the mount fetch).
+      if (connectorsInFlightRef.current) return connectorsInFlightRef.current;
 
-    async function loadAvailableConnectors() {
-      try {
-        const response = await authenticatedFetch("/v1/integrations/connections");
-        if (!response.ok) {
-          throw new Error(await parseApiError(response));
-        }
-        const body = (await response.json()) as { connections?: SessionConnector[] };
-        const usable = (body.connections ?? []).filter(
-          (connection) => connection.enabled && connection.status === "connected",
-        );
-        const nextConnectors = [SYSTEM_CONNECTOR, ...usable];
-        if (!cancelled) {
+      // Skeleton only on the very first load; later refreshes update silently
+      // so reopening the menu never flashes an empty list.
+      if (isFirstLoad) setConnectorsLoading(true);
+
+      const request = (async () => {
+        try {
+          const response = await authenticatedFetch("/v1/integrations/connections");
+          if (!response.ok) {
+            throw new Error(await parseApiError(response));
+          }
+          const body = (await response.json()) as { connections?: SessionConnector[] };
+          const usable = (body.connections ?? []).filter(
+            (connection) => connection.enabled && connection.status === "connected",
+          );
+          const nextConnectors = [SYSTEM_CONNECTOR, ...usable];
           setAvailableConnectors(nextConnectors);
           setSelectedConnectorIds((prev) =>
             prev.filter((id) => nextConnectors.some((connector) => connector.connection_id === id)),
           );
+          connectorsFetchedAtRef.current = Date.now();
+        } catch (error) {
+          console.warn("[session] Failed to load connectors", error);
+          if (isFirstLoad) {
+            setAvailableConnectors([SYSTEM_CONNECTOR]);
+            setSelectedConnectorIds((prev) =>
+              prev.filter((id) => id === SYSTEM_CONNECTOR.connection_id),
+            );
+          }
+        } finally {
+          if (isFirstLoad) setConnectorsLoading(false);
+          connectorsInFlightRef.current = null;
         }
-      } catch (error) {
-        console.warn("[session] Failed to load connectors", error);
-        if (!cancelled) {
-          setAvailableConnectors([SYSTEM_CONNECTOR]);
-          setSelectedConnectorIds((prev) => prev.filter((id) => id === SYSTEM_CONNECTOR.connection_id));
-        }
-      }
-    }
+      })();
 
-    void loadAvailableConnectors();
+      connectorsInFlightRef.current = request;
+      return request;
+    },
+    [authLoading, user],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [authLoading, user]);
+  useEffect(() => {
+    void refreshConnectors();
+  }, [refreshConnectors]);
 
   /* ---- Audio playback ---- */
   useEffect(() => {
@@ -275,6 +306,16 @@ export default function SessionPage() {
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
     const ts = Date.now();
+
+    const applyWorkingLogChat = () => {
+      setChatItems((prev) => {
+        const reduced = reduceWorkingLogMessage(prev, msg, ts);
+        return reduced ? reduced.chatItems : prev;
+      });
+      if (msg.type === "todo_list_updated" && Array.isArray(msg.items)) {
+        setTodoItems(msg.items);
+      }
+    };
 
     switch (msg.type) {
       case "sandbox_status":
@@ -409,10 +450,7 @@ export default function SessionPage() {
       case "agent_thinking":
         setPhase("thinking");
         setAgentStatus("Thinking...");
-        setChatItems((prev) => [
-          ...prev,
-          { kind: "event", type: msg.type, content: msg.content, ts },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "agent_tool_call":
@@ -420,190 +458,68 @@ export default function SessionPage() {
         setAgentStatus(`Running ${displayAgentToolName(msg.tool)}...`);
         setAgentAction(toolAction(msg.tool, msg.args));
         setForcedTab(surfaceForAgentTool(msg.tool));
-        if (!isWorkflowVisualTool(msg.tool)) {
-          setChatItems((prev) => [
-            ...prev,
-            { kind: "event", type: msg.type, tool: msg.tool, args: msg.args, ts },
-          ]);
-        }
+        applyWorkingLogChat();
         break;
 
       case "agent_tool_result":
-        if (!isWorkflowVisualTool(msg.tool)) {
-          setChatItems((prev) => [
-            ...prev,
-            { kind: "event", type: msg.type, tool: msg.tool, output: msg.output, ts },
-          ]);
-        }
+        applyWorkingLogChat();
         break;
 
       case "agent_retry":
         setAgentStatus(`Retrying${msg.model ? ` ${msg.model}` : ""}...`);
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            reason: msg.reason,
-            attempt: msg.attempt,
-            model: msg.model,
-            delay_ms: msg.delay_ms,
-            trace_id: msg.trace_id,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "agent_model_fallback":
         setAgentStatus(`Switching to ${msg.to_model}...`);
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            reason: msg.reason,
-            attempt: msg.attempt,
-            from_model: msg.from_model,
-            to_model: msg.to_model,
-            trace_id: msg.trace_id,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "mcp_http_request":
       case "mcp_http_response":
       case "mcp_http_error":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            ...msg,
-            ts,
-          },
-        ]);
-        break;
-
       case "verification_result":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            ...msg,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "agent_screenshot":
         setAgentAction({ kind: "observe", label: "Observing screen", ts });
         setForcedTab("desktop");
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            image_b64: msg.image_b64,
-            analysis: msg.analysis,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "agent_complete":
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
-        setChatItems((prev) => [
-          ...prev,
-          { kind: "event", type: msg.type, summary: msg.summary, ts },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "agent_delegation":
         setActiveAgent(msg.to);
-        setChatItems((prev) => [
-          ...prev,
-          { kind: "delegation", from: msg.from, to: msg.to, ts },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "user_question":
         setPhase("idle");
         setAgentStatus("Waiting for your answer...");
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "user_question",
-            question_id: msg.question_id,
-            question: msg.question,
-            answered: false,
-            timedOut: false,
-            timeout_seconds: msg.timeout_seconds,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "user_question_resolved":
-        setChatItems((prev) =>
-          prev.map((item) =>
-            item.kind === "user_question" && item.question_id === msg.question_id
-              ? {
-                  ...item,
-                  answered: msg.answered,
-                  timedOut: !msg.answered,
-                }
-              : item,
-          ),
-        );
+        applyWorkingLogChat();
         if (!msg.answered) {
           setAgentStatus("");
         }
         break;
 
       case "permission_request":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "permission",
-            task_id: msg.task_id,
-            approval_id: msg.approval_id,
-            durable_task_id: msg.durable_task_id,
-            description: msg.description,
-            estimated_seconds: msg.estimated_seconds,
-            agent: msg.agent,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "bg_task_progress":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            task_id: msg.task_id,
-            progress: msg.progress,
-            message: msg.message,
-            ts,
-          },
-        ]);
-        break;
-
       case "bg_task_complete":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            task_id: msg.task_id,
-            success: msg.success,
-            result: msg.result,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "voice_status":
@@ -625,34 +541,11 @@ export default function SessionPage() {
 
       case "budget_warning":
         setAgentStatus(msg.message);
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            state: msg.state,
-            action: msg.action,
-            message: msg.message,
-            soft_limit: msg.soft_limit,
-            hard_limit: msg.hard_limit,
-            projected_total_tokens: msg.projected_total_tokens,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "resume_recovery":
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            state: msg.state,
-            message: msg.message,
-            reused_context_digest: msg.reused_context_digest,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "context_packet":
@@ -664,24 +557,11 @@ export default function SessionPage() {
               }
             : prev,
         );
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            stage: msg.stage,
-            action: msg.action,
-            estimated_tokens: msg.estimated_tokens,
-            reasoning_model: msg.reasoning_model,
-            vision_model: msg.vision_model,
-            packet: msg.packet,
-            ts,
-          },
-        ]);
+        applyWorkingLogChat();
         break;
 
       case "todo_list_updated":
-        setTodoItems(msg.items);
+        applyWorkingLogChat();
         break;
 
       case "error":
@@ -689,17 +569,20 @@ export default function SessionPage() {
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
-        setChatItems((prev) => [
-          ...prev,
-          {
-            kind: "event",
-            type: msg.type,
-            code: msg.code,
-            message: msg.message,
-            detail: msg.detail,
-            ts,
+        applyWorkingLogChat();
+        break;
+
+      case "token_usage":
+        setContextUsage({
+          maxTokens: Math.max(1, Number(msg.max_tokens) || 1),
+          usedTokens: Math.max(0, Number(msg.input_tokens) || 0),
+          model: typeof msg.model === "string" ? msg.model : undefined,
+          usage: {
+            inputTokens: Math.max(0, Number(msg.input_tokens) || 0),
+            outputTokens: Math.max(0, Number(msg.output_tokens) || 0),
+            totalTokens: Math.max(0, Number(msg.total_tokens) || 0),
           },
-        ]);
+        });
         break;
 
       case "quota_update":
@@ -866,6 +749,8 @@ export default function SessionPage() {
       setPageError(null);
       setPhase("idle");
       setChatItems([]);
+      setTodoItems([]);
+      setContextUsage(null);
       setRunInfo(null);
       setRunSteps([]);
       setRunArtifacts([]);
@@ -896,20 +781,89 @@ export default function SessionPage() {
       }
 
       setSessionInfo(info);
-      const [messages, run, steps, artifacts] = await Promise.all([
+      if (info.last_usage && (info.model_context_limit || info.last_usage.input_tokens > 0)) {
+        setContextUsage({
+          maxTokens: Math.max(1, Number(info.model_context_limit) || 262144),
+          usedTokens: Math.max(0, Number(info.last_usage.input_tokens) || 0),
+          model: info.last_usage.model || undefined,
+          usage: {
+            inputTokens: Math.max(0, Number(info.last_usage.input_tokens) || 0),
+            outputTokens: Math.max(0, Number(info.last_usage.output_tokens) || 0),
+            totalTokens: Math.max(0, Number(info.last_usage.total_tokens) || 0),
+          },
+        });
+      } else {
+        setContextUsage(null);
+      }
+      const durableTaskIdFromSession =
+        typeof info.task_id === "string" && info.task_id.startsWith("task_")
+          ? info.task_id
+          : null;
+
+      const [messages, run, steps, artifacts, durablePage] = await Promise.all([
         getSessionMessages(sessionId),
         getSessionRun(sessionId),
         getSessionRunSteps(sessionId),
         getSessionArtifacts(sessionId),
+        durableTaskIdFromSession
+          ? listDurableTaskEvents(durableTaskIdFromSession)
+          : Promise.resolve(null),
       ]);
       if (cancelled) return;
-      const nextChatItems = mapStoredMessagesToChatItems(messages).filter((item) => {
+
+      const durableHydrateSucceeded = durablePage !== null;
+      const historyMode = durableHydrateSucceeded ? "transcript" : "full";
+      const historyChatItems = mapStoredMessagesToChatItems(messages, {
+        mode: historyMode,
+      }).filter((item) => {
         if (item.kind === "event" && item.type === "artifact_created") {
           const art = (item as { artifact?: RunArtifact }).artifact;
           return art ? isDeliverableArtifact(art) : false;
         }
         return true;
       });
+
+      let durableChatItems: ChatItem[] = [];
+      let hydratedTodos: Array<{
+        title: string;
+        status: "pending" | "in_progress" | "done";
+        note?: string;
+      }> = [];
+      let durableLastSeq = 0;
+
+      if (durablePage) {
+        const folded = foldDurableWorkingLogEvents(
+          durablePage.events
+            .map((event) => {
+              const message = replayEventToMessage(event);
+              if (!message) {
+                return null;
+              }
+              const ts = event.created_at
+                ? new Date(event.created_at).getTime()
+                : Date.now();
+              return { message, ts };
+            })
+            .filter(
+              (entry): entry is { message: NonNullable<ReturnType<typeof replayEventToMessage>>; ts: number } =>
+                entry !== null,
+            ),
+          {
+            permissionDecisions: permissionDecisionsFromRunSteps(steps),
+          },
+        );
+        durableChatItems = folded.chatItems;
+        hydratedTodos = folded.todoItems;
+        durableLastSeq = durablePage.last_seq;
+        seedDurableCursor(durableLastSeq);
+      } else {
+        hydratedTodos = extractTodoItemsFromHistory(messages);
+      }
+
+      const nextChatItems = mergeChatItemsByTimestamp(
+        historyChatItems,
+        durableChatItems,
+      );
       const existingArtifactIds = new Set(
         nextChatItems
           .filter((item) => item.kind === "event" && item.type === "artifact_created")
@@ -934,6 +888,7 @@ export default function SessionPage() {
         }
         return prev.length > 0 ? prev : [];
       });
+      setTodoItems(hydratedTodos);
       setRunInfo(run);
       setRunSteps(steps);
       setRunArtifacts(artifacts);
@@ -965,6 +920,7 @@ export default function SessionPage() {
         setViewMode("live");
         setSessionData({
           session_id: info.session_id,
+          task_id: durableTaskIdFromSession ?? info.task_id ?? null,
           stream_url: info.stream_url,
           ws_ticket: wsTicket,
           status: info.status,
@@ -973,6 +929,11 @@ export default function SessionPage() {
           run_status: info.run_status,
           artifact_count: info.artifact_count,
         });
+        // Re-seed after sessionData.task_id lands so the durableTaskId effect
+        // cannot wipe the cursor back to 0.
+        if (durableHydrateSucceeded) {
+          seedDurableCursor(durableLastSeq);
+        }
         setStreamUrl(info.stream_url);
 
         // If the session is already active with a stream URL,
@@ -998,8 +959,10 @@ export default function SessionPage() {
     getSessionRunSteps,
     getSession,
     isNewSession,
+    listDurableTaskEvents,
     refreshTicket,
     router,
+    seedDurableCursor,
     sessionId,
     user,
   ]);
@@ -1014,6 +977,7 @@ export default function SessionPage() {
         type: "text_input",
         text: pendingText.text,
         connector_ids: pendingText.connectorIds,
+        tool_ids: pendingText.toolIds,
         uploaded_files: pendingText.uploadedFiles,
       });
       setPendingText(null);
@@ -1227,6 +1191,7 @@ export default function SessionPage() {
         type: "text_input",
         text: nextPayload.text,
         connector_ids: nextPayload.connectorIds,
+        tool_ids: nextPayload.toolIds,
         uploaded_files: nextPayload.uploadedFiles,
       });
     },
@@ -1308,12 +1273,42 @@ export default function SessionPage() {
     );
   }, []);
 
-  const handleOpenFilePicker = useCallback(() => {
+  const toggleToolSelection = useCallback((toolId: string) => {
+    setSelectedToolIds((prev) =>
+      prev.includes(toolId)
+        ? prev.filter((id) => id !== toolId)
+        : [...prev, toolId],
+    );
+  }, []);
+
+  const toggleAllConnectors = useCallback((ids: string[]) => {
+    setSelectedConnectorIds((prev) => {
+      if (ids.every((id) => prev.includes(id))) {
+        return prev.filter((id) => !ids.includes(id));
+      }
+      return Array.from(new Set([...prev, ...ids]));
+    });
+  }, []);
+
+  const toggleAllTools = useCallback((ids: string[]) => {
+    setSelectedToolIds((prev) => {
+      if (ids.every((id) => prev.includes(id))) {
+        return prev.filter((id) => !ids.includes(id));
+      }
+      return Array.from(new Set([...prev, ...ids]));
+    });
+  }, []);
+
+  const handleOpenFilePicker = useCallback((kind: "image" | "file" = "file") => {
     if (isNewSession || viewMode !== "live" || !sessionData?.session_id) {
       toast("File upload is available in a live session.", "error");
       return;
     }
-    fileInputRef.current?.click();
+    const input = fileInputRef.current;
+    if (!input) return;
+    input.accept = kind === "image" ? "image/*" : "";
+    input.value = "";
+    input.click();
   }, [isNewSession, sessionData?.session_id, toast, viewMode]);
 
   const handleFileUpload = useCallback(
@@ -1388,6 +1383,7 @@ export default function SessionPage() {
     const payload: PendingTurnInput = {
       text,
       connectorIds: selectedConnectorIds,
+      toolIds: selectedToolIds,
       uploadedFiles,
     };
     if (isNewSession) {
@@ -1398,7 +1394,7 @@ export default function SessionPage() {
     sendTextOrQueue(payload);
     setTextInput("");
     setUploadedFiles([]);
-  }, [createThreadFromPrompt, isNewSession, openSettings, requiresByokSetup, selectedConnectorIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
+  }, [createThreadFromPrompt, isNewSession, openSettings, requiresByokSetup, selectedConnectorIds, selectedToolIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
 
   const handleShowDesktop = useCallback(() => {
     if (isNewSession) {
@@ -1467,6 +1463,17 @@ export default function SessionPage() {
       approvalId?: string,
       durableTaskId?: string,
     ) => {
+      setChatItems((prev) =>
+        prev.map((item) =>
+          item.kind === "permission" && item.task_id === taskId
+            ? {
+                ...item,
+                resolved: true,
+                decision: approved ? "approved" : "denied",
+              }
+            : item,
+        ),
+      );
       if (approvalId && durableTaskId) {
         void authenticatedFetch(
           `/api/v1/tasks/${encodeURIComponent(durableTaskId)}/approvals/${encodeURIComponent(approvalId)}`,
@@ -1576,24 +1583,6 @@ export default function SessionPage() {
     void continueCurrentThread(shouldAutoResume ? { openDesktop: true } : undefined);
   }, [continueCurrentThread, isNewSession, shouldAutoContinue, shouldAutoResume, viewMode]);
 
-  const handleEnd = async () => {
-    audioPlayer.current.stop();
-    stopMic();
-    if (isNewSession) {
-      router.push("/dashboard");
-      return;
-    }
-    if (viewMode === "live") {
-      try {
-        await destroySession(sessionId);
-        clearDesktop(sessionId);
-      } catch (err) {
-        console.error("[handleEnd] Failed to destroy session:", err);
-      }
-    }
-    router.push("/dashboard");
-  };
-
   const handleOpenSaveTemplate = useCallback(() => {
     if (isNewSession) {
       return;
@@ -1680,10 +1669,7 @@ export default function SessionPage() {
       <div className="flex-1 flex flex-col min-h-0 relative h-full overflow-hidden">
         {!hasStarted ? (
           <SessionLandingView
-            viewMode={viewMode}
             onShowDesktop={handleShowDesktop}
-            onOpenSettings={() => setIsSettingsOpen(true)}
-            onEndSession={handleEnd}
             textInput={textInput}
             onChangeText={setTextInput}
             onSubmitText={handleTextSubmit}
@@ -1701,17 +1687,12 @@ export default function SessionPage() {
             availableConnectors={availableConnectors}
             selectedConnectorIds={selectedConnectorIds}
             onToggleConnector={toggleConnectorSelection}
-            onToggleAllConnectors={(ids) => {
-              if (ids.every((id) => selectedConnectorIds.includes(id))) {
-                setSelectedConnectorIds((prev) =>
-                  prev.filter((id) => !ids.includes(id))
-                );
-              } else {
-                setSelectedConnectorIds((prev) =>
-                  Array.from(new Set([...prev, ...ids]))
-                );
-              }
-            }}
+            onToggleAllConnectors={toggleAllConnectors}
+            selectedToolIds={selectedToolIds}
+            onToggleTool={toggleToolSelection}
+            onToggleAllTools={toggleAllTools}
+            connectorsLoading={connectorsLoading}
+            onRefreshTools={refreshConnectors}
             pageError={pageError}
             error={error}
             landingInputRef={landingInputRef}
@@ -1725,12 +1706,11 @@ export default function SessionPage() {
               isNewSession={isNewSession}
               isDesktopVisible={isDesktopVisible}
               isDesktopFullscreen={isDesktopFullscreen}
+              contextUsage={contextUsage}
               onToggleDesktopFullscreen={handleToggleDesktopFullscreen}
               onShowDesktop={handleShowDesktop}
               onHideDesktop={handleHideDesktop}
               onOpenSaveTemplate={handleOpenSaveTemplate}
-              onOpenSettings={() => setIsSettingsOpen(true)}
-              onEndSession={handleEnd}
             />
 
             {/* ─── Main content: Desktop + Chat ─── */}
@@ -1799,17 +1779,12 @@ export default function SessionPage() {
                         availableConnectors={availableConnectors}
                         selectedConnectorIds={selectedConnectorIds}
                         onToggleConnector={toggleConnectorSelection}
-                        onToggleAllConnectors={(ids) => {
-                          if (ids.every((id) => selectedConnectorIds.includes(id))) {
-                            setSelectedConnectorIds((prev) =>
-                              prev.filter((id) => !ids.includes(id))
-                            );
-                          } else {
-                            setSelectedConnectorIds((prev) =>
-                              Array.from(new Set([...prev, ...ids]))
-                            );
-                          }
-                        }}
+                        onToggleAllConnectors={toggleAllConnectors}
+                        selectedToolIds={selectedToolIds}
+                        onToggleTool={toggleToolSelection}
+                        onToggleAllTools={toggleAllTools}
+                        connectorsLoading={connectorsLoading}
+                        onRefreshTools={refreshConnectors}
                       />
                     </div>
                   </div>

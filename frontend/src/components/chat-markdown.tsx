@@ -11,17 +11,29 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeHighlight from "rehype-highlight";
 import type { Components } from "react-markdown";
+import { CitationInline } from "@/components/agent-ui/citation-inline";
+import type { CiteRef } from "@/components/agent-ui/inline-citations";
 
 type Props = {
   content: string;
-  /** When set, markdown links get a numbered citation badge after the anchor. */
+  /** When set, markdown links get a citation pill after the anchor. */
   citationMap?: Map<string, number>;
+  /** Full turn sources for citation hover carousels. */
+  sources?: CiteRef[];
 };
 
-function buildComponents(citationMap?: Map<string, number>): Components {
+function buildComponents(
+  citationMap?: Map<string, number>,
+  sources?: CiteRef[],
+): Components {
   return {
     a({ href, children, ...props }) {
       const n = href && citationMap ? citationMap.get(href) : undefined;
+      const active =
+        href && sources?.length
+          ? sources.find((s) => s.url === href)
+          : undefined;
+
       return (
         <>
           <a
@@ -32,7 +44,9 @@ function buildComponents(citationMap?: Map<string, number>): Components {
           >
             {children}
           </a>
-          {n != null ? (
+          {active && sources?.length ? (
+            <CitationInline active={active} sources={sources} />
+          ) : n != null ? (
             <a
               href={`#cite-ref-${n}`}
               className="ml-0.5 inline-flex items-center rounded-md bg-background-tertiary-default px-1 align-super text-[10px] font-semibold text-text-secondary no-underline hover:bg-background-tertiary-hover hover:text-text-primary"
@@ -73,10 +87,10 @@ function buildComponents(citationMap?: Map<string, number>): Components {
   };
 }
 
-export function ChatMarkdown({ content, citationMap }: Props) {
+export function ChatMarkdown({ content, citationMap, sources }: Props) {
   const components = useMemo(
-    () => buildComponents(citationMap),
-    [citationMap],
+    () => buildComponents(citationMap, sources),
+    [citationMap, sources],
   );
 
   return (

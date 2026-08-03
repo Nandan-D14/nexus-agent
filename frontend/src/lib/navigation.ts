@@ -4,24 +4,25 @@
  */
 
 import {
-  MessageSquare,
-  History,
-  Workflow,
-  Cable,
-  PlusCircle,
   Bot,
+  MessagesSquare,
+  Clock,
+  GitBranch,
+  Plug,
+  PlusCircle,
+  Sparkles,
   Search,
   Library,
-  Settings,
+  Settings2,
 } from "lucide-react";
 
 export const NAV_LINKS = [
-  { name: "Chat Console", href: "/dashboard", icon: MessageSquare },
-  { name: "History", href: "/history", icon: History },
-  { name: "Agent Workflow", href: "/templates", icon: Workflow },
-  { name: "Agent Skills", href: "/skills", icon: Bot },
-  { name: "Connectors", href: "/connectors", icon: Cable },
-  { name: "Settings", href: "/settings", icon: Settings },
+  { name: "Chat Console", href: "/dashboard", icon: MessagesSquare },
+  { name: "History", href: "/history", icon: Clock },
+  { name: "Agent Workflow", href: "/templates", icon: GitBranch },
+  { name: "Agent Skills", href: "/skills", icon: Sparkles },
+  { name: "Connectors", href: "/connectors", icon: Plug },
+  { name: "Settings", href: "/settings", icon: Settings2 },
 ] as const;
 
 export const SIDEBAR_ACTIONS = [

@@ -181,6 +181,26 @@ def test_completion_requires_real_final_response() -> None:
     assert result.error_code == "MISSING_FINAL_RESPONSE"
 
 
+def test_completion_rejects_worker_envelope_as_final_response() -> None:
+    from nexus.control_loop import looks_like_worker_envelope
+
+    envelope = (
+        '{"status":"success","summary":"Generated PDF report.",'
+        '"evidence":["File exists"],"artifacts":[{"path":"outputs/a.pdf","kind":"pdf"}],'
+        '"sources":[],"remaining_work":[],"retryable":false,"error_code":""}'
+    )
+    assert looks_like_worker_envelope(envelope) is True
+    assert looks_like_worker_envelope("Here is your report.") is False
+
+    result = verify_completion(
+        request="Create a PDF report",
+        final_response=envelope,
+        ledger=ActionLedger(),
+    )
+    assert result.verified is False
+    assert result.error_code == "MISSING_FINAL_RESPONSE"
+
+
 def test_completion_ignores_unstructured_prompt_text_for_source_requirements() -> None:
     result = verify_completion(
         request="Research this topic and cite sources.",

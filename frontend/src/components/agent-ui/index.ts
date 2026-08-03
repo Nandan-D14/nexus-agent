@@ -10,6 +10,7 @@ export {
 } from "./thinking-reasoning";
 export { WebSearchCard } from "./web-search";
 export { TextResponse } from "./text-response";
+export { CitationInline } from "./citation-inline";
 export { InlineCitations, extractMarkdownCitations } from "./inline-citations";
 export type { CiteRef } from "./inline-citations";
 export { TaskList } from "./task-list";

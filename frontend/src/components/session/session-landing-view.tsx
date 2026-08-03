@@ -11,14 +11,11 @@ import type { SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 
 type Props = {
-  viewMode: string;
   onShowDesktop: () => void;
-  onOpenSettings: () => void;
-  onEndSession: () => void;
   textInput: string;
   onChangeText: (text: string) => void;
   onSubmitText: () => void;
-  onOpenFilePicker: () => void;
+  onOpenFilePicker: (kind?: "image" | "file") => void;
   uploadDisabled: boolean;
   uploadedFiles: UploadedInputFile[];
   onRemoveFile: (path: string) => void;
@@ -33,16 +30,18 @@ type Props = {
   selectedConnectorIds: string[];
   onToggleConnector: (id: string) => void;
   onToggleAllConnectors: (ids: string[]) => void;
+  selectedToolIds: string[];
+  onToggleTool: (id: string) => void;
+  onToggleAllTools: (ids: string[]) => void;
+  connectorsLoading?: boolean;
+  onRefreshTools?: () => void;
   pageError: string | null;
   error: string | null;
   landingInputRef?: React.RefObject<HTMLDivElement | null>;
 };
 
 export function SessionLandingView({
-  viewMode,
   onShowDesktop,
-  onOpenSettings,
-  onEndSession,
   textInput,
   onChangeText,
   onSubmitText,
@@ -61,39 +60,17 @@ export function SessionLandingView({
   selectedConnectorIds,
   onToggleConnector,
   onToggleAllConnectors,
+  selectedToolIds,
+  onToggleTool,
+  onToggleAllTools,
+  connectorsLoading,
+  onRefreshTools,
   pageError,
   error,
   landingInputRef,
 }: Props) {
   return (
     <div className="flex-1 flex flex-col items-center relative p-6 pt-[25vh]">
-      {/* Top right actions */}
-      <div className="absolute top-4 right-4 flex gap-2">
-        {viewMode === "live" && (
-          <button
-            suppressHydrationWarning
-            onClick={onShowDesktop}
-            className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white border border-blue-700 dark:bg-blue-500 dark:border-blue-400 hover:bg-blue-700 dark:hover:bg-blue-600 transition-all duration-200"
-          >
-            Open Desktop
-          </button>
-        )}
-        <button
-          suppressHydrationWarning
-          onClick={onOpenSettings}
-          className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-400 hover:bg-blue-100 dark:hover:bg-blue-600/20 transition-all duration-200"
-        >
-          Settings
-        </button>
-        <button
-          suppressHydrationWarning
-          onClick={onEndSession}
-          className="text-xs px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 hover:border-red-500/30 transition-all duration-200"
-        >
-          Dashboard
-        </button>
-      </div>
-
       <div className="max-w-3xl w-full flex flex-col items-center gap-2">
         <div className="text-center relative py-2">
           <motion.div
@@ -157,6 +134,11 @@ export function SessionLandingView({
             selectedConnectorIds={selectedConnectorIds}
             onToggleConnector={onToggleConnector}
             onToggleAllConnectors={onToggleAllConnectors}
+            selectedToolIds={selectedToolIds}
+            onToggleTool={onToggleTool}
+            onToggleAllTools={onToggleAllTools}
+            connectorsLoading={connectorsLoading}
+            onRefreshTools={onRefreshTools}
           />
         </div>
       </div>

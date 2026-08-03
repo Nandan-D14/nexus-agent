@@ -139,6 +139,7 @@ def build_execution_payload(
     session_id: str | None,
     input_text: str,
     connector_ids: list[str] | None = None,
+    tool_ids: list[str] | None = None,
     uploaded_files: list[dict[str, Any]] | None = None,
     runtime_config_snapshot: dict[str, Any] | None = None,
     autonomy_mode: str | None = None,
@@ -154,6 +155,12 @@ def build_execution_payload(
         else:
             logger.warning("build_execution_payload: implicitly stripped an empty connector_id")
 
+    cleaned_tools = []
+    for item in (tool_ids or []):
+        val = str(item).strip()
+        if val:
+            cleaned_tools.append(val)
+
     return {
         "schema_version": 1,
         "task_id": task_id,
@@ -162,6 +169,7 @@ def build_execution_payload(
         "session_id": session_id,
         "input_text": input_text,
         "connector_ids": cleaned_connectors,
+        "tool_ids": cleaned_tools,
         "uploaded_files": [item for item in (uploaded_files or []) if isinstance(item, dict)],
         "runtime_config": runtime_config_snapshot or {},
         "autonomy_mode": normalize_autonomy_mode(autonomy_mode or settings.default_autonomy_mode),

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
 import re
 from typing import Any, Mapping
 
@@ -624,6 +625,29 @@ _ARTIFACT_REQUEST = re.compile(
 _TASK_STATE_METADATA_KEYS = frozenset({"task_type", "stage", "review_status"})
 
 
+def looks_like_worker_envelope(text: str | None) -> bool:
+    """Return True when *text* is a serialized worker/tool result envelope.
+
+    The planner sometimes echoes ``_parse_worker_result`` JSON as a text part.
+    That shape must never be promoted to a user-facing final answer.
+    """
+    raw = str(text or "").strip()
+    if not raw or raw[0] != "{" or raw[-1] != "}":
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "status" not in payload or "summary" not in payload:
+        return False
+    return any(
+        key in payload
+        for key in ("evidence", "artifacts", "remaining_work", "retryable", "sources")
+    )
+
+
 def verify_completion(
     *,
     request: str,
@@ -632,12 +656,16 @@ def verify_completion(
 ) -> CompletionVerification:
     """Verify task completion from observable runtime evidence."""
     response = str(final_response or "").strip()
-    if not response:
+    if not response or looks_like_worker_envelope(response):
         return CompletionVerification(
             verified=False,
             status="failed",
             method="final_response",
-            summary="The model ended without a final response.",
+            summary=(
+                "The model ended without a final response."
+                if not response
+                else "The model returned a raw tool/worker result instead of a final response."
+            ),
             error_code="MISSING_FINAL_RESPONSE",
             remaining_work=["Produce a final response grounded in tool evidence."],
             retryable=True,

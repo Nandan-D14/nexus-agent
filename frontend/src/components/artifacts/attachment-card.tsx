@@ -13,8 +13,17 @@ import {
   downloadArtifactFile,
   resolveArtifactUrl,
 } from "@/lib/artifact-url";
+import {
+  Artifact,
+  ArtifactAction,
+  ArtifactActions,
+  ArtifactDescription,
+  ArtifactHeader,
+  ArtifactTitle,
+} from "@/components/ai-elements/artifact";
 import { ArtifactIconTile, artifactBadge } from "./artifact-icon";
 import { DocumentViewerModal } from "./document-viewer-modal";
+import { cn } from "@/lib/utils";
 
 type Props = {
   artifact: RunArtifact;
@@ -23,7 +32,7 @@ type Props = {
 };
 
 /**
- * SaaS-style file card: title, type badge, Preview / Download.
+ * Chat deliverable card: AI Elements Artifact chrome with Preview / Download.
  * Preview opens the full-screen viewer so the chat transcript never reflows.
  */
 export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
@@ -32,6 +41,7 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
   const [loading, setLoading] = useState(false);
 
   const previewable = canInlinePreview(artifact);
+  const badge = artifactBadge(artifact);
 
   const handleDownload = useCallback(async () => {
     setLoading(true);
@@ -60,63 +70,70 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
     setViewerUrl(null);
   }, []);
 
+  const descriptionParts = [
+    badge,
+    artifact.preview?.trim() ? artifact.preview.trim() : null,
+  ].filter(Boolean);
+
   return (
     <>
-      <div
-        className={
+      <Artifact
+        className={cn(
+          "w-full max-w-xl shadow-sm",
           compact
-            ? "rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-[#141414] overflow-hidden"
-            : "rounded-xl border border-zinc-800 bg-[#141414] overflow-hidden"
-        }
+            ? "rounded-xl border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-[#141414]"
+            : "rounded-xl border-zinc-800 bg-[#141414]",
+        )}
       >
-        <div className="flex items-center gap-3 px-3.5 py-3">
-          <ArtifactIconTile artifact={artifact} />
-          <div className="min-w-0 flex-1">
-            <div className="text-[14px] font-medium text-zinc-800 dark:text-zinc-100 truncate">
-              {artifact.title || "Generated file"}
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 text-[12px] text-zinc-500">
-              <span className="rounded bg-zinc-200/80 dark:bg-zinc-800 px-1.5 py-0.5 font-medium uppercase tracking-wide text-[10px] text-zinc-600 dark:text-zinc-400">
-                {artifactBadge(artifact)}
-              </span>
-              {artifact.preview && (
-                <span className="truncate max-w-[240px]">{artifact.preview}</span>
-              )}
+        <ArtifactHeader
+          className={cn(
+            "gap-3 border-b-0 bg-transparent px-3.5 py-3",
+            compact ? "dark:bg-transparent" : "",
+          )}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <ArtifactIconTile artifact={artifact} />
+            <div className="min-w-0">
+              <ArtifactTitle className="truncate text-[14px] text-zinc-800 dark:text-zinc-100">
+                {artifact.title || "Generated file"}
+              </ArtifactTitle>
+              {descriptionParts.length > 0 ? (
+                <ArtifactDescription className="mt-0.5 flex items-center gap-2 text-[12px] text-zinc-500">
+                  <span className="rounded bg-zinc-200/80 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    {badge}
+                  </span>
+                  {artifact.preview ? (
+                    <span className="max-w-[240px] truncate">{artifact.preview}</span>
+                  ) : null}
+                </ArtifactDescription>
+              ) : null}
             </div>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {previewable && (
-              <button
-                type="button"
+          <ArtifactActions className="shrink-0">
+            {previewable ? (
+              <ArtifactAction
+                tooltip="Preview"
+                label="Preview"
+                icon={loading ? Loader2 : Eye}
                 onClick={handleOpenViewer}
                 disabled={loading}
-                className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
-              >
-                {loading ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Eye className="w-3.5 h-3.5" />
+                className={cn(
+                  loading && "[&_svg]:animate-spin",
+                  "text-indigo-600 hover:text-indigo-500 dark:text-indigo-400",
                 )}
-                Preview
-              </button>
-            )}
-            <button
-              type="button"
+              />
+            ) : null}
+            <ArtifactAction
+              tooltip="Download"
+              label="Download"
+              icon={loading ? Loader2 : Download}
               onClick={handleDownload}
               disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors"
-              title="Download"
-            >
-              {loading ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Download className="w-3.5 h-3.5" />
-              )}
-              Download
-            </button>
-          </div>
-        </div>
-      </div>
+              className={cn(loading && "[&_svg]:animate-spin")}
+            />
+          </ArtifactActions>
+        </ArtifactHeader>
+      </Artifact>
 
       <DocumentViewerModal
         artifact={viewerOpen ? artifact : null}

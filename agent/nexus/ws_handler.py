@@ -174,6 +174,7 @@ async def _try_start_durable_text_run(
     orchestrator: NexusOrchestrator,
     text: str,
     connector_ids: list[str],
+    tool_ids: list[str],
     uploaded_files: list[dict[str, Any]],
     send_json,
 ) -> bool:
@@ -235,6 +236,7 @@ async def _try_start_durable_text_run(
         session_id=session.id,
         input_text=text,
         connector_ids=connector_ids,
+        tool_ids=tool_ids,
         uploaded_files=uploaded_files,
         runtime_config_snapshot=runtime_config_snapshot(getattr(session, "runtime_config", None)),
         autonomy_mode=getattr(getattr(session, "runtime_config", None), "autonomy_mode", None),
@@ -253,6 +255,7 @@ async def _try_start_durable_text_run(
             "role": "user",
             "text": text,
             "connector_ids": connector_ids,
+            "tool_ids": tool_ids,
             "uploaded_files": uploaded_files,
         },
     )
@@ -521,6 +524,11 @@ async def handle_websocket(
                                 for item in (data.get("connector_ids") or [])
                                 if str(item).strip()
                             ]
+                            tool_ids = [
+                                str(item).strip()
+                                for item in (data.get("tool_ids") or [])
+                                if str(item).strip()
+                            ]
                             uploaded_files = [
                                 item
                                 for item in (data.get("uploaded_files") or [])
@@ -533,6 +541,7 @@ async def handle_websocket(
                                     orchestrator=orchestrator,
                                     text=text,
                                     connector_ids=connector_ids,
+                                    tool_ids=tool_ids,
                                     uploaded_files=uploaded_files,
                                     send_json=_safe_send_json,
                                 )
@@ -572,6 +581,7 @@ async def handle_websocket(
                                     orchestrator.handle_text_input(
                                         text,
                                         connector_ids=connector_ids,
+                                        tool_ids=tool_ids,
                                         uploaded_files=uploaded_files,
                                     )
                                 ),

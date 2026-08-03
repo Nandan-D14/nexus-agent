@@ -67,6 +67,10 @@ _current_subagent_resource_locks: contextvars.ContextVar[Optional["ToolResourceL
 _current_task_budget_guard: contextvars.ContextVar[Optional["TaskBudgetGuard"]] = (
     contextvars.ContextVar("_current_task_budget_guard", default=None)
 )
+# None = unrestricted (empty user selection). A frozenset restricts gateable tools.
+_current_tool_allowlist: contextvars.ContextVar[Optional[frozenset[str]]] = (
+    contextvars.ContextVar("_current_tool_allowlist", default=None)
+)
 
 _ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable[None]]]] = (
     contextvars.ContextVar("_ensure_sandbox_callback", default=None)
@@ -303,3 +307,18 @@ def set_task_budget_guard(
 def get_task_budget_guard() -> Optional["TaskBudgetGuard"]:
     """Return the active durable-run budget guard, if any."""
     return _current_task_budget_guard.get()
+
+
+def set_tool_allowlist(allowlist: frozenset[str] | None) -> contextvars.Token:
+    """Bind the per-turn tool allowlist (None = unrestricted)."""
+    return _current_tool_allowlist.set(allowlist)
+
+
+def get_tool_allowlist() -> frozenset[str] | None:
+    """Return the active per-turn tool allowlist, or None if unrestricted."""
+    return _current_tool_allowlist.get()
+
+
+def clear_tool_allowlist() -> None:
+    """Reset the per-turn tool allowlist to unrestricted."""
+    _current_tool_allowlist.set(None)

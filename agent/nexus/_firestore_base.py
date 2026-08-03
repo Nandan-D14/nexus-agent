@@ -230,6 +230,7 @@ class FirestoreRepoBase:
             summary=summary if isinstance(summary, str) else None,
             message_count=int(data.get("messageCount", 0)),
             token_totals=self._coerce_token_totals(data.get("tokenTotals")),
+            last_usage=data.get("lastUsage") if isinstance(data.get("lastUsage"), dict) else None,
             token_tracking_started_at=self._coerce_datetime(data.get("tokenTrackingStartedAt")),
             handoff_summary=data.get("handoffSummary") if isinstance(data.get("handoffSummary"), dict) else None,
             can_continue_workspace=bool(data.get("canContinueWorkspace")),

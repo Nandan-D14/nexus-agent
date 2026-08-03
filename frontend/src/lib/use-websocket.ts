@@ -40,24 +40,31 @@ export interface UseWebSocketReturn {
   onJsonMessageRef: React.MutableRefObject<
     ((msg: WsMessage) => void) | null
   >;
+  /**
+   * Seed the durable event cursor after load-time hydrate so reconnect replay
+   * starts after already-applied events and does not double-apply.
+   */
+  seedDurableCursor: (lastSeq: number) => void;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
 
-type DurableReplayEvent = {
+export type DurableReplayEvent = {
   event_id?: string;
   task_id?: string;
   run_id?: string | null;
   type?: string;
   payload?: Record<string, unknown>;
   seq?: number;
+  created_at?: string;
 };
 
 type DurableReplayResponse = {
   events?: DurableReplayEvent[];
   last_seq?: number;
+  has_more?: boolean;
 };
 
 function resolveWebSocketTarget(target: string): { url: string; protocols?: string[] } {
@@ -89,7 +96,7 @@ function eventKey(message: WsMessage): string | null {
   return null;
 }
 
-function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
+export function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
   if (!event.type) {
     return null;
   }
@@ -145,6 +152,7 @@ export function useWebSocket(
     isDurableTaskId(durableTaskId) ? durableTaskId : null,
   );
   const lastSeqRef = useRef(0);
+  const pendingSeedSeqRef = useRef<number | null>(null);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const replayInFlightRef = useRef(false);
   const replayBufferRef = useRef<WsMessage[]>([]);
@@ -168,6 +176,12 @@ export function useWebSocket(
       replayBufferRef.current = [];
     }
     durableTaskIdRef.current = nextTaskId;
+    // Apply load-time hydrate seed after any task-id reset so reconnect does not
+    // replay events already folded into chatItems.
+    if (pendingSeedSeqRef.current != null) {
+      lastSeqRef.current = Math.max(lastSeqRef.current, pendingSeedSeqRef.current);
+      pendingSeedSeqRef.current = null;
+    }
   }, [durableTaskId]);
 
   const clearReconnectTimer = useCallback(() => {
@@ -436,6 +450,12 @@ export function useWebSocket(
     [send],
   );
 
+  const seedDurableCursor = useCallback((lastSeq: number) => {
+    const seq = Math.max(0, Number.isFinite(lastSeq) ? lastSeq : 0);
+    pendingSeedSeqRef.current = seq;
+    lastSeqRef.current = Math.max(lastSeqRef.current, seq);
+  }, []);
+
   const isConnected = readyState === ReadyState.OPEN;
 
   return {
@@ -447,5 +467,6 @@ export function useWebSocket(
     readyState,
     onBinaryMessageRef,
     onJsonMessageRef,
+    seedDurableCursor,
   };
 }

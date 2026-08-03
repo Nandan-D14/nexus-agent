@@ -184,6 +184,23 @@ export function toolActionLabel(tool = ""): string {
   return displayAgentToolName(tool);
 }
 
+/** Counted label for consecutive identical tool invocations in the activity log. */
+export function formatGroupedToolLabel(tool = "", count = 1): string {
+  if (count <= 1) return toolActionLabel(tool);
+  if (tool === "gmail_read") return `Read ${count} emails`;
+  if (tool === "gmail_search") return `Searched Gmail ×${count}`;
+  if (tool === "read_workspace_file") return `Read ${count} files`;
+  if (tool === "write_workspace_file") return `Wrote ${count} files`;
+  if (tool === "list_workspace_files") return `Listed files ×${count}`;
+  if (tool === "update_todo_item") return `Updated todo ×${count}`;
+  if (tool === "web_search" || tool === "search_web" || tool === "tavily_search") {
+    return `Searched web ×${count}`;
+  }
+  if (tool === "scrape_web_page") return `Read ${count} pages`;
+  if (tool === "run_command") return `Ran ${count} commands`;
+  return `${toolActionLabel(tool)} ×${count}`;
+}
+
 function formatBrowserTool(tool: string): string {
   if (tool === "web_search" || tool === "search_web") return "Web Search";
   if (tool === "scrape_web_page") return "Read Web Page";

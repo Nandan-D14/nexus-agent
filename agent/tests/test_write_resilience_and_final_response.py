@@ -221,6 +221,26 @@ class RunAgentTurnTests(IsolatedAsyncioTestCase):
         # Fallback capture avoided the need for a synthesis pass.
         self.assertEqual(runner.calls, 1)
 
+    async def test_worker_envelope_last_text_triggers_synthesis(self) -> None:
+        envelope = (
+            '{"status":"success","summary":"Generated PDF report.",'
+            '"evidence":["File exists"],"artifacts":[{"path":"outputs/a.pdf","kind":"pdf"}],'
+            '"sources":[],"remaining_work":[],"retryable":false,"error_code":""}'
+        )
+        scripts = [
+            [
+                _FakeEvent([_part(function_call=object())], final=False),
+                _FakeEvent([_part(text=envelope)], final=False),
+                _FakeEvent([_part(function_response=object())], final=True),
+            ],
+            [_FakeEvent([_part(text="I generated the PDF report for you.")], final=True)],
+        ]
+        runner = _FakeRunner(scripts)
+        with patch.object(settings, "force_final_synthesis", True):
+            result = await self._run(runner)
+        self.assertEqual(result.response, "I generated the PDF report for you.")
+        self.assertEqual(runner.calls, 2)
+
     async def test_synthesis_disabled_returns_empty(self) -> None:
         scripts = [
             [

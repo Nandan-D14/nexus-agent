@@ -117,7 +117,7 @@ export default function HomePage() {
       <section className="relative pt-40 pb-20 md:pt-56 md:pb-28 px-6 overflow-hidden">
         <BeamsBackground />
 
-        <div className="relative z-10 max-w-4xl mx-auto text-center mt-8 md:mt-16">
+        <div className="relative z-10 max-w-4xl mx-auto text-center mt-4 md:mt-8">
           <motion.h1
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}

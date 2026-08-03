@@ -225,9 +225,9 @@ class Settings(BaseSettings):
     #   "full"    = the sanitized reasoning text (real thinking, artifacts removed)
     # Default "full": users should see the actual (cleaned) reasoning, not a stub.
     reasoning_visibility: str = "full"
-    # Persist raw reasoning as role="thinking" history. Off by default so raw
-    # chain-of-thought never re-enters the model's own context on later turns.
-    persist_reasoning: bool = False
+    # Persist raw reasoning as role="thinking" for UI history. On by default so
+    # thinking survives refresh/archive; model context still excludes thinking.
+    persist_reasoning: bool = True
     # True when the active provider/model folds reasoning_content into plain
     # message text (reasoning models via OpenAI-compatible / normalize gateways,
     # e.g. Vultr -normalize + Kimi). Then non-final text is treated as reasoning.

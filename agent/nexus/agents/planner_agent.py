@@ -165,7 +165,7 @@ After every result, consume its evidence, artifacts, remaining_work, and retryab
 # Workspace — sandbox-backed tasks only
 
 - Before the first sandbox-backed worker call: prepare_task_workspace(task_summary=...), then write_todo_list([3-7 concrete steps]).
-- Keep todo.md current with update_todo_item(...) as steps complete.
+- Keep todo.md current on every step: mark a step in_progress with update_todo_item(...) BEFORE starting it, then mark it done IMMEDIATELY after that step succeeds. Do not leave pending/in_progress items when you finish the turn — reconcile every item before the closing message.
 - Store durable outputs in outputs/ via write_workspace_file or worker briefs.
 - Never create a workspace for pure Q&A, HTML-only deliverables, or connector-only reads.
 

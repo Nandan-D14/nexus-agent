@@ -14,6 +14,7 @@ from google.adk.sessions import BaseSessionService
 from google.genai import types
 
 from nexus.config import settings
+from nexus.control_loop import looks_like_worker_envelope
 from nexus.debug_trace import emit_debug_trace
 from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
@@ -248,8 +249,12 @@ async def run_agent_turn(
 
     # Robust capture: if the model never flagged a strict final response, fall
     # back to the last text it emitted so a summary is not silently dropped.
+    # Never promote a raw worker/tool result envelope — that must trigger
+    # forced synthesis instead of leaking JSON into the user bubble.
+    if looks_like_worker_envelope(final_response):
+        final_response = None
     if not (final_response and final_response.strip()) and (
-        last_text and last_text.strip()
+        last_text and last_text.strip() and not looks_like_worker_envelope(last_text)
     ):
         final_response = last_text
 
@@ -274,9 +279,9 @@ async def run_agent_turn(
             synthesis_message,
             _SYNTHESIS_TURN_CAP,
         )
-        if synth_final and synth_final.strip():
+        if synth_final and synth_final.strip() and not looks_like_worker_envelope(synth_final):
             final_response = synth_final
-        elif synth_last and synth_last.strip():
+        elif synth_last and synth_last.strip() and not looks_like_worker_envelope(synth_last):
             final_response = synth_last
 
     emit_debug_trace(

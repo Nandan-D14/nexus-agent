@@ -29,6 +29,7 @@ class StoredSession:
     summary: str | None = None
     message_count: int = 0
     token_totals: dict[str, Any] | None = None
+    last_usage: dict[str, Any] | None = None
     token_tracking_started_at: datetime | None = None
     handoff_summary: dict[str, Any] | None = None
     can_continue_workspace: bool = False

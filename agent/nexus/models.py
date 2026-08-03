@@ -62,6 +62,20 @@ class SessionResponse(BaseModel):
     continuation_mode: str | None = None
 
 
+class SessionTokenTotals(BaseModel):
+    input: int = 0
+    output: int = 0
+    total: int = 0
+
+
+class SessionLastUsage(BaseModel):
+    model: str = ""
+    source: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
 class SessionInfo(BaseModel):
     session_id: str
     task_id: str | None = None
@@ -85,6 +99,9 @@ class SessionInfo(BaseModel):
     exact_workspace_resume_available: bool = False
     continuation_mode: str | None = None
     context_packet: ContextPacket | None = None
+    token_totals: SessionTokenTotals | None = None
+    model_context_limit: int | None = None
+    last_usage: SessionLastUsage | None = None
 
 
 class TaskInfo(BaseModel):

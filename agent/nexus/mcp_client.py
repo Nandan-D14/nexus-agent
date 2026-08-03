@@ -405,6 +405,8 @@ def build_mcp_adk_tools(
                 "Returns:\n"
                 "    dict with status, text/content/structured result, latency_ms, connector, and error when failed."
             )
+            # Tagged so per-turn allowlists can resolve MCP tools by connection.
+            setattr(_call_mcp_tool, "_connection_id", connection.connection_id)
             adk_tools.append(_call_mcp_tool)
 
     return adk_tools

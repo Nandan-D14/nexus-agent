@@ -32,6 +32,7 @@ class AgentTurnRequest:
     title: str
     input_text: str
     connector_ids: list[str] = field(default_factory=list)
+    tool_ids: list[str] = field(default_factory=list)
     uploaded_files: list[dict[str, Any]] = field(default_factory=list)
     emit_user_transcript: bool = True
     autonomy_mode: str = "manual"
@@ -142,6 +143,7 @@ class AgentTurnRunner:
                 orchestrator.handle_text_input(
                     request.input_text,
                     connector_ids=request.connector_ids,
+                    tool_ids=request.tool_ids,
                     uploaded_files=request.uploaded_files,
                     emit_user_transcript=emit_user_transcript,
                     resume_context=resume_context or None,

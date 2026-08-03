@@ -184,6 +184,17 @@ export type WsMessage = WsEventMeta & (
   | { type: "voice_status"; status: string; message: string }
   | ({ type: "quota_update" } & PlanQuota)
   | {
+      type: "token_usage";
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      max_tokens: number;
+      session_input_tokens?: number;
+      session_output_tokens?: number;
+      session_total_tokens?: number;
+    }
+  | {
       type: "budget_warning";
       state: string;
       action: string;
@@ -219,6 +230,7 @@ export type WsCommand =
       type: "text_input";
       text: string;
       connector_ids?: string[];
+      tool_ids?: string[];
       uploaded_files?: UploadedInputFile[];
     }
   | { type: "analyze_screen" }
@@ -290,8 +302,23 @@ export type SessionData = {
   continuation_mode?: string | null;
 };
 
+export type SessionTokenTotals = {
+  input: number;
+  output: number;
+  total: number;
+};
+
+export type SessionLastUsage = {
+  model: string;
+  source: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+};
+
 export type SessionInfo = {
   session_id: string;
+  task_id?: string | null;
   status: SessionStatus | string;
   is_live: boolean;
   stream_url: string | null;
@@ -312,6 +339,9 @@ export type SessionInfo = {
   exact_workspace_resume_available?: boolean;
   continuation_mode?: string | null;
   context_packet?: ContextPacket | null;
+  token_totals?: SessionTokenTotals | null;
+  model_context_limit?: number | null;
+  last_usage?: SessionLastUsage | null;
 };
 
 export type RecentSession = {

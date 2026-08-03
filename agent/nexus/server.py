@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 from pythonjsonlogger import jsonlogger
 
 from nexus.config import settings, apply_runtime_env_overrides, validate_startup_settings
@@ -113,11 +113,37 @@ app = FastAPI(
 async def google_api_unavailable_handler(request: Request, exc: GoogleAPICallError):
     """Return a retryable response instead of leaking a Google API traceback."""
     request_id = getattr(request.state, "request_id", "unknown")
+    error_name = type(exc).__name__
+    error_message = str(exc).strip() or error_name
+
+    if isinstance(exc, ResourceExhausted):
+        module_logger.warning(
+            "Google API quota exceeded (request_id=%s, path=%s, error=%s, message=%s)",
+            request_id,
+            request.url.path,
+            error_name,
+            error_message,
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": {
+                    "code": "GOOGLE_QUOTA_EXCEEDED",
+                    "detail": (
+                        "Firestore quota exceeded. Check GCP quotas/billing for this "
+                        "project, then retry."
+                    ),
+                }
+            },
+            headers={"Retry-After": "60"},
+        )
+
     module_logger.warning(
-        "Google API temporarily unavailable (request_id=%s, path=%s, error=%s)",
+        "Google API temporarily unavailable (request_id=%s, path=%s, error=%s, message=%s)",
         request_id,
         request.url.path,
-        type(exc).__name__,
+        error_name,
+        error_message,
     )
     return JSONResponse(
         status_code=503,

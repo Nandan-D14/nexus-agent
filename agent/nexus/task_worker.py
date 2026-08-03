@@ -434,6 +434,11 @@ class TaskWorker:
                     for item in execution_payload.get("connector_ids", [])
                     if str(item).strip()
                 ],
+                tool_ids=[
+                    str(item)
+                    for item in execution_payload.get("tool_ids", [])
+                    if str(item).strip()
+                ],
                 uploaded_files=[
                     item
                     for item in execution_payload.get("uploaded_files", [])

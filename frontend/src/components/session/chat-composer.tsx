@@ -17,7 +17,7 @@ import {
 import {
   ArrowUp,
   BookOpen,
-  ChevronRight,
+  ChevronDown,
   Image as ImageIcon,
   Loader2,
   Mic,
@@ -27,17 +27,18 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { ToolPicker } from "./tool-picker";
+import { ToolPickerPanel } from "./tool-picker";
 import type { SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 import { authenticatedFetch } from "@/lib/api-client";
+import { builtInPaletteItems, type ToolPaletteItem } from "@/lib/tool-catalog";
 import { cx } from "@/utils/cx";
 
 type Props = {
   textInput: string;
   onChangeText: (text: string) => void;
   onSubmitText: () => void;
-  onOpenFilePicker: () => void;
+  onOpenFilePicker: (kind?: "image" | "file") => void;
   uploadDisabled: boolean;
   uploadedFiles: UploadedInputFile[];
   onRemoveFile: (path: string) => void;
@@ -53,6 +54,11 @@ type Props = {
   selectedConnectorIds: string[];
   onToggleConnector: (id: string) => void;
   onToggleAllConnectors: (ids: string[]) => void;
+  selectedToolIds: string[];
+  onToggleTool: (id: string) => void;
+  onToggleAllTools: (ids: string[]) => void;
+  connectorsLoading?: boolean;
+  onRefreshTools?: () => void;
   isLanding?: boolean;
   inputRef?: React.RefObject<HTMLDivElement | null>;
   onEnhance?: (prompt: string, signal?: AbortSignal) => Promise<string>;
@@ -67,13 +73,6 @@ type AgentSkill = {
   instructions: string;
   source: "built_in" | "user";
   enabled: boolean;
-};
-
-type ToolItem = {
-  id: string;
-  name: string;
-  description: string;
-  category: "System" | "Integration";
 };
 
 type Phase = "idle" | "enhancing" | "enhanced";
@@ -138,6 +137,11 @@ export function ChatComposer({
   selectedConnectorIds,
   onToggleConnector,
   onToggleAllConnectors,
+  selectedToolIds,
+  onToggleTool,
+  onToggleAllTools,
+  connectorsLoading = false,
+  onRefreshTools,
   isLanding = false,
   inputRef: externalInputRef,
   onEnhance = mockEnhance,
@@ -149,7 +153,9 @@ export function ChatComposer({
 
   const [skills, setSkills] = useState<AgentSkill[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsExpanded, setSkillsExpanded] = useState(false);
+  const [menuPlacement, setMenuPlacement] = useState<"top" | "bottom">("top");
+  const [menuMaxHeight, setMenuMaxHeight] = useState(480);
 
   const [enhancePhase, setEnhancePhase] = useState<Phase>("idle");
   const [pillMounted, setPillMounted] = useState(false);
@@ -188,25 +194,17 @@ export function ChatComposer({
   const sendActive = hasText && !enhancing && !isLoading && !isUploadingFile;
   const showEnhancePill = hasText && !enhancing && !isBusy;
 
-  const coreTools: ToolItem[] = [
-    { id: "tavily_search", name: "Tavily Web Search", description: "AI-powered web search tool", category: "System" },
-    { id: "web_search", name: "Google Web Search", description: "Standard search engine query", category: "System" },
-    { id: "run_command", name: "Terminal Command", description: "Run shell/bash command inside sandbox", category: "System" },
-    { id: "open_browser", name: "Sandbox Browser", description: "Interact via browser in sandbox", category: "System" },
-    { id: "take_screenshot", name: "Take Screenshot", description: "Observe desktop screen visually", category: "System" },
-    { id: "publish_html_artifact", name: "Publish HTML Artifact", description: "Build standalone HTML application", category: "System" },
+  const allTools: ToolPaletteItem[] = [
+    ...builtInPaletteItems(),
+    ...availableConnectors
+      .filter((conn) => conn.connection_id !== "system" && conn.enabled)
+      .map((conn) => ({
+        id: conn.connection_id,
+        name: conn.name,
+        description: `Access connector: ${conn.provider}`,
+        category: "Integration" as const,
+      })),
   ];
-
-  const integrationTools: ToolItem[] = availableConnectors
-    .filter((conn) => conn.connection_id !== "system" && conn.enabled)
-    .map((conn) => ({
-      id: conn.connection_id,
-      name: conn.name,
-      description: `Access connector: ${conn.provider}`,
-      category: "Integration" as const,
-    }));
-
-  const allTools = [...coreTools, ...integrationTools];
 
   const slashResults = skills.filter((skill) => {
     const needle = slashQuery.trim().toLowerCase();
@@ -227,6 +225,8 @@ export function ChatComposer({
       tool.description.toLowerCase().includes(needle)
     );
   });
+
+  const selectionCount = selectedToolIds.length + selectedConnectorIds.length;
 
   slashOpenRef.current = slashOpen;
   slashIndexRef.current = slashIndex;
@@ -417,7 +417,7 @@ export function ChatComposer({
   };
   applySlashRef.current = applySlash;
 
-  const applyAt = (tool: ToolItem) => {
+  const applyAt = (tool: ToolPaletteItem) => {
     const editor = editorRef.current;
     if (!editor) {
       closeAt();
@@ -679,7 +679,44 @@ export function ChatComposer({
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!menuOpen) setSkillsOpen(false);
+    if (!menuOpen) {
+      setSkillsExpanded(false);
+      return;
+    }
+    onRefreshTools?.();
+  }, [menuOpen, onRefreshTools]);
+
+  // Flip the menu above/below the trigger based on free viewport space, and
+  // cap its height to whatever that side actually offers.
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const VIEWPORT_MARGIN = 16;
+    const TRIGGER_GAP = 12;
+    const MIN_HEIGHT = 220;
+    const MAX_HEIGHT = 560;
+
+    const update = () => {
+      const trigger = plusRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const spaceAbove = rect.top - VIEWPORT_MARGIN - TRIGGER_GAP;
+      const spaceBelow =
+        window.innerHeight - rect.bottom - VIEWPORT_MARGIN - TRIGGER_GAP;
+      const openUp = spaceAbove >= spaceBelow;
+      const available = openUp ? spaceAbove : spaceBelow;
+      setMenuPlacement(openUp ? "top" : "bottom");
+      setMenuMaxHeight(
+        Math.round(Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, available))),
+      );
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
   }, [menuOpen]);
 
   useLayoutEffect(() => {
@@ -768,6 +805,12 @@ export function ChatComposer({
 
   const menuSurface =
     "border border-zinc-200/80 dark:border-white/8 bg-white/90 dark:bg-[#1c1c1e]/90 backdrop-blur-md shadow-2xl rounded-2xl";
+
+  const menuItemClass = cx(
+    "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-[13px] transition-colors",
+    "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]",
+    "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
+  );
 
   return (
     <div
@@ -949,7 +992,7 @@ export function ChatComposer({
             <button
               type="button"
               className={cx(
-                "flex items-center justify-center rounded-full border border-zinc-700/50 p-1.5 transition-colors",
+                "relative flex items-center justify-center rounded-full border border-zinc-700/50 p-1.5 transition-colors",
                 "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200",
                 "disabled:opacity-40",
                 menuOpen && "bg-zinc-800 text-zinc-200",
@@ -959,103 +1002,124 @@ export function ChatComposer({
                   ? undefined
                   : "var(--color-ai-chat-composer-add-background)",
               }}
-              aria-label="Add attachment or skill"
+              aria-label="Add attachment, skill, or tools"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((o) => !o)}
             >
               <Plus className="h-4 w-4" />
+              {selectionCount > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-indigo-500 text-[10px] font-bold text-white">
+                  {selectionCount}
+                </span>
+              )}
             </button>
 
             {menuOpen && (
               <div
-                className={cx(menuSurface, "absolute bottom-full left-0 z-50 mb-2 min-w-[200px] p-1")}
-                role="menu"
+                className={cx(
+                  menuSurface,
+                  "absolute left-0 z-50 flex w-80 flex-col overflow-hidden p-1.5",
+                  menuPlacement === "top"
+                    ? "bottom-full mb-3 origin-bottom-left"
+                    : "top-full mt-3 origin-top-left",
+                  "animate-in fade-in-0 zoom-in-95 duration-150",
+                )}
+                style={{ maxHeight: menuMaxHeight }}
               >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.04]"
-                  disabled={uploadDisabled}
-                  onClick={() => {
-                    if (uploadDisabled) return;
-                    onOpenFilePicker();
-                    setMenuOpen(false);
-                  }}
-                >
-                  <ImageIcon className="h-3.5 w-3.5 text-zinc-500" />
-                  Add photos
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.04]"
-                  disabled={uploadDisabled}
-                  onClick={() => {
-                    if (uploadDisabled) return;
-                    onOpenFilePicker();
-                    setMenuOpen(false);
-                  }}
-                >
-                  <Paperclip className="h-3.5 w-3.5 text-zinc-500" />
-                  Attach files
-                </button>
-                <div className="my-1 border-t border-zinc-200/80 dark:border-white/8" />
-                <div
-                  className="relative"
-                  onMouseEnter={() => setSkillsOpen(true)}
-                  onMouseLeave={() => setSkillsOpen(false)}
-                >
+                <div className="shrink-0 space-y-0.5">
                   <button
                     type="button"
-                    role="menuitem"
-                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.04]"
-                    aria-haspopup="menu"
-                    aria-expanded={skillsOpen}
-                    onClick={() => setSkillsOpen(true)}
+                    className={menuItemClass}
+                    disabled={uploadDisabled}
+                    onClick={() => {
+                      if (uploadDisabled) return;
+                      onOpenFilePicker("image");
+                      setMenuOpen(false);
+                    }}
                   >
-                    <BookOpen className="h-3.5 w-3.5 text-zinc-500" />
-                    <span className="flex-1 text-left">Skills</span>
-                    <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
+                    <ImageIcon className="h-4 w-4 shrink-0 text-zinc-500" />
+                    <span className="flex-1 text-left">Add photos</span>
                   </button>
-                  {skillsOpen && (
-                    <div
+                  <button
+                    type="button"
+                    className={menuItemClass}
+                    disabled={uploadDisabled}
+                    onClick={() => {
+                      if (uploadDisabled) return;
+                      onOpenFilePicker("file");
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <Paperclip className="h-4 w-4 shrink-0 text-zinc-500" />
+                    <span className="flex-1 text-left">Attach files</span>
+                  </button>
+                </div>
+
+                <div className="my-1.5 h-px shrink-0 bg-zinc-200/80 dark:bg-white/5" />
+
+                <div className="flex min-h-0 shrink-0 flex-col">
+                  <button
+                    type="button"
+                    className={menuItemClass}
+                    aria-expanded={skillsExpanded}
+                    onClick={() => setSkillsExpanded((o) => !o)}
+                  >
+                    <BookOpen className="h-4 w-4 shrink-0 text-zinc-500" />
+                    <span className="flex-1 text-left">Skills</span>
+                    {skills.length > 0 && (
+                      <span className="text-[11px] tabular-nums text-zinc-400 dark:text-zinc-600">
+                        {skills.length}
+                      </span>
+                    )}
+                    <ChevronDown
                       className={cx(
-                        menuSurface,
-                        "absolute left-full top-0 z-50 ml-1 max-h-60 min-w-[200px] overflow-y-auto p-1 no-scrollbar",
+                        "h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200",
+                        skillsExpanded && "rotate-180",
                       )}
-                      role="menu"
-                    >
+                    />
+                  </button>
+                  {skillsExpanded && (
+                    <div className="custom-scrollbar mt-0.5 max-h-44 space-y-0.5 overflow-y-auto pl-2">
                       {skills.length ? (
                         skills.map((sk) => (
                           <button
                             key={sk.skill_id}
                             type="button"
-                            role="menuitem"
-                            className="flex w-full flex-col rounded-lg px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-white/[0.04]"
+                            className="flex w-full flex-col rounded-lg px-3 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]"
                             onClick={() => addSkillFromMenu(sk)}
                           >
-                            <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                            <span className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200">
                               /{sk.skill_id}
                             </span>
-                            <span className="truncate text-xs text-zinc-500">{sk.name}</span>
+                            <span className="truncate text-[11px] text-zinc-500">
+                              {sk.name}
+                            </span>
                           </button>
                         ))
                       ) : (
-                        <div className="px-3 py-2 text-sm text-zinc-500">No skills enabled</div>
+                        <div className="px-3 py-2 text-[13px] text-zinc-500">
+                          No skills enabled
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
+
+                <div className="my-1.5 h-px shrink-0 bg-zinc-200/80 dark:bg-white/5" />
+
+                <ToolPickerPanel
+                  availableConnectors={availableConnectors}
+                  selectedConnectorIds={selectedConnectorIds}
+                  onToggleConnector={onToggleConnector}
+                  onToggleAllConnectors={onToggleAllConnectors}
+                  selectedToolIds={selectedToolIds}
+                  onToggleTool={onToggleTool}
+                  onToggleAllTools={onToggleAllTools}
+                  loading={connectorsLoading}
+                />
               </div>
             )}
           </div>
-
-          <ToolPicker
-            availableConnectors={availableConnectors}
-            selectedConnectorIds={selectedConnectorIds}
-            onToggleConnector={onToggleConnector}
-            onToggleAll={onToggleAllConnectors}
-          />
 
           <button
             type="button"

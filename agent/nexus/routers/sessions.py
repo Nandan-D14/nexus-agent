@@ -26,7 +26,9 @@ from nexus.models import (
     RunStep,
     SessionCreateRequest,
     SessionInfo,
+    SessionLastUsage,
     SessionResponse,
+    SessionTokenTotals,
     StatusMessage,
     TaskInfo,
     UserSettingsResponse,
@@ -56,6 +58,28 @@ def _build_resume_seed_context(stored_session) -> str:
         "Load the stored compact session context automatically instead of asking the user to restate prior work."
     )
 
+def _serialize_token_totals(raw: dict[str, Any] | None) -> SessionTokenTotals | None:
+    if not isinstance(raw, dict):
+        return None
+    return SessionTokenTotals(
+        input=int(raw.get("input", 0) or 0),
+        output=int(raw.get("output", 0) or 0),
+        total=int(raw.get("total", 0) or 0),
+    )
+
+
+def _serialize_last_usage(raw: dict[str, Any] | None) -> SessionLastUsage | None:
+    if not isinstance(raw, dict):
+        return None
+    return SessionLastUsage(
+        model=str(raw.get("model") or ""),
+        source=str(raw.get("source") or ""),
+        input_tokens=int(raw.get("inputTokens", raw.get("input_tokens", 0)) or 0),
+        output_tokens=int(raw.get("outputTokens", raw.get("output_tokens", 0)) or 0),
+        total_tokens=int(raw.get("totalTokens", raw.get("total_tokens", 0)) or 0),
+    )
+
+
 def _build_session_info_from_stored(stored_session) -> SessionInfo:
     return SessionInfo(
         session_id=stored_session.session_id,
@@ -80,6 +104,9 @@ def _build_session_info_from_stored(stored_session) -> SessionInfo:
         exact_workspace_resume_available=stored_session.exact_workspace_resume_available,
         continuation_mode=stored_session.continuation_mode,
         context_packet=_serialize_context_packet(stored_session.context_packet),
+        token_totals=_serialize_token_totals(stored_session.token_totals),
+        model_context_limit=int(settings.model_context_limit),
+        last_usage=_serialize_last_usage(getattr(stored_session, "last_usage", None)),
     )
 
 def _serialize_run(run) -> RunInfo | None:
@@ -358,6 +385,11 @@ async def get_session(session_id: str, user: AuthenticatedUser = Depends(require
             exact_workspace_resume_available=session.exact_workspace_resume_available,
             continuation_mode=session.continuation_mode or (stored_session.continuation_mode if stored_session else None),
             context_packet=_serialize_context_packet(stored_session.context_packet if stored_session else None),
+            token_totals=_serialize_token_totals(stored_session.token_totals if stored_session else None),
+            model_context_limit=int(settings.model_context_limit),
+            last_usage=_serialize_last_usage(
+                getattr(stored_session, "last_usage", None) if stored_session else None
+            ),
         )
 
     if not stored_session or stored_session.owner_id != user.uid:
