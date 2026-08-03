@@ -19,6 +19,7 @@ import {
   Github,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { SiteNav } from "@/components/marketing/site-nav";
 
 const plans = [
   {
@@ -157,44 +158,13 @@ export default function PricingPage() {
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-blue-500/30 overflow-x-hidden font-sans">
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-background/80 backdrop-blur-xl border-b border-zinc-200 dark:border-card-border">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 group">
-            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold transform group-hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
-              <Terminal className="w-4 h-4" />
-            </div>
-            <span className="font-semibold text-lg tracking-tight">
-              CoComputer
-            </span>
-          </Link>
-          <div className="flex items-center gap-4">
-            <Link
-              href="/"
-              className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Home
-            </Link>
-            {user ? (
-              <Link
-                href="/dashboard"
-                className="px-4 py-2 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95"
-              >
-                Dashboard
-              </Link>
-            ) : (
-              <button
-                onClick={() => {
-                  void signInWithGoogle().catch(() => {});
-                }}
-                className="px-4 py-2 rounded-md bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-blue-600 dark:hover:bg-blue-500 transition-all shadow-md"
-              >
-                Get Started
-              </button>
-            )}
-          </div>
-        </div>
-      </nav>
+      <SiteNav
+        variant="pricing"
+        user={user}
+        onSignIn={() => {
+          void signInWithGoogle().catch(() => {});
+        }}
+      />
 
       {/* Hero */}
       <section className="relative pt-32 pb-16 px-6">

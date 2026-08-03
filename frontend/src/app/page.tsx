@@ -13,7 +13,9 @@ import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
 import type { RecentSession } from "@/lib/message-types";
 import { fetchBetaStatus } from "@/lib/beta-access";
-import { Code2, Cpu, Layout, Mic, Shield, Terminal, ArrowRight, Github } from "lucide-react";
+import { Code2, Cpu, Layout, Mic, Shield, Terminal, Github } from "lucide-react";
+import { BeamsBackground } from "@/components/react-bits/beams-background";
+import { SiteNav } from "@/components/marketing/site-nav";
 
 export default function HomePage() {
   const router = useRouter();
@@ -25,7 +27,6 @@ export default function HomePage() {
     signOutUser,
   } = useAuth();
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
-  const [scrolled, setScrolled] = useState(false);
   const mounted = useSyncExternalStore(
     () => () => {},
     () => true,
@@ -37,12 +38,6 @@ export default function HomePage() {
     damping: 30,
     restDelta: 0.001
   });
-
-  useEffect(() => {
-    const handleScroll = () => setScrolled(window.scrollY > 50);
-    window.addEventListener("scroll", handleScroll);
-    return () => window.removeEventListener("scroll", handleScroll);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,235 +96,88 @@ export default function HomePage() {
         style={{ scaleX }}
       />
 
-      {/* Navigation */}
-      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 border-b ${scrolled ? "bg-white/80 dark:bg-background/80 backdrop-blur-xl border-zinc-200 dark:border-card-border" : "bg-transparent border-transparent"}`}>
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-8">
-            <Link href="/" className="flex items-center gap-2 group">
-              <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold transform group-hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
-                <Terminal className="w-4 h-4" />
-              </div>
-              <span className="font-semibold text-lg tracking-tight">CoComputer</span>
-            </Link>
-            
-            <div className="hidden md:flex items-center gap-6 text-sm font-medium text-muted-foreground">
-              <a href="#features" className="hover:text-foreground transition-colors">Features</a>
-              <a href="#how-it-works" className="hover:text-foreground transition-colors">How it Works</a>
-              <Link href="/pricing" className="hover:text-foreground transition-colors">Pricing</Link>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4">
-            {user ? (
-              <>
-                <Link href="/dashboard" className="hidden sm:block text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
-                  Dashboard
-                </Link>
-                <button
-                  onClick={() => handleStart()}
-                  disabled={isLaunching}
-                  className="px-4 py-2 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95 disabled:opacity-50"
-                >
-                  {isLaunching ? "Starting..." : resumableSession ? "Resume Workspace" : "Launch Console"}
-                </button>
-                <button
-                  onClick={() => { void signOutUser().catch(() => {}); }}
-                  className="p-2 rounded-lg text-muted-foreground hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={() => { void signInWithGoogle().catch(() => {}); }}
-                disabled={authLoading}
-                className="px-4 py-2 rounded-md bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-blue-600 dark:hover:bg-blue-500 transition-all shadow-md"
-              >
-                {authLoading ? "Loading..." : "Get Started"}
-              </button>
-            )}
-          </div>
-        </div>
-      </nav>
+      <SiteNav
+        variant="home"
+        user={user}
+        authLoading={authLoading}
+        isLaunching={isLaunching}
+        resumableSession={Boolean(resumableSession)}
+        onSignIn={() => {
+          void signInWithGoogle().catch(() => {});
+        }}
+        onSignOut={() => {
+          void signOutUser().catch(() => {});
+        }}
+        onStart={() => {
+          void handleStart();
+        }}
+      />
 
       {/* Hero Section */}
-      <section className="relative pt-32 pb-20 md:pt-48 md:pb-32 px-6 overflow-hidden">
-        {/* Subtle Background Gradients */}
-        <div className="absolute inset-0 z-0 pointer-events-none flex items-center justify-center">
-          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-blue-500/10 dark:bg-blue-500/20 blur-[120px] rounded-full" />
-        </div>
+      <section className="relative pt-40 pb-20 md:pt-56 md:pb-28 px-6 overflow-hidden">
+        <BeamsBackground />
 
-        <div className="relative z-10 max-w-5xl mx-auto text-center">
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.5 }}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 text-blue-600 dark:text-blue-400 text-xs font-semibold mb-8"
+        <div className="relative z-10 max-w-4xl mx-auto text-center mt-8 md:mt-16">
+          <motion.h1
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.7 }}
+            className="font-serif text-5xl sm:text-6xl md:text-7xl text-foreground tracking-tight mb-6 leading-[1.05] text-balance"
           >
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
-            </span>
-            CoComputer Beta
-          </motion.div>
-          
-          <motion.h1 
+            The agentic desktop for builders.
+          </motion.h1>
+
+          <motion.p
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.1 }}
-            className="text-5xl md:text-7xl font-bold tracking-tight text-foreground mb-6 leading-[1.1]"
+            className="max-w-2xl mx-auto text-base md:text-lg text-muted-foreground mb-10 leading-relaxed"
           >
-            The Agentic Desktop <br className="hidden md:block" />
-            <span className="text-muted-foreground">Operating System</span>
-          </motion.h1>
+            CoComputer turns what you say into real work on your desktop.
+            <br className="hidden sm:block" />
+            From research to shipping, it handles the busywork so you can stay
+            focused.
+          </motion.p>
 
-          <motion.p 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.2 }}
-            className="max-w-2xl mx-auto text-muted-foreground mb-10 leading-relaxed"
-          >
-            CoComputer is a voice-controlled AI agent with full native Linux access. 
-            Speak your intent, and watch it execute commands, browse the web, and build software in an isolated cloud sandbox.
-          </motion.p>
-
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7, delay: 0.3 }}
-            className="flex flex-col sm:flex-row items-center justify-center gap-4"
+            className="flex flex-col items-center gap-4"
           >
             <button
-              onClick={() => user ? handleStart() : signInWithGoogle()}
+              onClick={() => (user ? handleStart() : signInWithGoogle())}
               disabled={isLaunching || authLoading}
-              className="group w-full sm:w-48 h-14 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-lg hover:shadow-blue-500/25 flex items-center justify-center gap-2"
+              className="px-8 h-12 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-[0.98] disabled:opacity-50"
             >
-               {isLaunching ? "Starting..." : user ? (resumableSession ? "Resume Workspace" : "Launch Console") : "Start Free"}
-               <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-            </button>
-            <button
-              onClick={() => signInWithGoogle()}
-              disabled={authLoading}
-              className="w-full sm:w-48 h-14 rounded-xl bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-900 dark:text-white font-medium transition-all flex items-center justify-center gap-2"
-            >
-              {authLoading ? "Loading..." : "Sign Up"}
+              {isLaunching
+                ? "Starting..."
+                : authLoading
+                  ? "Loading..."
+                  : user
+                    ? resumableSession
+                      ? "Resume Workspace"
+                      : "Launch Console"
+                    : "Get Started"}
             </button>
           </motion.div>
         </div>
 
-        {/* Hero Image / Mockup - Enhanced with Scrolling Interaction */}
-        <motion.div 
+        {/* Hero product media */}
+        <motion.div
           initial={{ opacity: 0, y: 100, scale: 0.95 }}
           whileInView={{ opacity: 1, y: 0, scale: 1 }}
           viewport={{ once: true, margin: "-100px" }}
           transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
-          className="mt-24 max-w-6xl mx-auto relative group"
+          className="mt-20 max-w-6xl mx-auto relative"
         >
-          {/* Decorative glow background */}
-          <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-emerald-500 rounded-[2.5rem] blur opacity-10 group-hover:opacity-20 transition duration-1000 group-hover:duration-200" />
-          
-          <div className="relative rounded-[2rem] overflow-hidden border border-zinc-200 dark:border-white/10 bg-white/80 dark:bg-[#0A0A0A]/80 backdrop-blur-3xl shadow-2xl">
-            <div className="h-12 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/50 dark:bg-zinc-900/50 flex items-center px-6 gap-2">
-              <div className="flex gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-[#FF5F56] shadow-sm" />
-                <div className="w-3 h-3 rounded-full bg-[#FFBD2E] shadow-sm" />
-                <div className="w-3 h-3 rounded-full bg-[#27C93F] shadow-sm" />
-              </div>
-              <div className="ml-4 flex-1 flex justify-center">
-                <div className="px-4 py-1 text-[10px] font-mono font-bold text-zinc-400 dark:text-zinc-500 bg-zinc-200/50 dark:bg-zinc-800/50 rounded-full flex items-center gap-2">
-                  <div className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
-                  cocomputer-prod-instance.cloud
-                </div>
-              </div>
-              <div className="flex gap-4 items-center">
-                <div className="h-4 w-[1px] bg-zinc-200 dark:bg-zinc-800" />
-                <div className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">v2.5.0-LTS</div>
-              </div>
-            </div>
-            
-            <div className="aspect-[16/9] bg-zinc-100 dark:bg-black relative flex overflow-hidden">
-               {/* Sidebar */}
-               <div className="w-1/4 border-r border-zinc-200 dark:border-white/5 p-6 flex flex-col gap-6 bg-zinc-50 dark:bg-[#0D0D0D]">
-                  <div className="space-y-4">
-                    <div className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-4">Neural Input</div>
-                    <motion.div 
-                       animate={{ scale: [1, 1.02, 1] }}
-                       transition={{ duration: 2, repeat: Infinity }}
-                       className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-white/10 p-4 shadow-sm"
-                    >
-                       <div className="flex gap-3 items-center mb-3">
-                          <div className="w-8 h-8 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500">
-                            <Mic className="w-4 h-4" />
-                          </div>
-                          <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100">Live Audio</div>
-                       </div>
-                       <div className="space-y-1.5">
-                          <motion.div 
-                            initial={{ width: "20%" }}
-                            animate={{ width: ["20%", "90%", "40%", "80%", "30%"] }}
-                            transition={{ duration: 4, repeat: Infinity }}
-                            className="h-1 bg-blue-500/40 rounded-full" 
-                          />
-                          <motion.div 
-                             initial={{ width: "40%" }}
-                             animate={{ width: ["40%", "70%", "90%", "50%", "85%"] }}
-                             transition={{ duration: 3, repeat: Infinity, delay: 0.5 }}
-                             className="h-1 bg-blue-500/20 rounded-full" 
-                          />
-                       </div>
-                    </motion.div>
-                  </div>
-
-                  <div className="flex-1 space-y-4">
-                     <div className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em]">Context Store</div>
-                     {[1, 2, 3].map(i => (
-                       <div key={i} className="h-6 w-full bg-zinc-200/50 dark:bg-zinc-800/50 rounded-lg animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
-                     ))}
-                  </div>
-               </div>
-
-               {/* Main Terminal Area */}
-               <div className="flex-1 p-8 relative flex flex-col bg-white dark:bg-black overflow-hidden group/desktop">
-                  <div className="absolute inset-0 opacity-20 pointer-events-none group-hover/desktop:opacity-30 transition-opacity">
-                    <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_50%,rgba(59,130,246,0.1),transparent_70%)]" />
-                    {/* Abstract Desktop Grid Pattern overlay */}
-                    <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:40px_40px]" />
-                  </div>
-
-                  <div className="flex-1 rounded-2xl border border-zinc-200 dark:border-white/5 bg-[#050505]/90 backdrop-blur-md overflow-hidden shadow-2xl flex flex-col relative z-10 transition-transform duration-500 group-hover/desktop:translate-y-[-4px]">
-                     <div className="bg-zinc-950 px-5 py-3 border-b border-white/5 flex items-center justify-between">
-                       <div className="flex items-center gap-3">
-                          <Terminal className="w-3.5 h-3.5 text-blue-500" />
-                          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-widest">Root@CoComputer-Sandbox:~</span>
-                       </div>
-                       <div className="flex items-center gap-4">
-                          <div className="flex items-center gap-1.5">
-                             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                             <span className="text-[9px] font-mono text-emerald-500/80">LATENCY: 14ms</span>
-                          </div>
-                       </div>
-                     </div>
-                     <div className="p-6 text-xs font-mono text-zinc-300 space-y-3 flex-1 overflow-hidden">
-                        <img 
-                           src="https://images.wallpapersden.com/image/download/windows-11-4k-esthetics_bWpmZ22UmZqaraWkpJRqZmdlrWdtbWU.jpg" 
-                           alt="Windows 11 Desktop"
-                           className="w-full h-full object-cover rounded-xl border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-transform duration-700 hover:scale-[1.05]"
-                        />
-                     </div>
-                  </div>
-
-                  {/* Floating Action Badge */}
-                  <motion.div 
-                    initial={{ opacity: 0, x: 20 }}
-                    whileInView={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 1 }}
-                    className="absolute bottom-12 right-12 px-4 py-2 bg-blue-600 text-white rounded-full text-[10px] font-black uppercase tracking-widest shadow-xl flex items-center gap-2 border border-blue-400/50"
-                  >
-                    <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                    Agent Real-time Feedback
-                  </motion.div>
-               </div>
-            </div>
+          <div className="absolute -inset-1 bg-gradient-to-r from-sky-300 to-blue-400 rounded-[16px] blur opacity-20" />
+          <div className="relative rounded-[16px] border border-sky-100 bg-gradient-to-br from-white via-sky-50 to-sky-100 p-4 sm:p-6 md:p-8 shadow-2xl">
+            <img
+              src="/hero-product.png"
+              alt="CoComputer product preview"
+              className="w-full h-auto rounded-[12px] border border-sky-100/80 shadow-lg object-cover"
+            />
           </div>
         </motion.div>
       </section>
@@ -342,7 +190,7 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-6 relative z-10">
           <div className="text-center max-w-2xl mx-auto mb-20">
             <h2 className="text-blue-600 dark:text-blue-500 font-semibold text-xs mb-3 uppercase tracking-widest">Capabilities</h2>
-            <h3 className="text-3xl md:text-5xl font-bold tracking-tight mb-6 text-foreground leading-tight">Engineered for absolute autonomy</h3>
+            <h3 className="font-serif text-3xl md:text-5xl tracking-tight mb-6 text-foreground leading-tight">Engineered for absolute autonomy</h3>
             <p className="text-muted-foreground text-lg">A fully integrated architecture bridging Google&apos;s Agent Developer Kit and secure, transient cloud environments.</p>
           </div>
 
@@ -403,7 +251,7 @@ export default function HomePage() {
                   <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-6 shadow-sm ${f.bg}`}>
                     {f.icon}
                   </div>
-                  <h4 className="text-xl font-bold text-foreground mb-3 tracking-tight">{f.title}</h4>
+                  <h4 className="font-serif text-xl text-foreground mb-3 tracking-tight">{f.title}</h4>
                   <p className="text-muted-foreground text-sm leading-relaxed">{f.desc}</p>
                 </div>
               </motion.div>
@@ -430,7 +278,7 @@ export default function HomePage() {
                 transition={{ duration: 0.5, delay: i * 0.1 }}
                 className="text-center md:text-left space-y-1"
               >
-                <div className={`text-2xl md:text-3xl font-bold tracking-tight ${stat.color}`}>{stat.value}</div>
+                <div className={`font-serif text-2xl md:text-3xl tracking-tight ${stat.color}`}>{stat.value}</div>
                 <div className="text-xs font-bold uppercase tracking-widest text-zinc-400">{stat.label}</div>
                 <div className="text-[10px] text-muted-foreground font-medium">{stat.desc}</div>
               </motion.div>
@@ -451,7 +299,7 @@ export default function HomePage() {
               className="flex-1 space-y-8"
             >
               <h2 className="text-blue-600 font-semibold text-xs uppercase tracking-[0.2em]">The Core Protocol</h2>
-              <h3 className="text-4xl md:text-5xl font-bold tracking-tight text-foreground leading-tight">
+              <h3 className="font-serif text-4xl md:text-5xl tracking-tight text-foreground leading-tight">
                 Designed for the <br /> <span className="text-muted-foreground">Autonomous Era.</span>
               </h3>
               <p className="text-muted-foreground text-lg leading-relaxed">
@@ -536,7 +384,7 @@ export default function HomePage() {
             <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_2px_2px,#fff_1px,transparent_0)] bg-[size:24px_24px]" />
             
             <div className="relative z-10">
-              <h3 className="text-3xl md:text-5xl font-bold text-white mb-6">Experience the future of <br /> computer interaction.</h3>
+              <h3 className="font-serif text-3xl md:text-5xl text-white mb-6">Experience the future of <br /> computer interaction.</h3>
               <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto text-balance">
                 CoComputer is open for early access. Start building multimodal agents today with $0 setup costs.
               </p>

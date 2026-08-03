@@ -4,7 +4,7 @@
  */
 
 import type { Metadata } from "next";
-import { Geist, Geist_Mono, Caveat } from "next/font/google";
+import { Geist, Geist_Mono, Caveat, Instrument_Serif } from "next/font/google";
 import "./globals.css";
 import "@/styles/globals.css";
 // Thesys C1 Generative UI styles (required by C1Component)
@@ -27,6 +27,12 @@ const cursive = Caveat({
   subsets: ["latin"],
 });
 
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: "400",
+});
+
 export const metadata: Metadata = {
   title: "CoComputer — AI Desktop Agent",
   description: "Voice-controlled AI agent with full Linux desktop access",
@@ -40,7 +46,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} antialiased min-h-screen`}
+        className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} ${instrumentSerif.variable} antialiased min-h-screen`}
       >
         <Providers>{children}</Providers>
       </body>
