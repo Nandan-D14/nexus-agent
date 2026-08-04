@@ -11,15 +11,15 @@ import { motion } from "framer-motion";
 import {
   Check,
   ChevronDown,
-  Terminal,
   ArrowRight,
   Zap,
   Shield,
   Cpu,
-  Github,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { SiteNav } from "@/components/marketing/site-nav";
+import { SiteFooter } from "@/components/marketing/site-footer";
+import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel";
 
 const plans = [
   {
@@ -424,16 +424,12 @@ export default function PricingPage() {
       {/* CTA */}
       <section className="py-24 px-6 relative overflow-hidden">
         <div className="max-w-5xl mx-auto">
-          <motion.div
-            {...fadeInUp}
-            className="relative rounded-[3rem] p-12 md:p-20 overflow-hidden text-center bg-blue-600 shadow-2xl shadow-blue-500/20"
-          >
-            <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_2px_2px,#fff_1px,transparent_0)] bg-[size:24px_24px]" />
-            <div className="relative z-10">
-              <h3 className="text-3xl md:text-5xl font-bold text-white mb-6">
+          <motion.div {...fadeInUp}>
+            <MarketingHeroPanel>
+              <h3 className="font-serif text-3xl md:text-5xl text-white mb-6">
                 Ready to get started?
               </h3>
-              <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto">
+              <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto text-balance">
                 Join thousands of developers building with CoComputer. Start
                 free, upgrade when you need more power.
               </p>
@@ -474,101 +470,12 @@ export default function PricingPage() {
                   </>
                 )}
               </div>
-            </div>
+            </MarketingHeroPanel>
           </motion.div>
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="py-24 px-6 border-t border-zinc-100 dark:border-card-border bg-background relative z-20">
-        <div className="max-w-7xl mx-auto">
-          <div className="grid grid-cols-2 md:grid-cols-12 gap-12 mb-16">
-            <div className="col-span-2 md:col-span-4 space-y-6">
-              <Link href="/" className="flex items-center gap-2 group">
-                <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
-                  <Terminal className="w-4 h-4" />
-                </div>
-                <span className="font-bold text-xl tracking-tighter text-foreground">
-                  CoComputer
-                </span>
-              </Link>
-              <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-                Autonomous multimodal neural architecture bridging the gap
-                between human language and native Linux environments.
-              </p>
-              <div className="flex items-center gap-4">
-                <a
-                  href="https://x.com"
-                  className="text-muted-foreground hover:text-blue-500 transition-colors"
-                >
-                  <svg
-                    className="w-5 h-5"
-                    fill="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-                  </svg>
-                </a>
-                <a
-                  href="https://github.com"
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <Github className="w-5 h-5" />
-                </a>
-              </div>
-            </div>
-
-            <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">
-                Product
-              </h5>
-              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
-                <li className="hover:text-blue-500 transition-colors">
-                  <Link href="/#features">Features</Link>
-                </li>
-                <li className="hover:text-blue-500 transition-colors">
-                  <Link href="/pricing">Pricing</Link>
-                </li>
-              </ul>
-            </div>
-
-            <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">
-                Resources
-              </h5>
-              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
-                <li className="hover:text-blue-500 transition-colors">
-                  <a href="#">Documentation</a>
-                </li>
-                <li className="hover:text-blue-500 transition-colors">
-                  <a href="#">Github</a>
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          <div className="pt-8 border-t border-zinc-100 dark:border-zinc-800/50 flex flex-col md:flex-row justify-between items-center gap-6 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-            <p>
-              &copy; {new Date().getFullYear()} CoComputer Systems. All rights
-              reserved.
-            </p>
-            <div className="flex items-center gap-6">
-              <a
-                href="#"
-                className="hover:text-zinc-900 dark:hover:text-white transition-colors"
-              >
-                Privacy Policy
-              </a>
-              <a
-                href="#"
-                className="hover:text-zinc-900 dark:hover:text-white transition-colors"
-              >
-                Terms of Service
-              </a>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

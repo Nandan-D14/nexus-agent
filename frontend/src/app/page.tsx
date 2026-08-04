@@ -13,9 +13,11 @@ import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
 import type { RecentSession } from "@/lib/message-types";
 import { fetchBetaStatus } from "@/lib/beta-access";
-import { Code2, Cpu, Layout, Mic, Shield, Terminal, Github } from "lucide-react";
+import { Code2, Cpu, Layout, Mic, Shield } from "lucide-react";
 import { BeamsBackground } from "@/components/react-bits/beams-background";
 import { SiteNav } from "@/components/marketing/site-nav";
+import { SiteFooter } from "@/components/marketing/site-footer";
+import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel";
 
 export default function HomePage() {
   const router = useRouter();
@@ -376,123 +378,56 @@ export default function HomePage() {
       {/* New: CTA Section */}
       <section className="py-24 px-6 relative overflow-hidden">
         <div className="max-w-5xl mx-auto">
-          <motion.div 
-            {...fadeInUp}
-            className="relative rounded-[3rem] p-12 md:p-20 overflow-hidden text-center bg-blue-600 dark:bg-blue-600 shadow-2xl shadow-blue-500/20"
-          >
-            {/* Background pattern */}
-            <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_2px_2px,#fff_1px,transparent_0)] bg-[size:24px_24px]" />
-            
-            <div className="relative z-10">
-              <h3 className="font-serif text-3xl md:text-5xl text-white mb-6">Experience the future of <br /> computer interaction.</h3>
+          <motion.div {...fadeInUp}>
+            <MarketingHeroPanel>
+              <h3 className="font-serif text-3xl md:text-5xl text-white mb-6">
+                Experience the future of <br /> computer interaction.
+              </h3>
               <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto text-balance">
-                CoComputer is open for early access. Start building multimodal agents today with $0 setup costs.
+                CoComputer is open for early access. Start building multimodal
+                agents today with $0 setup costs.
               </p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 {mounted ? (
                   <>
                     <button
-                      onClick={() => user ? handleStart() : signInWithGoogle()}
+                      onClick={() =>
+                        user ? handleStart() : signInWithGoogle()
+                      }
                       className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
                     >
                       Get Started Now
                     </button>
-                    <Link href="/docs" className="w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold hover:bg-blue-700/50 transition-colors">
+                    <Link
+                      href="/docs"
+                      className="w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold hover:bg-blue-700/50 transition-colors"
+                    >
                       Read Documentation
                     </Link>
                   </>
                 ) : (
-                  // Render visually hidden placeholders on the server to keep
-                  // markup stable until the client mounts.
                   <>
-                    <button aria-hidden className="invisible w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold transition-colors shadow-lg">Get Started Now</button>
-                    <div aria-hidden className="invisible w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold">Read Documentation</div>
+                    <button
+                      aria-hidden
+                      className="invisible w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold transition-colors shadow-lg"
+                    >
+                      Get Started Now
+                    </button>
+                    <div
+                      aria-hidden
+                      className="invisible w-full sm:w-auto px-10 py-4 bg-blue-700/30 text-white border border-white/20 rounded-xl font-bold"
+                    >
+                      Read Documentation
+                    </div>
                   </>
                 )}
               </div>
-            </div>
+            </MarketingHeroPanel>
           </motion.div>
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="py-24 px-6 border-t border-zinc-100 dark:border-card-border bg-background relative z-20">
-        <div className="max-w-7xl mx-auto">
-          <div className="grid grid-cols-2 md:grid-cols-12 gap-12 mb-16">
-            <div className="col-span-2 md:col-span-4 space-y-6">
-              <Link href="/" className="flex items-center gap-2 group">
-                <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
-                  <Terminal className="w-4 h-4" />
-                </div>
-                <span className="font-bold text-xl tracking-tighter text-foreground">CoComputer</span>
-              </Link>
-              <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-                Autonomous multimodal neural architecture bridging the gap between human language and native Linux environments.
-              </p>
-              <div className="flex items-center gap-4">
-                <a href="https://x.com" className="text-muted-foreground hover:text-blue-500 transition-colors"><svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
-                <a href="https://github.com" className="text-muted-foreground hover:text-foreground transition-colors"><Github className="w-5 h-5"/></a>
-              </div>
-            </div>
-
-            <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Product</h5>
-              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
-                <li className="hover:text-blue-500 transition-colors"><a href="#features">Features</a></li>
-                <li className="hover:text-blue-500 transition-colors"><Link href="/pricing">Pricing</Link></li>
-                <li className="hover:text-blue-500 transition-colors"><a href="#">Cloud Run</a></li>
-                <li className="hover:text-blue-500 transition-colors"><a href="#">API Access</a></li>
-              </ul>
-            </div>
-
-            <div className="col-span-1 md:col-span-2 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Resources</h5>
-              <ul className="space-y-3 text-sm text-muted-foreground font-medium">
-                <li className="hover:text-blue-500 transition-colors"><a href="#">Documentation</a></li>
-                <li className="hover:text-blue-500 transition-colors"><a href="#">Github</a></li>
-                <li className="hover:text-blue-500 transition-colors"><a href="#">Devpost</a></li>
-                <li className="hover:text-blue-500 transition-colors"><a href="#">Help Center</a></li>
-              </ul>
-            </div>
-
-            <div className="col-span-2 md:col-span-4 space-y-4">
-              <h5 className="text-xs font-bold uppercase tracking-widest text-foreground">Subscribe</h5>
-              <p className="text-sm text-muted-foreground">Join 2,000+ developers building with CoComputer.</p>
-              {mounted ? (
-                <form className="flex gap-2" onSubmit={(e) => e.preventDefault()}>
-                  <input 
-                    type="email" 
-                    placeholder="Enter your email" 
-                    className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                  />
-                  <button className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold hover:bg-zinc-800 transition-colors">
-                    Join
-                  </button>
-                </form>
-              ) : (
-                // Server-render stable placeholders until client mounts to avoid
-                // attribute injection (extensions) causing hydration mismatches.
-                <div className="flex gap-2" aria-hidden>
-                  <div className="flex-1 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm invisible">placeholder</div>
-                  <div className="bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg text-sm font-bold invisible">Join</div>
-                </div>
-              )}
-            </div>
-          </div>
-          
-          <div className="pt-8 border-t border-zinc-100 dark:border-zinc-800/50 flex flex-col md:flex-row justify-between items-center gap-6 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-            <p>© {new Date().getFullYear()} CoComputer Systems. All rights reserved.</p>
-            <div className="flex items-center gap-6">
-              <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Privacy Policy</a>
-              <a href="#" className="hover:text-zinc-900 dark:hover:text-white transition-colors">Terms of Service</a>
-              <div className="flex items-center gap-2 text-emerald-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                SYSTEMS OPERATIONAL
-              </div>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter showStatus />
     </div>
   );
 }

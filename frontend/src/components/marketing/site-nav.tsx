@@ -11,7 +11,7 @@ import { Terminal } from "lucide-react";
 import type { AppUser } from "@/lib/auth-context";
 
 type SiteNavProps = {
-  variant: "home" | "pricing";
+  variant: "home" | "pricing" | "marketing";
   user: AppUser | null;
   authLoading?: boolean;
   isLaunching?: boolean;
@@ -79,10 +79,33 @@ export function SiteNav({
               </Link>
             </div>
           ) : null}
+
+          {variant === "marketing" ? (
+            <div className="hidden md:flex items-center gap-5 text-sm font-medium text-muted-foreground">
+              <Link
+                href="/pricing"
+                className="hover:text-foreground transition-colors"
+              >
+                Pricing
+              </Link>
+              <Link
+                href="/about"
+                className="hover:text-foreground transition-colors"
+              >
+                About
+              </Link>
+              <Link
+                href="/security"
+                className="hover:text-foreground transition-colors"
+              >
+                Security
+              </Link>
+            </div>
+          ) : null}
         </div>
 
         <div className="relative z-10 flex items-center gap-2 sm:gap-3 shrink-0">
-          {variant === "pricing" ? (
+          {variant === "pricing" || variant === "marketing" ? (
             <Link
               href="/"
               className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors px-2"

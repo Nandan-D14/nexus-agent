@@ -14,7 +14,12 @@ function LightBlurFallback() {
   );
 }
 
-export function BeamsBackground() {
+type BeamsBackgroundProps = {
+  /** Hero fades out toward the next section; footer keeps beams across the block. */
+  variant?: "hero" | "footer";
+};
+
+export function BeamsBackground({ variant = "hero" }: BeamsBackgroundProps) {
   const { resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -34,9 +39,14 @@ export function BeamsBackground() {
     return <LightBlurFallback />;
   }
 
+  const maskClass =
+    variant === "footer"
+      ? "[mask-image:linear-gradient(to_bottom,transparent_0%,black_20%,black_100%)]"
+      : "[mask-image:linear-gradient(to_bottom,black_60%,transparent_100%)]";
+
   return (
     <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
-      <div className="absolute inset-0 [mask-image:linear-gradient(to_bottom,black_60%,transparent_100%)]">
+      <div className={`absolute inset-0 ${maskClass}`}>
         <Beams
           beamWidth={2}
           beamHeight={15}
@@ -48,7 +58,11 @@ export function BeamsBackground() {
           rotation={31}
         />
       </div>
-      <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background to-transparent" />
+      {variant === "hero" ? (
+        <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background to-transparent" />
+      ) : (
+        <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-background to-transparent" />
+      )}
     </div>
   );
 }
