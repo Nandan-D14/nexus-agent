@@ -18,10 +18,12 @@ import { BeamsBackground } from "@/components/react-bits/beams-background";
 import { SiteNav } from "@/components/marketing/site-nav";
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel";
+import { AppShellSkeleton } from "@/components/app-shell-skeleton";
 
 export default function HomePage() {
   const router = useRouter();
   const [isLaunching, setIsLaunching] = useState(false);
+  const [isCheckingAccess, setIsCheckingAccess] = useState(true);
   const {
     user,
     isLoading: authLoading,
@@ -56,8 +58,16 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
-    async function maybeRedirectToBeta() {
-      if (!user) return;
+    async function maybeRedirectSignedInUser() {
+      if (authLoading) {
+        return;
+      }
+      if (!user) {
+        setIsCheckingAccess(false);
+        return;
+      }
+
+      setIsCheckingAccess(true);
       try {
         const betaStatus = await fetchBetaStatus();
         if (cancelled) {
@@ -67,19 +77,28 @@ export default function HomePage() {
           router.replace("/beta");
           return;
         }
-        // Removed redirect to /settings/api as AppLayout or individual pages 
-        // will now handle showing the settings modal instead.
-      } catch {}
+        router.replace("/session/new");
+      } catch {
+        if (!cancelled) {
+          setIsCheckingAccess(false);
+        }
+      }
     }
-    void maybeRedirectToBeta();
+    void maybeRedirectSignedInUser();
     return () => { cancelled = true; };
-  }, [router, user]);
+  }, [authLoading, router, user]);
 
   const handleStart = async () => {
     if (!user) return;
     setIsLaunching(true);
     router.push("/session/new");
   };
+
+  // Wait for auth + beta gate before rendering marketing content so signed-in
+  // users don't flash the landing page before redirecting.
+  if (authLoading || isCheckingAccess) {
+    return <AppShellSkeleton />;
+  }
 
   const resumableSession = recentSessions.find((session) => session.can_continue_workspace);
 

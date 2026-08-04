@@ -10,6 +10,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useSettings } from "@/lib/settings-context";
 import { AppShell } from "@/components/app-shell";
+import { AppShellSkeleton } from "@/components/app-shell-skeleton";
 import { fetchBetaStatus } from "@/lib/beta-access";
 
 export default function AppLayout({
@@ -81,11 +82,7 @@ export default function AppLayout({
   }, [isLoading, pathname, router, user, setIsSettingsOpen]);
 
   if (isLoading || (user && isCheckingAccess)) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background text-foreground">
-        <div className="w-8 h-8 border-4 border-cyan-600 dark:border-cyan-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
+    return <AppShellSkeleton />;
   }
 
   if (!user) {
