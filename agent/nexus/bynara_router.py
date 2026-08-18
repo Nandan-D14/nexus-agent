@@ -15,6 +15,7 @@ from typing import Any
 
 from google.adk.models.lite_llm import LiteLlm
 from nexus.config import settings
+from nexus.model_select import is_deepseek_v4_flash
 from nexus.router_common import (
     apply_request_timeout,
     apply_tool_call_policy,
@@ -90,6 +91,18 @@ def _configured_bynara_models() -> list[str]:
     return ordered
 
 
+def _deepseek_v4_flash_router_fallbacks(models: list[str]) -> list[dict[str, list[str]]]:
+    """LiteLLM group fallbacks for DeepSeek-V4-Flash only."""
+    others = [model for model in models if not is_deepseek_v4_flash(model)]
+    if not others:
+        return []
+    return [
+        {flash: list(others)}
+        for flash in models
+        if is_deepseek_v4_flash(flash)
+    ]
+
+
 def get_bynara_router():
     global _bynara_router
     if _bynara_router is not None:
@@ -104,6 +117,7 @@ def get_bynara_router():
 
     logger.info("Initializing Bynara Router with endpoint: %s", api_base)
 
+    configured = _configured_bynara_models()
     model_list = [
         {
             "model_name": model,
@@ -113,10 +127,18 @@ def get_bynara_router():
                 "api_base": api_base,
             },
         }
-        for model in _configured_bynara_models()
+        for model in configured
     ]
 
-    _bynara_router = Router(model_list=model_list)
+    router_kwargs: dict[str, Any] = {}
+    flash_fallbacks = _deepseek_v4_flash_router_fallbacks(configured)
+    if flash_fallbacks:
+        router_kwargs["fallbacks"] = flash_fallbacks
+        logger.info(
+            "Bynara DeepSeek-V4-Flash LiteLLM fallbacks: %s",
+            flash_fallbacks,
+        )
+    _bynara_router = Router(model_list=model_list, **router_kwargs)
     return _bynara_router
 
 

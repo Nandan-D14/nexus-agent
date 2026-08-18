@@ -28,7 +28,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     >
       {isLandingChrome ? (
         <Image
-          src="/landing-bg.png"
+          src="/session-new-bg.png"
           alt=""
           fill
           priority

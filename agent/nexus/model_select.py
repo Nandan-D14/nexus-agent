@@ -37,6 +37,29 @@ _ROLE_FALLBACKS = {
     "micro": lambda: settings.micro_fallback_models,
 }
 
+# Bynara/DeepSeek-V4-Flash returns HTTP 504 empty bodies; other models keep
+# their existing hard-fail behaviour for gateway errors.
+_DEEPSEEK_V4_FLASH_MARKER = "deepseek-v4-flash"
+_DEEPSEEK_V4_FLASH_GATEWAY_MARKERS = (
+    "badgateway",
+    "bad gateway",
+    "http 504",
+    "upstream returned empty body",
+)
+
+
+def is_deepseek_v4_flash(model: str) -> bool:
+    """True for DeepSeek-V4-Flash, including the Bynara `deepseek-ai/` id."""
+    return _DEEPSEEK_V4_FLASH_MARKER in (model or "").lower().replace("_", "-")
+
+
+def is_deepseek_v4_flash_gateway_error(exc: BaseException | str, model: str) -> bool:
+    """True when DeepSeek-V4-Flash died with a gateway 504 / empty body."""
+    if not is_deepseek_v4_flash(model):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _DEEPSEEK_V4_FLASH_GATEWAY_MARKERS)
+
 
 def _is_supported_text_model(model: str) -> bool:
     """Check if a model name is supported by the active provider."""
@@ -133,4 +156,10 @@ def create_model(
         raise RuntimeError(f"Unknown model provider: {settings.model_provider}")
 
 
-__all__ = ["create_model", "model_candidates", "model_name_for_role"]
+__all__ = [
+    "create_model",
+    "is_deepseek_v4_flash",
+    "is_deepseek_v4_flash_gateway_error",
+    "model_candidates",
+    "model_name_for_role",
+]
