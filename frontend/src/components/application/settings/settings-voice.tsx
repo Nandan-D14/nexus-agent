@@ -58,7 +58,7 @@ export function SettingsVoice({ onSaved }: { onSaved?: () => void } = {}) {
     setError(null);
     try {
       const updated = await updateUserSettings({
-        settings: { voice: { voiceId, speed } },
+        settings: { ...settings?.settings, voice: { voiceId, speed } },
       });
       setSettings(updated);
       onSaved?.();

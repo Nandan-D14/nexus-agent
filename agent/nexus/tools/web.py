@@ -16,6 +16,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
+from nexus.config import settings
+from nexus.resilience import is_remote_deadline_error, retry_async
 from nexus.tools.workspace import get_active_workspace_path, save_source_artifact
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 
@@ -23,6 +25,54 @@ logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+_USER_AGENT = "CoComputer/1.0 (+https://cocomputer.local)"
+# 4xx is deterministic. HTTP 504 is usually a blocked/overloaded origin — retrying
+# it burns the turn budget and then surfaces as a Google "504 Stream removed".
+_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503}
+
+
+class _NonRetryableHttpStatus(Exception):
+    """Wraps an HTTP status that will not change on retry."""
+
+    def __init__(self, original: httpx.HTTPStatusError) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+async def _fetch_html(
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    label: str,
+) -> str:
+    """GET a page with bounded retries, then give up so the turn can continue."""
+
+    async def _once() -> str:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+            timeout=20.0,
+        ) as client:
+            response = await client.get(url, params=params)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if response.status_code not in _RETRYABLE_STATUS:
+                    raise _NonRetryableHttpStatus(exc) from exc
+                raise
+            return response.text
+
+    try:
+        return await retry_async(
+            _once,
+            attempts=settings.web_search_attempts,
+            base_delay=settings.web_search_retry_base_seconds,
+            give_up_on=(_NonRetryableHttpStatus,),
+            label=label,
+        )
+    except _NonRetryableHttpStatus as exc:
+        raise exc.original from exc
 
 
 def _tool_error(message: str, **extra: Any) -> dict[str, Any]:
@@ -227,14 +277,11 @@ async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
             provider = "tavily"
 
         if not results:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-                timeout=20.0,
-            ) as client:
-                response = await client.get("https://duckduckgo.com/html/", params={"q": cleaned_query})
-                response.raise_for_status()
-                html_text = response.text
+            html_text = await _fetch_html(
+                "https://duckduckgo.com/html/",
+                params={"q": cleaned_query},
+                label="duckduckgo search",
+            )
             results = parse_duckduckgo_results(html_text, max_results=max_results)
             raw_excerpt = html_text[:4000]
             provider = "duckduckgo_html"
@@ -257,6 +304,13 @@ async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
                 json.dumps(payload, indent=2, ensure_ascii=True),
             )
         except Exception as exc:
+            if is_remote_deadline_error(exc):
+                return tool_error(
+                    "Timed out while saving search results. Try a narrower query.",
+                    error_code="TIMEOUT",
+                    suggested_alternatives=["tavily_search"],
+                    query=cleaned_query,
+                )
             return tool_error(f"Failed to save search results: {exc}")
 
         return tool_success(
@@ -304,14 +358,7 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
         if not cleaned_url:
             return tool_error("url is required", error_code="INVALID_INPUT")
 
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": "CoComputer/1.0 (+https://cocomputer.local)"},
-            timeout=20.0,
-        ) as client:
-            response = await client.get(cleaned_url)
-            response.raise_for_status()
-            html_text = response.text
+        html_text = await _fetch_html(cleaned_url, label=f"scrape {cleaned_url}")
 
         title = extract_html_title(html_text) or cleaned_url
         markdown = extract_readable_markdown(html_text, url=cleaned_url)
@@ -321,7 +368,14 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
         try:
             save_result = await save_source_artifact(relative_path, markdown)
         except Exception as exc:
-            return tool_error(f"Failed to save scraped page: {exc}")
+            if is_remote_deadline_error(exc):
+                return tool_error(
+                    f"Could not scrape {cleaned_url}: timed out while saving the page. Try another source.",
+                    error_code="TIMEOUT",
+                    suggested_alternatives=["web_search"],
+                    url=cleaned_url,
+                )
+            return tool_error(f"Failed to save scraped page: {exc}", url=cleaned_url)
 
         return tool_success(
             f"Scraped {title} from {cleaned_url}",
@@ -339,10 +393,17 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
             message += (
                 " This source blocked automated access. Try another source or use open_browser only if the page is essential."
             )
+        elif status_code == 504:
+            message += " The origin timed out. Do not retry this URL; try another source."
+        alternatives = ["web_search"]
+        if status_code in {401, 403}:
+            alternatives = ["web_search", "open_browser"]
+        elif status_code not in {504, 429}:
+            alternatives = []
         return tool_error(
             message,
             error_code=f"HTTP_{status_code}" if status_code else "HTTP_ERROR",
-            suggested_alternatives=["open_browser", "web_search"] if status_code in {401, 403} else [],
+            suggested_alternatives=alternatives,
             url=cleaned_url,
             status_code=status_code,
         )
@@ -353,4 +414,11 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
             url=cleaned_url,
         )
     except Exception as exc:
+        if is_remote_deadline_error(exc):
+            return tool_error(
+                f"Could not scrape {(url or '').strip()}: the request timed out. Try another source.",
+                error_code="TIMEOUT",
+                suggested_alternatives=["web_search"],
+                url=(url or "").strip(),
+            )
         return tool_error(str(exc) or "Could not scrape the page unexpectedly.", url=(url or "").strip())

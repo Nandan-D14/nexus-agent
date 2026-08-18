@@ -11,14 +11,15 @@ import json
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from nexus.debug_trace import emit_debug_trace
 from nexus.dependencies import get_production_task_repository, get_task_queue
 from nexus.orchestrator import NexusOrchestrator
-from nexus.production_tasks import TERMINAL_TASK_STATUSES
+from nexus.production_tasks import TERMINAL_TASK_STATUSES, lease_is_live
 from nexus.runtime_config import runtime_config_snapshot
 from nexus.session import Session, SessionManager
 
@@ -31,6 +32,18 @@ class DurableEnqueueError(RuntimeError):
     Callers must not fall back to live execution for the same user turn —
     the failed run already owns the durable claim/bindings.
     """
+
+
+class DurableTurnOutcome(str, Enum):
+    """What the durable path decided to do with a user turn."""
+
+    #: A run was queued; the caller should stream its durable events.
+    STARTED = "started"
+    #: Durable execution is off or unavailable; use the live WebSocket path.
+    DECLINED = "declined"
+    #: Durable owns this turn but refused it (e.g. one is already running).
+    #: The client was already told why, so the caller must do nothing.
+    REJECTED = "rejected"
 
 
 import redis
@@ -168,6 +181,154 @@ async def _stream_durable_task_events(
         await asyncio.sleep(1.0)
 
 
+def _is_abandoned_queued_run(run) -> bool:
+    """True for a queued run that no worker will ever pick up.
+
+    The stale-run sweeper only recovers runs in ``running`` state with an expired
+    lease, so a run that was enqueued but never claimed (queue dispatch lost, the
+    process restarted before the local worker started, an enqueue that failed
+    half-way) stays ``queued`` forever. Treating those as in-flight would refuse
+    every later prompt on the session, so they are aged out instead.
+    """
+    if str(getattr(run, "status", "") or "") != "queued":
+        return False
+    if lease_is_live(getattr(run, "lease_expires_at", None)):
+        return False
+
+    started = getattr(run, "updated_at", None) or getattr(run, "created_at", None)
+    if started is None:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    grace = max(60.0, float(settings.task_worker_lease_seconds))
+    return (datetime.now(timezone.utc) - started).total_seconds() > grace
+
+
+async def _find_inflight_durable_run(session: Session) -> tuple[str, str] | None:
+    """Return ``(task_id, run_id)`` for a durable run still executing, if any.
+
+    This is what makes a refresh survivable: the worker owns the run, so a new
+    socket only has to find it and re-attach to its event log.
+    """
+    task_id = getattr(session, "task_id", None)
+    if not isinstance(task_id, str) or not task_id.startswith("task_"):
+        return None
+
+    repo = get_production_task_repository()
+    try:
+        task = await repo.get_task(task_id)
+    except Exception:
+        logger.warning("Failed to load durable task %s on reconnect", task_id, exc_info=True)
+        return None
+    if task is None or getattr(task, "owner_id", None) != session.owner_id:
+        return None
+
+    run_id = getattr(task, "current_run_id", None) or getattr(
+        session, "current_run_id", None
+    )
+    if not isinstance(run_id, str) or not run_id:
+        return None
+
+    try:
+        run = await repo.get_run(
+            task_id=task_id, run_id=run_id, owner_id=session.owner_id
+        )
+    except Exception:
+        logger.warning(
+            "Failed to load durable run %s/%s on reconnect", task_id, run_id, exc_info=True
+        )
+        return None
+    if run is None or getattr(run, "status", None) in TERMINAL_TASK_STATUSES:
+        return None
+
+    if _is_abandoned_queued_run(run):
+        logger.warning(
+            "Durable run %s/%s was never claimed; failing it so the session is usable",
+            task_id,
+            run_id,
+        )
+        reason = "This request was never picked up by a worker. Please send it again."
+        try:
+            await repo.finish_run(
+                task_id=task_id,
+                run_id=run_id,
+                status="failed",
+                summary=reason,
+                error=reason,
+            )
+            await repo.append_event(
+                task_id=task_id,
+                owner_id=session.owner_id,
+                run_id=run_id,
+                event_type="worker_failed",
+                payload={"reason": reason, "error_code": "RUN_ABANDONED"},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to settle abandoned durable run %s/%s",
+                task_id,
+                run_id,
+                exc_info=True,
+            )
+        return None
+
+    return task_id, run_id
+
+
+async def _durable_run_status(repo, session: Session, task_id: str, run_id: str) -> str:
+    try:
+        run = await repo.get_run(
+            task_id=task_id, run_id=run_id, owner_id=session.owner_id
+        )
+    except Exception:
+        logger.warning(
+            "Failed to load durable run status %s/%s", task_id, run_id, exc_info=True
+        )
+        return ""
+    return str(getattr(run, "status", "") or "") if run is not None else ""
+
+
+async def _supersede_paused_durable_run(
+    repo,
+    *,
+    session: Session,
+    task_id: str,
+    run_id: str,
+) -> bool:
+    """Finish a paused run so a new prompt can start. Returns False on failure."""
+    reason = "Superseded by a new message."
+    try:
+        await repo.finish_run(
+            task_id=task_id,
+            run_id=run_id,
+            status="cancelled",
+            summary=reason,
+            error=reason,
+        )
+        await repo.append_event(
+            task_id=task_id,
+            owner_id=session.owner_id,
+            run_id=run_id,
+            event_type="worker_failed",
+            payload={"reason": reason, "error_code": "RUN_SUPERSEDED"},
+        )
+        logger.info(
+            "Superseded paused durable run %s/%s for session %s",
+            task_id,
+            run_id,
+            session.id,
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "Failed to supersede paused durable run %s/%s",
+            task_id,
+            run_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def _try_start_durable_text_run(
     *,
     session: Session,
@@ -177,40 +338,72 @@ async def _try_start_durable_text_run(
     tool_ids: list[str],
     uploaded_files: list[dict[str, Any]],
     send_json,
-) -> bool:
-    """Create and enqueue a durable run for a WebSocket text turn.
-
-    Returns True when durable execution owns the turn. Returns False to let the
-    caller use the legacy live WebSocket path.
-    """
+) -> DurableTurnOutcome:
+    """Create and enqueue a durable run for a WebSocket text turn."""
     repo = get_production_task_repository()
     queue = get_task_queue()
     is_queue_configured = getattr(queue, "is_configured", None)
     queue_configured = bool(is_queue_configured()) if callable(is_queue_configured) else True
 
-    def trace_durable_decision(outcome: str, provider: str = "") -> None:
-        # region agent log
-        emit_debug_trace(
-            run_id=getattr(session, "current_run_id", "") or f"live:{id(session):x}",
-            hypothesis_id="H5",
-            location="ws_handler.py:177",
-            message="durable_execution_decision",
-            data={
-                "outcome": outcome,
-                "task_worker_enabled": bool(getattr(settings, "task_worker_enabled", False)),
-                "queue_configured": queue_configured,
-                "queue_provider": provider,
-                "input_chars": len(text),
-            },
-        )
-        # endregion agent log
-
     if not getattr(settings, "task_worker_enabled", False):
-        trace_durable_decision("worker_disabled")
-        return False
+        logger.debug("Durable execution skipped for %s: worker disabled", session.id)
+        return DurableTurnOutcome.DECLINED
     if not queue_configured:
-        trace_durable_decision("queue_unavailable")
-        return False
+        logger.debug("Durable execution skipped for %s: queue unavailable", session.id)
+        return DurableTurnOutcome.DECLINED
+
+    # One run per task at a time. `create_run` repoints `currentRunId` and would
+    # happily enqueue a second worker against the same session, so without this
+    # guard a follow-up prompt starts a competing agent on the same sandbox.
+    inflight = await _find_inflight_durable_run(session)
+    if inflight:
+        inflight_task_id, inflight_run_id = inflight
+        inflight_status = await _durable_run_status(
+            repo, session, inflight_task_id, inflight_run_id
+        )
+        if inflight_status == "paused":
+            superseded = await _supersede_paused_durable_run(
+                repo,
+                session=session,
+                task_id=inflight_task_id,
+                run_id=inflight_run_id,
+            )
+            if not superseded:
+                await send_json(
+                    {
+                        "type": "error",
+                        "code": "RUN_IN_PROGRESS",
+                        "message": (
+                            "The previous request is still running. Wait for it to finish "
+                            "or press stop, then send this again."
+                        ),
+                        "task_id": inflight_task_id,
+                        "run_id": inflight_run_id,
+                    }
+                )
+                return DurableTurnOutcome.REJECTED
+        else:
+            logger.info(
+                "Rejecting durable turn for session %s: run %s is still executing (%s)",
+                session.id,
+                inflight_run_id,
+                inflight_status or "unknown",
+            )
+            await send_json(
+                {
+                    "type": "error",
+                    "code": "RUN_IN_PROGRESS",
+                    "message": (
+                        "The previous request is still running. Wait for it to finish "
+                        "or press stop, then send this again."
+                    ),
+                    "task_id": inflight_task_id,
+                    "run_id": inflight_run_id,
+                }
+            )
+            # Durable execution owns the turn: refuse it rather than letting the live
+            # path start a duplicate agent alongside the worker.
+            return DurableTurnOutcome.REJECTED
 
     task_id = getattr(session, "task_id", None)
     task = None
@@ -343,7 +536,6 @@ async def _try_start_durable_text_run(
                 "run_id": run.run_id,
             }
         )
-        trace_durable_decision("enqueue_rejected", enqueue.provider)
         # Do not fall through to live execution with duplicate bindings.
         raise DurableEnqueueError(reason)
 
@@ -355,8 +547,14 @@ async def _try_start_durable_text_run(
             "queue": enqueue.__dict__,
         }
     )
-    trace_durable_decision("queued", enqueue.provider)
-    return True
+    logger.info(
+        "Durable run queued for session %s task %s run %s via %s",
+        session.id,
+        task.task_id,
+        run.run_id,
+        enqueue.provider,
+    )
+    return DurableTurnOutcome.STARTED
 
 
 async def handle_websocket(
@@ -458,6 +656,53 @@ async def handle_websocket(
             t.add_done_callback(_bg_tasks.discard)
             t.add_done_callback(lambda task: _surface_task_exception(task, label=label))
 
+        # Re-attach to a durable run that is still executing. The worker kept
+        # going while the browser was away, so the only thing this socket has to
+        # do is resume streaming its event log. The client hydrates events up to
+        # `after_seq` on load and dedupes by event id, so overlap is harmless.
+        # Best effort: a durable lookup failure here must not stop the client
+        # from connecting, so it degrades to "no re-attach" instead of raising.
+        try:
+            inflight = await _find_inflight_durable_run(session)
+        except Exception:
+            logger.warning(
+                "Durable re-attach lookup failed for session %s", session.id, exc_info=True
+            )
+            inflight = None
+
+        if inflight:
+            reattach_task_id, reattach_run_id = inflight
+            logger.info(
+                "Re-attaching session %s to in-flight durable run %s/%s",
+                session.id,
+                reattach_task_id,
+                reattach_run_id,
+            )
+            orchestrator.bind_durable_run(
+                task_id=reattach_task_id, run_id=reattach_run_id
+            )
+            await _safe_send_json(
+                {
+                    "type": "worker_claimed",
+                    "task_id": reattach_task_id,
+                    "run_id": reattach_run_id,
+                    "reattached": True,
+                }
+            )
+            _track(
+                asyncio.create_task(
+                    _stream_durable_task_events(
+                        repo=get_production_task_repository(),
+                        task_id=reattach_task_id,
+                        owner_id=session.owner_id,
+                        run_id=reattach_run_id,
+                        send_json=_safe_send_json,
+                        after_seq=0,
+                    )
+                ),
+                label="reattach_durable_task_events",
+            )
+
         # Main loop: frontend → agent/voice
         try:
             while True:
@@ -534,9 +779,9 @@ async def handle_websocket(
                                 for item in (data.get("uploaded_files") or [])
                                 if isinstance(item, dict)
                             ]
-                            durable_started = False
+                            durable = DurableTurnOutcome.DECLINED
                             try:
-                                durable_started = await _try_start_durable_text_run(
+                                durable = await _try_start_durable_text_run(
                                     session=session,
                                     orchestrator=orchestrator,
                                     text=text,
@@ -559,7 +804,11 @@ async def handle_websocket(
                                     exc_info=True,
                                 )
 
-                            if durable_started:
+                            if durable is DurableTurnOutcome.REJECTED:
+                                # The client already has an explanatory error frame.
+                                continue
+
+                            if durable is DurableTurnOutcome.STARTED:
                                 _track(
                                     asyncio.create_task(
                                         _stream_durable_task_events(

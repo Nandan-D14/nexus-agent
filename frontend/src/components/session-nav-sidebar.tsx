@@ -28,6 +28,7 @@ import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch } from "@/lib/api-client";
 import { DEFAULT_PLAN_QUOTA, type PlanQuota, type RecentSession } from "@/lib/message-types";
 import { useSettings } from "@/lib/settings-context";
+import { useLandingChrome } from "@/lib/landing-chrome-context";
 import { useSession } from "@/lib/use-session";
 import { useToast } from "./toast-provider";
 import { useLiveDesktop } from "./live-desktop-provider";
@@ -197,6 +198,7 @@ function SessionRow({
 export const SessionNavSidebar = memo(function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const { isSettingsOpen, setIsSettingsOpen } = useSettings();
+  const { isLandingChrome } = useLandingChrome();
   const { listSessions, destroySession } = useSession();
   const { clearDesktop } = useLiveDesktop();
   const { toast } = useToast();
@@ -375,7 +377,10 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
       <aside
         className={cx(
-          "fixed top-3 bottom-3 left-3 z-50 flex h-[calc(100dvh-24px)] shrink-0 flex-col overflow-hidden rounded-xl border border-border-button-white bg-background-secondary-default shadow-sidebar transition-[width,transform] duration-300 ease-in-out md:sticky md:top-3 md:bottom-auto md:z-20 md:m-3 md:h-[calc(100vh-24px)] md:translate-x-0",
+          "fixed top-3 bottom-3 left-3 z-50 flex h-[calc(100dvh-24px)] shrink-0 flex-col overflow-hidden rounded-xl border shadow-sidebar transition-[width,transform,background-color,border-color,backdrop-filter] duration-300 ease-in-out md:sticky md:top-3 md:bottom-auto md:z-20 md:m-3 md:h-[calc(100vh-24px)] md:translate-x-0",
+          isLandingChrome
+            ? "border-white/40 bg-white/45 backdrop-blur-2xl dark:border-white/20 dark:bg-black/25"
+            : "border-border-button-white bg-background-secondary-default",
           collapsed ? "w-[60px] px-[11px] py-3" : "w-[260px] p-3",
           isMobile && !isSidebarOpen && "-translate-x-[calc(100%+24px)]",
         )}

@@ -48,6 +48,21 @@ TaskStatus = Literal[
 CANONICAL_TASK_STATUSES: frozenset[str] = frozenset(TaskStatus.__args__)  # type: ignore[attr-defined]
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
+
+def lease_is_live(lease_expires_at: datetime | None) -> bool:
+    """True when a lease timestamp is present and still in the future.
+
+    A live lease means some worker currently owns the run, so other code paths
+    must leave it alone. Naive timestamps are read as UTC, matching how the
+    store writes them.
+    """
+    if lease_expires_at is None:
+        return False
+    expires = lease_expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires > datetime.now(timezone.utc)
+
 HISTORY_TO_DURABLE_STATUS: dict[str, TaskStatus] = {
     "idle": "queued",
     "creating": "queued",

@@ -64,6 +64,9 @@ export type HistoryMapMode = "full" | "transcript";
 
 export const DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300;
 
+/** Mirrors APPROVAL_TIMEOUT_SECONDS in agent/nexus/tool_gateway.py. */
+export const DEFAULT_APPROVAL_TIMEOUT_SECONDS = 120;
+
 export type PendingTurnInput = {
   text: string;
   connectorIds?: string[];
@@ -390,6 +393,25 @@ export function inferPermissionDecisionFromComplete(
   return "approved";
 }
 
+/**
+ * A live `permission_request` and its durable `approval_requested` twin can both
+ * reach the client for the same approval. Both identify the approval by id, so
+ * match on either slot to keep exactly one card.
+ */
+function isPermissionCardFor(item: ChatItem, approvalId: string): boolean {
+  return (
+    item.kind === "permission" &&
+    (item.approval_id === approvalId || item.task_id === approvalId)
+  );
+}
+
+function hasPermissionCard(items: ChatItem[], approvalId: string | undefined): boolean {
+  if (!approvalId) {
+    return false;
+  }
+  return items.some((item) => isPermissionCardFor(item, approvalId));
+}
+
 /** Map run-step permission_request rows → task_id decisions for hydrate. */
 export function permissionDecisionsFromRunSteps(
   steps: RunStep[],
@@ -480,6 +502,10 @@ export function reduceWorkingLogMessage(
             type: msg.type,
             tool: msg.tool,
             output: msg.output,
+            // `output` is only a one-line summary. The structured payload
+            // (search results, artifacts, metadata) lives here and is what
+            // rich tool cards render from.
+            result_summary: msg.result_summary,
             ts,
           },
         ],
@@ -592,6 +618,9 @@ export function reduceWorkingLogMessage(
     }
 
     case "permission_request": {
+      if (hasPermissionCard(prevChatItems, msg.approval_id ?? msg.task_id)) {
+        return { chatItems: prevChatItems };
+      }
       const decision = permissionDecisions?.get(msg.task_id);
       const elapsedSec = (Date.now() - ts) / 1000;
       const budget = Math.max(1, msg.estimated_seconds || 120);
@@ -612,6 +641,53 @@ export function reduceWorkingLogMessage(
             ts,
           },
         ],
+      };
+    }
+
+    case "approval_requested": {
+      const approvalId = msg.approval_id;
+      // The durable task id rides on the event envelope, not the payload.
+      const durableTaskId = msg.task_id;
+      if (!approvalId || hasPermissionCard(prevChatItems, approvalId)) {
+        return { chatItems: prevChatItems };
+      }
+      const decision = permissionDecisions?.get(approvalId);
+      const elapsedSec = (Date.now() - ts) / 1000;
+      const timedOutByClock = !decision && elapsedSec >= DEFAULT_APPROVAL_TIMEOUT_SECONDS;
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "permission",
+            task_id: approvalId,
+            approval_id: approvalId,
+            durable_task_id: durableTaskId,
+            description: msg.description || "Approval required to continue.",
+            estimated_seconds: DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+            agent: "policy",
+            resolved: Boolean(decision) || timedOutByClock,
+            decision: decision ?? (timedOutByClock ? "timed_out" : undefined),
+            ts,
+          },
+        ],
+      };
+    }
+
+    case "approval_resolved": {
+      const approvalId = msg.approval_id;
+      if (!approvalId) {
+        return { chatItems: prevChatItems };
+      }
+      return {
+        chatItems: prevChatItems.map((item) =>
+          isPermissionCardFor(item, approvalId)
+            ? {
+                ...item,
+                resolved: true,
+                decision: msg.approved ? "approved" : "denied",
+              }
+            : item,
+        ),
       };
     }
 
@@ -662,6 +738,27 @@ export function reduceWorkingLogMessage(
         ],
       };
     }
+
+    case "subagent_started":
+    case "subagent_progress":
+    case "subagent_completed":
+    case "subagent_failed":
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: msg.type,
+            subagent_id: msg.subagent_id,
+            role: msg.role,
+            detail: "detail" in msg ? msg.detail : undefined,
+            result: "result" in msg ? msg.result : undefined,
+            error: "error" in msg ? msg.error : undefined,
+            status: msg.status,
+            ts,
+          },
+        ],
+      };
 
     case "budget_warning":
       return {
@@ -738,7 +835,8 @@ export function reduceWorkingLogMessage(
     // Skipped on purpose (history / REST / ephemeral / page-owned side effects):
     // transcript, generative_ui, artifact_created, run_status, step_*,
     // sandbox_status, voice_status, pong, quota_update, ui_action, vnc_url,
-    // token_usage
+    // token_usage, worker_claimed/worker_finished and other durable lifecycle
+    // types the working log does not render.
     default:
       return null;
   }

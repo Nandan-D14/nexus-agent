@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ToastProvider } from "@/components/toast-provider";
 import { AuthProvider } from "@/lib/auth-context";
 import { SettingsProvider } from "@/lib/settings-context";
+import { LandingChromeProvider } from "@/lib/landing-chrome-context";
 import { LiveDesktopProvider } from "@/components/live-desktop-provider";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -18,7 +19,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <ToastProvider>
         <AuthProvider>
           <SettingsProvider>
-            <LiveDesktopProvider>{children}</LiveDesktopProvider>
+            <LandingChromeProvider>
+              <LiveDesktopProvider>{children}</LiveDesktopProvider>
+            </LandingChromeProvider>
           </SettingsProvider>
         </AuthProvider>
       </ToastProvider>

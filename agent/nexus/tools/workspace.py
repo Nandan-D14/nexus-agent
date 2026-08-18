@@ -38,6 +38,22 @@ def _tool_error(message: str) -> dict[str, Any]:
     return {"error": message}
 
 
+def _sanitize_workspace_error(exc: BaseException, fallback: str) -> str:
+    """Return a short tool error; never forward raw sandbox Python tracebacks."""
+    message = str(exc).strip()
+    if not message:
+        return fallback
+    lowered = message.lower()
+    if (
+        "traceback (most recent call last)" in lowered
+        or "filenotfounderror" in lowered
+        or "pathlib.py" in lowered
+        or message.count("\n") >= 2
+    ):
+        return fallback
+    return message
+
+
 async def _emit_todo_update(items: list[dict[str, str]]) -> None:
     send_json = get_send_json()
     if not send_json:
@@ -284,7 +300,9 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             "outputs_dir": f"{workspace_path}/outputs",
         }
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to prepare the task workspace.")
+        return _tool_error(
+            _sanitize_workspace_error(exc, "Failed to prepare the task workspace.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -335,7 +353,9 @@ async def initialize_task_state(
             review_status=state["review_status"],
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to initialize task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to initialize task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -396,7 +416,9 @@ async def update_task_state(
             artifact_count=len(updated.get("artifact_paths") or []),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to update task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to update task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -421,7 +443,9 @@ async def read_task_state() -> dict[str, Any]:
             state=state,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to read task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to read task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -455,7 +479,9 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
             item_count=len(todo_items),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to write the todo list.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to write the todo list.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -491,6 +517,12 @@ async def update_todo_item(
         workspace_path = get_active_workspace_path()
         path = f"{workspace_path}/todo.md"
         sandbox = get_sandbox()
+        if not sandbox.path_exists(path):
+            return tool_error(
+                "todo.md does not exist yet. Call write_todo_list or prepare_task_workspace first.",
+                error_code="NOT_FOUND",
+                suggested_alternatives=["write_todo_list", "prepare_task_workspace"],
+            )
         items = _parse_todo_markdown(sandbox.read_text_file(path))
         if item_index > len(items):
             return tool_error("item_index is out of range for the current todo list", error_code="INVALID_INPUT")
@@ -514,7 +546,10 @@ async def update_todo_item(
             title=target["title"],
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to update the todo item.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to update the todo item."),
+            error_code="TOOL_EXCEPTION",
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -573,7 +608,9 @@ async def write_workspace_file(
             **result_meta,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to write the workspace file.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to write the workspace file.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -588,7 +625,16 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
     """
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
-        content = get_sandbox().read_text_file(absolute_path)
+        sandbox = get_sandbox()
+        if not sandbox.path_exists(absolute_path):
+            relative = _normalize_relative_path(relative_path)
+            return tool_error(
+                f"{relative} does not exist in the workspace. "
+                "Call list_workspace_files or prepare_task_workspace first.",
+                error_code="NOT_FOUND",
+                suggested_alternatives=["list_workspace_files", "prepare_task_workspace"],
+            )
+        content = sandbox.read_text_file(absolute_path)
         return tool_success(
             f"Read {_normalize_relative_path(relative_path)} ({len(content)} chars)",
             workspace_path=workspace_path,
@@ -597,7 +643,9 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
             content=content,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to read the workspace file.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to read the workspace file.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -628,7 +676,9 @@ async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
             entry_count=len(entries),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to list workspace files.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to list workspace files.")
+        )
 
 
 async def save_source_artifact(relative_path: str, content: str) -> dict[str, Any]:

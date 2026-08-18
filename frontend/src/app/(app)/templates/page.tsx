@@ -5,11 +5,12 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Clock, Edit3, Play, Search, Trash2, Workflow } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+import { useToast } from "@/components/toast-provider";
 import { WorkflowTemplateEditorModal } from "@/components/workflow-template-editor-modal";
 import { WorkflowTemplateRunModal } from "@/components/workflow-template-run-modal";
 import { useAuth } from "@/lib/auth-context";
@@ -38,11 +39,33 @@ function formatDate(value: string | null | undefined) {
 export default function TemplatesPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const { toast } = useToast();
   const { listTemplates, updateTemplate, deleteTemplate, runTemplate, isLoading, error } = useWorkflowTemplates();
   const [templates, setTemplates] = useState<WorkflowTemplateData[]>([]);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [pageError, setPageError] = useState<string | null>(null);
+
+  const lastToastedPageErrorRef = useRef<string | null>(null);
+  const lastToastedErrorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (pageError && pageError !== lastToastedPageErrorRef.current) {
+      lastToastedPageErrorRef.current = pageError;
+      toast(pageError, "error");
+    } else if (!pageError) {
+      lastToastedPageErrorRef.current = null;
+    }
+  }, [pageError, toast]);
+
+  useEffect(() => {
+    if (error && error !== lastToastedErrorRef.current) {
+      lastToastedErrorRef.current = error;
+      toast(error, "error");
+    } else if (!error) {
+      lastToastedErrorRef.current = null;
+    }
+  }, [error, toast]);
   const [selectedTemplate, setSelectedTemplate] = useState<WorkflowTemplateData | null>(null);
   const [editorMode, setEditorMode] = useState<"edit" | null>(null);
   const [runTemplateTarget, setRunTemplateTarget] = useState<WorkflowTemplateData | null>(null);
@@ -165,11 +188,7 @@ export default function TemplatesPage() {
         />
       </div>
 
-      {(pageError || error) && (
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
-          {pageError || error}
-        </div>
-      )}
+
 
       <div className="flex-1 overflow-y-auto pr-2">
         {isLoading && templates.length === 0 ? (

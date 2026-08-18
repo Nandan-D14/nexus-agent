@@ -9,6 +9,8 @@ import io
 
 from PIL import Image
 
+from nexus.config import settings
+from nexus.resilience import retry_sync
 from nexus.sandbox import SandboxDeadError, _coerce_exit_code
 from nexus.sandbox_components.base import SandboxComponent
 
@@ -30,15 +32,33 @@ class SandboxDisplay(SandboxComponent):
         return {"success": True, "width": width, "height": height}
 
     def screenshot(self) -> bytes:
-        """Capture the screen as PNG bytes."""
+        """Capture the screen as PNG bytes.
+
+        The E2B SDK call has no client-side timeout, so it is wrapped in a
+        bounded retry with a per-attempt deadline. A dead sandbox fails fast
+        (no point retrying) while transient stalls get another chance.
+        """
         self._require_sandbox()
-        try:
-            return bytes(self._sandbox.screenshot())
-        except Exception as e:
-            if "not found" in str(e).lower() or "timeout" in str(e).lower():
-                self._sandbox = None
-                raise SandboxDeadError("Sandbox timed out while taking screenshot.") from e
-            raise
+
+        def _capture() -> bytes:
+            try:
+                return bytes(self._sandbox.screenshot())
+            except Exception as e:
+                if "not found" in str(e).lower() or "timeout" in str(e).lower():
+                    self._sandbox = None
+                    raise SandboxDeadError(
+                        "Sandbox timed out while taking screenshot."
+                    ) from e
+                raise
+
+        return retry_sync(
+            _capture,
+            attempts=settings.screenshot_capture_attempts,
+            base_delay=settings.screenshot_retry_base_seconds,
+            timeout=settings.screenshot_capture_timeout_seconds,
+            give_up_on=(SandboxDeadError,),
+            label="sandbox screenshot",
+        )
 
     def screenshot_base64(self) -> str:
         """Capture the screen as a base64-encoded PNG string."""

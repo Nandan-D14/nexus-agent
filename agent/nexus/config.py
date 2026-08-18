@@ -137,8 +137,11 @@ class Settings(BaseSettings):
     session_timeout_minutes: int = 120
     jwt_secret: str = "dev-secret-change-in-production-min-32b"
 
-    # Durable production task runtime
-    task_worker_enabled: bool = False
+    # Durable production task runtime. On by default so a turn is owned by a
+    # worker rather than by the browser's WebSocket: closing or refreshing the
+    # tab no longer kills the run. Production additionally requires Cloud Tasks
+    # and an auth token (see validate_production_settings).
+    task_worker_enabled: bool = True
     # When the durable worker is enabled but Cloud Tasks is not configured,
     # run durable turns on an in-process asyncio queue so runs survive the
     # WebSocket (browser close) without requiring GCP infrastructure.
@@ -153,7 +156,7 @@ class Settings(BaseSettings):
     subagent_lease_seconds: int = 600
     subagent_heartbeat_interval_seconds: int = 120
     subagent_max_mailbox_messages: int = 32
-    subagent_parent_wait_seconds: int = 300
+    subagent_parent_wait_seconds: int = 1200
     deep_research_workflow_enabled: bool = False
     deep_research_workflow_max_sources: int = 6
     task_event_replay_limit: int = 200
@@ -189,6 +192,31 @@ class Settings(BaseSettings):
 
     # Single production orchestration path.
     max_agent_turns: int = 30
+
+    # --- Bounded retries: never let one remote call stall a turn ---
+    # Vision (Qwen VLM) grounding: per-model attempts and per-request timeout.
+    # After the last attempt on the last model the tool returns a degraded
+    # observation and the agent continues instead of waiting forever.
+    vision_request_timeout_seconds: float = 45.0
+    vision_attempts_per_model: int = 3
+    vision_retry_base_seconds: float = 1.0
+    # Screen capture (E2B has no client-side timeout of its own).
+    screenshot_capture_attempts: int = 3
+    screenshot_capture_timeout_seconds: float = 25.0
+    screenshot_retry_base_seconds: float = 0.75
+    # Firestore vision cache is an optimization; never block a turn on it.
+    vision_cache_timeout_seconds: float = 5.0
+    # Web search / page fetch.
+    web_search_attempts: int = 3
+    web_search_retry_base_seconds: float = 0.75
+    # Model routing (LiteLLM) request deadline. 0 disables.
+    model_request_timeout_seconds: float = 180.0
+    # Hard ceiling for a single agent turn. When exceeded the turn is stopped
+    # and reported as failed so the client never waits on a wedged run.
+    agent_turn_timeout_seconds: float = 1_800.0
+    # How long a queued turn waits for the previous turn on the same session
+    # before it is rejected with a clear error instead of hanging.
+    turn_queue_wait_seconds: float = 900.0
 
     # --- Firestore write resilience (Phase 1) ---
     # Serialize concurrent writes that touch the same shared session/task docs

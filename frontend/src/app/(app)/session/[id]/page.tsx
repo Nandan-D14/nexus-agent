@@ -63,6 +63,7 @@ import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useWorkflowTemplates } from "@/lib/use-workflow-templates";
 import { useSettings } from "@/lib/settings-context";
+import { useLandingChrome } from "@/lib/landing-chrome-context";
 import {
   classifyAgentTool,
   displayAgentToolName,
@@ -118,6 +119,13 @@ const CONNECTORS_TTL_MS = 60_000;
 const AGENT_STALL_TIMEOUT_MS = 180_000;
 const AGENT_STALL_POLL_MS = 5_000;
 
+/** Run states a durable worker may still be actively progressing through. */
+const EXECUTING_RUN_STATUSES = new Set(["queued", "running", "cancelling"]);
+
+function isRunStillExecuting(runStatus: string | null | undefined): boolean {
+  return typeof runStatus === "string" && EXECUTING_RUN_STATUSES.has(runStatus);
+}
+
 export default function SessionPage() {
   const params = useParams();
   const router = useRouter();
@@ -125,6 +133,7 @@ export default function SessionPage() {
   const sessionId = params.id as string;
   const { user, isLoading: authLoading } = useAuth();
   const { openSettings, requiresByokSetup } = useSettings();
+  const { setLandingChrome } = useLandingChrome();
   const {
     createSession,
     continueSession,
@@ -188,9 +197,20 @@ export default function SessionPage() {
   const inputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const landingInputRef = useRef<HTMLDivElement>(null);
-  const autoActionHandledRef = useRef(false);
-  const pendingActionKeyRef = useRef(`nexus.pendingSessionAction:${sessionId}`);
   const autoResumeTriggeredRef = useRef(false);
+  // The first prompt of a brand-new session is handed off through sessionStorage
+  // and must outlive the session-load reset below. Keeping it in a ref (rather
+  // than only in `pendingText`) means a second pass of that effect -- React
+  // StrictMode double-mounts it in dev -- cannot swallow the prompt, because the
+  // storage key has already been consumed by then. Cleared only once it is sent.
+  const armedActionRef = useRef<{ sessionId: string; action: PendingSessionAction } | null>(null);
+  // Bumped by the session-load reset so the armed action re-applies itself.
+  const [sessionResetToken, setSessionResetToken] = useState(0);
+  // Text of a user bubble rendered before the server echoed it back, so the
+  // echo can be recognised and dropped instead of duplicating the message.
+  const optimisticUserTextRef = useRef<string | null>(null);
+  // Guards against a double-submit creating two threads from one click.
+  const createThreadInFlightRef = useRef(false);
   // Wall clock of the last frame received from the backend. Drives the stall
   // watchdog so a lost terminal event can never strand the thinking indicator.
   const lastServerActivityRef = useRef(Date.now());
@@ -348,9 +368,11 @@ export default function SessionPage() {
   }, []);
 
   useEffect(() => {
-    autoActionHandledRef.current = false;
     autoResumeTriggeredRef.current = false;
-    pendingActionKeyRef.current = `nexus.pendingSessionAction:${sessionId}`;
+    // Drop an action armed for a session we have navigated away from.
+    if (armedActionRef.current && armedActionRef.current.sessionId !== sessionId) {
+      armedActionRef.current = null;
+    }
   }, [sessionId]);
 
   /* ---- WS message handler ---- */
@@ -492,6 +514,17 @@ export default function SessionPage() {
         break;
 
       case "transcript":
+        // The first prompt of a new session is rendered optimistically before
+        // the socket exists, so the server's echo of that same turn must not
+        // add a second identical bubble.
+        if (
+          msg.role === "user" &&
+          optimisticUserTextRef.current !== null &&
+          optimisticUserTextRef.current === msg.text
+        ) {
+          optimisticUserTextRef.current = null;
+          break;
+        }
         setChatItems((prev) => [
           ...prev,
           { kind: "message", role: msg.role, text: msg.text, ts },
@@ -589,6 +622,36 @@ export default function SessionPage() {
         applyWorkingLogChat();
         break;
 
+      case "subagent_started":
+        setAgentStatus(
+          msg.role ? `${msg.role} started` : "Background agent started",
+        );
+        applyWorkingLogChat();
+        break;
+
+      case "subagent_progress":
+        setAgentStatus(
+          (typeof msg.detail === "string" && msg.detail.trim())
+            || (msg.role ? `${msg.role} working...` : "Background agent working..."),
+        );
+        applyWorkingLogChat();
+        break;
+
+      case "subagent_completed":
+        setAgentStatus(
+          msg.role ? `${msg.role} finished` : "Background agent finished",
+        );
+        applyWorkingLogChat();
+        break;
+
+      case "subagent_failed":
+        setAgentStatus(
+          (typeof msg.error === "string" && msg.error.trim())
+            || (msg.role ? `${msg.role} failed` : "Background agent failed"),
+        );
+        applyWorkingLogChat();
+        break;
+
       case "voice_status":
         if (
           msg.status === "available" ||
@@ -675,7 +738,14 @@ export default function SessionPage() {
         break;
 
       case "worker_claimed":
-        setAgentStatus("Starting...");
+        if (msg.reattached) {
+          // The run kept going while this tab was away. Show it as live work so
+          // the composer stays locked and the thinking indicator is honest.
+          setPhase("acting");
+          setAgentStatus("Reconnected — still working...");
+        } else {
+          setAgentStatus("Starting...");
+        }
         break;
 
       case "agent_status":
@@ -908,6 +978,9 @@ export default function SessionPage() {
       setTemplateDraft(EMPTY_TEMPLATE);
       setIsSavingTemplate(false);
       setViewMode("live");
+      // The resets above also clear an auto-action that was already applied for
+      // this session. Bump the token so it re-arms itself instead of being lost.
+      setSessionResetToken((token) => token + 1);
 
       if (isNewSession) {
         return;
@@ -1083,6 +1156,16 @@ export default function SessionPage() {
           setHasActivatedSession(true);
           setIsDesktopVisible(true);
         }
+
+        // A run still executing on a worker (we just refreshed away from it) can
+        // only be re-attached over the socket, and the socket is gated on
+        // activation. Sandbox-free turns have no stream_url, so activate on the
+        // run state too and show the work as live.
+        if (isRunStillExecuting(info.run_status)) {
+          setHasActivatedSession(true);
+          setPhase("acting");
+          setAgentStatus("Reconnecting to the running task...");
+        }
       }
     }
 
@@ -1122,17 +1205,21 @@ export default function SessionPage() {
         uploaded_files: pendingText.uploadedFiles,
       });
       setPendingText(null);
+      // Delivered: stop re-arming it on the next session-state reset.
+      armedActionRef.current = null;
     }
 
     if (pendingMicStart && voiceStatus === "connected") {
       startMic();
       setPendingMicStart(false);
       setPhase("listening");
+      armedActionRef.current = null;
     }
 
     if (pendingDesktopStart) {
       sendJson({ type: "start_desktop" });
       setPendingDesktopStart(false);
+      armedActionRef.current = null;
     }
   }, [isConnected, pendingDesktopStart, pendingMicStart, pendingText, sendJson, startMic, viewMode, voiceStatus]);
 
@@ -1251,52 +1338,64 @@ export default function SessionPage() {
   );
 
   const createThreadFromAction = useCallback(
-    async (action: PendingSessionAction) => {
-      if (isLoading) {
-        return;
+    async (action: PendingSessionAction): Promise<boolean> => {
+      // Only a concurrent create is a reason to bail. Gating on the shared
+      // `isLoading` flag used to drop the very first prompt of a new session
+      // whenever any unrelated request happened to be in flight.
+      if (createThreadInFlightRef.current) {
+        return false;
       }
 
       if (action.type === "prompt" || action.type === "demo") {
         const payload = normalizePendingTurnInput(action.payload);
         if (!payload) {
-          return;
+          return false;
         }
         action = { ...action, payload };
       }
 
+      createThreadInFlightRef.current = true;
       setPageError(null);
-      const session = await createSession({ mode: "fresh" });
+      let session: SessionData | null = null;
+      try {
+        session = await createSession({ mode: "fresh" });
+      } finally {
+        createThreadInFlightRef.current = false;
+      }
       if (!session) {
-        setPageError("Failed to create a new thread.");
-        return;
+        setPageError("Failed to create a new thread. Your message was not sent.");
+        return false;
       }
 
-      if (action.type === "prompt" || action.type === "demo") {
-        setTextInput("");
-      }
-
+      // Hand the action to the created session. If storage is unavailable the
+      // prompt would silently vanish after the redirect, so keep the user on the
+      // page with their text intact instead.
       try {
         sessionStorage.setItem(
           `nexus.pendingSessionAction:${session.session_id}`,
           JSON.stringify(action),
         );
       } catch {
-        // Ignore storage failures and continue to the created session.
+        setPageError(
+          "This browser blocked session storage, so the thread could not be started. Please retry.",
+        );
+        return false;
       }
 
       router.replace(`/session/${session.session_id}`);
+      return true;
     },
-    [createSession, isLoading, router],
+    [createSession, router],
   );
 
   const createThreadFromPrompt = useCallback(
-    async (payload: PendingTurnInput) => {
+    async (payload: PendingTurnInput): Promise<boolean> => {
       const nextPayload = normalizePendingTurnInput(payload);
       if (!nextPayload) {
-        return;
+        return false;
       }
 
-      await createThreadFromAction({ type: "prompt", payload: nextPayload });
+      return createThreadFromAction({ type: "prompt", payload: nextPayload });
     },
     [createThreadFromAction],
   );
@@ -1528,8 +1627,15 @@ export default function SessionPage() {
       uploadedFiles,
     };
     if (isNewSession) {
-      void createThreadFromPrompt(payload);
+      // Clear optimistically so the composer feels responsive, but put the text
+      // back if the thread could not be started -- losing the prompt with no
+      // feedback is worse than a brief flicker.
       setTextInput("");
+      void createThreadFromPrompt(payload).then((started) => {
+        if (!started) {
+          setTextInput(payload.text);
+        }
+      });
       return;
     }
     sendTextOrQueue(payload);
@@ -1662,54 +1768,67 @@ export default function SessionPage() {
     if (isNewSession || !sessionId) {
       return;
     }
-    if (autoActionHandledRef.current) {
+
+    // Adopt a freshly handed-off action into the ref. The storage key is consumed
+    // immediately so a later reload cannot resubmit the same prompt, but the ref
+    // keeps it alive across session-state resets until it is actually sent.
+    if (armedActionRef.current?.sessionId !== sessionId) {
+      try {
+        const key = `nexus.pendingSessionAction:${sessionId}`;
+        const raw = sessionStorage.getItem(key);
+        if (!raw) {
+          return;
+        }
+        sessionStorage.removeItem(key);
+        const stored = JSON.parse(raw) as
+          | PendingSessionAction
+          | { type: "demo" | "prompt"; text?: string };
+        const action: PendingSessionAction | null =
+          stored.type === "openDesktop" || stored.type === "startMic"
+            ? { type: stored.type }
+            : (() => {
+                const payload = normalizePendingTurnInput(
+                  "payload" in stored ? stored.payload : { text: stored.text ?? "" },
+                );
+                return payload ? { type: stored.type, payload } : null;
+              })();
+        if (!action) {
+          return;
+        }
+        armedActionRef.current = { sessionId, action };
+      } catch {
+        // Ignore invalid storage payloads.
+        return;
+      }
+    }
+
+    const armed = armedActionRef.current;
+    if (!armed || armed.sessionId !== sessionId) {
       return;
     }
 
-    try {
-      const key = `nexus.pendingSessionAction:${sessionId}`;
-      const raw = sessionStorage.getItem(key);
-      if (!raw) {
-        return;
-      }
-      sessionStorage.removeItem(key);
-
-      const action = JSON.parse(raw) as PendingSessionAction | { type: "demo" | "prompt"; text?: string };
-
-      autoActionHandledRef.current = true;
-
-      if (action.type === "openDesktop") {
-        setHasActivatedSession(true);
-        setIsDesktopVisible(true);
-        setPendingDesktopStart(true);
-      } else if (action.type === "startMic") {
-        setHasActivatedSession(true);
-        setPendingMicStart(true);
-        setPhase("listening");
-      } else if (action.type === "demo" || action.type === "prompt") {
-        const payload = normalizePendingTurnInput(
-          "payload" in action ? action.payload : { text: action.text ?? "" },
-        );
-        if (!payload) {
-          return;
-        }
-        setHasActivatedSession(true);
-        setPendingText(payload);
-        setPhase("thinking");
-        // Optimistically add user's message to chatItems to avoid empty flash
-        setChatItems([
-          {
-            kind: "message",
-            role: "user",
-            text: payload.text,
-            ts: Date.now(),
-          },
-        ]);
-      }
-    } catch {
-      // Ignore invalid storage payloads.
+    // Re-applied after every reset, so each branch must be idempotent.
+    setHasActivatedSession(true);
+    if (armed.action.type === "openDesktop") {
+      setIsDesktopVisible(true);
+      setPendingDesktopStart(true);
+    } else if (armed.action.type === "startMic") {
+      setPendingMicStart(true);
+      setPhase("listening");
+    } else {
+      const payload = armed.action.payload;
+      setPendingText(payload);
+      setPhase("thinking");
+      // Show the user's message right away so the thread is never blank while
+      // the socket dials. Never append twice on a re-apply.
+      optimisticUserTextRef.current = payload.text;
+      setChatItems((prev) =>
+        prev.length > 0
+          ? prev
+          : [{ kind: "message", role: "user", text: payload.text, ts: Date.now() }],
+      );
     }
-  }, [isNewSession, sessionId]);
+  }, [isNewSession, sessionId, sessionResetToken]);
 
   useEffect(() => {
     if (
@@ -1795,6 +1914,11 @@ export default function SessionPage() {
   const hasStarted = hasConversationStarted || isDesktopVisible;
   const uploadDisabled = isNewSession || viewMode !== "live" || isUploadingFile;
   const canShowComposer = !isNewSession;
+
+  useEffect(() => {
+    setLandingChrome(!hasStarted);
+    return () => setLandingChrome(false);
+  }, [hasStarted, setLandingChrome]);
 
   return (
     <>

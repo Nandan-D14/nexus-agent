@@ -1,55 +1,36 @@
 "use client";
 
-import { useRef, useState, type ComponentProps } from "react";
-import { CalendarDate } from "@internationalized/date";
-import { RiCalendarLine, RiExternalLinkLine, RiLogoutCircleLine, RiMailLine } from "@remixicon/react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { RiLogoutCircleLine, RiMailLine } from "@remixicon/react";
 import { Button } from "@/components/base/buttons/button";
-import { DatePicker } from "@/components/base/date-picker/date-picker";
 import { Input } from "@/components/base/input/input";
-import { Switch } from "@/components/base/switch/switch";
-import { cx } from "@/utils/cx";
+import { useAuth } from "@/lib/auth-context";
 import {
-  SettingsCard,
-  SettingsRow,
-  SettingsValueField,
-} from "./settings-rows";
+  disconnectGoogleDrive,
+  fetchGoogleDriveAuthUrl,
+  fetchUserSettings,
+  patchAppSettings,
+  readAppSettings,
+  splitDisplayName,
+} from "@/lib/user-settings";
+import { cx } from "@/utils/cx";
+import { SettingsCard, SettingsRow, SettingsValueField } from "./settings-rows";
 
-/**
- * Figma source: Board UI → "Settings/Profile" (node 4081:13943), the right
- * pane of the settings modal.
- *
- * Two cards, 24px apart:
- *   1. identity   Email / First name / Last name as editable design-system
- *                 Inputs (small, 202px — mail icon on Email), Date of birth
- *                 (white date-picker trigger, 202px)
- *   2. account    BoardUI account → "Manage", Public profile toggle (on),
- *                 Device ID (muted, truncated), Log out from all devices.
- */
-
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-
-function formatBirthDate(date: CalendarDate) {
-  return `${date.day} ${MONTHS[date.month - 1]} ${date.year}`;
-}
-
-/**
- * Design-system Input that commits on Enter / blur: Enter just blurs the
- * field, and blur fires `onSaved` only when the value actually changed since
- * the last commit — so clicking in and out without typing stays silent.
- */
 function SavableInput({
   initialValue,
-  onSaved,
+  onCommit,
   ...inputProps
-}: { initialValue: string; onSaved?: () => void } & Omit<
+}: { initialValue: string; onCommit?: (value: string) => void | Promise<void> } & Omit<
   ComponentProps<typeof Input>,
   "value" | "onChange" | "defaultValue"
 >) {
   const [value, setValue] = useState(initialValue);
   const committed = useRef(initialValue);
+
+  useEffect(() => {
+    setValue(initialValue);
+    committed.current = initialValue;
+  }, [initialValue]);
 
   return (
     <Input
@@ -61,10 +42,9 @@ function SavableInput({
         if (event.key === "Enter") (event.target as HTMLElement).blur();
       }}
       onBlur={() => {
-        if (value !== committed.current) {
-          committed.current = value;
-          onSaved?.();
-        }
+        if (value === committed.current) return;
+        committed.current = value;
+        void onCommit?.(value);
       }}
       className={cx("w-[202px] shrink-0", inputProps.className)}
     />
@@ -72,78 +52,139 @@ function SavableInput({
 }
 
 export function SettingsProfile({ onSaved }: { onSaved?: () => void } = {}) {
-  const [birthDate, setBirthDate] = useState<CalendarDate>(new CalendarDate(1997, 7, 28));
-  const [birthOpen, setBirthOpen] = useState(false);
-  const birthTriggerRef = useRef<HTMLButtonElement>(null);
-  const [publicProfile, setPublicProfile] = useState(true);
+  const { user, signOutUser } = useAuth();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [driveConnected, setDriveConnected] = useState(false);
+  const [driveBusy, setDriveBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchUserSettings()
+      .then((data) => {
+        if (cancelled) return;
+        const parsed = readAppSettings(data);
+        const fallback = splitDisplayName(user?.displayName);
+        setFirstName(parsed.profile.firstName || fallback.firstName);
+        setLastName(parsed.profile.lastName || fallback.lastName);
+        setDriveConnected(data.googleDriveConnected);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load profile.");
+        const fallback = splitDisplayName(user?.displayName);
+        setFirstName(fallback.firstName);
+        setLastName(fallback.lastName);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.displayName]);
+
+  const saveName = async (nextFirst: string, nextLast: string) => {
+    setError(null);
+    try {
+      await patchAppSettings({ profile: { firstName: nextFirst, lastName: nextLast } });
+      onSaved?.();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save profile.");
+    }
+  };
+
+  const handleDrive = async () => {
+    setDriveBusy(true);
+    setError(null);
+    try {
+      if (driveConnected) {
+        await disconnectGoogleDrive();
+        setDriveConnected(false);
+        onSaved?.();
+      } else {
+        const url = await fetchGoogleDriveAuthUrl();
+        window.location.href = url;
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to update Google Drive.");
+    } finally {
+      setDriveBusy(false);
+    }
+  };
 
   return (
     <div className="flex w-full flex-col gap-6">
+      {error ? (
+        <div
+          role="alert"
+          className="rounded-2lg border border-status-rose-text/20 bg-status-rose-background px-3 py-2 text-body-2-regular text-status-rose-text"
+        >
+          {error}
+        </div>
+      ) : null}
+
       <SettingsCard>
         <SettingsRow label="Email">
-          <SavableInput
-            aria-label="Email"
-            type="email"
-            leadingIcon={RiMailLine}
-            initialValue="hi@mertcan.works"
-            onSaved={onSaved}
-          />
+          <SettingsValueField icon={RiMailLine} muted>
+            {user?.email || "Not signed in"}
+          </SettingsValueField>
         </SettingsRow>
         <SettingsRow label="First name">
-          <SavableInput aria-label="First name" initialValue="Mertcan" onSaved={onSaved} />
+          <SavableInput
+            aria-label="First name"
+            initialValue={firstName}
+            isDisabled={loading}
+            onCommit={(value) => {
+              setFirstName(value);
+              void saveName(value, lastName);
+            }}
+          />
         </SettingsRow>
         <SettingsRow label="Last name">
-          <SavableInput aria-label="Last name" initialValue="Esmergül" onSaved={onSaved} />
-        </SettingsRow>
-        <SettingsRow label="Date of birth">
-          <button
-            ref={birthTriggerRef}
-            type="button"
-            onClick={() => setBirthOpen((o) => !o)}
-            className={[
-              "flex h-8 w-[202px] shrink-0 cursor-pointer items-center gap-0.5 rounded-lg px-2",
-              "border border-border-button-default bg-background-primary-default shadow-xs",
-              "transition-colors duration-150 ease hover:bg-background-primary-hover",
-              "outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring",
-            ].join(" ")}
-          >
-            <RiCalendarLine className="size-[18px] shrink-0 text-foreground-icon-primary" aria-hidden />
-            <span className="px-0.5 text-body-regular whitespace-nowrap text-text-primary">
-              {formatBirthDate(birthDate)}
-            </span>
-          </button>
-          <DatePicker
-            aria-label="Date of birth"
-            triggerRef={birthTriggerRef}
-            isOpen={birthOpen}
-            onOpenChange={setBirthOpen}
-            value={birthDate}
-            onChange={(next) => next && setBirthDate(next)}
+          <SavableInput
+            aria-label="Last name"
+            initialValue={lastName}
+            isDisabled={loading}
+            onCommit={(value) => {
+              setLastName(value);
+              void saveName(firstName, value);
+            }}
           />
         </SettingsRow>
       </SettingsCard>
 
       <SettingsCard>
-        <SettingsRow label="BoardUI account">
-          <Button variant="secondary" size="small" leadingIcon={RiExternalLinkLine}>
-            Manage
+        <SettingsRow
+          label="Google Drive"
+          description={
+            driveConnected
+              ? "Connected — the agent can read and write Drive files"
+              : "Connect Drive to let the agent use your files"
+          }
+        >
+          <Button
+            variant="secondary"
+            size="small"
+            disabled={driveBusy}
+            onClick={() => void handleDrive()}
+          >
+            {driveBusy ? "Working…" : driveConnected ? "Disconnect" : "Connect"}
           </Button>
         </SettingsRow>
-        <SettingsRow
-          label="Public profile"
-          description="When enabled your profile page will be visible to anyone"
-        >
-          <Switch
-            aria-label="Public profile"
-            isSelected={publicProfile}
-            onChange={setPublicProfile}
-          />
+        <SettingsRow label="Account ID">
+          <SettingsValueField muted>{user?.uid || "—"}</SettingsValueField>
         </SettingsRow>
-        <SettingsRow label="Device ID">
-          <SettingsValueField muted>593e2611-b9e3-44e2-1289-ab3f9d21</SettingsValueField>
-        </SettingsRow>
-        <SettingsRow label="Log out from all devices">
-          <Button variant="secondary" size="small" leadingIcon={RiLogoutCircleLine}>
+        <SettingsRow label="Log out">
+          <Button
+            variant="secondary"
+            size="small"
+            leadingIcon={RiLogoutCircleLine}
+            onClick={() => void signOutUser()}
+          >
             Logout
           </Button>
         </SettingsRow>

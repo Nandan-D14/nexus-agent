@@ -861,6 +861,15 @@ function StepRow({ item }: { item: GroupedEvent }) {
   if (item.kind === "tool_invocation") return <ToolLine invocation={item} />;
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
   if (item.kind === "error") return <ErrorLine message={item.message} />;
+  if (item.kind === "bg_progress") {
+    const suffix =
+      typeof item.progress === "number" ? ` (${item.progress}%)` : "";
+    return <ProgressStatusLine message={`${item.message}${suffix}`} failed={item.complete && item.success === false} />;
+  }
+  if (item.kind === "subagent_status") {
+    const label = item.role ? `${item.role}: ${item.detail}` : item.detail;
+    return <ProgressStatusLine message={label} failed={item.status === "failed"} />;
+  }
   return null;
 }
 
@@ -1212,6 +1221,23 @@ function ErrorLine({ message }: { message: string }) {
     <div className="flex items-start gap-2 text-[14px]">
       <X className="w-4 h-4 text-red-400 dark:text-red-500 shrink-0 mt-0.5" />
       <span className="text-red-500 dark:text-red-400">{message}</span>
+    </div>
+  );
+}
+
+function ProgressStatusLine({
+  message,
+  failed = false,
+}: {
+  message: string;
+  failed?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-2 text-[14px] min-w-0">
+      <Bot className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${failed ? "text-red-400 dark:text-red-500" : "text-zinc-400 dark:text-zinc-500"}`} />
+      <span className={failed ? "text-red-500 dark:text-red-400" : "text-zinc-600 dark:text-zinc-400"}>
+        {message}
+      </span>
     </div>
   );
 }

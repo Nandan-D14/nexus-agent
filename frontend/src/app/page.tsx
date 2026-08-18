@@ -195,7 +195,7 @@ export default function HomePage() {
           <div className="absolute -inset-1 bg-gradient-to-r from-sky-300 to-blue-400 rounded-[16px] blur opacity-20" />
           <div className="relative rounded-[16px] border border-sky-100 bg-gradient-to-br from-white via-sky-50 to-sky-100 p-4 sm:p-6 md:p-8 shadow-2xl">
             <img
-              src="/hero-product.png"
+              src="/hero-product.png?v=20260815"
               alt="CoComputer product preview"
               className="w-full h-auto rounded-[12px] border border-sky-100/80 shadow-lg object-cover"
             />

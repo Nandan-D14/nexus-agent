@@ -21,11 +21,29 @@ type ThemeTransitionOrigin = { x: number; y: number };
 type ViewTransition = {
   ready: Promise<void>;
   finished: Promise<void>;
+  updateCallbackDone: Promise<void>;
 };
 
 type ViewTransitionDocument = Document & {
   startViewTransition?: (update: () => void) => ViewTransition;
 };
+
+/**
+ * The browser skips a view transition (superseded by a newer one, tab
+ * hidden mid-flight, reduced-motion toggled, etc.) by rejecting its
+ * lifecycle promises with an AbortError. That's expected, not a bug, but
+ * each promise is "unhandled" the instant it's created -- attaching a
+ * `.catch` later via `await` inside a try/catch is not early enough for
+ * every browser to recognize as handled, and the rejection surfaces as an
+ * uncaught runtime error. Every framework that hit this (Nuxt, TanStack
+ * Router, React Spectrum, HeroUI) fixed it the same way: swallow all three
+ * promises synchronously, right where the transition is created.
+ */
+function silenceViewTransitionRejections(transition: ViewTransition): void {
+  transition.ready.catch(() => {});
+  transition.updateCallbackDone.catch(() => {});
+  transition.finished.catch(() => {});
+}
 
 let themeTransitionRunning = false;
 
@@ -162,11 +180,15 @@ export async function applyThemeWithTransition(
 
   themeTransitionRunning = true;
   document.documentElement.classList.add("theme-transitioning");
-  const transitionStyle = installThemeTransitionStyle({ x, y }, radius, duration);
+  // Owned entirely inside the try so a failure installing the mask style
+  // (or anything else below) can never strand `themeTransitionRunning`.
+  let transitionStyle: HTMLStyleElement | null = null;
   try {
+    transitionStyle = installThemeTransitionStyle({ x, y }, radius, duration);
     const transition = transitionDocument.startViewTransition(() => {
       flushSync(() => applyTheme(theme));
     });
+    silenceViewTransitionRejections(transition);
 
     await transition.ready;
     await transition.finished;
@@ -174,7 +196,7 @@ export async function applyThemeWithTransition(
     // If the browser aborts a transition mid-flight, the theme still changes.
     if (currentTheme() !== theme) applyTheme(theme);
   } finally {
-    transitionStyle.remove();
+    transitionStyle?.remove();
     document.documentElement.classList.remove("theme-transitioning");
     themeTransitionRunning = false;
   }

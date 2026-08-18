@@ -20,7 +20,6 @@ from typing import Any
 
 from starlette.websockets import WebSocketState
 
-from nexus.debug_trace import emit_debug_trace
 from nexus.event_sink import prepare_correlated_event
 
 logger = logging.getLogger("nexus.orchestrator")
@@ -44,7 +43,14 @@ class OrchestratorComponent:
 class WsMessenger(OrchestratorComponent):
     """WebSocket / event-sink delivery for the orchestrator."""
 
-    def _ws_is_open(self) -> bool:
+    def _raw_ws_is_open(self) -> bool:
+        """Socket-level liveness, ignoring the cooperative stop latch.
+
+        ``_ws_connected`` is also used to stop an in-flight turn, so it stays
+        false after any send failure. Callers that need to know whether the
+        transport itself is usable (e.g. before starting a new turn) must ask
+        this instead of :meth:`_ws_is_open`.
+        """
         ws = getattr(self, "ws", None)
         if ws is None:
             return False
@@ -52,10 +58,12 @@ class WsMessenger(OrchestratorComponent):
         client_state = getattr(ws, "client_state", WebSocketState.CONNECTED)
         application_state = getattr(ws, "application_state", WebSocketState.CONNECTED)
         return (
-            getattr(self, "_ws_connected", True)
-            and client_state == WebSocketState.CONNECTED
+            client_state == WebSocketState.CONNECTED
             and application_state == WebSocketState.CONNECTED
         )
+
+    def _ws_is_open(self) -> bool:
+        return getattr(self, "_ws_connected", True) and self._raw_ws_is_open()
 
     async def _send_bytes(self, data: bytes) -> None:
         try:
@@ -91,63 +99,32 @@ class WsMessenger(OrchestratorComponent):
         """Send JSON message to the frontend WebSocket."""
         message_type = data.get("type")
 
-        def trace_delivery(outcome: str, error_type: str = "") -> None:
-            if message_type not in {
-                "agent_tool_call",
-                "agent_tool_result",
-                "agent_complete",
-                "error",
-                "run_status",
-            }:
-                return
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H4",
-                location="orchestrator.py:2282",
-                message="websocket_event_delivery",
-                data={
-                    "message_type": message_type,
-                    "outcome": outcome,
-                    "error_type": error_type,
-                    "websocket_open": self._ws_is_open(),
-                    "durable_run_bound": bool(getattr(self, "_durable_task_id", None)),
-                },
-            )
-            # endregion agent log
-
         try:
             async with self._ws_send_lock:
                 if not self._ws_is_open():
                     logger.debug("Skipping WS message %s — connection not open", message_type)
-                    trace_delivery("skipped_closed")
                     return
                 await self.ws.send_json(data)
-                trace_delivery("sent")
         except RuntimeError as exc:
             if "websocket.close" in str(exc) or "response already completed" in str(exc):
                 logger.debug("Skipping WS message %s — connection closed", message_type)
                 self.mark_ws_disconnected()
-                trace_delivery("closed_runtime_error", type(exc).__name__)
             else:
                 logger.warning(
                     "Failed to send WS message: %s",
                     message_type,
                     exc_info=True,
                 )
-                trace_delivery("runtime_error", type(exc).__name__)
         except Exception:
             if not self._ws_is_open():
                 logger.debug("Skipping WS message %s — connection closed", message_type)
                 self.mark_ws_disconnected()
-                trace_delivery("closed_exception")
                 return
             logger.warning(
                 "Failed to send WS message: %s",
                 message_type,
                 exc_info=True,
             )
-            trace_delivery("exception")
 
     @staticmethod
     def _quota_update_payload(quota: dict[str, Any]) -> dict[str, Any]:

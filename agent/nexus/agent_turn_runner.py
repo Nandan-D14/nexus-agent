@@ -196,12 +196,20 @@ class AgentTurnRunner:
                     else {}
                 ),
             )
-            await self.production_task_repository.save_checkpoint(
-                task_id=request.task_id,
-                run_id=request.run_id,
-                owner_id=request.owner_id,
-                checkpoint=checkpoint,
-            )
+            try:
+                await self.production_task_repository.save_checkpoint(
+                    task_id=request.task_id,
+                    run_id=request.run_id,
+                    owner_id=request.owner_id,
+                    checkpoint=checkpoint,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist turn checkpoint for %s/%s",
+                    request.task_id,
+                    request.run_id,
+                    exc_info=True,
+                )
             if turn_result:
                 verification = (
                     turn_result.get("verification")

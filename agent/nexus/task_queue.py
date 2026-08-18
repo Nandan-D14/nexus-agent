@@ -37,6 +37,53 @@ def local_worker_task_count() -> int:
     return sum(1 for task in _local_worker_tasks if not task.done())
 
 
+async def _fail_unstarted_local_run(
+    task_id: str,
+    run_id: str,
+    exc: BaseException,
+) -> None:
+    """Mark a run failed after the local worker task itself crashed.
+
+    Best effort: this is the last line of defence against a run that produces
+    no terminal event, so every failure here is swallowed and logged.
+    """
+    reason = str(exc) or exc.__class__.__name__
+    try:
+        from nexus.dependencies import get_production_task_repository
+
+        repo = get_production_task_repository()
+        task = await repo.get_task(task_id)
+        if task is None:
+            return
+        run = await repo.get_run(
+            task_id=task_id,
+            run_id=run_id,
+            owner_id=task.owner_id,
+        )
+        if run is not None and run.status in {"completed", "failed", "cancelled"}:
+            return
+        await repo.finish_run(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            summary=reason[:1000],
+            error=reason[:1000],
+        )
+        await repo.append_event(
+            task_id=task_id,
+            owner_id=task.owner_id,
+            run_id=run_id,
+            event_type="worker_failed",
+            payload={"error": reason[:1000], "origin": "local_queue"},
+        )
+    except Exception:
+        logger.exception(
+            "Failed to mark crashed local run task=%s run=%s as failed",
+            task_id,
+            run_id,
+        )
+
+
 class TaskQueue:
     """Queue facade.
 
@@ -213,10 +260,16 @@ class TaskQueue:
                     run_id,
                     result.status,
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
                 logger.exception(
                     "Local durable worker crashed for task=%s run=%s", task_id, run_id
                 )
+                # Nothing else owns this run: the crash happened outside the
+                # worker's own recovery path, so without a terminal event the
+                # client waits on a run that will never emit anything again.
+                await _fail_unstarted_local_run(task_id, run_id, exc)
 
         worker_task = asyncio.get_running_loop().create_task(
             _run(), name=f"local-durable-{task_id}-{run_id}"

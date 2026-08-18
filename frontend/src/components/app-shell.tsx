@@ -5,30 +5,52 @@
 
 "use client";
 
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { SettingsModal } from "@/components/application/settings/settings-modal";
 import { useSettings } from "@/lib/settings-context";
+import { useLandingChrome } from "@/lib/landing-chrome-context";
+import { cx } from "@/utils/cx";
 import { SessionNavSidebar } from "./session-nav-sidebar";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { isSettingsOpen, setIsSettingsOpen, settingsDefaultPage } = useSettings();
+  const { isLandingChrome } = useLandingChrome();
   const pathname = usePathname();
   const isSessionPage = pathname.includes("/session/");
 
   return (
-    <div className="flex h-screen bg-white dark:bg-[#0d0d0d] overflow-hidden text-foreground">
-      {/* Unified Sidebar */}
-      <SessionNavSidebar />
+    <div
+      className={cx(
+        "relative flex h-screen overflow-hidden text-foreground",
+        isLandingChrome ? "bg-transparent" : "bg-white dark:bg-[#0d0d0d]",
+      )}
+    >
+      {isLandingChrome ? (
+        <Image
+          src="/landing-bg.png"
+          alt=""
+          fill
+          priority
+          quality={100}
+          sizes="100vw"
+          className="pointer-events-none select-none object-cover object-center"
+        />
+      ) : null}
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 relative h-full overflow-hidden">
-        <main 
-          className={`flex-1 pt-16 transition-all duration-300 md:pt-0 ${
-            !isSessionPage ? "overflow-y-auto" : "flex flex-col min-h-0"
-          }`}
-        >
-          {children}
-        </main>
+      <div className="relative z-10 flex h-full min-w-0 flex-1">
+        <SessionNavSidebar />
+
+        <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+          <main
+            className={cx(
+              "flex-1 pt-16 transition-all duration-300 md:pt-0",
+              !isSessionPage ? "overflow-y-auto" : "flex min-h-0 flex-col",
+            )}
+          >
+            {children}
+          </main>
+        </div>
       </div>
 
       <SettingsModal

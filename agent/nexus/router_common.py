@@ -46,6 +46,24 @@ def apply_tool_call_policy(kwargs: dict[str, Any], tools: Any) -> dict[str, Any]
     return updated
 
 
+def apply_request_timeout(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return kwargs carrying a request deadline for the model call.
+
+    LiteLLM has no default wall clock, so a gateway that accepts the
+    connection and then stalls would hold the agent turn open indefinitely.
+    An explicit ``timeout`` turns that into a retryable error. A caller-set
+    value always wins; ``model_request_timeout_seconds <= 0`` disables it.
+    """
+    if "timeout" in kwargs:
+        return kwargs
+    timeout = float(getattr(settings, "model_request_timeout_seconds", 0) or 0)
+    if timeout <= 0:
+        return kwargs
+    updated = dict(kwargs)
+    updated["timeout"] = timeout
+    return updated
+
+
 def _iter_message_tool_calls(response: Any):
     choices = getattr(response, "choices", None)
     if choices is None and isinstance(response, dict):
@@ -109,4 +127,4 @@ def repair_tool_call_ids(response: Any) -> Any:
     return response
 
 
-__all__ = ["apply_tool_call_policy", "repair_tool_call_ids"]
+__all__ = ["apply_request_timeout", "apply_tool_call_policy", "repair_tool_call_ids"]

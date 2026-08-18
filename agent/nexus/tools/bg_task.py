@@ -51,6 +51,11 @@ async def request_background_task(
     )
 
     if approved:
+        await manager.send_progress(
+            task_id,
+            0,
+            "Approved — work continues in this turn.",
+        )
         return tool_success(
             f"User approved background task {task_id}",
             task_id=task_id, approved=True,

@@ -342,6 +342,49 @@ async def test_task_worker_pauses_partial_result(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_does_not_retry_after_durable_run_already_failed(
+    monkeypatch,
+) -> None:
+    """A timeout that already finished the run must not re-enqueue it."""
+    claimed = SimpleNamespace(
+        task_id="task_1",
+        run_id="run_1",
+        owner_id="user_1",
+        attempt=1,
+        claim_generation=1,
+    )
+    repo = SimpleNamespace(
+        claim_run=AsyncMock(return_value=claimed),
+        append_event=AsyncMock(),
+        finish_run=AsyncMock(),
+        pause_run=AsyncMock(),
+        renew_lease=AsyncMock(return_value=True),
+        get_run=AsyncMock(
+            return_value=SimpleNamespace(status="failed", summary="timed out")
+        ),
+        requeue_run=AsyncMock(),
+    )
+
+    class _Worker(TaskWorker):
+        async def _execute_claimed_run(self, **kwargs):
+            raise RuntimeError("504 Stream removed (Deadline Exceeded)")
+
+    monkeypatch.setattr(
+        task_worker_module,
+        "get_production_task_repository",
+        lambda: repo,
+    )
+    result = await _Worker(worker_id="worker_1").run_once(
+        task_id="task_1",
+        run_id="run_1",
+    )
+
+    assert result.status == "failed"
+    repo.requeue_run.assert_not_awaited()
+    repo.finish_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stale_run_sweeper_requeues_with_new_claim_token(
     monkeypatch,
 ) -> None:

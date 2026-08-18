@@ -15,7 +15,6 @@ from google.genai import types
 
 from nexus.config import settings
 from nexus.control_loop import looks_like_worker_envelope
-from nexus.debug_trace import emit_debug_trace
 from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.session_service import FirestoreSessionService
@@ -127,18 +126,6 @@ async def run_agent_turn(
     usage_seen: set[tuple[str, str, int, int, int]] = set()
     max_turns = max_turns or settings.max_agent_turns
     usage_source, usage_model = get_agent_usage_source(runtime_config)
-    emit_debug_trace(
-        run_id=f"session:{session_id[-12:]}",
-        hypothesis_id="H3",
-        location="agent.py:run_agent_turn",
-        message="agent_runner_started",
-        data={
-            "max_turns": max_turns,
-            "usage_source": usage_source,
-            "usage_model": usage_model,
-            "event_callback_bound": event_callback is not None,
-        },
-    )
 
     async def _consume(new_message, turn_cap: int):
         """Drive the runner for one message.
@@ -284,21 +271,6 @@ async def run_agent_turn(
         elif synth_last and synth_last.strip() and not looks_like_worker_envelope(synth_last):
             final_response = synth_last
 
-    emit_debug_trace(
-        run_id=f"session:{session_id[-12:]}",
-        hypothesis_id="H3,H4",
-        location="agent.py:run_agent_turn",
-        message="agent_runner_finished",
-        data={
-            "function_call_rounds": turn_count,
-            "function_response_count": function_response_count,
-            "hit_turn_cap": hit_turn_cap,
-            "forced_synthesis_used": forced_synthesis_used,
-            "final_response_present": final_response is not None,
-            "final_response_chars": len(final_response or ""),
-            "usage_record_count": len(usage_records),
-        },
-    )
     return AgentTurnResult(
         response=final_response,
         usage_records=usage_records,

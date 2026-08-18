@@ -1,9 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/base/buttons/button";
 import { Select, SelectItem } from "@/components/base/select/select";
 import { Switch } from "@/components/base/switch/switch";
+import {
+  type ArtifactOpenMode,
+  type AutonomyMode,
+  type NotificationPrefs,
+  fetchUserQuota,
+  fetchUserSettings,
+  patchAppSettings,
+  readAppSettings,
+} from "@/lib/user-settings";
+import type { PlanQuota } from "@/lib/message-types";
 import { PlanArtFlame } from "./plan-art-flame";
 import {
   SettingsCard,
@@ -11,46 +21,91 @@ import {
   SettingsSectionLabel,
 } from "./settings-rows";
 
-/**
- * Figma source: Board UI → "Settings/General" (node 4079:13037), the right
- * pane of the settings modal. Taller than the 614px modal, so the pane
- * scrolls within the shell.
- *
- * Sections, 24px apart:
- *   plan          "Current plan" chip, Ultra $149/mo, upgrade button, and the
- *                 artwork bleeding off the right edge under a radial fade
- *                 into the card background.
- *   limits        single row with a "Manage limits" button.
- *   pull requests two select rows (Review provider / PR destination).
- *   notifications four toggle rows, only "Critical requests" on by default.
- */
-
-/** Compact white select trigger (h 32, radius/lg) per the Figma rows. */
 const SELECT_TRIGGER = "h-8 w-auto gap-1 rounded-lg px-2 py-1.5";
 
-export function SettingsGeneral({ planArtSrc }: { planArtSrc?: string }) {
-  const [toggles, setToggles] = useState({
+function planHeadline(quota: PlanQuota | null): string {
+  if (!quota) return "Loading…";
+  const name = quota.plan_name || quota.plan?.name || "Starter";
+  const price = quota.price_usd ?? quota.plan?.price_usd ?? 0;
+  return price > 0 ? `${name} $${price}/mo` : name;
+}
+
+function creditsUsed(quota: PlanQuota | null): { used: number; limit: number } {
+  const used = quota?.credits?.used ?? quota?.used ?? 0;
+  const limit = quota?.credits?.limit ?? quota?.limit ?? 0;
+  return { used, limit };
+}
+
+export function SettingsGeneral({
+  planArtSrc,
+  onManageLimits,
+  onSaved,
+}: {
+  planArtSrc?: string;
+  onManageLimits?: () => void;
+  onSaved?: () => void;
+}) {
+  const [quota, setQuota] = useState<PlanQuota | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>("manual");
+  const [artifactOpenMode, setArtifactOpenMode] = useState<ArtifactOpenMode>("in_app");
+  const [toggles, setToggles] = useState<NotificationPrefs>({
     critical: true,
     system: false,
     sound: false,
-    dispatch: false,
   });
 
-  const setToggle = (key: keyof typeof toggles) => (value: boolean) =>
-    setToggles((t) => ({ ...t, [key]: value }));
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([fetchUserQuota(), fetchUserSettings()])
+      .then(([nextQuota, settings]) => {
+        if (cancelled) return;
+        const parsed = readAppSettings(settings);
+        setQuota(nextQuota);
+        setAutonomyMode(parsed.autonomyMode);
+        setArtifactOpenMode(parsed.artifactOpenMode);
+        setToggles(parsed.notifications);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load settings.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persist = async (partial: Parameters<typeof patchAppSettings>[0]) => {
+    setError(null);
+    try {
+      await patchAppSettings(partial);
+      onSaved?.();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save settings.");
+    }
+  };
+
+  const { used, limit } = creditsUsed(quota);
 
   return (
     <div className="flex w-full flex-col gap-6">
-      {/* Current plan */}
+      {error ? (
+        <div
+          role="alert"
+          className="rounded-2lg border border-status-rose-text/20 bg-status-rose-background px-3 py-2 text-body-2-regular text-status-rose-text"
+        >
+          {error}
+        </div>
+      ) : null}
+
       <div className="relative w-full overflow-hidden rounded-2xl bg-background-secondary-default">
-        {/* Artwork bleeding off the right edge, fading into the card bg.
-            Rendered through a WebGL shader: waving like a wind-torn flag with
-            a continuous burning-edge effect (see plan-art-flame.tsx). */}
         <div aria-hidden className="absolute -top-[11px] left-[328px] size-[277px]">
-          <PlanArtFlame
-            src={planArtSrc}
-            className="size-full object-cover"
-          />
+          <PlanArtFlame src={planArtSrc} className="size-full object-cover" />
           <div
             className="absolute inset-0"
             style={{
@@ -66,103 +121,127 @@ export function SettingsGeneral({ planArtSrc }: { planArtSrc?: string }) {
               Current plan
             </span>
             <div className="flex flex-col gap-0.5">
-              <p className="text-headline-medium text-text-primary">Ultra $149/mo</p>
+              <p className="text-headline-medium text-text-primary">{planHeadline(quota)}</p>
               <p className="text-body-2-regular text-text-secondary">
-                You are on 7x more usage than Regular.
+                {loading
+                  ? "Loading usage…"
+                  : `${used.toLocaleString()} of ${limit.toLocaleString()} credits used`}
               </p>
             </div>
           </div>
-          <Button variant="secondary" size="small" className="w-fit">
-            Upgrade to Max
+          <Button
+            variant="secondary"
+            size="small"
+            className="w-fit"
+            onClick={() => {
+              window.location.assign("/pricing");
+            }}
+          >
+            Upgrade
           </Button>
         </div>
       </div>
 
-      {/* Limits */}
       <SettingsCard>
-        <SettingsRow label="Limits" description="You are on 7x more usage than Premium">
-          <Button variant="secondary" size="small">
+        <SettingsRow
+          label="Limits"
+          description={
+            loading
+              ? "Loading credit balance…"
+              : `${Math.max(limit - used, 0).toLocaleString()} credits remaining`
+          }
+        >
+          <Button variant="secondary" size="small" onClick={onManageLimits}>
             Manage limits
           </Button>
         </SettingsRow>
       </SettingsCard>
 
-      {/* Pull Requests */}
       <div className="flex w-full flex-col gap-2">
-        <SettingsSectionLabel>Pull Requests</SettingsSectionLabel>
+        <SettingsSectionLabel>Agent defaults</SettingsSectionLabel>
         <SettingsCard>
           <SettingsRow
-            label="Review provider"
-            description="Select Github or other providers for reviews"
+            label="Autonomy"
+            description="Ask before sensitive tools, or run them automatically"
           >
             <Select
-              aria-label="Review provider"
-              defaultSelectedKey="github"
+              aria-label="Autonomy"
+              selectedKey={autonomyMode}
+              onSelectionChange={(key) => {
+                if (key !== "manual" && key !== "auto") return;
+                setAutonomyMode(key);
+                void persist({ autonomyMode: key });
+              }}
               triggerClassName={SELECT_TRIGGER}
             >
-              <SelectItem id="github">GitHub</SelectItem>
-              <SelectItem id="gitlab">GitLab</SelectItem>
-              <SelectItem id="bitbucket">Bitbucket</SelectItem>
+              <SelectItem id="manual">Manual</SelectItem>
+              <SelectItem id="auto">Auto</SelectItem>
             </Select>
           </SettingsRow>
           <SettingsRow
-            label="PR destination"
-            description="Open pull request links inside your app"
+            label="Open artifacts"
+            description="Where generated files and links should open"
           >
             <Select
-              aria-label="PR destination"
-              defaultSelectedKey="inside"
+              aria-label="Open artifacts"
+              selectedKey={artifactOpenMode}
+              onSelectionChange={(key) => {
+                if (key !== "in_app" && key !== "browser") return;
+                setArtifactOpenMode(key);
+                void persist({ artifactOpenMode: key });
+              }}
               triggerClassName={SELECT_TRIGGER}
             >
-              <SelectItem id="inside">Inside BoardUI</SelectItem>
+              <SelectItem id="in_app">Inside CoComputer</SelectItem>
               <SelectItem id="browser">In the browser</SelectItem>
             </Select>
           </SettingsRow>
         </SettingsCard>
       </div>
 
-      {/* Notifications */}
       <div className="flex w-full flex-col gap-2">
         <SettingsSectionLabel>Notifications</SettingsSectionLabel>
         <SettingsCard>
           <SettingsRow
             label="Critical requests"
-            description="Get notified when the mode needs to make a critical decision"
+            description="Get notified when the agent needs a critical decision"
           >
             <Switch
               aria-label="Critical requests"
               isSelected={toggles.critical}
-              onChange={setToggle("critical")}
+              onChange={(value) => {
+                const next = { ...toggles, critical: value };
+                setToggles(next);
+                void persist({ notifications: next });
+              }}
             />
           </SettingsRow>
           <SettingsRow
             label="System notifications"
-            description="Show fundamental notifications when an agent completes a task"
+            description="Show a notification when an agent completes a task"
           >
             <Switch
               aria-label="System notifications"
               isSelected={toggles.system}
-              onChange={setToggle("system")}
+              onChange={(value) => {
+                const next = { ...toggles, system: value };
+                setToggles(next);
+                void persist({ notifications: next });
+              }}
             />
           </SettingsRow>
           <SettingsRow
             label="Completion sound"
-            description="Sound effect a task is completed"
+            description="Play a sound when a task is completed"
           >
             <Switch
               aria-label="Completion sound"
               isSelected={toggles.sound}
-              onChange={setToggle("sound")}
-            />
-          </SettingsRow>
-          <SettingsRow
-            label="Dispatch alerts"
-            description="Push notification on your phone when BoardUI messages you"
-          >
-            <Switch
-              aria-label="Dispatch alerts"
-              isSelected={toggles.dispatch}
-              onChange={setToggle("dispatch")}
+              onChange={(value) => {
+                const next = { ...toggles, sound: value };
+                setToggles(next);
+                void persist({ notifications: next });
+              }}
             />
           </SettingsRow>
         </SettingsCard>

@@ -52,6 +52,12 @@ export type ToolInvocation = {
     errorCode?: string;
     retryReason?: string;
     latencyMs?: number;
+    /**
+     * Full normalized tool payload (`status`/`summary`/`metadata`). `output` is
+     * only a human-readable summary line, so rich cards (search results,
+     * artifacts) must read their structured data from here.
+     */
+    resultSummary?: Record<string, unknown>;
   };
   callTs: number;
   status: "running" | "completed" | "failed";
@@ -70,7 +76,23 @@ export type GroupedEvent =
       delayMs?: number;
       ts: number;
     }
-  | { kind: "thinking"; text: string; ts: number };
+  | { kind: "thinking"; text: string; ts: number }
+  | {
+      kind: "bg_progress";
+      taskId?: string;
+      progress?: number;
+      message: string;
+      complete?: boolean;
+      success?: boolean;
+      ts: number;
+    }
+  | {
+      kind: "subagent_status";
+      role?: string;
+      status: "started" | "progress" | "completed" | "failed";
+      detail: string;
+      ts: number;
+    };
 
 export type TaskGroup = {
   id: string;
@@ -139,7 +161,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
   }
 
   for (const event of events) {
-    if (event.type.startsWith("bg_task") || FILTERED_TYPES.has(event.type)) {
+    if (FILTERED_TYPES.has(event.type)) {
       continue;
     }
 
@@ -248,6 +270,10 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
       const output = sanitizeDisplayText(event.output) || "Success";
       const stepId = typeof event.step_id === "string" ? event.step_id : undefined;
       const status = typeof event.status === "string" ? event.status : "success";
+      const resultSummary =
+        event.result_summary && typeof event.result_summary === "object"
+          ? (event.result_summary as Record<string, unknown>)
+          : undefined;
 
       const queue = pendingTools.get(tool);
       const matchedByStep = stepId ? pendingToolsByStep.get(stepId) : undefined;
@@ -267,6 +293,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
             typeof event.retry_reason === "string" ? event.retry_reason : undefined,
           latencyMs:
             typeof event.latency_ms === "number" ? event.latency_ms : undefined,
+          resultSummary,
         };
         invocation.status = ["error", "failed", "cancelled", "denied"].includes(status)
           ? "failed"
@@ -279,7 +306,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           kind: "tool_invocation",
           tool,
           args: {},
-          result: { output, ts: event.ts },
+          result: { output, ts: event.ts, resultSummary },
           callTs: event.ts,
           status: ["error", "failed", "cancelled", "denied"].includes(status)
             ? "failed"
@@ -351,6 +378,71 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         kind: "screenshot",
         image_b64: typeof event.image_b64 === "string" ? event.image_b64 : undefined,
         analysis: typeof event.analysis === "string" ? event.analysis : undefined,
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (event.type === "bg_task_progress" || event.type === "bg_task_complete") {
+      if (!currentTask) {
+        taskIndex++;
+        currentTask = {
+          id: `task-${taskIndex}-${event.ts}`,
+          title: "Background task",
+          status: "running",
+          steps: [],
+          ts: event.ts,
+        };
+      }
+      const complete = event.type === "bg_task_complete";
+      const message = complete
+        ? String(event.result || (event.success ? "Background task finished." : "Background task failed."))
+        : String(event.message || "Background task running...");
+      currentTask.steps.push({
+        kind: "bg_progress",
+        taskId: typeof event.task_id === "string" ? event.task_id : undefined,
+        progress: typeof event.progress === "number" ? event.progress : undefined,
+        message,
+        complete,
+        success: typeof event.success === "boolean" ? event.success : undefined,
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (
+      event.type === "subagent_started" ||
+      event.type === "subagent_progress" ||
+      event.type === "subagent_completed" ||
+      event.type === "subagent_failed"
+    ) {
+      if (!currentTask) {
+        taskIndex++;
+        currentTask = {
+          id: `task-${taskIndex}-${event.ts}`,
+          title: "Background agents",
+          status: "running",
+          steps: [],
+          ts: event.ts,
+        };
+      }
+      const status =
+        event.type === "subagent_started"
+          ? "started"
+          : event.type === "subagent_progress"
+            ? "progress"
+            : event.type === "subagent_completed"
+              ? "completed"
+              : "failed";
+      const detail = String(
+        event.detail || event.result || event.error ||
+          (status === "started" ? "started" : status === "completed" ? "finished" : "working..."),
+      );
+      currentTask.steps.push({
+        kind: "subagent_status",
+        role: typeof event.role === "string" ? event.role : undefined,
+        status,
+        detail,
         ts: event.ts,
       });
       continue;

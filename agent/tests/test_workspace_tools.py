@@ -335,6 +335,76 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
             "item_index must be at least 1. Index is 1-based. Please retry with a valid index.",
         )
 
+    async def test_update_todo_item_returns_not_found_when_todo_missing(self) -> None:
+        result = await update_todo_item(1, "in_progress", "starting")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "NOT_FOUND")
+        self.assertEqual(
+            result["summary"],
+            "todo.md does not exist yet. Call write_todo_list or prepare_task_workspace first.",
+        )
+        self.assertEqual(
+            result["suggested_alternatives"],
+            ["write_todo_list", "prepare_task_workspace"],
+        )
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_update_todo_item_sanitizes_sandbox_traceback(self) -> None:
+        await prepare_task_workspace("Research")
+        await write_todo_list(["Gather logs"])
+        traceback_stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/lib/python3.10/pathlib.py", line 1134, in read_text\n'
+            "FileNotFoundError: [Errno 2] No such file or directory: 'todo.md'\n"
+        )
+
+        with patch.object(
+            self.sandbox,
+            "read_text_file",
+            side_effect=RuntimeError(traceback_stderr),
+        ):
+            result = await update_todo_item(1, "done")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["summary"], "Failed to update the todo item.")
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_read_workspace_file_returns_not_found_when_missing(self) -> None:
+        result = await read_workspace_file("missing.md")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "NOT_FOUND")
+        self.assertIn("missing.md does not exist in the workspace", result["summary"])
+        self.assertEqual(
+            result["suggested_alternatives"],
+            ["list_workspace_files", "prepare_task_workspace"],
+        )
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_read_workspace_file_sanitizes_sandbox_traceback(self) -> None:
+        await prepare_task_workspace("Research")
+        traceback_stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/lib/python3.10/pathlib.py", line 1134, in read_text\n'
+            "FileNotFoundError: [Errno 2] No such file or directory: 'notes.md'\n"
+        )
+
+        with patch.object(
+            self.sandbox,
+            "read_text_file",
+            side_effect=RuntimeError(traceback_stderr),
+        ):
+            result = await read_workspace_file("notes.md")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["summary"], "Failed to read the workspace file.")
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
     async def test_write_todo_list_returns_error_for_empty_items(self) -> None:
         await prepare_task_workspace("Research")
 
@@ -370,6 +440,38 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.assertIn("blocked automated access", result["summary"])
         self.assertEqual(result["metadata"]["status_code"], 401)
         self.assertEqual(result["metadata"]["url"], blocked_url)
+
+    async def test_scrape_web_page_fails_fast_on_http_504(self) -> None:
+        await prepare_task_workspace("Research")
+        url = "https://data.cityofnewyork.us/api/views/43nn-pn8j/rows.csv"
+        response = FakeHttpResponse(url=url, status_code=504, text="Gateway Timeout")
+
+        with patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)):
+            result = await scrape_web_page(url, output_basename="nyc-restaurant-sample")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("HTTP 504", result["summary"])
+        self.assertNotIn("Stream removed", result["summary"])
+        self.assertEqual(result["error_code"], "HTTP_504")
+
+    async def test_scrape_web_page_hides_google_deadline_on_save(self) -> None:
+        await prepare_task_workspace("Research")
+        url = "https://example.com/page"
+        response = FakeHttpResponse(url=url, status_code=200, text="<html><title>Ok</title></html>")
+
+        with (
+            patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)),
+            patch(
+                "nexus.tools.web.save_source_artifact",
+                side_effect=RuntimeError("504 Stream removed (Deadline Exceeded)"),
+            ),
+        ):
+            result = await scrape_web_page(url, output_basename="ok-page")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "TIMEOUT")
+        self.assertNotIn("Stream removed", result["summary"])
+        self.assertNotIn("Deadline Exceeded", result["summary"])
 
 
 class WorkspaceRootRetryTests(IsolatedAsyncioTestCase):

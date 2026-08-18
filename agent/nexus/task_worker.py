@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import socket
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import Any
 from nexus.agent_turn_runner import AgentTurnRequest, AgentTurnRunner
 from nexus.config import settings
 from nexus.dependencies import get_production_task_repository, get_session_manager
+from nexus.production_tasks import TERMINAL_TASK_STATUSES, lease_is_live
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,14 @@ class TaskWorker:
             claim_token=claim_token,
         )
         if not claimed:
+            # A skipped claim produces no events at all, so the UI would wait on
+            # a run that will never execute. Record why it was rejected and, when
+            # nobody else owns the run, settle it so the client stops waiting.
+            await self._report_claim_rejection(
+                repo=repo,
+                task_id=task_id,
+                run_id=run_id,
+            )
             return WorkerRunResult(
                 "skipped",
                 "Run is stale, already leased, cancelled, missing, or complete.",
@@ -210,6 +220,19 @@ class TaskWorker:
                 run_id,
             )
             summary = str(exc) or "Worker failed."
+            try:
+                current = await repo.get_run(
+                    task_id=task_id,
+                    run_id=run_id,
+                    owner_id=claimed.owner_id,
+                )
+            except Exception:
+                current = None
+            if (
+                current is not None
+                and str(getattr(current, "status", "") or "") in TERMINAL_TASK_STATUSES
+            ):
+                return WorkerRunResult(str(current.status), summary)
             retried = await self._retry_claimed_run(
                 repo=repo,
                 claimed=claimed,
@@ -254,6 +277,105 @@ class TaskWorker:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _report_claim_rejection(
+        self,
+        *,
+        repo,
+        task_id: str,
+        run_id: str,
+    ) -> None:
+        """Explain a rejected claim; never raise from the diagnostic path.
+
+        When the rejection means the run is orphaned — nobody holds a live lease
+        and it is not already terminal — the run is failed and a terminal
+        ``worker_failed`` event is appended. Without that the client polls a
+        ``queued`` run forever and shows an endless thinking state.
+        """
+        try:
+            task = await repo.get_task(task_id)
+            run = (
+                await repo.get_run(
+                    task_id=task_id,
+                    run_id=run_id,
+                    owner_id=task.owner_id,
+                )
+                if task
+                else None
+            )
+        except Exception:
+            logger.warning(
+                "Durable worker could not claim %s/%s and failed to read its state",
+                task_id,
+                run_id,
+                exc_info=True,
+            )
+            return
+
+        if run is None:
+            logger.warning(
+                "Durable worker could not claim %s/%s: run or task missing",
+                task_id,
+                run_id,
+            )
+            return
+
+        status = str(getattr(run, "status", "") or "")
+        lease_owner = getattr(run, "lease_owner", None)
+        lease_expires_at = getattr(run, "lease_expires_at", None)
+        cancel_requested = bool(getattr(task, "cancel_requested", False))
+
+        logger.warning(
+            "Durable worker could not claim %s/%s: status=%s lease_owner=%s "
+            "lease_expires_at=%s claim_generation=%s cancel_requested=%s",
+            task_id,
+            run_id,
+            status or "?",
+            lease_owner,
+            lease_expires_at,
+            getattr(run, "claim_generation", None),
+            cancel_requested,
+        )
+
+        if status in TERMINAL_TASK_STATUSES or cancel_requested:
+            # The run already reached (or is reaching) a terminal state and the
+            # owning path emits its own events.
+            return
+        if lease_owner and lease_is_live(lease_expires_at):
+            # Another worker legitimately owns this run.
+            return
+
+        reason = (
+            "This run could not be started by any worker "
+            f"(state: {status or 'unknown'}). Please send the request again."
+        )
+        try:
+            await repo.finish_run(
+                task_id=task_id,
+                run_id=run_id,
+                status="failed",
+                summary=reason,
+                error=reason,
+            )
+            await repo.append_event(
+                task_id=task_id,
+                owner_id=task.owner_id,
+                run_id=run_id,
+                event_type="worker_failed",
+                payload={
+                    "worker_id": self.worker_id,
+                    "reason": reason,
+                    "error_code": "RUN_NOT_CLAIMABLE",
+                    "retryable": False,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to settle unclaimable durable run %s/%s",
+                task_id,
+                run_id,
+                exc_info=True,
+            )
 
     async def _lease_heartbeat(
         self,

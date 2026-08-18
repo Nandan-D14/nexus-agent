@@ -15,6 +15,21 @@ from nexus.sandbox_components.base import SandboxComponent
 logger = logging.getLogger("nexus.sandbox")
 
 
+def raise_sandbox_io_error(path: str, stderr: str | None, *, action: str) -> None:
+    """Raise a short I/O error; never forward raw sandbox Python tracebacks."""
+    text = (stderr or "").strip()
+    lowered = text.lower()
+    missing = (
+        "filenotfounderror" in lowered
+        or "no such file or directory" in lowered
+        or "enosent" in lowered
+    )
+    if missing:
+        noun = "Directory" if action.startswith("list") else "File"
+        raise FileNotFoundError(f"{noun} not found: {path}")
+    raise RuntimeError(f"Failed to {action} {path}")
+
+
 class SandboxFiles(SandboxComponent):
 
     def ensure_directory(self, path: str) -> None:
@@ -102,7 +117,7 @@ class SandboxFiles(SandboxComponent):
         )
         result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
         if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
+            raise_sandbox_io_error(path, result.get("stderr"), action="read file")
         return base64.b64decode(str(result.get("stdout") or ""))
 
     def read_text_file(self, path: str) -> str:
@@ -115,7 +130,7 @@ class SandboxFiles(SandboxComponent):
         )
         result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
         if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
+            raise_sandbox_io_error(path, result.get("stderr"), action="read file")
         return str(result.get("stdout") or "")
 
     def path_exists(self, path: str) -> bool:
@@ -137,7 +152,63 @@ class SandboxFiles(SandboxComponent):
         )
         result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
         if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to list directory {path}")
+            raise_sandbox_io_error(path, result.get("stderr"), action="list directory")
+        raw = str(result.get("stdout") or "").strip()
+        if not raw:
+            return []
+        return list(json.loads(raw))
+
+    def list_tree(
+        self,
+        path: str,
+        *,
+        max_depth: int = 8,
+        max_entries: int = 2000,
+    ) -> list[dict[str, object]]:
+        """Return a recursive directory listing relative to ``path``.
+
+        Each entry: ``name``, ``relative_path``, ``is_dir``, ``size``.
+        Skips common noise dirs and caps depth/count for UI safety.
+        """
+        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
+        script = f"""
+import base64, json, pathlib
+root = pathlib.Path(base64.b64decode('{path_b64}').decode('utf-8'))
+max_depth = {int(max_depth)}
+max_entries = {int(max_entries)}
+skip = {{'__pycache__', '.git', 'node_modules', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache'}}
+entries = []
+
+def walk(current, depth):
+    if len(entries) >= max_entries or depth > max_depth:
+        return
+    try:
+        children = sorted(current.iterdir(), key=lambda i: (not i.is_dir(), i.name.lower()))
+    except (OSError, PermissionError):
+        return
+    for item in children:
+        if len(entries) >= max_entries:
+            break
+        name = item.name
+        if name in skip or name.startswith('.'):
+            continue
+        try:
+            is_dir = item.is_dir()
+            size = 0 if is_dir else (item.stat().st_size if item.exists() else 0)
+        except (OSError, PermissionError):
+            continue
+        rel = str(item.relative_to(root)).replace('\\\\', '/')
+        entries.append({{'name': name, 'relative_path': rel, 'is_dir': is_dir, 'size': size}})
+        if is_dir:
+            walk(item, depth + 1)
+
+if root.exists() and root.is_dir():
+    walk(root, 0)
+print(json.dumps(entries))
+"""
+        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
+        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
+            raise RuntimeError(result.get("stderr") or f"Failed to list tree {path}")
         raw = str(result.get("stdout") or "").strip()
         if not raw:
             return []

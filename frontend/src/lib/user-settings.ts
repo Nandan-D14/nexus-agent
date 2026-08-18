@@ -6,6 +6,7 @@
 "use client";
 
 import { authenticatedFetch, readApiError } from "./api-client";
+import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "./message-types";
 
 export type GeminiProvider = "apiKey" | "vertex";
 
@@ -37,6 +38,120 @@ export type UserSettingsUpdatePayload = {
     accessCode?: string | null;
   };
 };
+
+export type AutonomyMode = "manual" | "auto";
+export type ArtifactOpenMode = "in_app" | "browser";
+
+export type NotificationPrefs = {
+  critical: boolean;
+  system: boolean;
+  sound: boolean;
+};
+
+export type ProfilePrefs = {
+  firstName: string;
+  lastName: string;
+};
+
+export type AppSettingsBlob = {
+  notifications?: NotificationPrefs;
+  profile?: ProfilePrefs;
+  agentRules?: string;
+  autonomyMode?: AutonomyMode;
+  artifactOpenMode?: ArtifactOpenMode;
+};
+
+export const DEFAULT_NOTIFICATIONS: NotificationPrefs = {
+  critical: true,
+  system: false,
+  sound: false,
+};
+
+const DEFAULT_PROFILE: ProfilePrefs = { firstName: "", lastName: "" };
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function asBool(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+export function readAppSettings(data: UserSettingsResponse): Required<AppSettingsBlob> {
+  const raw = asRecord(data.settings);
+  const notifications = asRecord(raw.notifications);
+  const profile = asRecord(raw.profile);
+  const autonomy = asString(raw.autonomyMode);
+  const artifactOpen = asString(raw.artifactOpenMode);
+  return {
+    notifications: {
+      critical: asBool(notifications.critical, DEFAULT_NOTIFICATIONS.critical),
+      system: asBool(notifications.system, DEFAULT_NOTIFICATIONS.system),
+      sound: asBool(notifications.sound, DEFAULT_NOTIFICATIONS.sound),
+    },
+    profile: {
+      firstName: asString(profile.firstName),
+      lastName: asString(profile.lastName),
+    },
+    agentRules: asString(raw.agentRules),
+    autonomyMode: autonomy === "auto" ? "auto" : "manual",
+    artifactOpenMode: artifactOpen === "browser" ? "browser" : "in_app",
+  };
+}
+
+export async function patchAppSettings(
+  partial: AppSettingsBlob,
+): Promise<UserSettingsResponse> {
+  const current = await fetchUserSettings();
+  const parsed = readAppSettings(current);
+  const next: Required<AppSettingsBlob> = {
+    ...parsed,
+    ...partial,
+    notifications: partial.notifications
+      ? { ...parsed.notifications, ...partial.notifications }
+      : parsed.notifications,
+    profile: partial.profile ? { ...parsed.profile, ...partial.profile } : parsed.profile,
+  };
+  return updateUserSettings({
+    settings: {
+      ...current.settings,
+      notifications: next.notifications,
+      profile: next.profile,
+      agentRules: next.agentRules,
+      autonomyMode: next.autonomyMode,
+      artifactOpenMode: next.artifactOpenMode,
+    },
+  });
+}
+
+export async function fetchUserQuota(): Promise<PlanQuota> {
+  const response = await authenticatedFetch("/api/v1/user/quota");
+  if (!response.ok) {
+    const error = await readApiError(response);
+    throw new Error(error.message);
+  }
+  const body = (await response.json()) as Partial<PlanQuota>;
+  return {
+    ...DEFAULT_PLAN_QUOTA,
+    ...body,
+    plan: body.plan ?? DEFAULT_PLAN_QUOTA.plan,
+    credits: body.credits ?? DEFAULT_PLAN_QUOTA.credits,
+    tokens: body.tokens ?? DEFAULT_PLAN_QUOTA.tokens,
+  };
+}
+
+export function splitDisplayName(name: string | null | undefined): ProfilePrefs {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { ...DEFAULT_PROFILE };
+  if (parts.length === 1) return { firstName: parts[0], lastName: "" };
+  return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+}
 
 export function requiresByokSetup(data: UserSettingsResponse): boolean {
   return data.requireByok && data.byok.missing.length > 0;

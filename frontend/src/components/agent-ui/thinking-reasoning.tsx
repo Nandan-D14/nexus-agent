@@ -87,10 +87,6 @@ export function ThinkingReasoning({
   const done = !isActive && !holdOpen;
   const expanded = isActive || holdOpen || open;
 
-  // #region agent log
-  fetch('http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1a4bff'},body:JSON.stringify({sessionId:'1a4bff',runId:'pre-fix',hypothesisId:'C',location:'thinking-reasoning.tsx:render',message:'ThinkingReasoning state',data:{isActive,holdOpen,open,done,expanded,chunkCount:chunks.length,textLen:text.length,elapsedS,startedAt,endedAt:endedAt??null},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-
   const onScroll = () => {
     const el = viewportRef.current;
     if (!el) return;

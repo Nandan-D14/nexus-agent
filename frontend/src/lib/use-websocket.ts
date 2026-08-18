@@ -45,11 +45,22 @@ export interface UseWebSocketReturn {
    * starts after already-applied events and does not double-apply.
    */
   seedDurableCursor: (lastSeq: number) => void;
+  /**
+   * True once automatic reconnection has given up. The run may still be alive
+   * on the server, so the UI must surface this instead of waiting forever.
+   */
+  connectionLost: boolean;
+  /** Reset the reconnect budget and dial again (user-initiated retry). */
+  reconnect: () => void;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
+/** Replay blocks live frames, so it must never hang the stream indefinitely. */
+const REPLAY_TIMEOUT_MS = 10_000;
+const REPLAY_PAGE_LIMIT = 200;
+const REPLAY_MAX_PAGES = 50;
 
 export type DurableReplayEvent = {
   event_id?: string;
@@ -133,6 +144,7 @@ export function useWebSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const [readyState, setReadyState] = useState<ReadyStateValue>(ReadyState.CLOSED);
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
+  const [connectionLost, setConnectionLost] = useState(false);
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
   const onBinaryMessageRef = useRef<((data: ArrayBuffer) => void) | null>(null);
@@ -204,8 +216,17 @@ export function useWebSocket(
       seenEventKeysRef.current.add(key);
     }
 
-    if (typeof message.seq === "number" && Number.isFinite(message.seq)) {
-      lastSeqRef.current = Math.max(lastSeqRef.current, message.seq);
+    const seq =
+      typeof message.seq === "number" && Number.isFinite(message.seq) ? message.seq : null;
+    if (seq !== null) {
+      // The cursor marks everything already folded into the view, either by the
+      // load-time hydrate or by an earlier frame. A server that re-attaches to a
+      // durable run streams its log from the beginning because it cannot know
+      // this cursor, so anything at or below it is a duplicate.
+      if (seq > 0 && seq <= lastSeqRef.current) {
+        return;
+      }
+      lastSeqRef.current = Math.max(lastSeqRef.current, seq);
     }
 
     onJsonMessageRef.current?.(message);
@@ -220,20 +241,45 @@ export function useWebSocket(
 
   const replayMissedEvents = useCallback(
     async (taskId: string, afterSeq: number) => {
-      const response = await authenticatedFetch(
-        `/api/v1/tasks/${encodeURIComponent(taskId)}/events?after_seq=${afterSeq}`,
-      );
-      if (!response.ok) {
-        return;
-      }
-      const body = (await response.json().catch(() => null)) as DurableReplayResponse | null;
-      const replayed = Array.isArray(body?.events) ? body.events : [];
-      replayed
-        .map(replayEventToMessage)
-        .filter((message): message is WsMessage => message !== null)
-        .forEach(dispatchJsonMessage);
-      if (typeof body?.last_seq === "number" && Number.isFinite(body.last_seq)) {
-        lastSeqRef.current = Math.max(lastSeqRef.current, body.last_seq);
+      let cursor = afterSeq;
+
+      for (let page = 0; page < REPLAY_MAX_PAGES; page += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REPLAY_TIMEOUT_MS);
+        let body: DurableReplayResponse | null = null;
+        try {
+          const response = await authenticatedFetch(
+            `/api/v1/tasks/${encodeURIComponent(taskId)}/events?after_seq=${cursor}&limit=${REPLAY_PAGE_LIMIT}`,
+            { signal: controller.signal },
+          );
+          if (!response.ok) {
+            return;
+          }
+          body = (await response.json().catch(() => null)) as DurableReplayResponse | null;
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const replayed = Array.isArray(body?.events) ? body.events : [];
+        replayed
+          .map(replayEventToMessage)
+          .filter((message): message is WsMessage => message !== null)
+          .forEach(dispatchJsonMessage);
+
+        const lastSeq =
+          typeof body?.last_seq === "number" && Number.isFinite(body.last_seq)
+            ? body.last_seq
+            : cursor;
+        lastSeqRef.current = Math.max(lastSeqRef.current, lastSeq);
+
+        const hasMore =
+          typeof body?.has_more === "boolean"
+            ? body.has_more
+            : replayed.length >= REPLAY_PAGE_LIMIT;
+        if (!hasMore || replayed.length === 0 || lastSeq <= cursor) {
+          return;
+        }
+        cursor = lastSeq;
       }
     },
     [dispatchJsonMessage],
@@ -273,6 +319,7 @@ export function useWebSocket(
     ws.onopen = () => {
       reconnectAttempts.current = 0;
       setReadyState(ReadyState.OPEN);
+      setConnectionLost(false);
 
       // Flush any frames queued while the socket was down (in order).
       if (pendingOutboundRef.current.length > 0) {
@@ -336,6 +383,7 @@ export function useWebSocket(
           message: event.reason || "WebSocket connection was closed.",
         });
         reconnectAttempts.current = MAX_RECONNECT_ATTEMPTS;
+        setConnectionLost(true);
         failBufferedSends();
         return;
       }
@@ -353,7 +401,12 @@ export function useWebSocket(
         }, delay);
       } else {
         // Reconnect budget exhausted (or intentionally disconnected): stop
-        // holding queued frames hostage so the UI can surface a retry.
+        // holding queued frames hostage so the UI can surface a retry. The run
+        // usually keeps executing server-side, so flag the dead socket instead
+        // of leaving the page waiting on events that can no longer arrive.
+        if (urlRef.current !== null) {
+          setConnectionLost(true);
+        }
         failBufferedSends();
       }
     };
@@ -390,6 +443,7 @@ export function useWebSocket(
     hasOpenedRef.current = false;
     replayInFlightRef.current = false;
     replayBufferRef.current = [];
+    setConnectionLost(false);
 
     if (url) {
       queueMicrotask(() => connect(url));
@@ -456,6 +510,16 @@ export function useWebSocket(
     lastSeqRef.current = Math.max(lastSeqRef.current, seq);
   }, []);
 
+  const reconnect = useCallback(() => {
+    if (!urlRef.current) {
+      return;
+    }
+    clearReconnectTimer();
+    reconnectAttempts.current = 0;
+    setConnectionLost(false);
+    connectRef.current(urlRef.current);
+  }, [clearReconnectTimer]);
+
   const isConnected = readyState === ReadyState.OPEN;
 
   return {
@@ -468,5 +532,7 @@ export function useWebSocket(
     onBinaryMessageRef,
     onJsonMessageRef,
     seedDurableCursor,
+    connectionLost,
+    reconnect,
   };
 }

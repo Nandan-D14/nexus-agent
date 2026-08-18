@@ -11,7 +11,11 @@ import os
 from typing import Any
 from google.adk.models.lite_llm import LiteLlm
 from nexus.config import settings
-from nexus.router_common import apply_tool_call_policy, repair_tool_call_ids
+from nexus.router_common import (
+    apply_request_timeout,
+    apply_tool_call_policy,
+    repair_tool_call_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +157,7 @@ def _normalize_qwen_request_kwargs(
         # Model Studio reasoning models reject required/object tool_choice. "auto"
         # still permits tool calls and avoids a provider-side 400.
         normalized["tool_choice"] = "auto"
-    return apply_tool_call_policy(normalized, tools)
+    return apply_request_timeout(apply_tool_call_policy(normalized, tools))
 
 def get_qwen_router():
     global _qwen_router

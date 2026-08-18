@@ -21,7 +21,7 @@ export type SearchCiteRef = {
 type ToolStepLike = {
   kind: string;
   tool?: string;
-  result?: { output?: string };
+  result?: { output?: string; resultSummary?: Record<string, unknown> };
 };
 
 type EventSegmentLike = {
@@ -69,6 +69,41 @@ export function normalizeSearchResults(values: unknown[]): SearchResult[] {
     .filter((item): item is SearchResult => Boolean(item?.url || item?.title));
 }
 
+function resultsArrayFrom(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const obj = objectValue(value);
+  if (!obj) return [];
+  const nested = obj.results ?? obj.data ?? obj.items;
+  return Array.isArray(nested) ? nested : [];
+}
+
+/**
+ * Pull search results out of a normalized tool payload.
+ *
+ * The backend returns `{ status, summary, metadata: { results: [...] } }`, so
+ * the hits live under `metadata`. Top-level keys are also accepted for
+ * payloads that were flattened upstream.
+ */
+export function parseSearchToolResultSummary(
+  tool: string,
+  resultSummary?: Record<string, unknown> | null,
+): SearchResult[] | null {
+  if (!isSearchTool(tool) || !resultSummary) return null;
+
+  const candidates = [
+    objectValue(resultSummary.metadata),
+    resultSummary,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const values = resultsArrayFrom(candidate);
+    if (values.length === 0) continue;
+    const results = normalizeSearchResults(values);
+    if (results.length > 0) return results;
+  }
+  return null;
+}
+
 /**
  * Parse tool output for web-search style tools.
  * Supports a plain JSON array or `{ results: [...] }` (tavily shape).
@@ -80,25 +115,30 @@ export function parseSearchToolOutput(
   if (!isSearchTool(tool) || !output?.trim()) return null;
 
   try {
-    const parsed: unknown = JSON.parse(output);
-    let values: unknown[] = [];
-
-    if (Array.isArray(parsed)) {
-      values = parsed;
-    } else {
-      const obj = objectValue(parsed);
-      if (obj) {
-        const nested = obj.results ?? obj.data ?? obj.items;
-        if (Array.isArray(nested)) values = nested;
-      }
-    }
-
+    const values = resultsArrayFrom(JSON.parse(output));
     if (values.length === 0) return null;
     const results = normalizeSearchResults(values);
     return results.length > 0 ? results : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve search results from whichever channel carried them: the structured
+ * `result_summary` (normal case) or a JSON `output` string (legacy / replay).
+ */
+export function resolveSearchResults(
+  tool: string,
+  options: {
+    output?: string | null;
+    resultSummary?: Record<string, unknown> | null;
+  },
+): SearchResult[] | null {
+  return (
+    parseSearchToolResultSummary(tool, options.resultSummary) ??
+    parseSearchToolOutput(tool, options.output)
+  );
 }
 
 function hostname(url: string): string {
@@ -126,7 +166,10 @@ export function collectSearchRefsFromEventSegments(
 
     for (const step of steps) {
       if (step.kind !== "tool_invocation" || !step.tool) continue;
-      const results = parseSearchToolOutput(step.tool, step.result?.output);
+      const results = resolveSearchResults(step.tool, {
+        output: step.result?.output,
+        resultSummary: step.result?.resultSummary,
+      });
       if (!results) continue;
 
       for (const result of results) {

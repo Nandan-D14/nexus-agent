@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from openai import AsyncOpenAI, OpenAI
 
 from nexus.config import settings
+from nexus.resilience import retry_sync
 
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,8 @@ class QwenVisionProvider:
         primary_model: str,
         fallback_models: tuple[str, ...] = (),
         timeout_seconds: float = 60.0,
+        attempts_per_model: int = 1,
+        retry_base_seconds: float = 1.0,
     ) -> None:
         if not api_key.strip():
             raise VisionAnalysisError("QWEN_API_KEY is required for screenshot analysis")
@@ -206,6 +209,8 @@ class QwenVisionProvider:
             timeout=timeout_seconds,
         )
         self.models = _parse_models(primary_model, fallback_models)
+        self._attempts_per_model = max(1, int(attempts_per_model))
+        self._retry_base_seconds = max(0.0, float(retry_base_seconds))
 
     def analyze(
         self,
@@ -239,7 +244,7 @@ class QwenVisionProvider:
                     to_model=model,
                     reason=reason,
                 )
-            try:
+            def _ground() -> ScreenObservation:
                 response = self._client.chat.completions.create(
                     model=model,
                     temperature=0,
@@ -261,9 +266,22 @@ class QwenVisionProvider:
                     height=height,
                     model=model,
                 )
+
+            try:
+                return retry_sync(
+                    _ground,
+                    attempts=self._attempts_per_model,
+                    base_delay=self._retry_base_seconds,
+                    label=f"qwen vision grounding ({model})",
+                )
             except Exception as exc:
                 errors.append(f"{model}: {type(exc).__name__}: {str(exc)[:240]}")
-                logger.warning("Qwen vision model %s failed", model, exc_info=True)
+                logger.warning(
+                    "Qwen vision model %s failed after %d attempt(s)",
+                    model,
+                    self._attempts_per_model,
+                    exc_info=True,
+                )
         raise VisionAnalysisError(
             "All Qwen vision models failed: " + " | ".join(errors)
         )
@@ -340,6 +358,9 @@ def create_vision_provider(
                 if model.strip()
             )
         ),
+        timeout_seconds=settings.vision_request_timeout_seconds,
+        attempts_per_model=settings.vision_attempts_per_model,
+        retry_base_seconds=settings.vision_retry_base_seconds,
     )
 
 

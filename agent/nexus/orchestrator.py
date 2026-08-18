@@ -29,6 +29,7 @@ from nexus.billing import calculate_screenshot_credits, calculate_usage_credits
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.mcp_client import build_mcp_adk_tools, redact_sensitive
 from nexus.runtime_config import SessionRuntimeConfig
+from nexus.resilience import is_remote_deadline_error
 from nexus.sandbox import SandboxDeadError
 from nexus.skills import build_enabled_skills_prompt
 from nexus.tools._context import (
@@ -66,7 +67,6 @@ from nexus.context_builder import (
     PRIORITY_TURN,
     TurnContextBuilder,
 )
-from nexus.debug_trace import emit_debug_trace
 from nexus.event_sink import (
     CompositeEventSink,
     build_session_event_sink,
@@ -109,6 +109,30 @@ _FINAL_SYNTHESIS_NUDGE = (
     "Write the final answer or summary for the user now, using only what has "
     "already been collected."
 )
+
+# Pending background children are not an advisory caveat: delivering
+# agent_complete would mark the durable run finished and skip the worker's
+# wait-and-retry path in task_worker.py.
+_HARD_INCOMPLETE_ERROR_CODES = frozenset({"SUBAGENTS_PENDING"})
+
+
+def should_deliver_soft_veto(
+    *,
+    deliver_enabled: bool,
+    final_response: str | None,
+    status: str,
+    error_code: str,
+) -> bool:
+    """Return True when an unverified turn may still be delivered as success."""
+    if not deliver_enabled:
+        return False
+    if not (final_response and str(final_response).strip()):
+        return False
+    if status == "blocked":
+        return False
+    if error_code in _HARD_INCOMPLETE_ERROR_CODES:
+        return False
+    return True
 
 
 class _AgentStopped(Exception):
@@ -232,6 +256,14 @@ class NexusOrchestrator:
         self._agent_task: asyncio.Task | None = None
         self._stop_requested: bool = False
         self._ws_connected: bool = True
+        # Serializes turns on this session. Two overlapping ADK runs against the
+        # same session id corrupt the run state and the second one never
+        # produces events, which the client sees as a permanent "thinking".
+        self._turn_lock: asyncio.Lock = asyncio.Lock()
+        # True once the current turn reported a terminal run status. Guarantees
+        # the client always receives an end-of-turn signal, even on paths that
+        # bail out early.
+        self._turn_status_settled: bool = True
 
         # Voice is lazy — only connects when user explicitly starts mic
         self._voice_started = asyncio.Event()
@@ -245,6 +277,7 @@ class NexusOrchestrator:
         self._turn_tool_summaries: list[str] = []
         self._budget_stop_requested: bool = False
         self._budget_stop_reason: str = ""
+        self._turn_started_monotonic: float = 0.0
         self._workspace_path: str | None = None
         # ask_user: question_id -> future resolved by the user's ws reply
         self._pending_user_questions: dict[str, asyncio.Future] = {}
@@ -275,34 +308,12 @@ class NexusOrchestrator:
             f"{type(self).__name__!r} object has no attribute {name!r}"
         )
 
-    def _debug_run_id(self) -> str:
-        return getattr(self, "_current_run_id", None) or f"live:{id(self):x}"
-
     def restore_durable_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
         """Restore persisted control-loop state before a reclaimed run starts."""
         self._resume_checkpoint = dict(checkpoint or {})
 
     async def initialize(self, *, lazy_sandbox: bool = False) -> None:
         """Set up ADK session. Voice connection is deferred until user starts mic."""
-        # region agent log
-        emit_debug_trace(
-            run_id=self._debug_run_id(),
-            hypothesis_id="H1,H2,H3,H5",
-            location="orchestrator.py:190",
-            message="orchestrator_initialized",
-            data={
-                "planner_mode": "planner_v2",
-                "model_provider": settings.model_provider,
-                "planner_model": settings.planner_model,
-                "worker_model": settings.worker_model,
-                "task_worker_enabled": settings.task_worker_enabled,
-                "durable_run_bound": bool(self._durable_task_id),
-                "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
-                "e2b_key_available": bool(self.runtime_config.e2b_api_key),
-                "gemini_available": self.runtime_config.gemini_available,
-            },
-        )
-        # endregion agent log
         # Bind sandbox and bg task manager to tool context
         set_sandbox(self.session.sandbox)
         set_bg_task_manager(self.bg_task_manager)
@@ -1184,21 +1195,6 @@ class NexusOrchestrator:
 
             for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
                 try:
-                    # region agent log
-                    emit_debug_trace(
-                        run_id=self._debug_run_id(),
-                        hypothesis_id="H3",
-                        location="orchestrator.py:1052",
-                        message="agent_attempt_started",
-                        data={
-                            "model": task_model,
-                            "model_index": model_index,
-                            "attempt": attempt,
-                            "turn_cap": turn_cap,
-                            "planner_mode": "planner_v2",
-                        },
-                    )
-                    # endregion agent log
                     return await run_agent_turn(
                         runner=turn_runner,
                         session_service=self._session_service,
@@ -1212,6 +1208,8 @@ class NexusOrchestrator:
                 except _AgentStopped:
                     raise
                 except Exception as exc:
+                    if getattr(self, "_stop_requested", False):
+                        raise _AgentStopped() from exc
                     if not self._is_rate_limit_error(exc):
                         logger.error(
                             "Agent turn failed with unexpected error for session %s",
@@ -1702,36 +1700,14 @@ class NexusOrchestrator:
         sandbox = getattr(self.session, "sandbox", None)
         stream_url = getattr(self.session, "stream_url", None)
 
-        def trace_sandbox(outcome: str, error_type: str = "") -> None:
-            current_sandbox = getattr(self.session, "sandbox", None)
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H2",
-                location="orchestrator.py:1510",
-                message="sandbox_readiness",
-                data={
-                    "reason": reason,
-                    "outcome": outcome,
-                    "error_type": error_type,
-                    "sandbox_present": current_sandbox is not None,
-                    "sandbox_alive": bool(getattr(current_sandbox, "is_alive", False)),
-                    "stream_url_present": bool(getattr(self.session, "stream_url", None)),
-                    "activation_callback_bound": self._ensure_sandbox_ready_callback is not None,
-                },
-            )
-            # endregion agent log
-
         if sandbox is None:
             logger.warning("No sandbox attached for session %s while preparing %s", self.session.id, reason)
-            trace_sandbox("missing_sandbox")
             return False
         if sandbox.is_alive and stream_url:
             if not getattr(self, "_sandbox_ready_reported", False):
                 await self._send_json({"type": "sandbox_status", "status": "ready"})
                 await self._send_json({"type": "vnc_url", "url": stream_url})
                 self._sandbox_ready_reported = True
-            trace_sandbox("already_ready")
             return True
 
         await self._send_json({"type": "sandbox_status", "status": "connecting", "reason": reason})
@@ -1758,10 +1734,8 @@ class NexusOrchestrator:
             if getattr(self.session, "stream_url", None):
                 await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
             self._sandbox_ready_reported = True
-            trace_sandbox("activated")
             return True
         except Exception as exc:
-            trace_sandbox("activation_failed", type(exc).__name__)
             logger.exception("Sandbox activation failed for session %s", self.session.id)
             await self._send_json({
                 "type": "error",
@@ -1785,10 +1759,82 @@ class NexusOrchestrator:
         tool_ids: list[str] | None = None,
     ) -> None:
         """Wrap _run_agent in a cancellable task and await it."""
+        # `_ws_connected` doubles as a cooperative stop latch during a turn, so a
+        # single failed send or a transient socket blip leaves it false forever.
+        # Re-arm it here when the socket is genuinely open, otherwise every
+        # later turn on this connection would return without emitting anything
+        # and the client would sit on the thinking indicator indefinitely.
+        if not self._ws_connected and self._raw_ws_is_open():
+            logger.info(
+                "Re-arming stale WebSocket disconnect flag for session %s",
+                self.session.id,
+            )
+            self._ws_connected = True
         if not self._ws_connected:
-            logger.info("Skipping agent turn start for session %s because the WebSocket is disconnected", self.session.id)
+            logger.info(
+                "Skipping agent turn start for session %s because the WebSocket is disconnected",
+                self.session.id,
+            )
+            # Still settle the run so a reconnecting client (or the durable
+            # event log) sees a terminal state instead of an open turn.
+            await self._set_run_status("cancelled")
             return
+
+        if self._turn_lock.locked():
+            logger.info(
+                "Queuing agent turn for session %s behind the in-flight turn",
+                self.session.id,
+            )
+            await self._send_json({
+                "type": "agent_status",
+                "status": "queued",
+                "message": "Finishing the previous request first…",
+            })
+        try:
+            await asyncio.wait_for(
+                self._turn_lock.acquire(),
+                timeout=max(1.0, settings.turn_queue_wait_seconds),
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timed out waiting for the previous turn to finish on session %s",
+                self.session.id,
+            )
+            await self._send_json({
+                "type": "error",
+                "code": "TURN_BUSY",
+                "message": (
+                    "The previous request is still running and did not finish in time. "
+                    "Stop it and try again."
+                ),
+            })
+            await self._set_run_status("failed")
+            return
+
+        try:
+            await self._run_agent_turn_locked(
+                message,
+                source=source,
+                completion_request=completion_request,
+                connector_ids=connector_ids,
+                tool_ids=tool_ids,
+            )
+        finally:
+            self._turn_lock.release()
+
+    async def _run_agent_turn_locked(
+        self,
+        message: str,
+        *,
+        source: str,
+        completion_request: str | None = None,
+        connector_ids: list[str] | None = None,
+        tool_ids: list[str] | None = None,
+    ) -> None:
+        """Execute one agent turn. Callers must hold ``_turn_lock``."""
+        self._turn_status_settled = False
         self._stop_requested = False
+        self._turn_started_monotonic = time.monotonic()
         self._turn_screenshot_count = 0
         self._turn_tool_summaries = []
         self._tool_trace_steps = {}
@@ -1829,22 +1875,6 @@ class NexusOrchestrator:
         )
         set_tool_allowlist(allowlist)
         try:
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H1,H3,H5",
-                location="orchestrator.py:1602",
-                message="agent_turn_started",
-                data={
-                    "source": source,
-                    "input_chars": len(message),
-                    "websocket_connected": self._ws_connected,
-                    "durable_run_bound": bool(self._durable_task_id),
-                    "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
-                    "planner_mode": "planner_v2",
-                },
-            )
-            # endregion agent log
             # Persist ONLY the original user request in the user-visible step. The
             # composed `message` also carries the resume checkpoint, connector
             # context, and internal repair directives, which must never surface in
@@ -1865,7 +1895,26 @@ class NexusOrchestrator:
             self._agent_task = asyncio.create_task(
                 self._run_agent(message, completion_request=completion_request)
             )
-            result = await self._agent_task
+            turn_timeout = float(settings.agent_turn_timeout_seconds or 0)
+            if turn_timeout > 0:
+                # asyncio.shield keeps `_agent_task` cancellable by stop_agent
+                # while still bounding how long this turn can stay open.
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(self._agent_task),
+                        timeout=turn_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Agent turn exceeded %.0fs for session %s — cancelling",
+                        turn_timeout,
+                        self.session.id,
+                    )
+                    self._stop_requested = True
+                    self._agent_task.cancel()
+                    raise
+            else:
+                result = await self._agent_task
             # Defensive: a delivered-with-caveat turn is terminal success. Map any
             # legacy "completed_with_caveat" to the canonical "completed" so it is
             # never treated as a failure or retried.
@@ -1907,6 +1956,10 @@ class NexusOrchestrator:
                     status="cancelled",
                 )
                 await self._set_run_status("cancelled")
+                await self._finish_durable_run_if_bound(
+                    "cancelled",
+                    summary=str(result.get("summary") or "Turn cancelled."),
+                )
             else:
                 await self._fail_unfinished_tool_steps(status="failed", error=result.get("summary"))
                 await self._fail_step(
@@ -1915,6 +1968,65 @@ class NexusOrchestrator:
                     error=result.get("summary"),
                 )
                 await self._set_run_status("failed")
+                await self._finish_durable_run_if_bound(
+                    "failed",
+                    summary=str(result.get("summary") or "Turn failed."),
+                )
+        except asyncio.TimeoutError:
+            timeout_reason = (
+                "The request exceeded the maximum run time and was stopped. "
+                "Try a narrower request or split it into steps."
+            )
+            self._active_agent = "nexus_orchestrator"
+            self.last_turn_result = {
+                "status": "failed",
+                "summary": timeout_reason,
+                "final_response": "",
+                "verification": {
+                    "verified": False,
+                    "status": "failed",
+                    "error_code": "TURN_TIMEOUT",
+                    "retryable": False,
+                },
+            }
+            await self._fail_unfinished_tool_steps(status="failed", error=timeout_reason)
+            await self._fail_step(
+                self._current_turn_step_id,
+                detail=timeout_reason,
+                error=timeout_reason,
+                status="failed",
+            )
+            await self._send_json({
+                "type": "error",
+                "code": "TURN_TIMEOUT",
+                "message": timeout_reason,
+            })
+            await self._set_run_status("failed")
+            await self._finish_durable_run_if_bound("failed", summary=timeout_reason)
+        except _AgentStopped:
+            # Cooperative stop (user pressed stop, socket closed, or budget
+            # exhausted). Settle the run so the client leaves the thinking state.
+            stop_reason = (
+                "Stopped because the connection closed."
+                if not self._ws_connected
+                else "Stopped."
+            )
+            logger.info("Agent turn stopped for session %s: %s", self.session.id, stop_reason)
+            self._active_agent = "nexus_orchestrator"
+            self.last_turn_result = {
+                "status": "cancelled",
+                "summary": stop_reason,
+                "final_response": "",
+            }
+            await self._fail_unfinished_tool_steps(status="cancelled", error=stop_reason)
+            await self._fail_step(
+                self._current_turn_step_id,
+                detail=stop_reason,
+                error=stop_reason,
+                status="cancelled",
+            )
+            await self._set_run_status("cancelled")
+            await self._finish_durable_run_if_bound("cancelled", summary=stop_reason)
         except asyncio.CancelledError:
             cancel_reason = "WebSocket disconnected." if not self._ws_connected else "Stopped by user."
             if self._ws_connected:
@@ -1922,6 +2034,11 @@ class NexusOrchestrator:
             else:
                 logger.info("Agent turn cancelled after WebSocket disconnect for session %s", self.session.id)
             self._active_agent = "nexus_orchestrator"
+            self.last_turn_result = {
+                "status": "cancelled",
+                "summary": cancel_reason,
+                "final_response": "",
+            }
             await self._fail_unfinished_tool_steps(status="cancelled", error=cancel_reason)
             await self._fail_step(
                 self._current_turn_step_id,
@@ -1930,6 +2047,33 @@ class NexusOrchestrator:
                 status="cancelled",
             )
             await self._set_run_status("cancelled")
+            await self._finish_durable_run_if_bound("cancelled", summary=cancel_reason)
+        except Exception:
+            logger.exception(
+                "Agent turn raised an unexpected error for session %s",
+                self.session.id,
+            )
+            failure = "The request failed unexpectedly. Please try again."
+            self._active_agent = "nexus_orchestrator"
+            self.last_turn_result = {
+                "status": "failed",
+                "summary": failure,
+                "final_response": "",
+            }
+            await self._fail_unfinished_tool_steps(status="failed", error=failure)
+            await self._fail_step(
+                self._current_turn_step_id,
+                detail=failure,
+                error=failure,
+                status="failed",
+            )
+            await self._send_json({
+                "type": "error",
+                "code": "AGENT_TURN_ERROR",
+                "message": failure,
+            })
+            await self._set_run_status("failed")
+            await self._finish_durable_run_if_bound("failed", summary=failure)
         finally:
             from nexus.tools._context import clear_tool_allowlist
 
@@ -1938,6 +2082,23 @@ class NexusOrchestrator:
             self._tool_trace_steps = {}
             self._active_agent = "nexus_orchestrator"
             self._current_turn_step_id = None
+            # Last line of defence: a turn that ends without a terminal run
+            # status leaves the client waiting forever on the thinking state.
+            if not self._turn_status_settled:
+                logger.error(
+                    "Agent turn for session %s ended without a terminal status — settling as failed",
+                    self.session.id,
+                )
+                await self._send_json({
+                    "type": "error",
+                    "code": "TURN_NOT_SETTLED",
+                    "message": "The request ended unexpectedly. Please try again.",
+                })
+                await self._set_run_status("failed")
+                await self._finish_durable_run_if_bound(
+                    "failed",
+                    summary="The request ended unexpectedly. Please try again.",
+                )
 
     async def _run_agent(
         self,
@@ -1991,23 +2152,6 @@ class NexusOrchestrator:
             result = await self._run_agent_with_retry(message)
             for usage in result.usage_records:
                 await self._persist_token_usage(usage)
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H3,H4",
-                location="orchestrator.py:1700",
-                message="agent_turn_returned",
-                data={
-                    "error_present": bool(result.error),
-                    "error_type": type(result.error).__name__ if result.error else "",
-                    "response_present": result.response is not None,
-                    "response_chars": len(result.response or ""),
-                    "usage_record_count": len(result.usage_records),
-                    "sandbox_alive": bool(getattr(self.session.sandbox, "is_alive", False)),
-                    "will_use_missing_final_summary": result.response is None and not result.error,
-                },
-            )
-            # endregion agent log
 
             if self._current_thinking:
                 await self._persist_message(
@@ -2018,11 +2162,32 @@ class NexusOrchestrator:
                 self._current_thinking = ""
 
             if result.error:
+                if getattr(self, "_stop_requested", False):
+                    raise _AgentStopped()
                 logger.error(
                     "Agent turn returned an error result for session %s: %s",
                     self.session.id,
                     result.error,
                 )
+                if is_remote_deadline_error(result.error):
+                    summary = (
+                        "A model or storage request timed out. "
+                        "Try a narrower request or split it into steps."
+                    )
+                    await self._mark_summary(
+                        summary,
+                        status="error",
+                        error_code="TURN_TIMEOUT",
+                    )
+                    await self._send_json({
+                        "type": "error",
+                        "code": "TURN_TIMEOUT",
+                        "message": summary,
+                    })
+                    return {
+                        "status": "failed",
+                        "summary": summary,
+                    }
                 await self._mark_summary(
                     "Agent encountered an error processing your request.",
                     status="error",
@@ -2101,11 +2266,32 @@ class NexusOrchestrator:
                         final_response=final_response,
                     )
 
+            if (
+                not completion_verification.verified
+                and completion_verification.error_code == "SUBAGENTS_PENDING"
+            ):
+                completion_verification, final_response = await self._resolve_pending_subagents(
+                    request=completion_request if completion_request is not None else message,
+                    final_response=final_response,
+                )
+                if (
+                    not completion_verification.verified
+                    and completion_verification.error_code == "SUBAGENTS_PENDING"
+                ):
+                    await self._reconcile_todos_at_turn_end(mark_complete=False)
+                    return {
+                        "status": "partial",
+                        "summary": completion_verification.summary,
+                        "final_response": final_response or "",
+                        "verification": completion_verification.to_dict(),
+                    }
+
             if not completion_verification.verified:
-                soft_veto = (
-                    settings.deliver_answer_on_soft_veto
-                    and bool(final_response and final_response.strip())
-                    and completion_verification.status != "blocked"
+                soft_veto = should_deliver_soft_veto(
+                    deliver_enabled=settings.deliver_answer_on_soft_veto,
+                    final_response=final_response,
+                    status=completion_verification.status,
+                    error_code=completion_verification.error_code,
                 )
                 if soft_veto:
                     # Advisory veto with a real answer in hand: deliver the
@@ -2307,6 +2493,8 @@ class NexusOrchestrator:
             raise
 
         except Exception as exc:
+            if getattr(self, "_stop_requested", False):
+                raise _AgentStopped() from exc
             logger.exception("Agent turn failed")
             if self._current_thinking:
                 try:
@@ -2318,6 +2506,21 @@ class NexusOrchestrator:
                 except Exception:
                     pass
                 self._current_thinking = ""
+            if is_remote_deadline_error(exc):
+                summary = (
+                    "A model or storage request timed out. "
+                    "Try a narrower request or split it into steps."
+                )
+                await self._mark_summary(summary, status="error", error_code="TURN_TIMEOUT")
+                await self._send_json({
+                    "type": "error",
+                    "code": "TURN_TIMEOUT",
+                    "message": summary,
+                })
+                return {
+                    "status": "failed",
+                    "summary": summary,
+                }
             await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
             await self._send_json({
                 "type": "error",
@@ -2393,24 +2596,6 @@ class NexusOrchestrator:
                         "error_code": str(event_response_mapping.get("error_code") or ""),
                     }
                 )
-            # region agent log
-            emit_debug_trace(
-                run_id=self._debug_run_id(),
-                hypothesis_id="H3,H4",
-                location="orchestrator.py:1845",
-                message="agent_event_observed",
-                data={
-                    "author": str(author or "")[:80],
-                    "function_calls": [
-                        str(self._get_attr(call, "name", "tool_name") or "unknown")[:80]
-                        for call in function_calls[:8]
-                    ],
-                    "function_response_statuses": response_statuses[:8],
-                    "is_final_response": self._is_final_response(event),
-                    "part_count": len(event_parts),
-                },
-            )
-            # endregion agent log
 
             for fc in function_calls:
                 self._raise_if_agent_should_stop()
@@ -2961,6 +3146,78 @@ class NexusOrchestrator:
             lines.append(f"Why it stopped: {self._clip_text(self._budget_stop_reason, 240)}")
         lines.append("Continue if you want deeper research or more browsing.")
         return "\n".join(lines)
+
+    def _subagent_synthesis_nudge(self) -> str:
+        lines = [
+            "Background subagents have finished. Do NOT spawn new subagents. "
+            "Write the final answer for the user using their results and what "
+            "you already collected.",
+        ]
+        for record in self._subagent_supervisor.list()[:8]:
+            payload = record.payload()
+            snippet = str(payload.get("result") or payload.get("error") or "").strip()
+            if len(snippet) > 800:
+                snippet = snippet[:799].rstrip() + "…"
+            role = str(payload.get("role") or "worker")
+            status = str(payload.get("status") or "unknown")
+            lines.append(f"- {role} ({status}): {snippet or 'no result'}")
+        return "\n".join(lines)
+
+    async def _resolve_pending_subagents(
+        self,
+        *,
+        request: str,
+        final_response: str | None,
+    ) -> tuple[CompletionVerification, str | None]:
+        """Wait for running children, then synthesize if they settled."""
+        wait_seconds = min(
+            float(settings.subagent_parent_wait_seconds),
+            self._remaining_turn_seconds(),
+        )
+        await self._send_json({
+            "type": "agent_status",
+            "status": "waiting_subagents",
+            "message": "Waiting for background agents...",
+        })
+        if wait_seconds < 1.0:
+            logger.info(
+                "Skipping subagent wait for session %s; turn budget is exhausted",
+                self.session.id,
+            )
+        else:
+            try:
+                await self._subagent_supervisor.await_subagents(
+                    None,
+                    timeout_seconds=wait_seconds,
+                )
+            except Exception:
+                logger.exception(
+                    "Waiting for subagents failed for session %s",
+                    self.session.id,
+                )
+        verification = await self._verify_turn_completion(
+            request=request,
+            final_response=final_response,
+        )
+        if verification.error_code == "SUBAGENTS_PENDING":
+            await self._send_json({
+                "type": "agent_status",
+                "status": "waiting_subagents",
+                "message": "Background agents are still running...",
+            })
+            return verification, final_response
+
+        retry_result = await self._run_agent_with_retry(self._subagent_synthesis_nudge())
+        for usage in retry_result.usage_records:
+            await self._persist_token_usage(usage)
+        updated = final_response
+        if retry_result.response and retry_result.response.strip():
+            updated = retry_result.response
+        verification = await self._verify_turn_completion(
+            request=request,
+            final_response=updated,
+        )
+        return verification, updated
 
     async def _verify_turn_completion(
         self,
@@ -3537,8 +3794,60 @@ class NexusOrchestrator:
         )
         return False
 
+    _TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+    def _remaining_turn_seconds(self) -> float:
+        """Seconds left before the hard turn cap, minus a settle buffer."""
+        timeout = float(settings.agent_turn_timeout_seconds or 0)
+        parent_wait = float(settings.subagent_parent_wait_seconds)
+        if timeout <= 0:
+            return parent_wait
+        started = float(getattr(self, "_turn_started_monotonic", 0.0) or 0.0)
+        if started <= 0:
+            return parent_wait
+        return max(0.0, timeout - (time.monotonic() - started) - 45.0)
+
+    async def _finish_durable_run_if_bound(
+        self,
+        status: str,
+        *,
+        summary: str = "",
+    ) -> None:
+        """Settle the Firestore durable run so a new prompt is not blocked.
+
+        History ``_set_run_status`` does not update production_tasks. After a
+        timeout or cancel the worker may still see ``running`` and refuse the
+        next message with RUN_IN_PROGRESS.
+        """
+        repo = getattr(self, "production_task_repository", None)
+        task_id = getattr(self, "_durable_task_id", None)
+        run_id = getattr(self, "_durable_run_id", None)
+        if repo is None or not task_id or not run_id:
+            return
+        if status not in self._TERMINAL_RUN_STATUSES:
+            return
+        reason = summary or f"Agent turn {status}."
+        try:
+            await repo.finish_run(
+                task_id=task_id,
+                run_id=run_id,
+                status=status,
+                summary=reason,
+                error=reason if status in {"failed", "cancelled"} else None,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to settle durable run %s/%s as %s",
+                task_id,
+                run_id,
+                status,
+                exc_info=True,
+            )
+
     async def _set_run_status(self, status: str) -> None:
         self.session.run_status = status
+        if status in self._TERMINAL_RUN_STATUSES:
+            self._turn_status_settled = True
         if not self.history_repository or not self._current_run_id:
             await self._send_json({
                 "type": "run_status",
@@ -3899,6 +4208,12 @@ class NexusOrchestrator:
             metadata["result"] = clipped_result
 
         sources: list[dict[str, Any]] = [output_mapping]
+        # Normalized tool results carry their structured payload (search results,
+        # saved paths, urls) under `metadata`, so the hoist below must look there
+        # too or the workflow panel renders an empty card.
+        nested_metadata = output_mapping.get("metadata")
+        if isinstance(nested_metadata, dict):
+            sources.append(nested_metadata)
         detail = output_mapping.get("detail")
         if isinstance(detail, dict):
             sources.append(detail)

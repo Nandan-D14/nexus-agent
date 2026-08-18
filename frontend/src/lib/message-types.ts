@@ -178,8 +178,68 @@ export type WsMessage = WsEventMeta & (
       durable_task_id?: string;
       risk?: string;
     }
+  // Durable twin of permission_request, written to the task event log by the
+  // approval store. In worker-executed runs this is the ONLY approval signal
+  // that reaches the browser (the worker's own socket is a no-op), so it must
+  // render the same card. `task_id` here is the durable task, not the approval.
+  | {
+      type: "approval_requested";
+      approval_id: string;
+      description?: string;
+      risk?: string;
+      metadata?: Record<string, unknown>;
+    }
+  | {
+      type: "approval_resolved";
+      approval_id: string;
+      approved: boolean;
+      status?: string;
+      action_hash?: string;
+    }
+  // Durable worker died before (or instead of) producing a normal completion.
+  // Without this the client keeps waiting on a run that can never report back.
+  | { type: "worker_failed"; error?: string; attempt?: number; origin?: string; reason?: string; error_code?: string }
+  // Durable lifecycle: the turn was accepted onto the queue, claimed, or the
+  // worker released it. `worker_finished` is terminal for the run.
+  | { type: "run_queued"; queue?: Record<string, unknown> }
+  // `reattached` marks a claim replayed to a socket that connected while the
+  // run was already executing (i.e. after a refresh), not a fresh claim.
+  | { type: "worker_claimed"; worker_id?: string; attempt?: number; claim_generation?: number; reattached?: boolean }
+  | { type: "worker_finished"; status?: string; summary?: string }
+  | { type: "enqueue_rejected"; provider?: string; reason?: string }
+  // Coarse orchestrator progress that is not tied to a tool call, e.g. a turn
+  // waiting behind the previous turn on the same session.
+  | { type: "agent_status"; status: string; message?: string }
   | { type: "bg_task_progress"; task_id: string; progress: number; message: string }
   | { type: "bg_task_complete"; task_id: string; success: boolean; result: string }
+  | {
+      type: "subagent_started";
+      subagent_id?: string;
+      role?: string;
+      type_name?: string;
+      status?: string;
+    }
+  | {
+      type: "subagent_progress";
+      subagent_id?: string;
+      role?: string;
+      detail?: string;
+      status?: string;
+    }
+  | {
+      type: "subagent_completed";
+      subagent_id?: string;
+      role?: string;
+      result?: string;
+      status?: string;
+    }
+  | {
+      type: "subagent_failed";
+      subagent_id?: string;
+      role?: string;
+      error?: string;
+      status?: string;
+    }
   | { type: "todo_list_updated"; items: Array<{ title: string; status: "pending" | "in_progress" | "done"; note?: string }> }
   | { type: "voice_status"; status: string; message: string }
   | ({ type: "quota_update" } & PlanQuota)

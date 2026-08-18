@@ -9,13 +9,14 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText, LayoutGrid } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { WorkspacePanel } from "./workspace-panel";
+import { SandboxFilesPanel } from "./sandbox-files-panel";
 import { RunArtifact } from "@/lib/message-types";
 import { Tabs, Tooltip } from "@heroui/react";
 
-type Tab = "workflow" | "desktop" | "artifacts" | "workspace";
+type Tab = "workflow" | "desktop" | "artifacts" | "files" | "workspace";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -163,6 +164,20 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
 
+              <Tabs.Tab id="files" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Folder className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Files
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
               <Tabs.Tab id="workspace" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
@@ -271,6 +286,19 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               className="absolute inset-0"
             >
               <OutputsPanel artifacts={artifacts} />
+            </motion.div>
+          )}
+
+          {activeTab === "files" && (
+            <motion.div
+              key="files"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <SandboxFilesPanel sessionId={sessionId} active={activeTab === "files"} />
             </motion.div>
           )}
 

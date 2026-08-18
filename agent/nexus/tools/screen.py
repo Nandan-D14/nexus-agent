@@ -15,6 +15,8 @@ import time
 
 from PIL import Image
 
+from nexus.resilience import call_with_deadline
+
 logger = logging.getLogger(__name__)
 
 # Thread-local storage for the last screenshot image (base64 PNG).
@@ -90,8 +92,17 @@ def _vision_cache_doc_id(screenshot_hash: str, model_id: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
-def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
+def _vision_cache_timeout() -> float:
     try:
+        from nexus.config import settings
+
+        return max(float(settings.vision_cache_timeout_seconds), 0.5)
+    except Exception:
+        return 5.0
+
+
+def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
+    def _read() -> str | None:
         from nexus.firebase import get_firestore_client
 
         doc = (
@@ -108,6 +119,14 @@ def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
         description = data.get("description")
         if isinstance(description, str) and description.strip():
             return description.strip()
+        return None
+
+    try:
+        return call_with_deadline(
+            _read,
+            timeout=_vision_cache_timeout(),
+            label="vision cache lookup",
+        )
     except Exception:
         logger.debug("Vision cache lookup failed", exc_info=True)
     return None
@@ -121,7 +140,7 @@ def _store_persisted_analysis(
     model_id: str,
     description: str,
 ) -> None:
-    try:
+    def _write() -> None:
         from nexus.firebase import get_firestore_client
 
         (
@@ -140,6 +159,13 @@ def _store_persisted_analysis(
                 },
                 merge=True,
             )
+        )
+
+    try:
+        call_with_deadline(
+            _write,
+            timeout=_vision_cache_timeout(),
+            label="vision cache write",
         )
     except Exception:
         logger.debug("Vision cache write failed", exc_info=True)
@@ -312,23 +338,29 @@ def take_screenshot() -> dict:
         except Exception as exc:
             logger.exception("Qwen vision analysis failed for screenshot")
             vision_error = str(exc)[:500] or type(exc).__name__
+            next_action = (
+                "Vision retries are already exhausted — do NOT call take_screenshot "
+                "again for this step. Continue the task using non-visual tools "
+                "(playwright_snapshot for DOM, bash/terminal output, file reads) "
+                "or ask the user if the screen is genuinely required."
+            )
             description = (
-                "STATE: Screenshot captured.\n"
-                "FOCUS: Qwen vision analysis failed.\n"
+                "STATE: Screenshot captured, but visual analysis is unavailable.\n"
+                f"FOCUS: Vision analysis failed after all configured retries.\n"
                 "ELEMENTS:\n"
                 "- Visual summary unavailable.\n"
                 "TEXT:\n"
                 f"- {vision_error}\n"
-                "NEXT_ACTION: Retry once or use DOM/terminal inspection."
+                f"NEXT_ACTION: {next_action}"
             )
             base_description = description
             structured_observation = {
-                "visible_state": "Screenshot captured but Qwen vision failed.",
+                "visible_state": "Screenshot captured but vision analysis failed.",
                 "focus": "",
                 "targets": [],
                 "visible_text": [],
                 "errors": [vision_error],
-                "next_action": "Retry once or use DOM/terminal inspection.",
+                "next_action": next_action,
                 "confidence": 0.0,
                 "model": model_id,
             }
@@ -365,5 +397,13 @@ def take_screenshot() -> dict:
         logger.error("take_screenshot failed: %s", e)
         return {
             "status": "error",
-            "description": f"STATE: Screenshot failed. NEXT_ACTION: Recover the sandbox before retrying. Error: {e}",
+            "error_code": "SCREENSHOT_UNAVAILABLE",
+            "error": str(e)[:500],
+            "description": (
+                "STATE: Screen capture failed after all configured retries.\n"
+                "NEXT_ACTION: Do NOT keep calling take_screenshot. Continue with "
+                "non-visual tools (playwright_snapshot, bash, file reads), or report "
+                "that the desktop is unreachable if the task cannot proceed without it.\n"
+                f"Error: {e}"
+            ),
         }

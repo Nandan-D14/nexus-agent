@@ -29,6 +29,39 @@ function hostname(url: string): string {
   }
 }
 
+function faviconUrl(host: string): string {
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
+}
+
+/** Site logo with a lettered fallback when the favicon service has nothing. */
+function SiteFavicon({ host }: { host: string }) {
+  const [failed, setFailed] = useState(false);
+
+  if (!host || failed) {
+    return (
+      <span
+        className="inline-flex size-4 shrink-0 items-center justify-center rounded-[3px] border border-separator-border bg-background-tertiary-default text-[8px] font-semibold uppercase text-text-tertiary"
+        aria-hidden
+      >
+        {host.charAt(0) || "?"}
+      </span>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- remote favicon URLs
+    <img
+      src={faviconUrl(host)}
+      alt=""
+      width={16}
+      height={16}
+      className="size-4 shrink-0 rounded-[3px] bg-background-secondary-default"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 const M = {
   L: "M6.057 11.565 C2.081 11.565 0.371 8.159 0.371 5.964 C0.371 3.642 2.152 0.329 6.05 0.329",
   ML: "M6.012 11.55 C4.575 10.496 3.333 8.116 3.321 5.964 C3.307 3.399 4.974 0.977 6.012 0.329",
@@ -348,6 +381,7 @@ export function WebSearchCard({ query, results, isRunning }: Props) {
                           )}
                         >
                           <ResultBullet state={state} />
+                          <SiteFavicon host={host} />
                           <span className="min-w-0 flex-1 truncate text-text-primary">
                             {result.title || host || "Result"}
                           </span>
