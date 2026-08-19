@@ -473,6 +473,21 @@ export type RunArtifact = {
   metadata: Record<string, unknown>;
 };
 
+export type LibraryCategory =
+  | "slides"
+  | "documents"
+  | "spreadsheets"
+  | "images"
+  | "media"
+  | "others";
+
+export type LibraryItem = {
+  artifact: RunArtifact;
+  session_id: string;
+  session_title: string;
+  category: LibraryCategory;
+};
+
 export type UploadedInputFile = {
   artifact_id?: string;
   name: string;

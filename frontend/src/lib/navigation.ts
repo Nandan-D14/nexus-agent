@@ -19,6 +19,7 @@ import {
 export const NAV_LINKS = [
   { name: "Chat Console", href: "/dashboard", icon: MessagesSquare },
   { name: "History", href: "/history", icon: Clock },
+  { name: "Library", href: "/library", icon: Library },
   { name: "Agent Workflow", href: "/templates", icon: GitBranch },
   { name: "Agent Skills", href: "/skills", icon: Sparkles },
   { name: "Connectors", href: "/connectors", icon: Plug },

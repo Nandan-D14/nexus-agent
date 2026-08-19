@@ -190,6 +190,7 @@ from nexus.routers import (
     files_router,
     templates_router,
     sessions_router,
+    library_router,
     users_router,
     tasks_router,
     worker_router,
@@ -204,6 +205,7 @@ app.include_router(integrations_router)
 app.include_router(files_router)
 app.include_router(templates_router)
 app.include_router(sessions_router)
+app.include_router(library_router)
 app.include_router(users_router)
 app.include_router(tasks_router)
 app.include_router(worker_router)

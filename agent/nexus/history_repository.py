@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from firebase_admin import firestore
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import AlreadyExists, FailedPrecondition, GoogleAPICallError
 from google.cloud.firestore_v1 import FieldFilter
 
 from nexus._firestore_base import FirestoreRepoBase
@@ -662,6 +662,25 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
 
     async def get_artifact_for_owner(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
         return await asyncio.to_thread(self._get_artifact_for_owner_sync, owner_id, artifact_id)
+
+    async def list_owner_library_artifacts(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 100,
+        cursor: datetime | None = None,
+        search: str | None = None,
+        category: str | None = None,
+    ) -> tuple[list[Any], datetime | None]:
+        """Return library-eligible artifacts for an owner, newest first."""
+        return await asyncio.to_thread(
+            self._list_owner_library_artifacts_sync,
+            owner_id,
+            limit,
+            cursor,
+            search,
+            category,
+        )
 
     def _upsert_session_sync(
         self,
@@ -1548,6 +1567,244 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             self._build_stored_artifact(session_id, data.get("runId", ""), doc_id, data)
             for doc_id, data in self._deduplicated_collection_group_docs(stream, limit=limit)
         ]
+
+    _LIBRARY_FETCH_CAP = 400
+
+    @staticmethod
+    def _is_missing_firestore_index_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return "index" in message and (
+            isinstance(exc, FailedPrecondition)
+            or "requires an index" in message
+            or "currently building" in message
+        )
+
+    def _list_owner_library_artifacts_sync(
+        self,
+        owner_id: str,
+        limit: int,
+        cursor: datetime | None,
+        search: str | None,
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        """List deliverable artifacts for a user, excluding scrapes/sources.
+
+        Uses per-session listing because the collection-group index
+        artifacts(ownerId ASC, createdAt DESC) is not deployed in all
+        environments yet. A FailedPrecondition on that query was being
+        mapped to HTTP 503 by the global Google API handler.
+        """
+        return self._list_owner_library_artifacts_via_sessions_sync(
+            owner_id,
+            limit,
+            cursor,
+            search,
+            category,
+        )
+
+    def _list_owner_library_artifacts_collection_group_sync(
+        self,
+        owner_id: str,
+        limit: int,
+        cursor: datetime | None,
+        search: str | None,
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        from nexus.library_artifacts import (
+            LIBRARY_CATEGORIES,
+            LibraryListRow,
+            is_library_artifact,
+            library_category,
+            matches_library_search,
+        )
+
+        page_limit = max(1, min(int(limit or 100), 100))
+        category_filter = category if category in LIBRARY_CATEGORIES else None
+        search_query = search.strip() if isinstance(search, str) and search.strip() else None
+
+        collected: list[LibraryListRow] = []
+        page_cursor = cursor
+        exhausted = False
+        title_cache: dict[str, str] = {}
+
+        while len(collected) < page_limit and not exhausted:
+            query = (
+                self._db.collection_group("artifacts")
+                .where(filter=FieldFilter("ownerId", "==", owner_id))
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            )
+            if page_cursor is not None:
+                query = query.start_after(page_cursor)
+            query = query.limit(self._LIBRARY_FETCH_CAP)
+            batch: list[StoredArtifact] = []
+            for doc_id, data in self._deduplicated_collection_group_docs(
+                query.stream(),
+                limit=self._LIBRARY_FETCH_CAP,
+            ):
+                session_id = str(data.get("sessionId") or "")
+                run_id = str(data.get("runId") or "")
+                if not session_id:
+                    continue
+                batch.append(self._build_stored_artifact(session_id, run_id, doc_id, data))
+
+            if not batch:
+                exhausted = True
+                break
+
+            page_cursor = batch[-1].created_at
+            if len(batch) < self._LIBRARY_FETCH_CAP:
+                exhausted = True
+
+            eligible = [artifact for artifact in batch if is_library_artifact(artifact)]
+            self._hydrate_session_titles(eligible, title_cache)
+            for artifact in eligible:
+                session_title = title_cache.get(artifact.session_id, "Untitled session")
+                mapped = library_category(artifact)
+                if category_filter and mapped != category_filter:
+                    continue
+                if search_query and not matches_library_search(artifact, session_title, search_query):
+                    continue
+                collected.append(
+                    LibraryListRow(
+                        artifact=artifact,
+                        session_title=session_title,
+                        category=mapped,
+                    )
+                )
+                if len(collected) >= page_limit:
+                    break
+
+        next_cursor = None
+        if collected and len(collected) >= page_limit:
+            next_cursor = collected[-1].artifact.created_at
+        return collected, next_cursor
+
+    def _list_owner_library_artifacts_via_sessions_sync(
+        self,
+        owner_id: str,
+        limit: int,
+        cursor: datetime | None,
+        search: str | None,
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        """Fallback when the ownerId+createdAt collection-group index is missing."""
+        from nexus.library_artifacts import (
+            LIBRARY_CATEGORIES,
+            LibraryListRow,
+            is_library_artifact,
+            library_category,
+            matches_library_search,
+        )
+
+        page_limit = max(1, min(int(limit or 100), 100))
+        category_filter = category if category in LIBRARY_CATEGORIES else None
+        search_query = search.strip() if isinstance(search, str) and search.strip() else None
+
+        rows: list[LibraryListRow] = []
+        for session_id, data in self._list_owner_sessions_sync(owner_id):
+            if data.get("status") == "deleted":
+                continue
+            has_artifacts = bool(data.get("hasArtifacts"))
+            artifact_count = int(data.get("artifactCount") or 0)
+            if not has_artifacts and artifact_count <= 0:
+                continue
+            raw_title = data.get("title")
+            session_title = (
+                raw_title.strip()
+                if isinstance(raw_title, str) and raw_title.strip()
+                else "Untitled session"
+            )
+            try:
+                session_artifacts = self._list_session_run_artifacts_sync(session_id, 200)
+            except GoogleAPICallError:
+                logger.warning(
+                    "Skipping library artifacts for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                continue
+            for artifact in session_artifacts:
+                if not is_library_artifact(artifact):
+                    continue
+                mapped = library_category(artifact)
+                if category_filter and mapped != category_filter:
+                    continue
+                if search_query and not matches_library_search(artifact, session_title, search_query):
+                    continue
+                created_at = artifact.created_at
+                if cursor is not None and created_at and created_at >= cursor:
+                    continue
+                rows.append(
+                    LibraryListRow(
+                        artifact=artifact,
+                        session_title=session_title,
+                        category=mapped,
+                    )
+                )
+
+        rows.sort(
+            key=lambda row: row.artifact.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        page = rows[:page_limit]
+        next_cursor = page[-1].artifact.created_at if len(rows) > page_limit else None
+        return page, next_cursor
+
+    def _list_session_run_artifacts_sync(self, session_id: str, limit: int = 200) -> list[StoredArtifact]:
+        """List artifacts from session run subcollections. No collection-group index required."""
+        artifacts: list[StoredArtifact] = []
+        runs = self._db.collection("sessions").document(session_id).collection("runs").stream()
+        for run_doc in runs:
+            run_id = run_doc.id
+            docs = (
+                run_doc.reference.collection("artifacts")
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                .limit(max(1, limit))
+                .stream()
+            )
+            for doc in docs:
+                artifacts.append(
+                    self._build_stored_artifact(session_id, run_id, doc.id, doc.to_dict() or {})
+                )
+        artifacts.sort(
+            key=lambda artifact: artifact.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        unique: list[StoredArtifact] = []
+        seen: set[str] = set()
+        for artifact in artifacts:
+            if artifact.artifact_id in seen:
+                continue
+            seen.add(artifact.artifact_id)
+            unique.append(artifact)
+            if len(unique) >= limit:
+                break
+        return unique
+
+    def _hydrate_session_titles(
+        self,
+        artifacts: list[StoredArtifact],
+        cache: dict[str, str],
+    ) -> None:
+        missing = {
+            artifact.session_id
+            for artifact in artifacts
+            if artifact.session_id and artifact.session_id not in cache
+        }
+        if not missing:
+            return
+        refs = [self._db.collection("sessions").document(session_id) for session_id in missing]
+        snapshots = self._db.get_all(refs)
+        for snapshot in snapshots:
+            title = "Untitled session"
+            if snapshot.exists:
+                data = snapshot.to_dict() or {}
+                raw = data.get("title")
+                if isinstance(raw, str) and raw.strip():
+                    title = raw.strip()
+            cache[snapshot.id] = title
+        for session_id in missing:
+            cache.setdefault(session_id, "Untitled session")
 
     def _append_message_time_ordered(
         self,

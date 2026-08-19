@@ -27,12 +27,16 @@ const SOURCE_KINDS = new Set([
   "workspace_output",
 ]);
 
+const SOURCE_TOOLS = new Set(["scrape_web_page", "web_search", "tavily_search"]);
+
 /**
  * Source/working artifacts (search dumps, scrapes, screenshots, agent summaries).
  * These belong in the Sources panel section — never as chat cards.
  * Heuristic also covers older artifacts minted before `metadata.role` existed.
  */
 export function isSourceArtifact(artifact: Pick<RunArtifact, "kind" | "path" | "metadata">): boolean {
+  const tool = artifact.metadata?.tool;
+  if (typeof tool === "string" && SOURCE_TOOLS.has(tool)) return true;
   const role = artifact.metadata?.role;
   if (role === "source") return true;
   if (role === "deliverable") return false;
@@ -180,15 +184,48 @@ function toBlobUrlIfDataUri(url: string): string {
   }
 }
 
+export type ResolveArtifactOptions = {
+  /** Prefer the PDF preview sibling for Office artifacts. */
+  forPreview?: boolean;
+  /**
+   * Fall back to the live session sandbox. Library and other historical
+   * views must leave this off — those sandboxes are gone and the API 400s.
+   */
+  allowSandbox?: boolean;
+};
+
+function normalizeResolveOptions(
+  forPreviewOrOptions: boolean | ResolveArtifactOptions = false,
+): Required<ResolveArtifactOptions> {
+  if (typeof forPreviewOrOptions === "boolean") {
+    return { forPreview: forPreviewOrOptions, allowSandbox: true };
+  }
+  return {
+    forPreview: forPreviewOrOptions.forPreview ?? false,
+    allowSandbox: forPreviewOrOptions.allowSandbox ?? true,
+  };
+}
+
+/** URLs that can be used in <img>/<iframe> without a refresh round-trip. */
+export function durableInlineUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (url.includes("storage.googleapis.com")) return null;
+  if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("http")) {
+    return url;
+  }
+  return null;
+}
+
 /**
  * Resolve a working preview/download URL.
  * Prefer the authenticated download API for GCS-backed artifacts.
- * @param forPreview - when true, prefer the PDF preview sibling for Office artifacts
+ * @param forPreviewOrOptions - `true` for preview, or `{ forPreview, allowSandbox }`
  */
 export async function resolveArtifactUrl(
   artifact: RunArtifact,
-  forPreview = false,
+  forPreviewOrOptions: boolean | ResolveArtifactOptions = false,
 ): Promise<string | null> {
+  const { forPreview, allowSandbox } = normalizeResolveOptions(forPreviewOrOptions);
   // Permanent non-GCS URLs (Drive, http(s) CDN, etc.)
   if (
     artifact.url &&
@@ -226,7 +263,7 @@ export async function resolveArtifactUrl(
     return toBlobUrlIfDataUri(fresh);
   }
 
-  if (artifact.path && artifact.session_id) {
+  if (allowSandbox && artifact.path && artifact.session_id) {
     const sandboxUrl = await downloadFromWorkspaceSandbox(
       artifact.session_id,
       artifact.path,
@@ -240,8 +277,11 @@ export async function resolveArtifactUrl(
 /**
  * Trigger a browser download for an artifact (blob preferred).
  */
-export async function downloadArtifactFile(artifact: RunArtifact): Promise<boolean> {
-  const url = await resolveArtifactUrl(artifact);
+export async function downloadArtifactFile(
+  artifact: RunArtifact,
+  options?: ResolveArtifactOptions,
+): Promise<boolean> {
+  const url = await resolveArtifactUrl(artifact, options);
   if (!url) return false;
 
   const filename =
