@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import {
@@ -108,7 +113,7 @@ export async function listArchivedMessages(
     const data = docSnapshot.data();
     return {
       id: docSnapshot.id,
-      role: data.role === "user" ? "user" : "agent",
+      role: data.role as ArchivedMessage["role"],
       text: typeof data.text === "string" ? data.text : "",
       source: typeof data.source === "string" ? data.source : undefined,
       turn_index: typeof data.turnIndex === "number" ? data.turnIndex : 0,

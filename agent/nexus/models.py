@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Pydantic models for API request / response schemas."""
 
 from __future__ import annotations
@@ -5,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -59,6 +62,20 @@ class SessionResponse(BaseModel):
     continuation_mode: str | None = None
 
 
+class SessionTokenTotals(BaseModel):
+    input: int = 0
+    output: int = 0
+    total: int = 0
+
+
+class SessionLastUsage(BaseModel):
+    model: str = ""
+    source: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
 class SessionInfo(BaseModel):
     session_id: str
     task_id: str | None = None
@@ -82,6 +99,9 @@ class SessionInfo(BaseModel):
     exact_workspace_resume_available: bool = False
     continuation_mode: str | None = None
     context_packet: ContextPacket | None = None
+    token_totals: SessionTokenTotals | None = None
+    model_context_limit: int | None = None
+    last_usage: SessionLastUsage | None = None
 
 
 class TaskInfo(BaseModel):
@@ -162,11 +182,12 @@ class WorkflowTemplate(BaseModel):
     owner_id: str
     name: str
     description: str = ""
-    source_session_id: str
+    source_session_id: str | None = None
     source_run_id: str | None = None
     instructions: str
     input_fields: list[WorkflowTemplateInputField] = Field(default_factory=list)
     source_artifacts: list[str] = Field(default_factory=list)
+    status: Literal["draft", "published"] = "published"
     created_at: datetime
     updated_at: datetime
     last_used_at: datetime | None = None
@@ -196,6 +217,7 @@ class CreateWorkflowTemplateRequest(BaseModel):
     description: str | None = None
     instructions: str | None = None
     input_fields: list[WorkflowTemplateInputField] = Field(default_factory=list)
+    status: Literal["draft", "published"] | None = None
 
 
 class UpdateWorkflowTemplateRequest(BaseModel):
@@ -203,6 +225,7 @@ class UpdateWorkflowTemplateRequest(BaseModel):
     description: str | None = None
     instructions: str | None = None
     input_fields: list[WorkflowTemplateInputField] | None = None
+    status: Literal["draft", "published"] | None = None
 
 
 class RunWorkflowTemplateRequest(BaseModel):
@@ -244,6 +267,7 @@ class IntegrationCatalogItem(BaseModel):
     name: str
     description: str
     status: str = "available"
+    auth_mode: str = "oauth"
 
 
 class CreateMcpConnectionRequest(BaseModel):
@@ -262,21 +286,107 @@ class UpsertGithubConnectionRequest(BaseModel):
     enabled: bool = True
 
 
+class UpsertSlackConnectionRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertTavilyConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertTinyfishConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertVyoraConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertOpenAIConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
+class UpsertThesysConnectionRequest(BaseModel):
+    api_key: str = Field(min_length=8, max_length=4000)
+    enabled: bool = True
+
+
 class AgentSkillUpsertRequest(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, max_length=40)
-    description: str | None = Field(default=None, max_length=240)
+    description: str | None = Field(default=None, max_length=1024)
     trigger: str | None = Field(default=None, max_length=500)
-    instructions: str | None = Field(default=None, max_length=4000)
+    instructions: str | None = Field(default=None, max_length=16000)
     enabled: bool | None = None
 
 
+class AgentSkillImportRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    skill_md: str | None = Field(
+        default=None,
+        max_length=200_000,
+        validation_alias=AliasChoices("skill_md", "skill_md"),
+    )
+    source_url: str | None = Field(
+        default=None,
+        max_length=2000,
+        validation_alias=AliasChoices("source_url", "source_url"),
+    )
+    files: dict[str, str] | None = None
+    zip_b64: str | None = Field(
+        default=None,
+        max_length=2_800_000,
+        validation_alias=AliasChoices("zip_b64", "package_zip_b64"),
+    )
+    enabled: bool = True
+
+
 # ── User Settings ────────────────────────────────────────────────
+
+class LlmProviderPublic(BaseModel):
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    signupUrl: str = ""
+    keyUrl: str = ""
+    docsUrl: str = ""
+    apiBase: str = ""
+    defaultModel: str = ""
+    defaultVisionModel: str = ""
+    recommendedModels: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    notes: str = ""
+    visionWarning: str = ""
+    custom: bool = False
+    logoUrl: str = ""
+    logoInvertInDark: bool = False
+
+
+class E2bSetupPublic(BaseModel):
+    signupUrl: str = ""
+    keyUrl: str = ""
+    docsUrl: str = ""
+    steps: list[str] = Field(default_factory=list)
+    notes: str = ""
+    logoUrl: str = ""
+    logoInvertInDark: bool = False
+
 
 class ByokResponse(BaseModel):
     e2bKeySet: bool = False
     geminiKeySet: bool = False
     geminiProvider: Literal["apiKey", "vertex"] = "apiKey"
+    llmKeySet: bool = False
+    llmProvider: str = ""
+    llmModel: str = ""
+    llmVisionModel: str = ""
+    llmApiBase: str = ""
     missing: list[str] = Field(default_factory=list)
     configured: bool = False
     vertexConfigured: bool = False
@@ -290,6 +400,8 @@ class UserSettingsResponse(BaseModel):
     googleDriveConnected: bool = False
     settings: dict[str, Any] = Field(default_factory=dict)
     byok: ByokResponse = Field(default_factory=ByokResponse)
+    llmProviders: list[LlmProviderPublic] = Field(default_factory=list)
+    e2bSetup: E2bSetupPublic = Field(default_factory=E2bSetupPublic)
 
 
 class ByokUpdateRequest(BaseModel):
@@ -297,58 +409,27 @@ class ByokUpdateRequest(BaseModel):
     geminiApiKey: str | None = None
     geminiProvider: Literal["apiKey", "vertex"] | None = None
     accessCode: str | None = None
+    llmProvider: str | None = None
+    llmApiKey: str | None = None
+    llmModel: str | None = None
+    llmVisionModel: str | None = None
+    llmApiBase: str | None = None
+
+
+class TestLlmRequest(BaseModel):
+    llmProvider: str | None = None
+    llmApiKey: str | None = None
+    llmModel: str | None = None
+    llmVisionModel: str | None = None
+    llmApiBase: str | None = None
+
+
+class LlmModelsResponse(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    apiBase: str = ""
 
 
 class UserSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     byok: ByokUpdateRequest | None = None
-
-
-# ── Controlled Beta Access ───────────────────────────────────────
-
-class BetaApplicationRequest(BaseModel):
-    full_name: str = Field(min_length=2, max_length=120)
-    role: str = Field(min_length=2, max_length=120)
-    company_team: str = Field(min_length=2, max_length=120)
-    primary_use_case: str = Field(min_length=10, max_length=500)
-    current_workflow: str = Field(min_length=10, max_length=1_000)
-    why_access: str = Field(min_length=10, max_length=1_000)
-    expected_usage_frequency: str = Field(min_length=2, max_length=120)
-    acknowledge_byok: bool = False
-
-
-class RedeemBetaAccessCodeRequest(BaseModel):
-    code: str = Field(min_length=4, max_length=64)
-
-
-class BetaApplicationSummary(BaseModel):
-    full_name: str = ""
-    email: str = ""
-    role: str = ""
-    company_team: str = ""
-    primary_use_case: str = ""
-    current_workflow: str = ""
-    why_access: str = ""
-    expected_usage_frequency: str = ""
-    acknowledge_byok: bool = False
-    status: str = "none"
-    sheet_sync_status: str | None = None
-
-
-class BetaStatusResponse(BaseModel):
-    state: Literal["none", "pending_review", "approved", "rejected", "revoked"] = "none"
-    can_apply: bool = True
-    can_access_app: bool = False
-    needs_access_code: bool = False
-    access_code_redeemed: bool = False
-    requires_byok_setup: bool = False
-    byok_missing: list[str] = Field(default_factory=list)
-    message: str = ""
-    application_submitted_at: datetime | None = None
-    application_updated_at: datetime | None = None
-    approved_at: datetime | None = None
-    rejected_at: datetime | None = None
-    revoked_at: datetime | None = None
-    redeemed_at: datetime | None = None
-    application: BetaApplicationSummary | None = None

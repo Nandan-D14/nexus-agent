@@ -1,17 +1,16 @@
-"""Multi-agent subsystem — hierarchical orchestration."""
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
+"""Single-planner subsystem with terminal and desktop AgentTool workers."""
 
 from nexus.agents.sub_agents import (
-    create_computer_agent,
-    create_browser_agent,
-    create_code_agent,
-    create_deepresearcher_agent,
+    create_desktop_worker,
+    create_terminal_worker,
 )
-from nexus.agents.orchestrator_agent import create_orchestrator_agent
+from nexus.agents.planner_agent import create_planner_agent
 
 __all__ = [
-    "create_computer_agent",
-    "create_browser_agent",
-    "create_code_agent",
-    "create_deepresearcher_agent",
-    "create_orchestrator_agent",
+    "create_desktop_worker",
+    "create_terminal_worker",
+    "create_planner_agent",
 ]

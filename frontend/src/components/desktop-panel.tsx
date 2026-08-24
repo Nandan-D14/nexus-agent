@@ -1,7 +1,14 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { Monitor } from "lucide-react";
+import { authenticatedFetch } from "@/lib/api-client";
 import { VisionOverlay } from "@/components/vision-overlay";
 
 export type AgentVisualAction = {
@@ -17,10 +24,93 @@ type Props = {
   streamUrl: string | null;
   analysis?: string | null;
   action?: AgentVisualAction | null;
+  sessionId?: string | null;
+  isAgentIdle?: boolean;
+  isFullscreen?: boolean;
+  onResize?: (width: number, height: number) => void;
 };
 
 const SCREEN_W = 1324;
 const SCREEN_H = 968;
+
+const RESOLUTION_PRESETS = [
+  { label: "1324×968", w: 1324, h: 968, default: true },
+  { label: "1280×720", w: 1280, h: 720 },
+  { label: "1600×900", w: 1600, h: 900 },
+  { label: "1920×1080", w: 1920, h: 1080 },
+];
+
+function ResizeDropdown({
+  sessionId,
+  currentResolution,
+  onResize,
+}: {
+  sessionId: string;
+  currentResolution: { w: number; h: number };
+  onResize: (w: number, h: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handleSelect = async (w: number, h: number) => {
+    if (w === currentResolution.w && h === currentResolution.h) {
+      setOpen(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await authenticatedFetch(`/api/sessions/${sessionId}/resize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width: w, height: h }),
+      });
+      if (res.ok) {
+        onResize(w, h);
+      }
+    } catch {
+      // silently fail — user sees no change
+    } finally {
+      setLoading(false);
+      setOpen(false);
+    }
+  };
+
+  const current = RESOLUTION_PRESETS.find(
+    (p) => p.w === currentResolution.w && p.h === currentResolution.h,
+  );
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        disabled={loading}
+        className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/10 hover:bg-white/15 text-[10px] font-bold text-zinc-300 uppercase tracking-wider transition-colors disabled:opacity-50 border border-white/10"
+      >
+        <Monitor className="w-3 h-3" />
+        {loading ? "..." : current?.label ?? `${currentResolution.w}×${currentResolution.h}`}
+      </button>
+      {open && (
+        <div className="absolute top-full right-0 mt-1 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl overflow-hidden z-30 min-w-[120px]">
+          {RESOLUTION_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              onClick={() => void handleSelect(preset.w, preset.h)}
+              disabled={loading}
+              className={`w-full text-left px-3 py-2 text-xs transition-colors disabled:opacity-50 ${
+                preset.w === currentResolution.w && preset.h === currentResolution.h
+                  ? "text-blue-400 bg-blue-500/10 font-semibold"
+                  : "text-zinc-300 hover:bg-zinc-800"
+              }`}
+            >
+              {preset.label}
+              {preset.default && <span className="ml-1.5 text-[9px] text-zinc-500">default</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function clampPercent(value: number | undefined, max: number): number {
   if (typeof value !== "number" || Number.isNaN(value)) return 50;
@@ -82,8 +172,28 @@ function AgentActionOverlay({ action }: { action?: AgentVisualAction | null }) {
   );
 }
 
-export function DesktopPanel({ streamUrl, analysis, action }: Props) {
+export function DesktopPanel({ streamUrl, analysis, action, sessionId, isAgentIdle, isFullscreen, onResize }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [currentResolution, setCurrentResolution] = useState({ w: SCREEN_W, h: SCREEN_H });
+
+  const handleResize = (w: number, h: number) => {
+    setCurrentResolution({ w, h });
+    onResize?.(w, h);
+  };
+
+  const showResize = isFullscreen && isAgentIdle && !!sessionId && !!streamUrl;
+
+  useEffect(() => {
+    if (!showResize && sessionId && (currentResolution.w !== SCREEN_W || currentResolution.h !== SCREEN_H)) {
+      authenticatedFetch(`/api/sessions/${sessionId}/resize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width: SCREEN_W, height: SCREEN_H }),
+      })
+        .catch(() => {})
+        .finally(() => setCurrentResolution({ w: SCREEN_W, h: SCREEN_H }));
+    }
+  }, [showResize, sessionId, currentResolution.w, currentResolution.h]);
 
   if (!streamUrl) {
     return (
@@ -127,15 +237,24 @@ export function DesktopPanel({ streamUrl, analysis, action }: Props) {
 
   return (
     <div ref={containerRef} className="relative h-full rounded-2xl border border-zinc-800 overflow-hidden bg-black shadow-inner shadow-black/80 group">
-      {/* LIVE indicator */}
-      <div className="absolute top-4 right-4 z-10 flex items-center gap-2.5 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/5 transition-transform group-hover:scale-105">
-        <span className="relative flex h-2 w-2">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-        </span>
-        <span className="text-emerald-400 text-[10px] font-black uppercase tracking-[0.2em]">
-          Live Stream
-        </span>
+      {/* LIVE indicator + Resize */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
+        {showResize && sessionId && (
+          <ResizeDropdown
+            sessionId={sessionId}
+            currentResolution={currentResolution}
+            onResize={handleResize}
+          />
+        )}
+        <div className="flex items-center gap-2.5 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/5 transition-transform group-hover:scale-105">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+          </span>
+          <span className="text-emerald-400 text-[10px] font-black uppercase tracking-[0.2em]">
+            Live Stream
+          </span>
+        </div>
       </div>
 
       <iframe

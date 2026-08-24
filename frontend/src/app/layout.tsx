@@ -1,12 +1,16 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono, Caveat } from "next/font/google";
-import "./globals.css";
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
 
-import { LiveDesktopProvider } from "@/components/live-desktop-provider";
-import { AuthProvider } from "@/lib/auth-context";
-import { SettingsProvider } from "@/lib/settings-context";
-import { ToastProvider } from "@/components/toast-provider";
-import { ThemeProvider } from "@/components/theme-provider";
+import type { Metadata } from "next";
+import { Geist, Geist_Mono, Caveat, Instrument_Serif } from "next/font/google";
+import "./globals.css";
+import "@/styles/globals.css";
+// Thesys C1 Generative UI styles (required by C1Component)
+import "@crayonai/react-ui/styles/index.css";
+
+import { Providers } from "./providers";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,9 +27,39 @@ const cursive = Caveat({
   subsets: ["latin"],
 });
 
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: "400",
+});
+
 export const metadata: Metadata = {
   title: "CoComputer — AI Desktop Agent",
   description: "Voice-controlled AI agent with full Linux desktop access",
+  metadataBase: new URL("https://cocomputer.ai"),
+  manifest: "/manifest.json",
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/icon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+    shortcut: "/favicon.ico",
+  },
+  openGraph: {
+    title: "CoComputer — AI Desktop Agent",
+    description: "Voice-controlled AI agent with full Linux desktop access",
+    images: [{ url: "/og-image.png", width: 1200, height: 630, alt: "CoComputer" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "CoComputer — AI Desktop Agent",
+    description: "Voice-controlled AI agent with full Linux desktop access",
+    images: ["/og-image.png"],
+  },
+  appleWebApp: { capable: true, title: "CoComputer", statusBarStyle: "default" },
 };
 
 export default function RootLayout({
@@ -36,22 +70,9 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} antialiased min-h-screen`}
+        className={`${geistSans.variable} ${geistMono.variable} ${cursive.variable} ${instrumentSerif.variable} antialiased min-h-screen`}
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <ToastProvider>
-            <AuthProvider>
-              <SettingsProvider>
-                <LiveDesktopProvider>{children}</LiveDesktopProvider>
-              </SettingsProvider>
-            </AuthProvider>
-          </ToastProvider>
-        </ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import { motion } from "framer-motion";
@@ -108,6 +113,7 @@ export function DemoPicker({ onSelect, disabled }: Props) {
               }
             `}
           >
+            {/* @ts-expect-error React 19 ElementType inference — runtime is a lucide icon component */}
             <demo.icon className="w-6 h-6" />
           </div>
 

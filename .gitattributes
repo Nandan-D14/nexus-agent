@@ -1,0 +1,22 @@
+# Handle line endings for text files
+* text=auto eol=lf
+
+# Python files
+*.py text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# JSON/YAML
+*.json text
+*.yaml text
+*.yml text
+
+# Markdown
+*.md text
+
+# Windows executables - binary
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 from __future__ import annotations
 
 import sys
@@ -19,4 +22,5 @@ class NativeIntegrationToolTests(IsolatedAsyncioTestCase):
             result = await github_search_repos("openai")
 
         self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error"], "GitHub is not connected for this user.")
+        self.assertEqual(result["summary"], "GitHub is not connected for this user.")
+        self.assertEqual(result["error_code"], "AUTH_REQUIRED")

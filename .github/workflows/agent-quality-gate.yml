@@ -1,0 +1,131 @@
+name: Agent quality gate
+
+on:
+  pull_request:
+    paths:
+      - "agent/**"
+      - "frontend/src/components/agent-workflow-panel.tsx"
+      - "frontend/src/lib/turn-event-grouper.ts"
+      - ".github/workflows/agent-quality-gate.yml"
+  push:
+    branches: ["main", "developer"]
+    paths:
+      - "agent/**"
+      - "frontend/src/components/agent-workflow-panel.tsx"
+      - "frontend/src/lib/turn-event-grouper.ts"
+  workflow_dispatch:
+    inputs:
+      baseline_report:
+        description: "Repository path to a live baseline report"
+        required: false
+        default: "agent/nexus/eval/baselines/live.json"
+      candidate_report:
+        description: "Repository path to a live candidate report"
+        required: false
+        default: "agent/nexus/eval/reports/candidate.json"
+  workflow_call:
+    inputs:
+      baseline_report:
+        description: "Repository path to a live baseline report"
+        required: false
+        type: string
+        default: "agent/nexus/eval/baselines/live.json"
+      candidate_report:
+        description: "Repository path to a live candidate report"
+        required: false
+        type: string
+        default: "agent/nexus/eval/reports/candidate.json"
+      run_live_gate:
+        description: "When true, require live baseline/candidate reports and block regressions"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  compatibility-and-eval-contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install exact locked environment
+        run: uv sync --locked --extra dev
+      - name: Assert Google ADK 2.4.0
+        run: uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.4.0'"
+      - name: Run ADK compatibility, eval, and production hardening tests
+        run: >-
+          uv run pytest
+          tests/test_adk_compatibility.py
+          tests/test_production_eval.py
+          tests/test_runtime_tracing.py
+          tests/test_qwen_core.py
+          tests/test_computer_control_loop.py
+          tests/test_durable_execution_hardening.py
+          tests/test_durable_subagents.py
+          tests/test_adk_workflow_pilot.py
+          tests/test_tool_gateway.py
+          tests/test_agent_routing.py
+          -q
+      - name: Validate 25-task catalog
+        run: uv run python -m nexus.eval.run_task_eval validate
+      - name: Generate candidate contract report
+        run: uv run python -m nexus.eval.run_task_eval contract --output reports/contract-candidate.json
+      - name: Gate scorer contract against stored contract
+        run: >-
+          uv run python -m nexus.eval.run_task_eval gate
+          nexus/eval/baselines/contract.json
+          reports/contract-candidate.json
+          --allow-contract
+          --output reports/contract-gate.json
+      - name: Upload eval reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eval-contract-${{ github.sha }}
+          path: agent/reports/*.json
+          if-no-files-found: error
+
+  live-release-gate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_call' && inputs.run_live_gate == true)
+    needs: compatibility-and-eval-contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --extra dev
+      - name: Require live reports
+        shell: bash
+        run: |
+          baseline="${{ inputs.baseline_report || 'agent/nexus/eval/baselines/live.json' }}"
+          candidate="${{ inputs.candidate_report || 'agent/nexus/eval/reports/candidate.json' }}"
+          test -f "../${baseline}"
+          test -f "../${candidate}"
+          echo "BASELINE=../${baseline}" >> "$GITHUB_ENV"
+          echo "CANDIDATE=../${candidate}" >> "$GITHUB_ENV"
+      - name: Block release regressions
+        run: >-
+          uv run python -m nexus.eval.run_task_eval gate
+          "${BASELINE}"
+          "${CANDIDATE}"
+          --output reports/live-release-gate.json
+      - name: Upload live gate result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-live-release-gate-${{ github.sha }}
+          path: agent/reports/live-release-gate.json
+          if-no-files-found: warn

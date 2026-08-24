@@ -42,3 +42,7 @@ This document details the plan to add an "Integrations" section to the Virtual V
 3. Implement the Google Sign-in flow in the newly created Integrations page.
 4. Establish the MCP Client wrapper in the Python backend.
 5. Create endpoints in `server.py` to list and toggle active MCP integrations.
+
+
+
+// integration : mutipl gmail and drives etc... integraitons 

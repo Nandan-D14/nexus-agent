@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Standalone test: boot an E2B sandbox, print stream URL, take screenshot, destroy."""
 
 import sys

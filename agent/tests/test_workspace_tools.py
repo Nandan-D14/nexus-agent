@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 from __future__ import annotations
 
 import sys
@@ -26,9 +29,13 @@ from nexus.tools.web import (
 from nexus.tools.workspace import (
     derive_session_workspace_path,
     derive_workspace_path,
+    initialize_task_state,
     list_workspace_files,
     prepare_task_workspace,
+    read_task_state,
     read_workspace_file,
+    reconcile_todo_list_at_turn_end,
+    update_task_state,
     update_todo_item,
     write_todo_list,
     write_workspace_file,
@@ -186,6 +193,8 @@ class SandboxEnsureDirectoryTests(TestCase):
 class WorkspaceToolTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.sandbox = FakeSandbox()
+        self.upload_patcher = patch("nexus.tools.workspace.upload_artifact_async", return_value=None)
+        self.upload_patcher.start()
         self.session_token = set_session_id("session123")
         self.run_token = set_run_id("run456")
         self.workspace_token = set_workspace_path(
@@ -194,6 +203,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         self.sandbox_token = set_sandbox(self.sandbox)
 
     async def asyncTearDown(self) -> None:
+        self.upload_patcher.stop()
         for token in (
             self.sandbox_token,
             self.workspace_token,
@@ -204,23 +214,94 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
 
     async def test_prepare_task_workspace_creates_scaffold(self) -> None:
         result = await prepare_task_workspace("Investigate startup failure")
+        detail = result["detail"]
 
-        self.assertTrue(result["created"])
-        self.assertIn("task.md", result["touched_files"])
-        self.assertIn("todo.md", result["touched_files"])
-        self.assertIn("notes.md", result["touched_files"])
-        self.assertIn(result["workspace_path"], self.sandbox.directories)
-        self.assertIn(f"{result['workspace_path']}/sources", self.sandbox.directories)
-        self.assertIn(f"{result['workspace_path']}/outputs", self.sandbox.directories)
+        self.assertTrue(detail["created"])
+        self.assertEqual(
+            detail["workspace_path"],
+            "/home/user/CoComputer/Workspaces/session123/run456",
+        )
+        self.assertIn("task.md", detail["touched_files"])
+        self.assertIn("todo.md", detail["touched_files"])
+        self.assertIn("notes.md", detail["touched_files"])
+        self.assertIn("task_state.json", detail["touched_files"])
+        self.assertEqual(detail["task_type"], "deep_research")
+        self.assertEqual(detail["stage"], "intake")
+        self.assertEqual(detail["review_status"], "pending")
+        self.assertIn(detail["workspace_path"], self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/sources", self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/outputs", self.sandbox.directories)
+        self.assertIn(f"{detail['workspace_path']}/todo.md", self.sandbox.files)
+
+    async def test_task_state_tools_track_stage_review_evidence_and_artifacts(self) -> None:
+        await prepare_task_workspace("Compare agent frameworks and write a report")
+        init_result = await initialize_task_state(
+            "Compare agent frameworks and write a report",
+            task_type="deep_research",
+            active_agent="deepresearcher",
+        )
+        self.assertEqual(init_result["metadata"]["task_type"], "deep_research")
+        self.assertEqual(init_result["metadata"]["review_status"], "pending")
+
+        update_result = await update_task_state(
+            stage="reviewing",
+            active_agent="research_reviewer_agent",
+            review_status="passed",
+            evidence=["sources/google_adk.md"],
+            artifact_paths=["outputs/final.md"],
+            summary="Reviewer passed the report.",
+        )
+        self.assertEqual(update_result["metadata"]["stage"], "reviewing")
+        self.assertEqual(update_result["metadata"]["review_status"], "passed")
+        self.assertEqual(update_result["metadata"]["evidence_count"], 1)
+        self.assertEqual(update_result["metadata"]["artifact_count"], 1)
+
+        state = (await read_task_state())["metadata"]["state"]
+        self.assertEqual(state["active_agent"], "research_reviewer_agent")
+        self.assertEqual(state["evidence"], ["sources/google_adk.md"])
+        self.assertEqual(state["artifact_paths"], ["outputs/final.md"])
+        self.assertEqual(state["trace"][-1]["summary"], "Reviewer passed the report.")
 
     async def test_todo_tools_write_and_update_stable_format(self) -> None:
         await prepare_task_workspace("Research")
         await write_todo_list(["Gather logs", "Compare docs"])
         await update_todo_item(2, "done", "Compared current docs")
 
-        todo_text = (await read_workspace_file("todo.md"))["content"]
+        todo_text = (await read_workspace_file("todo.md"))["metadata"]["content"]
         self.assertIn("1. [pending] Gather logs", todo_text)
         self.assertIn("2. [done] Compare docs - Compared current docs", todo_text)
+
+    async def test_reconcile_todo_list_marks_remaining_done_and_emits(self) -> None:
+        from nexus.tools._context import set_send_json
+
+        emitted: list[dict] = []
+
+        async def capture(payload: dict) -> None:
+            emitted.append(payload)
+
+        send_token = set_send_json(capture)
+        try:
+            await prepare_task_workspace("Research")
+            await write_todo_list(["Gather logs", "Compare docs", "Write report"])
+            await update_todo_item(1, "done")
+            await update_todo_item(2, "in_progress")
+
+            items = await reconcile_todo_list_at_turn_end(mark_complete=True)
+            self.assertEqual([item["status"] for item in items], ["done", "done", "done"])
+
+            todo_text = (await read_workspace_file("todo.md"))["metadata"]["content"]
+            self.assertIn("1. [done] Gather logs", todo_text)
+            self.assertIn("2. [done] Compare docs", todo_text)
+            self.assertIn("3. [done] Write report", todo_text)
+
+            todo_events = [e for e in emitted if e.get("type") == "todo_list_updated"]
+            self.assertTrue(todo_events)
+            self.assertEqual(
+                [item["status"] for item in todo_events[-1]["items"]],
+                ["done", "done", "done"],
+            )
+        finally:
+            send_token.var.reset(send_token)
 
     async def test_write_workspace_file_only_exposes_output_path_for_outputs(self) -> None:
         await prepare_task_workspace("Research")
@@ -228,10 +309,10 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         note_result = await write_workspace_file("notes.md", "hello", append=True)
         output_result = await write_workspace_file("outputs/final.md", "done")
 
-        self.assertIn("workspace_file", note_result)
-        self.assertNotIn("output_path", note_result)
+        self.assertIn("workspace_file", note_result["metadata"])
+        self.assertNotIn("output_path", note_result["metadata"])
         self.assertEqual(
-            output_result["output_path"],
+            output_result["metadata"]["output_path"],
             "/home/user/CoComputer/Workspaces/session123/run456/outputs/final.md",
         )
 
@@ -239,7 +320,7 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         await prepare_task_workspace("Research")
         result = await write_workspace_file("../escape.txt", "nope")
         self.assertEqual(
-            result["error"],
+            result["summary"],
             "relative_path must stay inside the active workspace",
         )
 
@@ -250,32 +331,102 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         result = await update_todo_item(0, "in_progress")
 
         self.assertEqual(
-            result["error"],
+            result["summary"],
             "item_index must be at least 1. Index is 1-based. Please retry with a valid index.",
         )
+
+    async def test_update_todo_item_returns_not_found_when_todo_missing(self) -> None:
+        result = await update_todo_item(1, "in_progress", "starting")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "NOT_FOUND")
+        self.assertEqual(
+            result["summary"],
+            "todo.md does not exist yet. Call write_todo_list or prepare_task_workspace first.",
+        )
+        self.assertEqual(
+            result["suggested_alternatives"],
+            ["write_todo_list", "prepare_task_workspace"],
+        )
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_update_todo_item_sanitizes_sandbox_traceback(self) -> None:
+        await prepare_task_workspace("Research")
+        await write_todo_list(["Gather logs"])
+        traceback_stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/lib/python3.10/pathlib.py", line 1134, in read_text\n'
+            "FileNotFoundError: [Errno 2] No such file or directory: 'todo.md'\n"
+        )
+
+        with patch.object(
+            self.sandbox,
+            "read_text_file",
+            side_effect=RuntimeError(traceback_stderr),
+        ):
+            result = await update_todo_item(1, "done")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["summary"], "Failed to update the todo item.")
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_read_workspace_file_returns_not_found_when_missing(self) -> None:
+        result = await read_workspace_file("missing.md")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "NOT_FOUND")
+        self.assertIn("missing.md does not exist in the workspace", result["summary"])
+        self.assertEqual(
+            result["suggested_alternatives"],
+            ["list_workspace_files", "prepare_task_workspace"],
+        )
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
+
+    async def test_read_workspace_file_sanitizes_sandbox_traceback(self) -> None:
+        await prepare_task_workspace("Research")
+        traceback_stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/lib/python3.10/pathlib.py", line 1134, in read_text\n'
+            "FileNotFoundError: [Errno 2] No such file or directory: 'notes.md'\n"
+        )
+
+        with patch.object(
+            self.sandbox,
+            "read_text_file",
+            side_effect=RuntimeError(traceback_stderr),
+        ):
+            result = await read_workspace_file("notes.md")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["summary"], "Failed to read the workspace file.")
+        self.assertNotIn("Traceback", result["summary"])
+        self.assertNotIn("pathlib.py", result["summary"])
 
     async def test_write_todo_list_returns_error_for_empty_items(self) -> None:
         await prepare_task_workspace("Research")
 
         result = await write_todo_list([])
 
-        self.assertEqual(result["error"], "Provide at least one todo item")
+        self.assertEqual(result["summary"], "Provide at least one todo item")
 
     async def test_list_workspace_files_returns_entries(self) -> None:
         await prepare_task_workspace("Research")
         await write_workspace_file("outputs/final.md", "done")
         listing = await list_workspace_files("outputs")
 
-        self.assertEqual(listing["relative_path"], "outputs")
-        self.assertEqual(len(listing["entries"]), 1)
-        self.assertEqual(listing["entries"][0]["name"], "final.md")
+        self.assertEqual(listing["metadata"]["relative_path"], "outputs")
+        self.assertEqual(len(listing["metadata"]["entries"]), 1)
+        self.assertEqual(listing["metadata"]["entries"][0]["name"], "final.md")
 
     async def test_web_search_returns_error_payload_for_blank_query(self) -> None:
         await prepare_task_workspace("Research")
 
         result = await web_search("", max_results=5)
 
-        self.assertEqual(result["error"], "query is required")
+        self.assertEqual(result["summary"], "query is required")
 
     async def test_scrape_web_page_returns_error_payload_for_blocked_source(self) -> None:
         await prepare_task_workspace("Research")
@@ -285,10 +436,42 @@ class WorkspaceToolTests(IsolatedAsyncioTestCase):
         with patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)):
             result = await scrape_web_page(blocked_url, output_basename="reuters_markets")
 
-        self.assertIn("error", result)
-        self.assertIn("blocked automated access", result["error"])
-        self.assertEqual(result["status_code"], 401)
-        self.assertEqual(result["url"], blocked_url)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("blocked automated access", result["summary"])
+        self.assertEqual(result["metadata"]["status_code"], 401)
+        self.assertEqual(result["metadata"]["url"], blocked_url)
+
+    async def test_scrape_web_page_fails_fast_on_http_504(self) -> None:
+        await prepare_task_workspace("Research")
+        url = "https://data.cityofnewyork.us/api/views/43nn-pn8j/rows.csv"
+        response = FakeHttpResponse(url=url, status_code=504, text="Gateway Timeout")
+
+        with patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)):
+            result = await scrape_web_page(url, output_basename="nyc-restaurant-sample")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("HTTP 504", result["summary"])
+        self.assertNotIn("Stream removed", result["summary"])
+        self.assertEqual(result["error_code"], "HTTP_504")
+
+    async def test_scrape_web_page_hides_google_deadline_on_save(self) -> None:
+        await prepare_task_workspace("Research")
+        url = "https://example.com/page"
+        response = FakeHttpResponse(url=url, status_code=200, text="<html><title>Ok</title></html>")
+
+        with (
+            patch("nexus.tools.web.httpx.AsyncClient", return_value=FakeAsyncClient(response)),
+            patch(
+                "nexus.tools.web.save_source_artifact",
+                side_effect=RuntimeError("504 Stream removed (Deadline Exceeded)"),
+            ),
+        ):
+            result = await scrape_web_page(url, output_basename="ok-page")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "TIMEOUT")
+        self.assertNotIn("Stream removed", result["summary"])
+        self.assertNotIn("Deadline Exceeded", result["summary"])
 
 
 class WorkspaceRootRetryTests(IsolatedAsyncioTestCase):

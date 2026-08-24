@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Small in-memory cache for fast-path lookups."""
 
 from __future__ import annotations

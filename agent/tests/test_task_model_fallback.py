@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 from __future__ import annotations
 
 import asyncio
@@ -38,6 +41,12 @@ def _runtime_config(
         kilo_api_key="",
         kilo_model_id="",
         kilo_gateway_url="",
+        qwen_planner_model=primary,
+        qwen_planner_fallback_models=fallbacks,
+        qwen_worker_model="qwen-worker",
+        qwen_visual_model="qwen-visual",
+        qwen_micro_model="qwen-micro",
+        qwen_vision_model="qwen-vision",
     )
 
 
@@ -56,11 +65,130 @@ def _session(runtime_config: SessionRuntimeConfig):
 
 
 class TaskModelFallbackTests(IsolatedAsyncioTestCase):
-    async def test_api_key_session_switches_to_fallback_model(self) -> None:
+    async def test_orchestrator_uses_firebase_uid_for_adk_user(self) -> None:
+        config = _runtime_config(provider="apiKey", primary="qwen-primary")
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+        fake_session_service = object()
+
+        with (
+            patch.object(orchestrator_module, "create_planner_agent", return_value=MagicMock(name="agent")),
+            patch.object(orchestrator_module, "create_runner", return_value=(object(), fake_session_service)),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
+
+        self.assertEqual(orchestrator._user_id, "user-123")
+
+    async def test_missing_adk_session_replays_last_15_firestore_turns(self) -> None:
+        config = _runtime_config(provider="apiKey", primary="qwen-primary")
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+
+        messages: list[dict[str, object]] = []
+        for index in range(1, 17):
+            messages.append({"id": f"u{index}", "role": "user", "text": f"user {index}"})
+            messages.append({"id": f"a{index}", "role": "agent", "text": f"agent {index}"})
+
+        history_repository = SimpleNamespace(
+            get_session_messages=AsyncMock(return_value=messages),
+        )
+
+        class FakeSessionService:
+            def __init__(self) -> None:
+                self.created_with: dict[str, str] | None = None
+                self.events = []
+
+            async def get_session(self, **kwargs):
+                return None
+
+            async def create_session(self, **kwargs):
+                self.created_with = kwargs
+                return SimpleNamespace(
+                    app_name=kwargs["app_name"],
+                    user_id=kwargs["user_id"],
+                    id=kwargs["session_id"],
+                    events=[],
+                )
+
+            async def append_event(self, adk_session, event):
+                adk_session.events.append(event)
+                self.events.append(event)
+                return event
+
+        fake_session_service = FakeSessionService()
+        fake_agent = SimpleNamespace(name="nexus_orchestrator")
+
+        with (
+            patch.object(orchestrator_module, "create_planner_agent", return_value=fake_agent),
+            patch.object(orchestrator_module, "create_runner", return_value=(object(), fake_session_service)),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(
+                session=session,
+                ws=ws,
+                history_repository=history_repository,
+            )
+            await orchestrator._ensure_adk_session()
+
+        self.assertEqual(
+            fake_session_service.created_with,
+            {
+                "app_name": "nexus",
+                "user_id": "user-123",
+                "session_id": "session-123",
+            },
+        )
+        self.assertEqual(orchestrator._adk_session_id, "session-123")
+        self.assertEqual(len(fake_session_service.events), 30)
+        self.assertEqual(fake_session_service.events[0].content.parts[0].text, "user 2")
+        self.assertEqual(fake_session_service.events[0].content.role, "user")
+        self.assertEqual(fake_session_service.events[1].content.parts[0].text, "agent 2")
+        self.assertEqual(fake_session_service.events[1].content.role, "model")
+
+    async def test_prepare_workspace_for_turn_accepts_normalized_tool_result(self) -> None:
+        orchestrator = orchestrator_module.NexusOrchestrator.__new__(orchestrator_module.NexusOrchestrator)
+        orchestrator.session = SimpleNamespace(id="session-123")
+        orchestrator._current_run_id = "run-123"
+        orchestrator._workspace_path = "/home/user/CoComputer/Workspaces/session-123/run-123"
+        orchestrator._bind_workspace_context = lambda: None
+        orchestrator._ensure_session_workspace_root = AsyncMock(return_value=True)
+        orchestrator._create_step = AsyncMock(return_value="step-1")
+        orchestrator._complete_step = AsyncMock()
+        orchestrator._fail_step = AsyncMock()
+
+        with patch.object(
+            orchestrator_module,
+            "prepare_task_workspace",
+            new=AsyncMock(
+                return_value={
+                    "status": "success",
+                    "summary": "Executed prepare_task_workspace",
+                    "detail": {
+                        "workspace_path": "/home/user/CoComputer/Workspaces/session-123",
+                        "created": True,
+                        "touched_files": ["task.md"],
+                    },
+                    "metadata": {
+                        "workspace_path": "/home/user/CoComputer/Workspaces/session-123",
+                        "created": True,
+                        "touched_files": ["task.md"],
+                    },
+                }
+            ),
+        ):
+            await orchestrator._prepare_workspace_for_turn("write code")
+
+        orchestrator._fail_step.assert_not_awaited()
+        orchestrator._complete_step.assert_awaited_once()
+        self.assertEqual(
+            orchestrator._complete_step.await_args.kwargs["metadata"]["workspace_path"],
+            "/home/user/CoComputer/Workspaces/session-123",
+        )
+
+    async def test_qwen_session_switches_to_fallback_tier(self) -> None:
         config = _runtime_config(
             provider="apiKey",
-            primary="gemini-3.1-pro-preview",
-            fallbacks=("gemini-3-flash-preview", "gemini-2.5-flash"),
+            primary="qwen-primary",
+            fallbacks=("qwen-fallback-a", "qwen-fallback-b"),
         )
         session = _session(config)
         ws = SimpleNamespace(send_json=AsyncMock())
@@ -72,9 +200,9 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         first_runner = object()
         second_runner = object()
 
-        def fake_create_multi_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
-            created_models.append(runtime_config.gemini_agent_model)
-            return MagicMock(name=f"agent-{runtime_config.gemini_agent_model}")
+        def fake_create_planner_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
+            created_models.append(runtime_config.qwen_planner_model)
+            return MagicMock(name=f"agent-{runtime_config.qwen_planner_model}")
 
         def fake_create_runner(agent, session_service=None):
             reused_session_services.append(session_service)
@@ -83,13 +211,13 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
             return second_runner, session_service
 
         async def fake_run_agent_turn(**kwargs):
-            run_calls.append(kwargs["runtime_config"].gemini_agent_model)
+            run_calls.append(kwargs["runtime_config"].qwen_planner_model)
             if len(run_calls) == 1:
                 raise RuntimeError("429 daily limit exceeded")
             return AgentTurnResult(response="ok", usage_records=[])
 
         with (
-            patch.object(orchestrator_module, "create_multi_agent", side_effect=fake_create_multi_agent),
+            patch.object(orchestrator_module, "create_planner_agent", side_effect=fake_create_planner_agent),
             patch.object(orchestrator_module, "create_runner", side_effect=fake_create_runner),
             patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
         ):
@@ -102,23 +230,23 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.response, "ok")
         self.assertEqual(
             run_calls,
-            ["gemini-3.1-pro-preview", "gemini-3-flash-preview"],
+            ["qwen-primary", "qwen-fallback-a"],
         )
         self.assertEqual(
             created_models,
-            ["gemini-3.1-pro-preview", "gemini-3-flash-preview"],
+            ["qwen-primary", "qwen-fallback-a"],
         )
         self.assertEqual(reused_session_services, [None, first_session_service])
-        self.assertEqual(orchestrator.runtime_config.gemini_agent_model, "gemini-3-flash-preview")
-        self.assertEqual(session.runtime_config.gemini_agent_model, "gemini-3-flash-preview")
-        self.assertEqual(get_runtime_config().gemini_agent_model, "gemini-3-flash-preview")
+        self.assertEqual(orchestrator.runtime_config.qwen_planner_model, "qwen-fallback-a")
+        self.assertEqual(session.runtime_config.qwen_planner_model, "qwen-fallback-a")
+        self.assertEqual(get_runtime_config().qwen_planner_model, "qwen-fallback-a")
         self.assertTrue(ws.send_json.await_count >= 1)
 
-    async def test_vertex_session_uses_fallback_chain_when_configured(self) -> None:
+    async def test_qwen_fallback_chain_is_provider_independent(self) -> None:
         config = _runtime_config(
             provider="vertex",
-            primary="vertex-default-model",
-            fallbacks=("vertex-fallback-model",),
+            primary="qwen-primary",
+            fallbacks=("qwen-fallback",),
         )
         session = _session(config)
         ws = SimpleNamespace(send_json=AsyncMock())
@@ -129,9 +257,9 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         first_runner = object()
         second_runner = object()
 
-        def fake_create_multi_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
-            created_models.append(runtime_config.gemini_agent_model)
-            return MagicMock(name=f"agent-{runtime_config.gemini_agent_model}")
+        def fake_create_planner_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
+            created_models.append(runtime_config.qwen_planner_model)
+            return MagicMock(name=f"agent-{runtime_config.qwen_planner_model}")
 
         def fake_create_runner(agent, session_service=None):
             if session_service is None:
@@ -139,13 +267,13 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
             return second_runner, session_service
 
         async def fake_run_agent_turn(**kwargs):
-            run_calls.append(kwargs["runtime_config"].gemini_agent_model)
+            run_calls.append(kwargs["runtime_config"].qwen_planner_model)
             if len(run_calls) == 1:
                 raise RuntimeError("429 quota exceeded")
             return AgentTurnResult(response="ok", usage_records=[])
 
         with (
-            patch.object(orchestrator_module, "create_multi_agent", side_effect=fake_create_multi_agent),
+            patch.object(orchestrator_module, "create_planner_agent", side_effect=fake_create_planner_agent),
             patch.object(orchestrator_module, "create_runner", side_effect=fake_create_runner),
             patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
         ):
@@ -156,14 +284,14 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
             result = await orchestrator._run_agent_with_retry("run the task")
 
         self.assertEqual(result.response, "ok")
-        self.assertEqual(run_calls, ["vertex-default-model", "vertex-fallback-model"])
-        self.assertEqual(created_models, ["vertex-default-model", "vertex-fallback-model"])
+        self.assertEqual(run_calls, ["qwen-primary", "qwen-fallback"])
+        self.assertEqual(created_models, ["qwen-primary", "qwen-fallback"])
 
     async def test_unexpected_exception_returns_error_result(self) -> None:
         config = _runtime_config(
             provider="apiKey",
-            primary="gemini-3.1-pro-preview",
-            fallbacks=("gemini-3-flash-preview",),
+            primary="qwen-primary",
+            fallbacks=("qwen-fallback",),
         )
         session = _session(config)
         ws = SimpleNamespace(send_json=AsyncMock())
@@ -173,6 +301,7 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
 
         with (
             patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
+            patch.object(orchestrator_module, "create_runner", return_value=(MagicMock(), MagicMock())),
         ):
             orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
             orchestrator._adk_session_id = "adk-session"
@@ -181,6 +310,102 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         self.assertIsNone(result.response)
         self.assertEqual(result.usage_records, [])
         self.assertEqual(result.error, "item_index must be at least 1")
+
+    async def test_deepseek_v4_flash_504_switches_to_fallback(self) -> None:
+        flash = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _runtime_config(
+            provider="apiKey",
+            primary=flash,
+            fallbacks=("tencent-hy3",),
+        )
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+        run_calls: list[str] = []
+        first_session_service = object()
+
+        def fake_create_planner_agent(runtime_config, task_model_override=None, integration_tools=None, skill_instruction=None):
+            return MagicMock(name=f"agent-{runtime_config.qwen_planner_model}")
+
+        def fake_create_runner(agent, session_service=None):
+            if session_service is None:
+                return object(), first_session_service
+            return object(), session_service
+
+        async def fake_run_agent_turn(**kwargs):
+            run_calls.append(kwargs["runtime_config"].qwen_planner_model)
+            if len(run_calls) == 1:
+                raise RuntimeError(
+                    "litellm.BadGatewayError: BadGatewayError: OpenAIException - "
+                    "Upstream returned empty body (HTTP 504). Received Model Group="
+                    "deepseek-ai/DeepSeek-V4-Flash Available Model Group Fallbacks=None "
+                    "LiteLLM Retried: 2 times, LiteLLM Max Retries: 2"
+                )
+            return AgentTurnResult(response="ok", usage_records=[])
+
+        with (
+            patch.object(orchestrator_module, "create_planner_agent", side_effect=fake_create_planner_agent),
+            patch.object(orchestrator_module, "create_runner", side_effect=fake_create_runner),
+            patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
+            orchestrator._RATE_LIMIT_MAX_RETRIES = 4
+            orchestrator._RATE_LIMIT_BASE_WAIT = 30
+            orchestrator._adk_session_id = "adk-session"
+            result = await orchestrator._run_agent_with_retry("continue the task")
+
+        self.assertEqual(result.response, "ok")
+        self.assertEqual(run_calls, [flash, "tencent-hy3"])
+        self.assertEqual(orchestrator.runtime_config.qwen_planner_model, "tencent-hy3")
+
+    async def test_gateway_504_on_other_models_does_not_fallback(self) -> None:
+        config = _runtime_config(
+            provider="apiKey",
+            primary="qwen-primary",
+            fallbacks=("qwen-fallback",),
+        )
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+
+        async def fake_run_agent_turn(**kwargs):
+            raise RuntimeError(
+                "litellm.BadGatewayError: Upstream returned empty body (HTTP 504)"
+            )
+
+        with (
+            patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
+            patch.object(orchestrator_module, "create_runner", return_value=(MagicMock(), MagicMock())),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
+            orchestrator._adk_session_id = "adk-session"
+            result = await orchestrator._run_agent_with_retry("run the task")
+
+        self.assertIsNone(result.response)
+        self.assertIn("HTTP 504", result.error or "")
+
+
+class DeepSeekV4FlashGatewayTests(IsolatedAsyncioTestCase):
+    def test_gateway_helper_is_scoped_to_flash(self) -> None:
+        from nexus.model_select import is_deepseek_v4_flash_gateway_error
+
+        error = "Upstream returned empty body (HTTP 504)"
+        self.assertTrue(
+            is_deepseek_v4_flash_gateway_error(error, "deepseek-ai/DeepSeek-V4-Flash")
+        )
+        self.assertFalse(is_deepseek_v4_flash_gateway_error(error, "tencent-hy3"))
+
+    def test_bynara_router_fallbacks_only_for_flash(self) -> None:
+        from nexus.bynara_router import _deepseek_v4_flash_router_fallbacks
+
+        self.assertEqual(
+            _deepseek_v4_flash_router_fallbacks(
+                ["deepseek-ai/DeepSeek-V4-Flash", "tencent-hy3"]
+            ),
+            [{"deepseek-ai/DeepSeek-V4-Flash": ["tencent-hy3"]}],
+        )
+        self.assertEqual(
+            _deepseek_v4_flash_router_fallbacks(["tencent-hy3", "glm-5"]),
+            [],
+        )
 
 
 class WebsocketSendLockTests(IsolatedAsyncioTestCase):

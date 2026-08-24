@@ -1,18 +1,24 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Monitoring tool for proactive background tasks using the E2B Sandbox."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 import uuid
+
+from nexus.tools.base import normalized_tool, tool_error, tool_success
 
 logger = logging.getLogger(__name__)
 
+
+@normalized_tool(needs_sandbox=True)
 def schedule_monitoring_task(
     description: str,
     interval_minutes: int,
     instruction: str,
-) -> dict[str, Any]:
+) -> dict:
     """Schedule a periodic task that the agent will perform in the background.
 
     Args:
@@ -21,26 +27,23 @@ def schedule_monitoring_task(
         instruction: The exact prompt the agent should follow when the task triggers.
 
     Returns:
-        Confirmation dict with task details.
+        NormalizedToolResult with task_id and schedule details.
     """
     from nexus.tools._context import get_sandbox
-    
+
     try:
         sandbox = get_sandbox()
     except RuntimeError:
-        return {"status": "error", "message": "No active sandbox context."}
-        
+        return tool_error(
+            "No active sandbox context.",
+            error_code="TOOL_UNAVAILABLE",
+        )
+
     if interval_minutes < 1:
         interval_minutes = 1
-        
+
     task_id = f"monitor_{uuid.uuid4().hex[:8]}"
-    
-    # We write a simple python daemon into the sandbox that sleeps and executes the instruction
-    # For a real hackathon demo, this script could use the agent's LLM API, but here we just
-    # simulate the proactive notification by echoing to a log file that the frontend could tail.
-    # To make it truly agentic, we could have it call an API webhook back to our FastAPI server
-    # to trigger a new run!
-    
+
     daemon_script = f"""
 import time
 import os
@@ -51,25 +54,18 @@ print(f"Started monitoring task: {description}")
 
 while True:
     time.sleep(interval)
-    # In a full implementation, this would trigger the AI agent.
-    # For the demo, we simulate a finding.
     print(f"ALERT: Condition met for '{description}'. Executing: {instruction}")
-    
-    # We can write to a specific file that the UI watches, or just log it.
     with open('/home/user/desktop/monitoring_alerts.log', 'a') as f:
         f.write(f"ALERT: {{time.ctime()}} - '{description}' triggered.\\n")
 """
 
     script_path = f"/tmp/{task_id}.py"
     sandbox.commands.run(f"cat << 'EOF' > {script_path}\n{daemon_script}\nEOF")
-    
-    # Run it in the background using nohup
     sandbox.commands.run(f"nohup python3 {script_path} > /tmp/{task_id}.log 2>&1 &")
-    
-    return {
-        "status": "scheduled",
-        "task_id": task_id,
-        "description": description,
-        "interval_minutes": interval_minutes,
-        "message": f"Successfully scheduled '{description}' to run every {interval_minutes} minutes in the background."
-    }
+
+    return tool_success(
+        f"Scheduled '{description}' every {interval_minutes} minutes",
+        task_id=task_id,
+        description=description,
+        interval_minutes=interval_minutes,
+    )

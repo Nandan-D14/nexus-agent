@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import {
@@ -13,6 +18,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowUpRight, MonitorSmartphone, X } from "lucide-react";
 import { useToast } from "@/components/toast-provider";
+import { APP_DASHBOARD, sessionPath } from "@/lib/app-paths";
 import { useAuth } from "@/lib/auth-context";
 import { useSession } from "@/lib/use-session";
 
@@ -300,8 +306,8 @@ export function LiveDesktopProvider({ children }: { children: ReactNode }) {
 
     setIsMinimized(false);
 
-    if (pathname !== `/session/${activeDesktop.sessionId}`) {
-      router.push(`/session/${activeDesktop.sessionId}`);
+    if (pathname !== sessionPath(activeDesktop.sessionId)) {
+      router.push(sessionPath(activeDesktop.sessionId));
     }
   }, [activeDesktop, pathname, router]);
 
@@ -340,8 +346,8 @@ export function LiveDesktopProvider({ children }: { children: ReactNode }) {
       setActiveDesktop(null);
       setIsMinimized(false);
 
-      if (pathname === `/session/${closedSessionId}`) {
-        router.push("/dashboard");
+      if (pathname === sessionPath(closedSessionId)) {
+        router.push(APP_DASHBOARD);
       }
 
       toast("Desktop session closed.", "success");
@@ -358,9 +364,17 @@ export function LiveDesktopProvider({ children }: { children: ReactNode }) {
     }
   }, [user]);
 
-  const isShowingPiP =
-    !!activeDesktop &&
-    (isMinimized || pathname !== `/session/${activeDesktop.sessionId}`);
+  // Auto-clear a stale minimized flag once the user is back on the desktop's
+  // own session page, so the PiP can never float over the live view itself.
+  useEffect(() => {
+    if (activeDesktop && pathname === sessionPath(activeDesktop.sessionId)) {
+      setIsMinimized(false);
+    }
+  }, [activeDesktop, pathname]);
+
+  // Only show the PiP when something explicitly minimized it. Merely
+  // navigating to a different route must never pop it up on its own.
+  const isShowingPiP = !!activeDesktop && isMinimized;
 
   const value = useMemo<LiveDesktopContextValue>(
     () => ({

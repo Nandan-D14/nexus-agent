@@ -4,6 +4,8 @@ set -euo pipefail
 PROJECT_ID="${GOOGLE_PROJECT_ID:?Set GOOGLE_PROJECT_ID}"
 REGION="${GOOGLE_CLOUD_REGION:-us-central1}"          # Cloud Run / Artifact Registry region
 GEMINI_REGION="${GOOGLE_GEMINI_REGION:-global}"        # Gemini API region (Gemini 3 requires "global")
+TASKS_LOCATION="${GCP_TASKS_LOCATION:-${REGION}}"
+TASKS_QUEUE="${GCP_TASKS_QUEUE:-cocomputer-tasks}"
 
 AR_HOST="${REGION}-docker.pkg.dev"
 AR_REPO="${AR_HOST}/${PROJECT_ID}/nexus"
@@ -36,6 +38,10 @@ JWT_SECRET="${JWT_SECRET:?Set JWT_SECRET}"
 
 AGENT_SECRET_FLAGS=(
   "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
+  "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
+  "--set-secrets=JWT_SECRET=jwt-secret:latest"
+  "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+  "--set-secrets=TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
 )
 
 if [[ -n "${BYOK_ENCRYPTION_KEY_SECRET}" ]]; then
@@ -46,6 +52,7 @@ fi
 
 AGENT_ENV_VARS=(
   "APP_ENV=production"
+  "MODEL_PROVIDER=qwen"
   "FIREBASE_PROJECT_ID=${FB_PROJECT_ID}"
   "GOOGLE_PROJECT_ID=${PROJECT_ID}"
   "GOOGLE_CLOUD_REGION=${GEMINI_REGION}"
@@ -53,14 +60,22 @@ AGENT_ENV_VARS=(
   "GOOGLE_CLOUD_LOCATION=${GEMINI_REGION}"
   "GOOGLE_GENAI_USE_VERTEXAI=true"
   "GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}"
-  "GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}"
   "REQUIRE_BYOK=${REQUIRE_BYOK}"
   "BETA_ENFORCE_BYOK=${BETA_ENFORCE_BYOK}"
   "SHARED_ACCESS_CODE=${SHARED_ACCESS_CODE}"
   "BETA_ADMIN_EMAILS=${BETA_ADMIN_EMAILS}"
   "BETA_GOOGLE_SHEET_ID=${BETA_GOOGLE_SHEET_ID}"
   "BETA_GOOGLE_SHEET_NAME=${BETA_GOOGLE_SHEET_NAME}"
-  "JWT_SECRET=${JWT_SECRET}"
+  "TASK_WORKER_ENABLED=true"
+  "TASK_QUEUE_LOCAL_FALLBACK=false"
+  "DURABLE_SUBAGENTS_ENABLED=true"
+  "SUBAGENT_LEASE_SECONDS=600"
+  "SUBAGENT_HEARTBEAT_INTERVAL_SECONDS=120"
+  "SUBAGENT_MAX_MAILBOX_MESSAGES=32"
+  "SUBAGENT_PARENT_WAIT_SECONDS=300"
+  "GCP_TASKS_PROJECT_ID=${PROJECT_ID}"
+  "GCP_TASKS_LOCATION=${TASKS_LOCATION}"
+  "GCP_TASKS_QUEUE=${TASKS_QUEUE}"
 )
 AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
@@ -82,6 +97,11 @@ gcloud builds submit \
   --tag="${AGENT_IMAGE}" \
   "${AGENT_DIR}"
 
+echo "Ensuring Cloud Tasks queue exists..."
+gcloud tasks queues create "${TASKS_QUEUE}" \
+  --project="${PROJECT_ID}" \
+  --location="${TASKS_LOCATION}" 2>/dev/null || true
+
 echo "Deploying agent service..."
 gcloud run deploy nexus-agent \
   --project="${PROJECT_ID}" \
@@ -102,7 +122,41 @@ AGENT_URL="$(gcloud run services describe nexus-agent \
   --format='value(status.url)')"
 
 echo "Agent URL: ${AGENT_URL}"
+echo "Rollback (deployment/version level only; no second runtime mesh):"
+echo "  gcloud run services update-traffic nexus-agent --region=${REGION} --to-revisions=PREVIOUS_REVISION=100"
+echo "List revisions with:"
+echo "  gcloud run revisions list --service=nexus-agent --region=${REGION}"
 AGENT_WS_URL="${AGENT_URL/https:/wss:}"
+
+echo "Deploying worker service..."
+gcloud run deploy cocomputer-worker \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --image="${AGENT_IMAGE}" \
+  --port=8000 \
+  --memory=2Gi \
+  --cpu=2 \
+  --timeout=3600 \
+  --concurrency=1 \
+  --allow-unauthenticated \
+  "${AGENT_SECRET_FLAGS[@]}" \
+  --set-env-vars="${AGENT_ENV_VARS_CSV}"
+
+WORKER_URL="$(gcloud run services describe cocomputer-worker \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --format='value(status.url)')"
+WORKER_TASK_URL="${WORKER_URL}/internal/tasks/run"
+
+echo "Updating agent and worker queue target..."
+gcloud run services update nexus-agent \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --update-env-vars="GCP_TASKS_WORKER_URL=${WORKER_TASK_URL}"
+gcloud run services update cocomputer-worker \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --update-env-vars="GCP_TASKS_WORKER_URL=${WORKER_TASK_URL}"
 
 echo "Building frontend image..."
 gcloud builds submit \
@@ -139,3 +193,5 @@ echo ""
 echo "=== Deployment Complete ==="
 echo "Frontend: ${FRONTEND_URL}"
 echo "Agent:    ${AGENT_URL}"
+echo "Worker:   ${WORKER_URL}"
+echo "Queue:    ${TASKS_QUEUE} (${TASKS_LOCATION})"

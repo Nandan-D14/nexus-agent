@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Remote MCP client support for user-configured Streamable HTTP servers."""
 
 from __future__ import annotations
@@ -14,10 +17,17 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from nexus.tracing import (
+    monotonic_ms,
+    safe_origin,
+    safe_trace_value,
+    trace_headers,
+    trace_metadata,
+)
+
 logger = logging.getLogger(__name__)
 
 SECRET_KEY_RE = re.compile(r"(authorization|token|secret|password|api[_-]?key)", re.I)
-RISKY_TOOL_RE = re.compile(r"(create|update|delete|write|drop|deploy|send|upload|insert|execute|run)", re.I)
 
 if TYPE_CHECKING:
     from nexus.history_repository import StoredIntegrationConnection
@@ -60,6 +70,29 @@ def redact_sensitive(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
     return value
+
+
+async def _emit_mcp_trace(event_type: str, **payload: Any) -> None:
+    event = {
+        "type": event_type,
+        **trace_metadata(),
+        **safe_trace_value(payload),
+    }
+    logger.info(
+        "MCP trace type=%s trace=%s operation=%s status=%s",
+        event_type,
+        event.get("trace_id", ""),
+        event.get("operation", ""),
+        event.get("status_code", ""),
+    )
+    try:
+        from nexus.tools._context import get_send_json
+
+        send_json = get_send_json()
+        if send_json is not None:
+            await send_json(event)
+    except Exception:
+        logger.debug("Unable to emit MCP trace event", exc_info=True)
 
 
 def normalize_tool_result(result: Any) -> dict[str, Any]:
@@ -154,7 +187,38 @@ class McpRemoteClient:
         headers = dict(self.headers)
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
+        headers.update(trace_headers())
         return headers
+
+    def _event_hooks(
+        self,
+        *,
+        operation: str,
+        tool_name: str = "",
+    ) -> dict[str, list[Callable[..., Awaitable[None]]]]:
+        async def on_request(request: httpx.Request) -> None:
+            request.extensions["nexus_trace_started_ms"] = monotonic_ms()
+            await _emit_mcp_trace(
+                "mcp_http_request",
+                operation=operation,
+                tool=tool_name,
+                method=request.method,
+                server=safe_origin(str(request.url)),
+            )
+
+        async def on_response(response: httpx.Response) -> None:
+            started = int(response.request.extensions.get("nexus_trace_started_ms") or monotonic_ms())
+            await _emit_mcp_trace(
+                "mcp_http_response",
+                operation=operation,
+                tool=tool_name,
+                method=response.request.method,
+                server=safe_origin(str(response.request.url)),
+                status_code=response.status_code,
+                latency_ms=max(0, monotonic_ms() - started),
+            )
+
+        return {"request": [on_request], "response": [on_response]}
 
     async def discover(self) -> McpTestResult:
         started = time.monotonic()
@@ -163,6 +227,7 @@ class McpRemoteClient:
                 headers=self._headers(),
                 timeout=httpx.Timeout(self.timeout_seconds, read=self.read_timeout_seconds),
                 follow_redirects=True,
+                event_hooks=self._event_hooks(operation="discover"),
             ) as http_client:
                 async with streamable_http_client(self.url, http_client=http_client) as streams:
                     read_stream, write_stream = streams[0], streams[1]
@@ -190,6 +255,14 @@ class McpRemoteClient:
                             latency_ms=int((time.monotonic() - started) * 1000),
                         )
         except Exception as exc:
+            await _emit_mcp_trace(
+                "mcp_http_error",
+                operation="discover",
+                server=safe_origin(self.url),
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
             return McpTestResult(
                 ok=False,
                 tools=[],
@@ -206,25 +279,38 @@ class McpRemoteClient:
         progress_callback: Callable[[float, float | None, str | None], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
-        async with httpx.AsyncClient(
-            headers=self._headers(),
-            timeout=httpx.Timeout(self.timeout_seconds, read=self.read_timeout_seconds),
-            follow_redirects=True,
-        ) as http_client:
-            async with streamable_http_client(self.url, http_client=http_client) as streams:
-                read_stream, write_stream = streams[0], streams[1]
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(
-                        tool_name,
-                        arguments=arguments or {},
-                        progress_callback=progress_callback,
-                        read_timeout_seconds=self.read_timeout_seconds,
-                    )
-                    payload = normalize_tool_result(result)
-                    payload["latency_ms"] = int((time.monotonic() - started) * 1000)
-                    payload["tool"] = tool_name
-                    return payload
+        try:
+            async with httpx.AsyncClient(
+                headers=self._headers(),
+                timeout=httpx.Timeout(self.timeout_seconds, read=self.read_timeout_seconds),
+                follow_redirects=True,
+                event_hooks=self._event_hooks(operation="call_tool", tool_name=tool_name),
+            ) as http_client:
+                async with streamable_http_client(self.url, http_client=http_client) as streams:
+                    read_stream, write_stream = streams[0], streams[1]
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        result = await session.call_tool(
+                            tool_name,
+                            arguments=arguments or {},
+                            progress_callback=progress_callback,
+                            read_timeout_seconds=self.read_timeout_seconds,
+                        )
+                        payload = normalize_tool_result(result)
+                        payload["latency_ms"] = int((time.monotonic() - started) * 1000)
+                        payload["tool"] = tool_name
+                        return payload
+        except Exception as exc:
+            await _emit_mcp_trace(
+                "mcp_http_error",
+                operation="call_tool",
+                tool=tool_name,
+                server=safe_origin(self.url),
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
 
 
 def discovered_tools_payload(tools: list[McpDiscoveredTool]) -> list[dict[str, Any]]:
@@ -260,6 +346,9 @@ def build_mcp_adk_tools(
         if not url:
             continue
         bearer_token = str(connection.private.get("bearerToken") or "")
+        auth_type = str(connection.private.get("authType") or "")
+        owner_id = str(getattr(connection, "owner_id", "") or "")
+        provider = str(getattr(connection, "provider", "") or "")
         server_slug = slugify_tool_part(connection.name or connection.connection_id, fallback="mcp")
         tools = connection.private.get("tools")
         if not isinstance(tools, list):
@@ -286,32 +375,32 @@ def build_mcp_adk_tools(
                 _tool_name: str = remote_tool_name,
                 _connection_id: str = connection.connection_id,
                 _connection_name: str = connection.name,
+                _owner_id: str = owner_id,
+                _provider: str = provider,
+                _auth_type: str = auth_type,
             ) -> dict[str, Any]:
                 """Call a configured remote MCP tool with JSON arguments."""
-                if RISKY_TOOL_RE.search(_tool_name):
-                    try:
-                        from nexus.tools._context import get_bg_task_manager
+                from nexus.exa_oauth import ensure_exa_access_token, is_unauthorized_mcp_error
+                from nexus.mcp_oauth import MCP_OAUTH_SPECS, ensure_mcp_oauth_access_token
+                from nexus.slack_oauth import ensure_slack_access_token
+                from nexus.treg_oauth import ensure_treg_access_token
 
-                        manager = get_bg_task_manager()
-                    except Exception:
-                        manager = None
-                    if manager is not None:
-                        task_id, approved = await manager.request_permission(
-                            description=f"Allow MCP tool {_connection_name}.{_tool_name}",
-                            estimated_seconds=30,
-                            agent="mcp",
-                        )
-                        if not approved:
-                            return {
-                                "status": "cancelled",
-                                "error": "User denied MCP tool permission.",
-                                "task_id": task_id,
-                                "connection_id": _connection_id,
-                                "connector": _connection_name,
-                                "tool": _tool_name,
-                                "arguments": redact_sensitive(arguments or {}),
-                            }
-                client = McpRemoteClient(url=_url, bearer_token=_token)
+                token = _token
+                if _auth_type == "oauth" and _owner_id:
+                    if _provider == "exa":
+                        token = await ensure_exa_access_token(_owner_id) or _token
+                    elif _provider == "treg":
+                        token = await ensure_treg_access_token(_owner_id) or _token
+                    elif _provider == "slack":
+                        token = await ensure_slack_access_token(_owner_id) or _token
+                    elif _provider in MCP_OAUTH_SPECS:
+                        spec = MCP_OAUTH_SPECS.get(_provider)
+                        token = await ensure_mcp_oauth_access_token(
+                            _owner_id,
+                            _provider,
+                            resource=spec.mcp_origin if spec else "",
+                        ) or _token
+                client = McpRemoteClient(url=_url, bearer_token=token)
                 try:
                     result = await client.call_tool(
                         tool_name=_tool_name,
@@ -324,6 +413,40 @@ def build_mcp_adk_tools(
                         "arguments": redact_sensitive(arguments or {}),
                     }
                 except Exception as exc:
+                    if (
+                        _provider in {"exa", "treg", "slack", *MCP_OAUTH_SPECS}
+                        and _owner_id
+                        and is_unauthorized_mcp_error(exc)
+                    ):
+                        if _provider == "treg":
+                            retry_token = await ensure_treg_access_token(_owner_id, force=True)
+                        elif _provider == "exa":
+                            retry_token = await ensure_exa_access_token(_owner_id, force=True)
+                        elif _provider == "slack":
+                            retry_token = await ensure_slack_access_token(_owner_id, force=True)
+                        else:
+                            spec = MCP_OAUTH_SPECS.get(_provider)
+                            retry_token = await ensure_mcp_oauth_access_token(
+                                _owner_id,
+                                _provider,
+                                force=True,
+                                resource=spec.mcp_origin if spec else "",
+                            )
+                        if retry_token and retry_token != token:
+                            try:
+                                retry_client = McpRemoteClient(url=_url, bearer_token=retry_token)
+                                result = await retry_client.call_tool(
+                                    tool_name=_tool_name,
+                                    arguments=arguments or {},
+                                )
+                                return {
+                                    **result,
+                                    "connection_id": _connection_id,
+                                    "connector": _connection_name,
+                                    "arguments": redact_sensitive(arguments or {}),
+                                }
+                            except Exception as retry_exc:
+                                exc = retry_exc
                     return {
                         "status": "error",
                         "error": str(exc)[:500] or "MCP tool call failed",
@@ -342,6 +465,8 @@ def build_mcp_adk_tools(
                 "Returns:\n"
                 "    dict with status, text/content/structured result, latency_ms, connector, and error when failed."
             )
+            # Tagged so per-turn allowlists can resolve MCP tools by connection.
+            setattr(_call_mcp_tool, "_connection_id", connection.connection_id)
             adk_tools.append(_call_mcp_tool)
 
     return adk_tools

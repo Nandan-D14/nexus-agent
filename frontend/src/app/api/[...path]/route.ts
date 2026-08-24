@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 import { NextRequest, NextResponse } from "next/server";
 
 const AGENT_URL = process.env.AGENT_URL || "http://localhost:8000";

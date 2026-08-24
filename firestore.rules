@@ -20,6 +20,10 @@ service cloud.firestore {
         && request.auth.uid in sessionDoc(sessionId).data.memberIds;
     }
 
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
     function userBootstrapKeys() {
       return [
         "uid",
@@ -62,6 +66,11 @@ service cloud.firestore {
         allow read: if isSessionMember(sessionId);
         allow write: if false;
       }
+    }
+
+    match /audit_logs/{logId} {
+      allow create: if isAdmin();
+      allow update, delete: if false;
     }
   }
 }

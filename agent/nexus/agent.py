@@ -1,32 +1,43 @@
-"""ADK agent definition — the CoComputer brain.
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
 
-Supports two modes:
-  1. Single agent (default fallback) — one agent with all tools.
-  2. Multi-agent orchestrator — hierarchical: Orchestrator → sub-agents.
-"""
+"""ADK planner construction and turn execution."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import logging
-from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import BaseSessionService
 from google.genai import types
 
-from nexus.credentialed_gemini import CredentialedGemini
 from nexus.config import settings
-from nexus.prompts.system import SYSTEM_PROMPT
+from nexus.control_loop import looks_like_worker_envelope
+from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
-from nexus.tools import ALL_TOOLS
-from nexus.usage import TokenUsageRecord, extract_token_usage_records, get_agent_usage_source
-
-if TYPE_CHECKING:
-    from nexus.sandbox import SandboxManager
+from nexus.session_service import FirestoreSessionService
+from nexus.usage import (
+    TokenUsageRecord,
+    extract_token_usage_records,
+    get_agent_usage_source,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# Instruction used when the model finished a turn on tool calls without ever
+# emitting a closing answer. It is nudged to synthesize from what it already
+# gathered instead of calling more tools.
+_FINAL_SYNTHESIS_INSTRUCTION = (
+    "You have gathered enough information from the previous tool results. "
+    "Do NOT call any tools. Using only the information already collected, "
+    "write the final answer or summary for the user now."
+)
+# Small, bounded turn cap for the forced synthesis pass so a stray tool call
+# cannot re-open an unbounded loop.
+_SYNTHESIS_TURN_CAP = 2
 
 
 @dataclass
@@ -36,181 +47,49 @@ class AgentTurnResult:
     error: str | None = None
 
 
-def _get_model(runtime_config: SessionRuntimeConfig):
-    """Return either a LiteLlm wrapper (Kilo) or a Gemini model string."""
-    if runtime_config.use_kilo:
-        from google.adk.models.lite_llm import LiteLlm
-        logger.info("Using Kilo gateway model: %s", runtime_config.kilo_model_id)
-        return LiteLlm(
-            model=f"openai/{runtime_config.kilo_model_id}",
-            api_key=runtime_config.kilo_api_key,
-            api_base=runtime_config.kilo_gateway_url,
-        )
-    return CredentialedGemini(
-        runtime_config=runtime_config,
-        model=runtime_config.gemini_agent_model,
-    )
-
-
 def _runtime_for_task_model(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
 ) -> SessionRuntimeConfig:
-    if not task_model_override or task_model_override == runtime_config.gemini_agent_model:
+    """Apply a Qwen planner-tier override to one turn."""
+    if (
+        not task_model_override
+        or task_model_override == runtime_config.qwen_planner_model
+    ):
         return runtime_config
-    return replace(runtime_config, gemini_agent_model=task_model_override)
+    return replace(
+        runtime_config,
+        qwen_planner_model=task_model_override,
+    )
 
 
-def create_agent(
+def create_planner_agent(
     runtime_config: SessionRuntimeConfig,
     task_model_override: str | None = None,
     integration_tools: list | None = None,
     skill_instruction: str = "",
 ) -> Agent:
-    """Create the single CoComputer ADK agent with all desktop control tools."""
-    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
-    instruction = SYSTEM_PROMPT if not skill_instruction else f"{SYSTEM_PROMPT}\n\n{skill_instruction}"
-    agent = Agent(
-        name="nexus",
-        model=_get_model(effective_runtime_config),
-        instruction=instruction,
-        tools=[*ALL_TOOLS, *(integration_tools or [])],
+    """Create the sole production planner with AgentTool workers."""
+    from nexus.agents.planner_agent import create_planner_agent as _build
+
+    effective_runtime_config = _runtime_for_task_model(
+        runtime_config,
+        task_model_override,
     )
-    return agent
-
-
-def create_multi_agent(
-    runtime_config: SessionRuntimeConfig,
-    task_model_override: str | None = None,
-    integration_tools: list | None = None,
-    skill_instruction: str = "",
-) -> Agent:
-    """Create a hierarchical multi-agent system.
-
-    Returns the top-level orchestrator agent which delegates to:
-      - computer_agent (GUI interactions)
-      - browser_agent (web browsing)
-      - code_agent (terminal & code)
-      - deepresearcher (coordinated research workflows)
-    """
-    effective_runtime_config = _runtime_for_task_model(runtime_config, task_model_override)
-    from nexus.agents import (
-        create_browser_agent,
-        create_code_agent,
-        create_computer_agent,
-        create_deepresearcher_agent,
-        create_orchestrator_agent,
-    )
-    from nexus.tools.bg_task import request_background_task
-    from nexus.tools.integrations import (
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-    )
-    from nexus.tools.workspace import (
-        prepare_task_workspace,
-        write_todo_list,
-        update_todo_item,
-        write_workspace_file,
-        read_workspace_file,
-        list_workspace_files,
-    )
-
-    orchestrator_tools = [
-        prepare_task_workspace,
-        write_todo_list,
-        update_todo_item,
-        read_workspace_file,
-        list_workspace_files,
-        request_background_task,
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-        *(integration_tools or []),
-    ]
-    deepresearcher_tools = [
-        prepare_task_workspace,
-        write_todo_list,
-        update_todo_item,
-        write_workspace_file,
-        read_workspace_file,
-        list_workspace_files,
-        request_background_task,
-        search_drive,
-        read_drive_file,
-        create_drive_doc,
-        upload_drive_file,
-        gmail_search,
-        gmail_read,
-        gmail_send,
-        tasks_list,
-        tasks_create,
-        calendar_list,
-        calendar_create,
-        github_search_repos,
-        github_read_file,
-        github_list_issues,
-        github_create_issue,
-        github_summarize_pr,
-        *(integration_tools or []),
-    ]
-
-    computer = create_computer_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    browser = create_browser_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    code = create_code_agent(effective_runtime_config, skill_instruction=skill_instruction)
-    deepresearcher = create_deepresearcher_agent(
+    return _build(
         effective_runtime_config,
-        extra_tools=deepresearcher_tools,
+        integration_tools=integration_tools,
         skill_instruction=skill_instruction,
+        model_override=task_model_override,
     )
-
-    orchestrator = create_orchestrator_agent(
-        runtime_config=effective_runtime_config,
-        computer_agent=computer,
-        browser_agent=browser,
-        code_agent=code,
-        deepresearcher_agent=deepresearcher,
-        extra_tools=orchestrator_tools,
-        skill_instruction=skill_instruction,
-    )
-    logger.info(
-        "Multi-agent orchestrator created with sub-agents: computer, browser, code, deepresearcher"
-    )
-    return orchestrator
 
 
 def create_runner(
     agent: Agent,
-    session_service: InMemorySessionService | None = None,
-) -> tuple[Runner, InMemorySessionService]:
-    """Create a Runner for executing agent turns."""
-    session_service = session_service or InMemorySessionService()
+    session_service: BaseSessionService | None = None,
+) -> tuple[Runner, BaseSessionService]:
+    """Create a Runner for executing planner turns."""
+    session_service = session_service or FirestoreSessionService()
     runner = Runner(
         agent=agent,
         app_name="nexus",
@@ -221,83 +100,178 @@ def create_runner(
 
 async def run_agent_turn(
     runner: Runner,
-    session_service: InMemorySessionService,
+    session_service: BaseSessionService,
     session_id: str,
     user_id: str,
     message: str,
     runtime_config: SessionRuntimeConfig,
     event_callback=None,
+    max_turns: int | None = None,
 ) -> AgentTurnResult:
-    """Execute a single agent turn with a user message.
-
-    Calls event_callback(event) for each intermediate event so the caller
-    can stream tool calls, thoughts, etc. to the frontend.
-
-    Returns the agent's final text response, or None.
-    """
-    # Ensure ADK session exists
+    """Execute one planner turn and return its final text and usage."""
     adk_session = await session_service.get_session(
-        app_name="nexus", user_id=user_id, session_id=session_id
+        app_name="nexus",
+        user_id=user_id,
+        session_id=session_id,
     )
     if adk_session is None:
-        adk_session = await session_service.create_session(
-            app_name="nexus", user_id=user_id, session_id=session_id
+        await session_service.create_session(
+            app_name="nexus",
+            user_id=user_id,
+            session_id=session_id,
         )
+
+    final_response = None
+    usage_records: list[TokenUsageRecord] = []
+    usage_seen: set[tuple[str, str, int, int, int]] = set()
+    max_turns = max_turns or settings.max_agent_turns
+    usage_source, usage_model = get_agent_usage_source(runtime_config)
+
+    async def _consume(new_message, turn_cap: int):
+        """Drive the runner for one message.
+
+        Returns (final_text, last_text, rounds, response_count, hit_cap) where
+        final_text is the strict ``is_final_response`` text and last_text is the
+        last non-empty text part seen (used as a fallback when the model does
+        not flag a final response).
+        """
+        final_text: str | None = None
+        last_text: str | None = None
+        rounds = 0
+        response_count = 0
+        hit_cap = False
+        try:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=new_message,
+            ):
+                for record in extract_token_usage_records(
+                    event,
+                    default_source=usage_source,
+                    default_model=usage_model,
+                ):
+                    fingerprint = (
+                        record.source,
+                        record.model,
+                        record.input_tokens,
+                        record.output_tokens,
+                        record.total_tokens,
+                    )
+                    if fingerprint in usage_seen:
+                        continue
+                    usage_seen.add(fingerprint)
+                    usage_records.append(record)
+
+                if event_callback:
+                    await event_callback(event)
+
+                if event.content and event.content.parts:
+                    if any(part.function_call for part in event.content.parts):
+                        rounds += 1
+                    response_count += sum(
+                        1
+                        for part in event.content.parts
+                        if getattr(part, "function_response", None)
+                    )
+                    for part in event.content.parts:
+                        # Only genuine answer text may become the response.
+                        # Skip parts EXPLICITLY marked as reasoning (thought=True
+                        # or reasoning fields). Do NOT apply the reasoning_is_text
+                        # blanket here: that heuristic is for routing the live
+                        # think-log stream; final/last answer text is the answer.
+                        if getattr(part, "text", None) and not is_reasoning_part(part):
+                            last_text = part.text
+
+                if (
+                    event.is_final_response()
+                    and event.content
+                    and event.content.parts
+                ):
+                    for part in event.content.parts:
+                        if part.text and not is_reasoning_part(part):
+                            final_text = part.text
+                            break
+
+                if rounds >= turn_cap:
+                    logger.warning(
+                        "Max turns (%d) reached, stopping agent loop",
+                        turn_cap,
+                    )
+                    hit_cap = True
+                    break
+        except ValueError as exc:
+            # A hallucinated / unregistered tool name makes ADK's _get_tool raise
+            # a bare ValueError. Do not let one bad tool call crash the whole turn:
+            # log it, surface a recovery note, and let the caller fall back to
+            # last_text / forced synthesis instead of propagating the exception.
+            message = str(exc)
+            lowered = message.lower()
+            if "tool" in lowered and "not found" in lowered:
+                logger.warning(
+                    "Model requested an unavailable tool (%s); recovering gracefully for session %s",
+                    message,
+                    session_id,
+                )
+                if not (last_text and last_text.strip()):
+                    last_text = (
+                        "A requested tool was unavailable, so that action was skipped. "
+                        "Continue using only the available tools."
+                    )
+            else:
+                raise
+        return final_text, last_text, rounds, response_count, hit_cap
 
     content = types.Content(
         role="user",
         parts=[types.Part(text=message)],
     )
+    (
+        final_response,
+        last_text,
+        turn_count,
+        function_response_count,
+        hit_turn_cap,
+    ) = await _consume(content, max_turns)
 
-    final_response = None
-    usage_records: list[TokenUsageRecord] = []
-    usage_seen: set[tuple[str, str, int, int, int]] = set()
-    turn_count = 0
-    max_turns = settings.max_agent_turns
-    usage_source, usage_model = get_agent_usage_source(runtime_config)
-
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=content,
+    # Robust capture: if the model never flagged a strict final response, fall
+    # back to the last text it emitted so a summary is not silently dropped.
+    # Never promote a raw worker/tool result envelope — that must trigger
+    # forced synthesis instead of leaking JSON into the user bubble.
+    if looks_like_worker_envelope(final_response):
+        final_response = None
+    if not (final_response and final_response.strip()) and (
+        last_text and last_text.strip() and not looks_like_worker_envelope(last_text)
     ):
-        for record in extract_token_usage_records(
-            event,
-            default_source=usage_source,
-            default_model=usage_model,
-        ):
-            fingerprint = (
-                record.source,
-                record.model,
-                record.input_tokens,
-                record.output_tokens,
-                record.total_tokens,
-            )
-            if fingerprint in usage_seen:
-                continue
-            usage_seen.add(fingerprint)
-            usage_records.append(record)
+        final_response = last_text
 
-        if event_callback:
-            await event_callback(event)
+    # Forced final synthesis: the model ran tools but produced no closing text.
+    forced_synthesis_used = False
+    if (
+        settings.force_final_synthesis
+        and not (final_response and final_response.strip())
+        and (turn_count > 0 or function_response_count > 0)
+    ):
+        forced_synthesis_used = True
+        logger.warning(
+            "No final text after %d tool round(s); forcing synthesis turn for session %s",
+            turn_count,
+            session_id,
+        )
+        synthesis_message = types.Content(
+            role="user",
+            parts=[types.Part(text=_FINAL_SYNTHESIS_INSTRUCTION)],
+        )
+        synth_final, synth_last, _, _, _ = await _consume(
+            synthesis_message,
+            _SYNTHESIS_TURN_CAP,
+        )
+        if synth_final and synth_final.strip() and not looks_like_worker_envelope(synth_final):
+            final_response = synth_final
+        elif synth_last and synth_last.strip() and not looks_like_worker_envelope(synth_last):
+            final_response = synth_last
 
-        # Count tool call rounds
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.function_call:
-                    turn_count += 1
-                    break
-
-        if event.is_final_response() and event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text:
-                    final_response = part.text
-                    break
-
-        if turn_count >= max_turns:
-            logger.warning("Max turns (%d) reached, stopping agent loop", max_turns)
-            if not final_response:
-                final_response = "I've taken many steps on this task. Here's what I've done so far — let me know if you'd like me to continue."
-            break
-
-    return AgentTurnResult(response=final_response, usage_records=usage_records)
+    return AgentTurnResult(
+        response=final_response,
+        usage_records=usage_records,
+    )

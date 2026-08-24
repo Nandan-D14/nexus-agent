@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Firestore-backed persistence for users, sessions, and message history."""
 
 from __future__ import annotations
@@ -5,544 +8,91 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from firebase_admin import firestore
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import AlreadyExists, FailedPrecondition, GoogleAPICallError
 from google.cloud.firestore_v1 import FieldFilter
 
+from nexus._firestore_base import FirestoreRepoBase
 from nexus.auth import AuthenticatedUser
-from nexus.beta_access import normalize_beta_profile
 from nexus.billing import build_quota_payload, calculate_usage_credits
 from nexus.config import settings
 from nexus.firebase import get_firestore_client
+from nexus.firestore_concurrency import guarded_write, run_with_write_retry
+
+# Re-exported for backward compatibility. The DTOs and ``utcnow`` were moved to
+# ``nexus.history_models`` so the repository base and focused repositories can
+# share them without a circular import.
+from nexus.history_models import (  # noqa: F401
+    StoredArtifact,
+    StoredIntegrationConnection,
+    StoredRun,
+    StoredRunStep,
+    StoredSession,
+    StoredTask,
+    StoredWorkflowTemplate,
+    utcnow,
+)
 
 if TYPE_CHECKING:
     from nexus.session import Session
 
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class StoredSession:
-    session_id: str
-    owner_id: str
-    task_id: str
-    status: str
-    created_at: datetime
-    ended_at: datetime | None = None
-    title: str = "Untitled session"
-    summary: str | None = None
-    message_count: int = 0
-    token_totals: dict[str, Any] | None = None
-    token_tracking_started_at: datetime | None = None
-    handoff_summary: dict[str, Any] | None = None
-    can_continue_workspace: bool = False
-    has_artifacts: bool = False
-    resume_state: str | None = None
-    workspace_owner_session_id: str | None = None
-    resume_source_session_id: str | None = None
-    current_run_id: str | None = None
-    run_status: str | None = None
-    artifact_count: int = 0
-    can_continue_conversation: bool = True
-    exact_workspace_resume_available: bool = False
-    continuation_mode: str | None = None
-    context_packet: dict[str, Any] | None = None
-    context_packet_inputs_digest: str | None = None
+class FirestoreHistoryRepository(FirestoreRepoBase):
+    """Sync Firestore access wrapped with async-friendly helpers.
 
+    The shared Firestore client, document-ref helpers, value coercion, and
+    ``StoredX`` projection builders live on :class:`FirestoreRepoBase`.
 
-@dataclass
-class StoredRun:
-    run_id: str
-    session_id: str
-    task_id: str
-    owner_id: str
-    status: str
-    created_at: datetime
-    updated_at: datetime | None = None
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    last_step_at: datetime | None = None
-    step_count: int = 0
-    artifact_count: int = 0
-    title: str = ""
-    source_session_id: str | None = None
+    Cleanly-separable concerns (users, integrations, workflow
+    templates, sandbox state, audit/GDPR) are delegated to focused
+    repositories under :mod:`nexus.repositories`. The interlinked
+    session/run/step/artifact/usage/task aggregate remains defined on this
+    class. Delegation is handled by :meth:`__getattr__`, so all existing
+    ``history_repository.<method>`` call sites are unchanged.
+    """
 
-
-@dataclass
-class StoredRunStep:
-    step_id: str
-    run_id: str
-    session_id: str
-    task_id: str
-    step_type: str
-    status: str
-    title: str
-    detail: str
-    created_at: datetime
-    updated_at: datetime | None = None
-    completed_at: datetime | None = None
-    step_index: int = 0
-    source: str | None = None
-    error: str | None = None
-    external_ref: str | None = None
-    metadata: dict[str, Any] | None = None
-
-
-@dataclass
-class StoredArtifact:
-    artifact_id: str
-    run_id: str
-    session_id: str
-    task_id: str
-    kind: str
-    title: str
-    preview: str
-    created_at: datetime
-    source_step_id: str | None = None
-    path: str | None = None
-    url: str | None = None
-    metadata: dict[str, Any] | None = None
-
-
-@dataclass
-class StoredWorkflowTemplate:
-    template_id: str
-    owner_id: str
-    name: str
-    description: str
-    source_session_id: str
-    source_run_id: str | None
-    instructions: str
-    input_fields: list[dict[str, Any]]
-    source_artifacts: list[str]
-    created_at: datetime
-    updated_at: datetime
-    last_used_at: datetime | None = None
-
-
-@dataclass
-class StoredIntegrationConnection:
-    connection_id: str
-    owner_id: str
-    connector_type: str
-    provider: str
-    name: str
-    enabled: bool
-    status: str
-    public: dict[str, Any]
-    private: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-    last_checked_at: datetime | None = None
-    last_error: str | None = None
-
-
-@dataclass
-class StoredTask:
-    task_id: str
-    owner_id: str
-    title: str
-    status: str
-    created_at: datetime
-    updated_at: datetime | None = None
-    current_session_id: str | None = None
-    current_run_id: str | None = None
-    run_status: str | None = None
-    message_count: int = 0
-    step_count: int = 0
-    artifact_count: int = 0
-
-
-class FirestoreHistoryRepository:
-    """Sync Firestore access wrapped with async-friendly helpers."""
-
-    @property
-    def _db(self):
-        return get_firestore_client()
-
-    def _user_public_ref(self, uid: str):
-        return self._db.collection("users").document(uid)
-
-    def _user_private_ref(self, uid: str):
-        return self._db.collection("userPrivate").document(uid)
-
-    def _task_ref(self, uid: str, task_id: str):
-        return self._user_public_ref(uid).collection("tasks").document(task_id)
-
-    def _task_run_ref(self, uid: str, task_id: str, run_id: str):
-        return self._task_ref(uid, task_id).collection("runs").document(run_id)
-
-    def _task_id_for_session_sync(self, session_id: str) -> str:
-        data = self._db.collection("sessions").document(session_id).get().to_dict() or {}
-        task_id = data.get("taskId")
-        return task_id if isinstance(task_id, str) and task_id else session_id
-
-    def _task_id_for_run_sync(self, session_id: str, run_id: str) -> str:
-        data = (
-            self._db.collection("sessions")
-            .document(session_id)
-            .collection("runs")
-            .document(run_id)
-            .get()
-            .to_dict()
-            or {}
-        )
-        task_id = data.get("taskId")
-        return task_id if isinstance(task_id, str) and task_id else self._task_id_for_session_sync(session_id)
-
-    @staticmethod
-    def _coerce_datetime(value: Any) -> datetime | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
-        if hasattr(value, "timestamp"):
-            try:
-                return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc)
-            except (OSError, OverflowError, TypeError, ValueError):
-                return None
-        return None
-
-    @staticmethod
-    def _empty_token_totals() -> dict[str, Any]:
-        return {
-            "input": 0,
-            "output": 0,
-            "total": 0,
-            "bySource": {},
-        }
-
-    @staticmethod
-    def _expand_dot_notation_updates(updates: dict[str, Any]) -> dict[str, Any]:
-        nested_updates: dict[str, Any] = {}
-        for key, value in updates.items():
-            if "." not in key:
-                nested_updates[key] = value
-                continue
-
-            parts = key.split(".")
-            current = nested_updates
-            for part in parts[:-1]:
-                current = current.setdefault(part, {})
-            current[parts[-1]] = value
-        return nested_updates
-
-    def _apply_document_updates_sync(self, ref, updates: dict[str, Any]) -> None:
-        if not updates:
-            return
-        try:
-            ref.update(updates)
-        except Exception:
-            ref.set(self._expand_dot_notation_updates(updates), merge=True)
-
-    @staticmethod
-    def _is_private_user_setting_key(key: str) -> bool:
-        return (
-            key == "byok"
-            or key.startswith("byok.")
-            or key == "googleDriveRefreshToken"
-            or key.startswith("googleDriveRefreshToken.")
-            or key == "integrations"
-            or key.startswith("integrations.")
+    def __init__(self) -> None:
+        from nexus.repositories import (
+            AuditRepository,
+            IntegrationRepository,
+            SandboxStateRepository,
+            UserRepository,
+            WorkflowTemplateRepository,
         )
 
-    @classmethod
-    def _partition_user_settings_updates(
-        cls,
-        updates: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        public_updates: dict[str, Any] = {}
-        private_updates: dict[str, Any] = {}
-        for key, value in updates.items():
-            if cls._is_private_user_setting_key(key):
-                private_updates[key] = value
-            else:
-                public_updates[key] = value
-        return public_updates, private_updates
-
-    def _cleanup_public_user_sensitive_fields_sync(
-        self,
-        uid: str,
-        *,
-        delete_byok: bool = False,
-        delete_google_drive_refresh_token: bool = False,
-        delete_google_drive_tokens: bool = False,
-    ) -> None:
-        updates: dict[str, Any] = {}
-        if delete_byok:
-            updates["byok"] = firestore.DELETE_FIELD
-        if delete_google_drive_refresh_token:
-            updates["googleDriveRefreshToken"] = firestore.DELETE_FIELD
-        if delete_google_drive_tokens:
-            updates["googleDriveTokens"] = firestore.DELETE_FIELD
-        if not updates:
-            return
-
-        public_ref = self._user_public_ref(uid)
-        snapshot = public_ref.get()
-        if not snapshot.exists:
-            return
-
-        updates["updatedAt"] = utcnow()
-        public_ref.update(updates)
-
-    @classmethod
-    def _coerce_token_totals(cls, value: Any) -> dict[str, Any]:
-        base = cls._empty_token_totals()
-        if not isinstance(value, dict):
-            return base
-
-        by_source = value.get("bySource")
-        normalized_sources: dict[str, Any] = {}
-        if isinstance(by_source, dict):
-            for key, raw in by_source.items():
-                if not isinstance(key, str) or not isinstance(raw, dict):
-                    continue
-                normalized_sources[key] = {
-                    "input": int(raw.get("input", 0) or 0),
-                    "output": int(raw.get("output", 0) or 0),
-                    "total": int(raw.get("total", 0) or 0),
-                    "model": raw.get("model") if isinstance(raw.get("model"), str) else "",
-                }
-
-        base["input"] = int(value.get("input", 0) or 0)
-        base["output"] = int(value.get("output", 0) or 0)
-        base["total"] = int(value.get("total", 0) or 0)
-        base["bySource"] = normalized_sources
-        return base
-
-    def _build_stored_session(self, session_id: str, data: dict[str, Any]) -> StoredSession:
-        title = data.get("title")
-        summary = data.get("summary")
-        task_id = data.get("taskId")
-        return StoredSession(
-            session_id=session_id,
-            owner_id=data.get("ownerId", ""),
-            task_id=task_id if isinstance(task_id, str) and task_id else session_id,
-            status=data.get("status", "ended"),
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            ended_at=self._coerce_datetime(data.get("endedAt")),
-            title=title.strip() if isinstance(title, str) and title.strip() else "Untitled session",
-            summary=summary if isinstance(summary, str) else None,
-            message_count=int(data.get("messageCount", 0)),
-            token_totals=self._coerce_token_totals(data.get("tokenTotals")),
-            token_tracking_started_at=self._coerce_datetime(data.get("tokenTrackingStartedAt")),
-            handoff_summary=data.get("handoffSummary") if isinstance(data.get("handoffSummary"), dict) else None,
-            can_continue_workspace=bool(data.get("canContinueWorkspace")),
-            has_artifacts=bool(data.get("hasArtifacts")),
-            resume_state=data.get("resumeState") if isinstance(data.get("resumeState"), str) else None,
-            workspace_owner_session_id=(
-                data.get("workspaceOwnerSessionId")
-                if isinstance(data.get("workspaceOwnerSessionId"), str)
-                else None
-            ),
-            resume_source_session_id=(
-                data.get("resumeSourceSessionId")
-                if isinstance(data.get("resumeSourceSessionId"), str)
-                else None
-            ),
-            current_run_id=(
-                data.get("currentRunId")
-                if isinstance(data.get("currentRunId"), str)
-                else None
-            ),
-            run_status=data.get("runStatus") if isinstance(data.get("runStatus"), str) else None,
-            artifact_count=int(data.get("artifactCount", 0) or 0),
-            can_continue_conversation=bool(data.get("canContinueConversation", True)),
-            exact_workspace_resume_available=bool(data.get("exactWorkspaceResumeAvailable")),
-            continuation_mode=(
-                data.get("continuationMode")
-                if isinstance(data.get("continuationMode"), str)
-                else None
-            ),
-            context_packet=data.get("contextPacket") if isinstance(data.get("contextPacket"), dict) else None,
-            context_packet_inputs_digest=(
-                data.get("contextPacketInputsDigest")
-                if isinstance(data.get("contextPacketInputsDigest"), str)
-                else None
-            ),
+        self._users = UserRepository()
+        self._integrations = IntegrationRepository()
+        self._templates = WorkflowTemplateRepository()
+        self._sandbox_state = SandboxStateRepository()
+        self._audit = AuditRepository()
+        # Ordered list of delegate repositories searched by __getattr__.
+        self._delegates = (
+            self._users,
+            self._integrations,
+            self._templates,
+            self._sandbox_state,
+            self._audit,
         )
 
-    def _build_stored_run(self, session_id: str, run_id: str, data: dict[str, Any]) -> StoredRun:
-        task_id = data.get("taskId")
-        return StoredRun(
-            run_id=run_id,
-            session_id=session_id,
-            task_id=task_id if isinstance(task_id, str) and task_id else session_id,
-            owner_id=data.get("ownerId", ""),
-            status=data.get("status", "queued"),
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            updated_at=self._coerce_datetime(data.get("updatedAt")),
-            started_at=self._coerce_datetime(data.get("startedAt")),
-            completed_at=self._coerce_datetime(data.get("completedAt")),
-            last_step_at=self._coerce_datetime(data.get("lastStepAt")),
-            step_count=int(data.get("stepCount", 0) or 0),
-            artifact_count=int(data.get("artifactCount", 0) or 0),
-            title=data.get("title") if isinstance(data.get("title"), str) else "",
-            source_session_id=(
-                data.get("sourceSessionId")
-                if isinstance(data.get("sourceSessionId"), str)
-                else None
-            ),
-        )
-
-    def _build_stored_run_step(self, session_id: str, run_id: str, step_id: str, data: dict[str, Any]) -> StoredRunStep:
-        task_id = data.get("taskId")
-        return StoredRunStep(
-            step_id=step_id,
-            run_id=run_id,
-            session_id=session_id,
-            task_id=task_id if isinstance(task_id, str) and task_id else session_id,
-            step_type=data.get("stepType", "system_event"),
-            status=data.get("status", "queued"),
-            title=data.get("title") if isinstance(data.get("title"), str) else "",
-            detail=data.get("detail") if isinstance(data.get("detail"), str) else "",
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            updated_at=self._coerce_datetime(data.get("updatedAt")),
-            completed_at=self._coerce_datetime(data.get("completedAt")),
-            step_index=int(data.get("stepIndex", 0) or 0),
-            source=data.get("source") if isinstance(data.get("source"), str) else None,
-            error=data.get("error") if isinstance(data.get("error"), str) else None,
-            external_ref=(
-                data.get("externalRef")
-                if isinstance(data.get("externalRef"), str)
-                else None
-            ),
-            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
-        )
-
-    def _build_stored_artifact(self, session_id: str, run_id: str, artifact_id: str, data: dict[str, Any]) -> StoredArtifact:
-        task_id = data.get("taskId")
-        return StoredArtifact(
-            artifact_id=artifact_id,
-            run_id=run_id,
-            session_id=session_id,
-            task_id=task_id if isinstance(task_id, str) and task_id else session_id,
-            kind=data.get("kind", "text_output"),
-            title=data.get("title") if isinstance(data.get("title"), str) else "",
-            preview=data.get("preview") if isinstance(data.get("preview"), str) else "",
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            source_step_id=(
-                data.get("sourceStepId")
-                if isinstance(data.get("sourceStepId"), str)
-                else None
-            ),
-            path=data.get("path") if isinstance(data.get("path"), str) else None,
-            url=data.get("url") if isinstance(data.get("url"), str) else None,
-            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
-        )
-
-    def _build_stored_task(self, task_id: str, data: dict[str, Any]) -> StoredTask:
-        title = data.get("title")
-        return StoredTask(
-            task_id=task_id,
-            owner_id=data.get("ownerId", ""),
-            title=title.strip() if isinstance(title, str) and title.strip() else "Untitled task",
-            status=data.get("status", "queued") if isinstance(data.get("status"), str) else "queued",
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            updated_at=self._coerce_datetime(data.get("updatedAt")),
-            current_session_id=(
-                data.get("currentSessionId")
-                if isinstance(data.get("currentSessionId"), str)
-                else None
-            ),
-            current_run_id=(
-                data.get("currentRunId")
-                if isinstance(data.get("currentRunId"), str)
-                else None
-            ),
-            run_status=data.get("runStatus") if isinstance(data.get("runStatus"), str) else None,
-            message_count=int(data.get("messageCount", 0) or 0),
-            step_count=int(data.get("stepCount", 0) or 0),
-            artifact_count=int(data.get("artifactCount", 0) or 0),
-        )
-
-    def _build_stored_workflow_template(self, template_id: str, data: dict[str, Any]) -> StoredWorkflowTemplate:
-        input_fields = data.get("inputFields")
-        normalized_fields: list[dict[str, Any]] = []
-        if isinstance(input_fields, list):
-            for raw in input_fields:
-                if not isinstance(raw, dict):
-                    continue
-                key = raw.get("key") if isinstance(raw.get("key"), str) else ""
-                label = raw.get("label") if isinstance(raw.get("label"), str) else key
-                if not key:
-                    continue
-                normalized_fields.append(
-                    {
-                        "key": key,
-                        "label": label or key,
-                        "placeholder": raw.get("placeholder") if isinstance(raw.get("placeholder"), str) else "",
-                        "required": bool(raw.get("required")),
-                    }
-                )
-
-        source_artifacts = data.get("sourceArtifacts")
-        normalized_artifacts = [
-            str(item).strip()
-            for item in source_artifacts
-            if str(item).strip()
-        ] if isinstance(source_artifacts, list) else []
-
-        return StoredWorkflowTemplate(
-            template_id=template_id,
-            owner_id=data.get("ownerId", ""),
-            name=data.get("name") if isinstance(data.get("name"), str) else "Workflow template",
-            description=data.get("description") if isinstance(data.get("description"), str) else "",
-            source_session_id=(
-                data.get("sourceSessionId")
-                if isinstance(data.get("sourceSessionId"), str)
-                else ""
-            ),
-            source_run_id=(
-                data.get("sourceRunId")
-                if isinstance(data.get("sourceRunId"), str)
-                else None
-            ),
-            instructions=data.get("instructions") if isinstance(data.get("instructions"), str) else "",
-            input_fields=normalized_fields,
-            source_artifacts=normalized_artifacts,
-            created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
-            updated_at=self._coerce_datetime(data.get("updatedAt")) or utcnow(),
-            last_used_at=self._coerce_datetime(data.get("lastUsedAt")),
-        )
-
-    def _build_stored_integration_connection(
-        self,
-        uid: str,
-        connection_id: str,
-        public_data: dict[str, Any],
-        private_data: dict[str, Any] | None = None,
-    ) -> StoredIntegrationConnection:
-        private_data = private_data or {}
-        merged = {**public_data, **private_data}
-        return StoredIntegrationConnection(
-            connection_id=connection_id,
-            owner_id=uid,
-            connector_type=str(merged.get("connectorType") or merged.get("type") or ""),
-            provider=str(merged.get("provider") or ""),
-            name=str(merged.get("name") or connection_id),
-            enabled=bool(merged.get("enabled")),
-            status=str(merged.get("status") or "needs_setup"),
-            public=public_data,
-            private=private_data,
-            created_at=self._coerce_datetime(merged.get("createdAt")) or utcnow(),
-            updated_at=self._coerce_datetime(merged.get("updatedAt")) or utcnow(),
-            last_checked_at=self._coerce_datetime(merged.get("lastCheckedAt")),
-            last_error=(
-                str(merged.get("lastError"))
-                if isinstance(merged.get("lastError"), str) and merged.get("lastError")
-                else None
-            ),
+    def __getattr__(self, name: str):
+        # Only invoked when normal attribute lookup fails, i.e. for methods
+        # that were moved to a focused repository. Public method names are
+        # unique across concerns, so first match wins.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        for delegate in self.__dict__.get("_delegates", ()):  # pragma: no branch
+            attr = getattr(delegate, name, None)
+            if attr is not None:
+                return attr
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
         )
 
     def _list_owner_sessions_sync(self, owner_id: str) -> list[tuple[str, dict[str, Any]]]:
@@ -761,9 +311,6 @@ class FirestoreHistoryRepository:
         packet["inputsDigest"] = digest
         return packet
 
-    async def upsert_user(self, user: AuthenticatedUser) -> None:
-        await asyncio.to_thread(self._upsert_user_sync, user)
-
     async def upsert_session(
         self,
         session: "Session",
@@ -789,14 +336,18 @@ class FirestoreHistoryRepository:
         source: str,
         text: str,
     ) -> None:
-        await asyncio.to_thread(
-            self._append_message_sync,
-            session_id,
-            owner_id,
-            role,
-            source,
-            text,
-        )
+        async with guarded_write(session_id):
+            await asyncio.to_thread(
+                run_with_write_retry,
+                lambda: self._append_message_sync(
+                    session_id,
+                    owner_id,
+                    role,
+                    source,
+                    text,
+                ),
+                description="append_message",
+            )
 
     async def append_token_usage(
         self,
@@ -808,17 +359,21 @@ class FirestoreHistoryRepository:
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
-    ) -> int:
-        return await asyncio.to_thread(
-            self._append_token_usage_sync,
-            session_id,
-            owner_id,
-            source,
-            model,
-            input_tokens,
-            output_tokens,
-            total_tokens,
-        )
+    ) -> tuple[int, dict[str, int]]:
+        async with guarded_write(session_id):
+            return await asyncio.to_thread(
+                run_with_write_retry,
+                lambda: self._append_token_usage_sync(
+                    session_id,
+                    owner_id,
+                    source,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                ),
+                description="append_token_usage",
+            )
 
     async def record_credit_charge(
         self,
@@ -897,191 +452,15 @@ class FirestoreHistoryRepository:
     async def list_recent_session_usage(self, owner_id: str, limit: int = 10) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_recent_session_usage_sync, owner_id, limit)
 
-    async def list_active_sessions(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_active_sessions_sync, owner_id, live_sessions)
+    async def list_active_sessions(self, owner_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_active_sessions_sync, owner_id)
+
+    async def list_all_active_sandbox_ids(self) -> list[str]:
+        """Return a list of all sandbox IDs associated with active sessions across all users."""
+        return await asyncio.to_thread(self._list_all_active_sandbox_ids_sync)
 
     async def get_session_messages(self, session_id: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._get_session_messages_sync, session_id)
-
-    async def get_user_settings(self, uid: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._get_user_settings_sync, uid)
-
-    async def update_user_settings(self, uid: str, updates: dict[str, Any]) -> None:
-        return await asyncio.to_thread(self._update_user_settings_sync, uid, updates)
-
-    async def list_integration_connections(self, uid: str) -> list[StoredIntegrationConnection]:
-        return await asyncio.to_thread(self._list_integration_connections_sync, uid)
-
-    async def list_enabled_integration_connections(self, uid: str) -> list[StoredIntegrationConnection]:
-        return await asyncio.to_thread(self._list_enabled_integration_connections_sync, uid)
-
-    async def get_integration_connection(
-        self,
-        uid: str,
-        connection_id: str,
-    ) -> StoredIntegrationConnection | None:
-        return await asyncio.to_thread(self._get_integration_connection_sync, uid, connection_id)
-
-    async def upsert_mcp_connection(
-        self,
-        uid: str,
-        *,
-        connection_id: str,
-        name: str,
-        url: str,
-        bearer_token: str = "",
-        enabled: bool = True,
-        tools: list[dict[str, Any]] | None = None,
-        resources: list[dict[str, Any]] | None = None,
-        status: str = "needs_setup",
-        last_error: str | None = None,
-        latency_ms: int | None = None,
-    ) -> StoredIntegrationConnection:
-        return await asyncio.to_thread(
-            self._upsert_mcp_connection_sync,
-            uid,
-            connection_id,
-            name,
-            url,
-            bearer_token,
-            enabled,
-            tools,
-            resources,
-            status,
-            last_error,
-            latency_ms,
-        )
-
-    async def upsert_github_connection(
-        self,
-        uid: str,
-        *,
-        token: str,
-        enabled: bool = True,
-        status: str = "connected",
-        last_error: str | None = None,
-    ) -> StoredIntegrationConnection:
-        return await asyncio.to_thread(
-            self._upsert_github_connection_sync,
-            uid,
-            token,
-            enabled,
-            status,
-            last_error,
-        )
-
-    async def upsert_google_drive_connection(
-        self,
-        uid: str,
-        *,
-        enabled: bool = True,
-        status: str = "connected",
-        last_error: str | None = None,
-    ) -> StoredIntegrationConnection:
-        return await asyncio.to_thread(
-            self._upsert_google_drive_connection_sync,
-            uid,
-            enabled,
-            status,
-            last_error,
-        )
-
-    async def update_integration_connection(
-        self,
-        uid: str,
-        connection_id: str,
-        *,
-        enabled: bool | None = None,
-        status: str | None = None,
-        last_error: str | None = None,
-    ) -> StoredIntegrationConnection | None:
-        return await asyncio.to_thread(
-            self._update_integration_connection_sync,
-            uid,
-            connection_id,
-            enabled,
-            status,
-            last_error,
-        )
-
-    async def delete_integration_connection(self, uid: str, connection_id: str) -> bool:
-        return await asyncio.to_thread(self._delete_integration_connection_sync, uid, connection_id)
-
-    async def get_beta_application(self, uid: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_beta_application_sync, uid)
-
-    async def upsert_beta_application(self, uid: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._upsert_beta_application_sync, uid, payload)
-
-    async def set_beta_profile(self, uid: str, payload: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._set_beta_profile_sync, uid, payload)
-
-    async def find_user_by_email(self, email: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._find_user_by_email_sync, email)
-
-    async def issue_beta_access_code(
-        self,
-        *,
-        uid: str,
-        admin_email: str,
-        code_hash: str,
-        code_preview: str,
-    ) -> None:
-        await asyncio.to_thread(
-            self._issue_beta_access_code_sync,
-            uid,
-            admin_email,
-            code_hash,
-            code_preview,
-        )
-
-    async def reject_beta_application(
-        self,
-        *,
-        uid: str,
-        admin_email: str,
-        reason: str | None = None,
-    ) -> None:
-        await asyncio.to_thread(self._reject_beta_application_sync, uid, admin_email, reason)
-
-    async def revoke_beta_access(
-        self,
-        *,
-        uid: str,
-        admin_email: str,
-        reason: str | None = None,
-    ) -> None:
-        await asyncio.to_thread(self._revoke_beta_access_sync, uid, admin_email, reason)
-
-    async def redeem_beta_access_code(self, uid: str, code_hash: str) -> None:
-        await asyncio.to_thread(self._redeem_beta_access_code_sync, uid, code_hash)
-
-    async def get_user_quota(self, uid: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._get_user_quota_sync, uid)
-
-    async def increment_user_token_usage(self, uid: str, tokens: int) -> dict[str, Any]:
-        """Atomically increment user-level token usage. Returns updated quota."""
-        return await asyncio.to_thread(self._increment_user_token_usage_sync, uid, tokens)
-
-    async def increment_user_credit_usage(self, uid: str, credits: int) -> dict[str, Any]:
-        """Atomically increment user-level credit usage. Returns updated quota."""
-        return await asyncio.to_thread(self._increment_user_credit_usage_sync, uid, credits)
-
-    async def get_persistent_sandbox(self, owner_id: str) -> str | None:
-        """Return the paused sandbox ID for the user, or None if none exists."""
-        return await asyncio.to_thread(self._get_persistent_sandbox_sync, owner_id)
-
-    async def get_workspace_state(self, owner_id: str) -> dict[str, str | None]:
-        return await asyncio.to_thread(self._get_workspace_state_sync, owner_id)
-
-    async def save_paused_sandbox(
-        self,
-        owner_id: str,
-        sandbox_id: str | None,
-        session_id: str | None = None,
-    ) -> None:
-        """Write (or clear) the user's paused sandbox ID in Firestore."""
-        await asyncio.to_thread(self._save_paused_sandbox_sync, owner_id, sandbox_id, session_id)
 
     async def refresh_session_handoff(
         self,
@@ -1117,6 +496,33 @@ class FirestoreHistoryRepository:
             source_session_id,
         )
 
+    async def ensure_run(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        owner_id: str,
+        title: str = "Agent Turn",
+        task_id: str | None = None,
+        status: str = "queued",
+    ) -> StoredRun:
+        """Create the history run doc if missing. Idempotent.
+
+        Durable workers bind a ``run_*`` id that lives under production_tasks
+        but history child writes (steps/artifacts/messages) require the same
+        id under ``sessions/{sessionId}/runs/{runId}``. Call this before any
+        child write when the run id came from outside history.
+        """
+        return await asyncio.to_thread(
+            self._ensure_run_sync,
+            session_id,
+            run_id,
+            owner_id,
+            title,
+            task_id,
+            status,
+        )
+
     async def get_session_run(self, session_id: str) -> StoredRun | None:
         return await asyncio.to_thread(self._get_session_run_sync, session_id)
 
@@ -1128,6 +534,21 @@ class FirestoreHistoryRepository:
         status: str,
     ) -> StoredRun | None:
         return await asyncio.to_thread(self._set_run_status_sync, session_id, run_id, status)
+
+    async def mark_session_deleted(self, session_id: str) -> None:
+        await asyncio.to_thread(self._mark_session_deleted_sync, session_id)
+
+    async def mark_session_sandbox_unavailable(
+        self,
+        session_id: str,
+        *,
+        reason: str = "sandbox_unavailable",
+    ) -> None:
+        await asyncio.to_thread(
+            self._mark_session_sandbox_unavailable_sync,
+            session_id,
+            reason,
+        )
 
     async def create_step(
         self,
@@ -1198,6 +619,10 @@ class FirestoreHistoryRepository:
     async def list_run_steps(self, session_id: str, run_id: str, limit: int = 200) -> list[StoredRunStep]:
         return await asyncio.to_thread(self._list_run_steps_sync, session_id, run_id, limit)
 
+    async def list_session_steps(self, session_id: str, limit: int = 500) -> list[StoredRunStep]:
+        """Return steps from *all* runs in a session, ordered chronologically."""
+        return await asyncio.to_thread(self._list_session_steps_sync, session_id, limit)
+
     async def create_artifact(
         self,
         *,
@@ -1227,163 +652,31 @@ class FirestoreHistoryRepository:
     async def list_run_artifacts(self, session_id: str, run_id: str, limit: int = 100) -> list[StoredArtifact]:
         return await asyncio.to_thread(self._list_run_artifacts_sync, session_id, run_id, limit)
 
-    async def create_workflow_template(
-        self,
-        *,
-        owner_id: str,
-        source_session_id: str,
-        source_run_id: str | None,
-        name: str,
-        description: str,
-        instructions: str,
-        input_fields: list[dict[str, Any]],
-        source_artifacts: list[str],
-    ) -> StoredWorkflowTemplate:
-        return await asyncio.to_thread(
-            self._create_workflow_template_sync,
-            owner_id,
-            source_session_id,
-            source_run_id,
-            name,
-            description,
-            instructions,
-            input_fields,
-            source_artifacts,
-        )
+    async def list_session_artifacts(self, session_id: str, limit: int = 200) -> list[StoredArtifact]:
+        """Return artifacts from *all* runs in a session, newest first."""
+        return await asyncio.to_thread(self._list_session_artifacts_sync, session_id, limit)
 
-    async def list_workflow_templates(
+    async def get_artifact_for_owner(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
+        return await asyncio.to_thread(self._get_artifact_for_owner_sync, owner_id, artifact_id)
+
+    async def list_owner_library_artifacts(
         self,
         owner_id: str,
         *,
         limit: int = 100,
+        cursor: datetime | None = None,
         search: str | None = None,
-    ) -> list[StoredWorkflowTemplate]:
+        category: str | None = None,
+    ) -> tuple[list[Any], datetime | None]:
+        """Return library-eligible artifacts for an owner, newest first."""
         return await asyncio.to_thread(
-            self._list_workflow_templates_sync,
+            self._list_owner_library_artifacts_sync,
             owner_id,
             limit,
+            cursor,
             search,
+            category,
         )
-
-    async def get_workflow_template(
-        self,
-        owner_id: str,
-        template_id: str,
-    ) -> StoredWorkflowTemplate | None:
-        return await asyncio.to_thread(
-            self._get_workflow_template_sync,
-            owner_id,
-            template_id,
-        )
-
-    async def update_workflow_template(
-        self,
-        *,
-        owner_id: str,
-        template_id: str,
-        name: str | None = None,
-        description: str | None = None,
-        instructions: str | None = None,
-        input_fields: list[dict[str, Any]] | None = None,
-    ) -> StoredWorkflowTemplate | None:
-        return await asyncio.to_thread(
-            self._update_workflow_template_sync,
-            owner_id,
-            template_id,
-            name,
-            description,
-            instructions,
-            input_fields,
-        )
-
-    async def delete_workflow_template(
-        self,
-        owner_id: str,
-        template_id: str,
-    ) -> bool:
-        return await asyncio.to_thread(
-            self._delete_workflow_template_sync,
-            owner_id,
-            template_id,
-        )
-
-    async def mark_workflow_template_used(
-        self,
-        owner_id: str,
-        template_id: str,
-    ) -> StoredWorkflowTemplate | None:
-        return await asyncio.to_thread(
-            self._mark_workflow_template_used_sync,
-            owner_id,
-            template_id,
-        )
-
-    @staticmethod
-    def _starter_plan_defaults(now: datetime) -> dict[str, Any]:
-        return {
-            "planId": settings.default_plan_id,
-            "planName": settings.default_plan_name,
-            "planPriceUsd": settings.default_plan_price_usd,
-            "planStatus": "active",
-            "billingMode": "internal_entitlement",
-            "creditLimit": settings.default_credit_limit,
-            "creditUsage": 0,
-            "creditUnitUsd": settings.default_credit_unit_usd,
-            "creditResetVersion": settings.default_credit_reset_version,
-            "creditResetAt": now,
-            "updatedAt": now,
-        }
-
-    def _build_starter_plan_updates(self, data: dict[str, Any], *, now: datetime) -> dict[str, Any]:
-        defaults = self._starter_plan_defaults(now)
-        if data.get("creditResetVersion") != settings.default_credit_reset_version:
-            forced_reset = dict(defaults)
-            if "migratedFromFreeTierAt" not in data:
-                forced_reset["migratedFromFreeTierAt"] = now
-            return forced_reset
-
-        updates: dict[str, Any] = {}
-        for key, value in defaults.items():
-            current = data.get(key)
-            if isinstance(value, str):
-                if not isinstance(current, str) or not current.strip():
-                    updates[key] = value
-            elif current is None:
-                updates[key] = value
-        if updates and "migratedFromFreeTierAt" not in data:
-            updates["migratedFromFreeTierAt"] = now
-        return updates
-
-    def _upsert_user_sync(self, user: AuthenticatedUser) -> None:
-        now = utcnow()
-        ref = self._user_public_ref(user.uid)
-        base_payload: dict[str, Any] = {
-            "uid": user.uid,
-            "email": user.email,
-            "displayName": user.display_name,
-            "photoURL": user.photo_url,
-            "lastLoginAt": now,
-        }
-        try:
-            # Atomic create — sets createdAt and token quota only when the document is new.
-            ref.create({
-                **base_payload,
-                "createdAt": now,
-                "tokenUsage": 0,
-                "tokenLimit": settings.default_token_limit,
-                **self._starter_plan_defaults(now),
-            })
-        except AlreadyExists:
-            # Document already exists; update mutable fields only.
-            existing = ref.get()
-            data = existing.to_dict() or {}
-            ref.set(
-                {
-                    **base_payload,
-                    **self._build_starter_plan_updates(data, now=now),
-                },
-                merge=True,
-            )
 
     def _upsert_session_sync(
         self,
@@ -1522,6 +815,78 @@ class FirestoreHistoryRepository:
         batch.commit()
         return self._build_stored_run(session_id, run_id, payload)
 
+    def _ensure_run_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        owner_id: str,
+        title: str,
+        task_id: str | None,
+        status: str,
+    ) -> StoredRun:
+        now = utcnow()
+        session_ref = self._db.collection("sessions").document(session_id)
+        run_ref = session_ref.collection("runs").document(run_id)
+        existing = run_ref.get()
+        if existing.exists:
+            return self._build_stored_run(session_id, run_id, existing.to_dict() or {})
+
+        session_data = session_ref.get().to_dict() or {}
+        effective_owner = owner_id or (
+            session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+        )
+        effective_task = task_id or (
+            session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+        )
+        payload: dict[str, Any] = {
+            "ownerId": effective_owner,
+            "sessionId": session_id,
+            "taskId": effective_task,
+            "status": status or "queued",
+            "title": title or "Agent Turn",
+            "createdAt": now,
+            "updatedAt": now,
+            "stepCount": 0,
+            "artifactCount": 0,
+        }
+        task_ref = self._task_ref(effective_owner, effective_task) if effective_owner else None
+        batch = self._db.batch()
+        batch.set(run_ref, payload, merge=True)
+        if task_ref is not None:
+            batch.set(task_ref.collection("runs").document(run_id), payload, merge=True)
+            batch.set(
+                task_ref,
+                {
+                    "ownerId": effective_owner,
+                    "taskId": effective_task,
+                    "currentSessionId": session_id,
+                    "currentRunId": run_id,
+                    "runStatus": payload["status"],
+                    "status": payload["status"],
+                    "title": payload["title"],
+                    "updatedAt": now,
+                    "schemaVersion": 1,
+                },
+                merge=True,
+            )
+        batch.set(
+            session_ref,
+            {
+                "taskId": effective_task,
+                "currentRunId": run_id,
+                "runStatus": payload["status"],
+                "updatedAt": now,
+            },
+            merge=True,
+        )
+        batch.commit()
+        logger.info(
+            "Ensured history run %s for session %s (was missing)",
+            run_id,
+            session_id,
+        )
+        return self._build_stored_run(session_id, run_id, payload)
+
     def _get_session_run_sync(self, session_id: str) -> StoredRun | None:
         session = self._get_session_sync(session_id)
         if not session:
@@ -1548,14 +913,31 @@ class FirestoreHistoryRepository:
 
     def _set_run_status_sync(self, session_id: str, run_id: str, status: str) -> StoredRun | None:
         now = utcnow()
-        run_ref = self._db.collection("sessions").document(session_id).collection("runs").document(run_id)
+        session_ref = self._db.collection("sessions").document(session_id)
+        run_ref = session_ref.collection("runs").document(run_id)
         run_doc = run_ref.get()
-        if not run_doc.exists:
-            return None
+        session_doc = session_ref.get()
+        session_data = session_doc.to_dict() or {} if session_doc.exists else {}
 
-        current = run_doc.to_dict() or {}
+        if not run_doc.exists:
+            owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+            task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+            current = {
+                "ownerId": owner_id,
+                "sessionId": session_id,
+                "taskId": task_id,
+                "status": "queued",
+                "title": "Agent Turn",
+                "createdAt": now,
+                "updatedAt": now,
+                "stepCount": 0,
+                "artifactCount": 0,
+            }
+        else:
+            current = run_doc.to_dict() or {}
+
         owner_id = current.get("ownerId") if isinstance(current.get("ownerId"), str) else ""
-        task_id = current.get("taskId") if isinstance(current.get("taskId"), str) else session_id
+        task_id = current.get("taskId") if isinstance(current.get("taskId"), str) else (session_data.get("taskId") or session_id)
         updates: dict[str, Any] = {
             "status": status,
             "updatedAt": now,
@@ -1594,6 +976,102 @@ class FirestoreHistoryRepository:
         merged = {**current, **updates}
         return self._build_stored_run(session_id, run_id, merged)
 
+    def _mark_session_deleted_sync(self, session_id: str) -> None:
+        now = utcnow()
+        ref = self._db.collection("sessions").document(session_id)
+        doc = ref.get()
+        if doc.exists:
+            data = doc.to_dict() or {}
+            task_id = data.get("taskId") if isinstance(data.get("taskId"), str) else session_id
+            owner_id = data.get("ownerId")
+            
+            batch = self._db.batch()
+            batch.set(
+                ref,
+                {
+                    "status": "deleted",
+                    "updatedAt": now,
+                    "endedAt": now,
+                    "sandboxId": None,
+                    "resumeState": "deleted",
+                    "canContinueWorkspace": False,
+                    "exactWorkspaceResumeAvailable": False,
+                },
+                merge=True,
+            )
+            
+            if owner_id:
+                task_ref = self._task_ref(owner_id, task_id)
+                # Note: we only update the session, not the whole task unless needed
+            
+            batch.commit()
+
+    def _mark_session_sandbox_unavailable_sync(self, session_id: str, reason: str) -> None:
+        now = utcnow()
+        ref = self._db.collection("sessions").document(session_id)
+        doc = ref.get()
+        if not doc.exists:
+            return
+
+        data = doc.to_dict() or {}
+        if data.get("status") == "deleted":
+            return
+
+        owner_id = data.get("ownerId") if isinstance(data.get("ownerId"), str) else ""
+        task_id = data.get("taskId") if isinstance(data.get("taskId"), str) else session_id
+        sandbox_id = data.get("sandboxId") if isinstance(data.get("sandboxId"), str) else None
+        ended_at = data.get("endedAt") or now
+
+        batch = self._db.batch()
+        batch.set(
+            ref,
+            {
+                "status": "ended",
+                "updatedAt": now,
+                "endedAt": ended_at,
+                "sandboxId": None,
+                "resumeState": "ended",
+                "canContinueWorkspace": False,
+                "exactWorkspaceResumeAvailable": False,
+                "continuationMode": "new_sandbox_resume",
+                "workspaceOwnerSessionId": None,
+                "canContinueConversation": True,
+                "lastErrorCode": reason,
+            },
+            merge=True,
+        )
+
+        if owner_id:
+            batch.set(
+                self._task_ref(owner_id, task_id),
+                {
+                    "status": "ended",
+                    "updatedAt": now,
+                    "currentSessionId": session_id,
+                    "runStatus": data.get("runStatus"),
+                },
+                merge=True,
+            )
+            user_ref = self._user_public_ref(owner_id)
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                user_data = user_doc.to_dict() or {}
+                if (
+                    user_data.get("pausedSandboxSessionId") == session_id
+                    or (sandbox_id and user_data.get("pausedSandboxId") == sandbox_id)
+                ):
+                    batch.set(
+                        user_ref,
+                        {
+                            "pausedSandboxId": None,
+                            "pausedSandboxSessionId": None,
+                            "updatedAt": now,
+                        },
+                        merge=True,
+                    )
+
+        batch.commit()
+
     def _create_step_sync(
         self,
         session_id: str,
@@ -1616,12 +1094,33 @@ class FirestoreHistoryRepository:
         @firestore.transactional
         def transactional_create(txn):
             run_snapshot = run_ref.get(transaction=txn)
-            if not run_snapshot.exists:
-                raise ValueError(f"Run {run_id} does not exist for session {session_id}")
+            session_snapshot = session_ref.get(transaction=txn)
+            session_data = session_snapshot.to_dict() or {} if session_snapshot.exists else {}
 
-            run_data = run_snapshot.to_dict() or {}
+            if not run_snapshot.exists:
+                owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+                task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+                run_payload = {
+                    "ownerId": owner_id,
+                    "sessionId": session_id,
+                    "taskId": task_id,
+                    "status": "running",
+                    "title": "Agent Turn",
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "stepCount": 0,
+                    "artifactCount": 0,
+                }
+                txn.set(run_ref, run_payload, merge=True)
+                if owner_id:
+                    task_run_ref = self._task_run_ref(owner_id, task_id, run_id)
+                    txn.set(task_run_ref, run_payload, merge=True)
+                run_data = run_payload
+            else:
+                run_data = run_snapshot.to_dict() or {}
+
             owner_id = run_data.get("ownerId") if isinstance(run_data.get("ownerId"), str) else ""
-            task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_id
+            task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_data.get("taskId") or session_id
             step_index = int(run_data.get("stepCount", 0) or 0) + 1
             payload: dict[str, Any] = {
                 "sessionId": session_id,
@@ -1853,6 +1352,55 @@ class FirestoreHistoryRepository:
             for doc in docs
         ]
 
+    # ------------------------------------------------------------------
+    #  Session-wide collection-group helpers
+    # ------------------------------------------------------------------
+    #
+    #  Steps and artifacts are stored under two Firestore paths:
+    #    1. sessions/{sid}/runs/{rid}/steps/{id}   (canonical)
+    #    2. users/{uid}/tasks/{tid}/runs/{rid}/steps/{id}  (task mirror)
+    #
+    #  A collection_group("steps") query returns docs from *both*
+    #  hierarchies.  We filter to the canonical "sessions/" prefix and
+    #  deduplicate by document ID to prevent React key collisions in
+    #  the frontend.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deduplicated_collection_group_docs(
+        query_stream,
+        *,
+        canonical_prefix: str = "sessions/",
+        limit: int = 500,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Yield (doc_id, doc_data) from a collection-group stream,
+        keeping only canonical documents and deduplicating by ID."""
+        results: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for doc in query_stream:
+            if doc.id in seen:
+                continue
+            if not doc.reference.path.startswith(canonical_prefix):
+                continue
+            seen.add(doc.id)
+            results.append((doc.id, doc.to_dict() or {}))
+            if len(results) >= limit:
+                break
+        return results
+
+    def _list_session_steps_sync(self, session_id: str, limit: int) -> list[StoredRunStep]:
+        """List steps across all runs for a session, ordered by creation time."""
+        stream = (
+            self._db.collection_group("steps")
+            .where(filter=FieldFilter("sessionId", "==", session_id))
+            .order_by("createdAt", direction=firestore.Query.ASCENDING)
+            .stream()
+        )
+        return [
+            self._build_stored_run_step(session_id, data.get("runId", ""), doc_id, data)
+            for doc_id, data in self._deduplicated_collection_group_docs(stream, limit=limit)
+        ]
+
     def _create_artifact_sync(
         self,
         session_id: str,
@@ -1875,21 +1423,42 @@ class FirestoreHistoryRepository:
         @firestore.transactional
         def transactional_create(txn):
             run_snapshot = run_ref.get(transaction=txn)
-            if not run_snapshot.exists:
-                raise ValueError(f"Run {run_id} does not exist for session {session_id}")
-
             session_snapshot = session_ref.get(transaction=txn)
-            session_data = session_snapshot.to_dict() or {}
-            run_data = run_snapshot.to_dict() or {}
+            session_data = session_snapshot.to_dict() or {} if session_snapshot.exists else {}
+
+            if not run_snapshot.exists:
+                owner_id = session_data.get("ownerId") if isinstance(session_data.get("ownerId"), str) else ""
+                task_id = session_data.get("taskId") if isinstance(session_data.get("taskId"), str) else session_id
+                run_payload = {
+                    "ownerId": owner_id,
+                    "sessionId": session_id,
+                    "taskId": task_id,
+                    "status": "running",
+                    "title": "Agent Turn",
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "stepCount": 0,
+                    "artifactCount": 0,
+                }
+                txn.set(run_ref, run_payload, merge=True)
+                if owner_id:
+                    task_run_ref = self._task_run_ref(owner_id, task_id, run_id)
+                    txn.set(task_run_ref, run_payload, merge=True)
+                run_data = run_payload
+            else:
+                run_data = run_snapshot.to_dict() or {}
+
             owner_id = run_data.get("ownerId") if isinstance(run_data.get("ownerId"), str) else ""
             task_id = run_data.get("taskId") if isinstance(run_data.get("taskId"), str) else session_data.get("taskId") or session_id
             run_artifact_count = int(run_data.get("artifactCount", 0) or 0) + 1
             session_artifact_count = int(session_data.get("artifactCount", 0) or 0) + 1
 
             payload: dict[str, Any] = {
+                "artifactId": artifact_id,
                 "sessionId": session_id,
                 "taskId": task_id,
                 "runId": run_id,
+                "ownerId": owner_id,
                 "kind": kind,
                 "title": title,
                 "preview": preview,
@@ -1950,6 +1519,22 @@ class FirestoreHistoryRepository:
         payload = transactional_create(transaction)
         return self._build_stored_artifact(session_id, run_id, artifact_id, payload)
 
+    def _get_artifact_for_owner_sync(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
+        docs = (
+            self._db.collection_group("artifacts")
+            .where(filter=FieldFilter("ownerId", "==", owner_id))
+            .where(filter=FieldFilter("artifactId", "==", artifact_id))
+            .limit(1)
+            .stream()
+        )
+        for doc in docs:
+            data = doc.to_dict() or {}
+            session_id = str(data.get("sessionId") or "")
+            run_id = str(data.get("runId") or "")
+            if session_id and run_id:
+                return self._build_stored_artifact(session_id, run_id, doc.id, data)
+        return None
+
     def _list_run_artifacts_sync(self, session_id: str, run_id: str, limit: int) -> list[StoredArtifact]:
         docs = (
             self._db.collection("sessions")
@@ -1966,129 +1551,359 @@ class FirestoreHistoryRepository:
             for doc in docs
         ]
 
-    def _workflow_templates_collection_ref(self, owner_id: str):
-        return self._db.collection("users").document(owner_id).collection("workflowTemplates")
+    def _list_session_artifacts_sync(self, session_id: str, limit: int) -> list[StoredArtifact]:
+        """List artifacts across all runs for a session, newest first."""
+        stream = (
+            self._db.collection_group("artifacts")
+            .where(filter=FieldFilter("sessionId", "==", session_id))
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
+        return [
+            self._build_stored_artifact(session_id, data.get("runId", ""), doc_id, data)
+            for doc_id, data in self._deduplicated_collection_group_docs(stream, limit=limit)
+        ]
 
-    def _create_workflow_template_sync(
-        self,
-        owner_id: str,
-        source_session_id: str,
-        source_run_id: str | None,
-        name: str,
-        description: str,
-        instructions: str,
-        input_fields: list[dict[str, Any]],
-        source_artifacts: list[str],
-    ) -> StoredWorkflowTemplate:
-        now = utcnow()
-        template_id = uuid.uuid4().hex[:12]
-        payload: dict[str, Any] = {
-            "ownerId": owner_id,
-            "name": name,
-            "description": description,
-            "sourceSessionId": source_session_id,
-            "instructions": instructions,
-            "inputFields": input_fields,
-            "sourceArtifacts": source_artifacts,
-            "createdAt": now,
-            "updatedAt": now,
-        }
-        if source_run_id:
-            payload["sourceRunId"] = source_run_id
-        self._workflow_templates_collection_ref(owner_id).document(template_id).set(payload)
-        return self._build_stored_workflow_template(template_id, payload)
+    _LIBRARY_FETCH_CAP = 400
 
-    def _list_workflow_templates_sync(
+    @staticmethod
+    def _is_missing_firestore_index_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return "index" in message and (
+            isinstance(exc, FailedPrecondition)
+            or "requires an index" in message
+            or "currently building" in message
+        )
+
+    def _list_owner_library_artifacts_sync(
         self,
         owner_id: str,
         limit: int,
+        cursor: datetime | None,
         search: str | None,
-    ) -> list[StoredWorkflowTemplate]:
-        docs = (
-            self._workflow_templates_collection_ref(owner_id)
-            .order_by("updatedAt", direction=firestore.Query.DESCENDING)
-            .limit(limit)
-            .stream()
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        """List deliverable artifacts for a user, excluding scrapes/sources.
+
+        Uses per-session listing because the collection-group index
+        artifacts(ownerId ASC, createdAt DESC) is not deployed in all
+        environments yet. A FailedPrecondition on that query was being
+        mapped to HTTP 503 by the global Google API handler.
+        """
+        return self._list_owner_library_artifacts_via_sessions_sync(
+            owner_id,
+            limit,
+            cursor,
+            search,
+            category,
         )
-        templates = [
-            self._build_stored_workflow_template(doc.id, doc.to_dict() or {})
-            for doc in docs
-        ]
-        if search:
-            search_lower = search.strip().lower()
-            if search_lower:
-                templates = [
-                    template
-                    for template in templates
-                    if search_lower in template.name.lower()
-                    or search_lower in template.description.lower()
-                    or search_lower in template.instructions.lower()
-                ]
-        return templates
 
-    def _get_workflow_template_sync(
+    def _list_owner_library_artifacts_collection_group_sync(
         self,
         owner_id: str,
-        template_id: str,
-    ) -> StoredWorkflowTemplate | None:
-        doc = self._workflow_templates_collection_ref(owner_id).document(template_id).get()
-        if not doc.exists:
-            return None
-        return self._build_stored_workflow_template(doc.id, doc.to_dict() or {})
+        limit: int,
+        cursor: datetime | None,
+        search: str | None,
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        from nexus.library_artifacts import (
+            LIBRARY_CATEGORIES,
+            LibraryListRow,
+            is_library_artifact,
+            library_category,
+            matches_library_search,
+        )
 
-    def _update_workflow_template_sync(
+        page_limit = max(1, min(int(limit or 100), 100))
+        category_filter = category if category in LIBRARY_CATEGORIES else None
+        search_query = search.strip() if isinstance(search, str) and search.strip() else None
+
+        collected: list[LibraryListRow] = []
+        page_cursor = cursor
+        exhausted = False
+        title_cache: dict[str, str] = {}
+
+        while len(collected) < page_limit and not exhausted:
+            query = (
+                self._db.collection_group("artifacts")
+                .where(filter=FieldFilter("ownerId", "==", owner_id))
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            )
+            if page_cursor is not None:
+                query = query.start_after(page_cursor)
+            query = query.limit(self._LIBRARY_FETCH_CAP)
+            batch: list[StoredArtifact] = []
+            for doc_id, data in self._deduplicated_collection_group_docs(
+                query.stream(),
+                limit=self._LIBRARY_FETCH_CAP,
+            ):
+                session_id = str(data.get("sessionId") or "")
+                run_id = str(data.get("runId") or "")
+                if not session_id:
+                    continue
+                batch.append(self._build_stored_artifact(session_id, run_id, doc_id, data))
+
+            if not batch:
+                exhausted = True
+                break
+
+            page_cursor = batch[-1].created_at
+            if len(batch) < self._LIBRARY_FETCH_CAP:
+                exhausted = True
+
+            eligible = [artifact for artifact in batch if is_library_artifact(artifact)]
+            self._hydrate_session_titles(eligible, title_cache)
+            for artifact in eligible:
+                session_title = title_cache.get(artifact.session_id, "Untitled session")
+                mapped = library_category(artifact)
+                if category_filter and mapped != category_filter:
+                    continue
+                if search_query and not matches_library_search(artifact, session_title, search_query):
+                    continue
+                collected.append(
+                    LibraryListRow(
+                        artifact=artifact,
+                        session_title=session_title,
+                        category=mapped,
+                    )
+                )
+                if len(collected) >= page_limit:
+                    break
+
+        next_cursor = None
+        if collected and len(collected) >= page_limit:
+            next_cursor = collected[-1].artifact.created_at
+        return collected, next_cursor
+
+    def _list_owner_library_artifacts_via_sessions_sync(
         self,
         owner_id: str,
-        template_id: str,
-        name: str | None,
-        description: str | None,
-        instructions: str | None,
-        input_fields: list[dict[str, Any]] | None,
-    ) -> StoredWorkflowTemplate | None:
-        ref = self._workflow_templates_collection_ref(owner_id).document(template_id)
-        doc = ref.get()
-        if not doc.exists:
-            return None
-        updates: dict[str, Any] = {
-            "updatedAt": utcnow(),
+        limit: int,
+        cursor: datetime | None,
+        search: str | None,
+        category: str | None,
+    ) -> tuple[list[Any], datetime | None]:
+        """Fallback when the ownerId+createdAt collection-group index is missing."""
+        from nexus.library_artifacts import (
+            LIBRARY_CATEGORIES,
+            LibraryListRow,
+            is_library_artifact,
+            library_category,
+            matches_library_search,
+        )
+
+        page_limit = max(1, min(int(limit or 100), 100))
+        category_filter = category if category in LIBRARY_CATEGORIES else None
+        search_query = search.strip() if isinstance(search, str) and search.strip() else None
+
+        rows: list[LibraryListRow] = []
+        for session_id, data in self._list_owner_sessions_sync(owner_id):
+            if data.get("status") == "deleted":
+                continue
+            has_artifacts = bool(data.get("hasArtifacts"))
+            artifact_count = int(data.get("artifactCount") or 0)
+            if not has_artifacts and artifact_count <= 0:
+                continue
+            raw_title = data.get("title")
+            session_title = (
+                raw_title.strip()
+                if isinstance(raw_title, str) and raw_title.strip()
+                else "Untitled session"
+            )
+            try:
+                session_artifacts = self._list_session_run_artifacts_sync(session_id, 200)
+            except GoogleAPICallError:
+                logger.warning(
+                    "Skipping library artifacts for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                continue
+            for artifact in session_artifacts:
+                if not is_library_artifact(artifact):
+                    continue
+                mapped = library_category(artifact)
+                if category_filter and mapped != category_filter:
+                    continue
+                if search_query and not matches_library_search(artifact, session_title, search_query):
+                    continue
+                created_at = artifact.created_at
+                if cursor is not None and created_at and created_at >= cursor:
+                    continue
+                rows.append(
+                    LibraryListRow(
+                        artifact=artifact,
+                        session_title=session_title,
+                        category=mapped,
+                    )
+                )
+
+        rows.sort(
+            key=lambda row: row.artifact.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        page = rows[:page_limit]
+        next_cursor = page[-1].artifact.created_at if len(rows) > page_limit else None
+        return page, next_cursor
+
+    def _list_session_run_artifacts_sync(self, session_id: str, limit: int = 200) -> list[StoredArtifact]:
+        """List artifacts from session run subcollections. No collection-group index required."""
+        artifacts: list[StoredArtifact] = []
+        runs = self._db.collection("sessions").document(session_id).collection("runs").stream()
+        for run_doc in runs:
+            run_id = run_doc.id
+            docs = (
+                run_doc.reference.collection("artifacts")
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                .limit(max(1, limit))
+                .stream()
+            )
+            for doc in docs:
+                artifacts.append(
+                    self._build_stored_artifact(session_id, run_id, doc.id, doc.to_dict() or {})
+                )
+        artifacts.sort(
+            key=lambda artifact: artifact.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        unique: list[StoredArtifact] = []
+        seen: set[str] = set()
+        for artifact in artifacts:
+            if artifact.artifact_id in seen:
+                continue
+            seen.add(artifact.artifact_id)
+            unique.append(artifact)
+            if len(unique) >= limit:
+                break
+        return unique
+
+    def _hydrate_session_titles(
+        self,
+        artifacts: list[StoredArtifact],
+        cache: dict[str, str],
+    ) -> None:
+        missing = {
+            artifact.session_id
+            for artifact in artifacts
+            if artifact.session_id and artifact.session_id not in cache
         }
-        if name is not None:
-            updates["name"] = name
-        if description is not None:
-            updates["description"] = description
-        if instructions is not None:
-            updates["instructions"] = instructions
-        if input_fields is not None:
-            updates["inputFields"] = input_fields
-        ref.set(updates, merge=True)
-        merged = {**(doc.to_dict() or {}), **updates}
-        return self._build_stored_workflow_template(template_id, merged)
+        if not missing:
+            return
+        refs = [self._db.collection("sessions").document(session_id) for session_id in missing]
+        snapshots = self._db.get_all(refs)
+        for snapshot in snapshots:
+            title = "Untitled session"
+            if snapshot.exists:
+                data = snapshot.to_dict() or {}
+                raw = data.get("title")
+                if isinstance(raw, str) and raw.strip():
+                    title = raw.strip()
+            cache[snapshot.id] = title
+        for session_id in missing:
+            cache.setdefault(session_id, "Untitled session")
 
-    def _delete_workflow_template_sync(
+    def _append_message_time_ordered(
         self,
+        session_id: str,
         owner_id: str,
-        template_id: str,
-    ) -> bool:
-        ref = self._workflow_templates_collection_ref(owner_id).document(template_id)
-        doc = ref.get()
-        if not doc.exists:
-            return False
-        ref.delete()
-        return True
+        role: str,
+        source: str,
+        text: str,
+    ) -> None:
+        """Append a message without a read-modify-write counter.
 
-    def _mark_workflow_template_used_sync(
-        self,
-        owner_id: str,
-        template_id: str,
-    ) -> StoredWorkflowTemplate | None:
-        ref = self._workflow_templates_collection_ref(owner_id).document(template_id)
-        doc = ref.get()
-        if not doc.exists:
-            return None
+        Uses time-ordered message IDs and an epoch-microsecond ``turnIndex``
+        for ordering, and bumps ``messageCount`` via an atomic ``Increment``.
+        This removes the shared-doc counter read from the hot path so parallel
+        appends no longer contend inside a Firestore transaction. Ordering
+        readers (backend/frontend ``order_by("turnIndex")``) keep working: the
+        epoch-microsecond values sort after any legacy dense indices, so mixed
+        legacy + new histories still render in the correct order.
+        """
+        session_ref = self._db.collection("sessions").document(session_id)
+        snapshot = session_ref.get()
+        if not snapshot.exists:
+            raise ValueError(f"Session {session_id} does not exist")
+
+        data = snapshot.to_dict() or {}
+        task_id = (
+            data.get("taskId")
+            if isinstance(data.get("taskId"), str) and data.get("taskId")
+            else session_id
+        )
+        run_id = (
+            data.get("currentRunId")
+            if isinstance(data.get("currentRunId"), str)
+            else None
+        )
+        task_ref = self._task_ref(owner_id, task_id)
+        task_snapshot = task_ref.get()
+        task_data = task_snapshot.to_dict() or {}
+
         now = utcnow()
-        ref.set({"lastUsedAt": now, "updatedAt": now}, merge=True)
-        merged = {**(doc.to_dict() or {}), "lastUsedAt": now, "updatedAt": now}
-        return self._build_stored_workflow_template(template_id, merged)
+        # Zero-padded epoch microseconds keep the doc ID lexicographically
+        # time-sortable; the random suffix guarantees uniqueness.
+        epoch_us = int(now.timestamp() * 1_000_000)
+        turn_index = epoch_us
+        message_id = f"{epoch_us:016d}-{uuid.uuid4().hex[:8]}"
+        task_message_id = f"{epoch_us:016d}-{uuid.uuid4().hex[:8]}"
+        message_ref = session_ref.collection("messages").document(message_id)
+        message_payload = {
+            "role": role,
+            "source": source,
+            "text": text,
+            "createdAt": now,
+            "turnIndex": turn_index,
+            "ownerId": owner_id,
+            "sessionId": session_id,
+            "taskId": task_id,
+        }
+        if run_id:
+            message_payload["runId"] = run_id
+
+        task_message_payload = {
+            **message_payload,
+            "turnIndex": turn_index,
+            "sessionMessageId": message_id,
+        }
+
+        updates: dict[str, Any] = {
+            "messageCount": firestore.Increment(1),
+            "updatedAt": now,
+        }
+        task_updates: dict[str, Any] = {
+            "ownerId": owner_id,
+            "taskId": task_id,
+            "currentSessionId": session_id,
+            "currentRunId": run_id,
+            "messageCount": firestore.Increment(1),
+            "updatedAt": now,
+            "schemaVersion": 1,
+        }
+        if not task_snapshot.exists:
+            task_updates["createdAt"] = data.get("createdAt") or now
+        if role == "user":
+            updates["lastUserAt"] = now
+            task_updates["lastUserAt"] = now
+            if data.get("title") in (None, "", "New session"):
+                updates["title"] = text[:80]
+            if task_data.get("title") in (None, "", "New task"):
+                task_updates["title"] = text[:80]
+        elif role == "agent":
+            updates["lastAgentAt"] = now
+            task_updates["lastAgentAt"] = now
+
+        # A batch is atomic and, unlike a transaction, performs no
+        # read-modify-write, so concurrent appends cannot abort each other.
+        batch = self._db.batch()
+        batch.set(message_ref, message_payload)
+        batch.set(
+            task_ref.collection("messages").document(task_message_id),
+            task_message_payload,
+        )
+        batch.set(session_ref, updates, merge=True)
+        batch.set(task_ref, task_updates, merge=True)
+        batch.commit()
 
     def _append_message_sync(
         self,
@@ -2098,6 +1913,11 @@ class FirestoreHistoryRepository:
         source: str,
         text: str,
     ) -> None:
+        if settings.use_time_ordered_message_ids:
+            self._append_message_time_ordered(
+                session_id, owner_id, role, source, text
+            )
+            return
         session_ref = self._db.collection("sessions").document(session_id)
         transaction = self._db.transaction()
 
@@ -2180,9 +2000,9 @@ class FirestoreHistoryRepository:
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
-    ) -> int:
+    ) -> tuple[int, dict[str, int]]:
         if input_tokens < 0 or output_tokens < 0 or total_tokens < 0:
-            return 0
+            return 0, {"input": 0, "output": 0, "total": 0}
 
         credits_charged = calculate_usage_credits(
             source=source,
@@ -2253,6 +2073,13 @@ class FirestoreHistoryRepository:
             txn.set(usage_ref, usage_payload)
             updates: dict[str, Any] = {
                 "tokenTotals": totals,
+                "lastUsage": {
+                    "model": model,
+                    "source": source,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": total_tokens,
+                },
                 "updatedAt": now,
             }
             if credits_charged > 0:
@@ -2263,9 +2090,13 @@ class FirestoreHistoryRepository:
             if data.get("tokenTrackingStartedAt") is None:
                 updates["tokenTrackingStartedAt"] = now
             txn.set(session_ref, updates, merge=True)
+            return credits_charged, {
+                "input": int(totals["input"]),
+                "output": int(totals["output"]),
+                "total": int(totals["total"]),
+            }
 
-        transactional_append(transaction)
-        return credits_charged
+        return transactional_append(transaction)
 
     def _record_credit_charge_sync(
         self,
@@ -2442,7 +2273,7 @@ class FirestoreHistoryRepository:
             total_sessions += 1
             total_messages += int(data.get("messageCount", 0))
 
-            if data.get("status") in ("active", "ready"):
+            if data.get("status") in ("creating", "ready", "active") and data.get("sandboxId"):
                 active_sessions += 1
 
             created_at = self._coerce_datetime(data.get("createdAt"))
@@ -2653,44 +2484,59 @@ class FirestoreHistoryRepository:
             )
         return results
 
-    def _list_active_sessions_sync(self, owner_id: str, live_sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _list_active_sessions_sync(self, owner_id: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        for live in live_sessions:
-            if live.get("owner_id") != owner_id:
-                continue
-            session_id = str(live.get("session_id", ""))
-            stored_session = self._get_session_sync(session_id) if session_id else None
-            token_totals = (
-                stored_session.token_totals
-                if stored_session and stored_session.token_totals
-                else self._empty_token_totals()
-            )
-            results.append(
-                {
+        try:
+            from google.cloud import firestore
+            docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("ownerId", "==", owner_id)).where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
+            for doc in docs:
+                session_id = doc.id
+                data = doc.to_dict() or {}
+                sandbox_id = data.get("sandboxId") if isinstance(data.get("sandboxId"), str) else ""
+                if not sandbox_id:
+                    continue
+                stored_session = self._build_stored_session(session_id, data)
+                results.append({
                     "session_id": session_id,
-                    "title": stored_session.title if stored_session else "New session",
-                    "status": live.get("status", "active"),
-                    "created_at": live.get("created_at"),
-                    "last_active_at": live.get("last_active_at"),
-                    "stream_url": live.get("stream_url"),
-                    "message_count": stored_session.message_count if stored_session else 0,
-                    "token_totals": token_totals,
-                    "token_tracking_started_at": (
-                        stored_session.token_tracking_started_at if stored_session else None
-                    ),
-                    "token_coverage": (
-                        "tracked"
-                        if stored_session and stored_session.token_tracking_started_at
-                        else "no_data"
-                    ),
-                }
-            )
-
-        results.sort(
-            key=lambda item: self._coerce_datetime(item.get("last_active_at")) or utcnow(),
-            reverse=True,
-        )
+                    "title": stored_session.title,
+                    "status": stored_session.status,
+                    "created_at": stored_session.created_at,
+                    "last_active_at": data.get("lastActiveAt") or stored_session.created_at,
+                    "stream_url": None,
+                    "sandbox_id": sandbox_id,
+                    "message_count": stored_session.message_count,
+                    "token_totals": stored_session.token_totals,
+                    "token_tracking_started_at": stored_session.token_tracking_started_at,
+                    "token_coverage": 1.0,
+                    "current_run_id": stored_session.current_run_id,
+                    "run_status": stored_session.run_status,
+                    "artifact_count": stored_session.artifact_count,
+                })
+        except Exception:
+            pass
         return results
+
+    def _list_all_active_sandbox_ids_sync(self) -> list[str]:
+        """Return a list of all sandbox IDs associated with active sessions across all users."""
+        sandbox_ids = set()
+        try:
+            from google.cloud import firestore
+            # Check active sessions
+            docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
+            for doc in docs:
+                sid = doc.to_dict().get("sandboxId")
+                if sid:
+                    sandbox_ids.add(sid)
+
+            # Check users with paused sandboxes
+            users = self._db.collection("userPublic").where(filter=firestore.FieldFilter("pausedSandboxId", "!=", None)).get()
+            for user in users:
+                sid = user.to_dict().get("pausedSandboxId")
+                if sid:
+                    sandbox_ids.add(sid)
+        except Exception:
+            pass
+        return list(sandbox_ids)
 
     def _get_session_messages_sync(self, session_id: str) -> list[dict[str, Any]]:
         messages_docs = self._db.collection("sessions").document(session_id).collection("messages").order_by("turnIndex").stream()
@@ -2706,801 +2552,6 @@ class FirestoreHistoryRepository:
                 "turnIndex": data.get("turnIndex")
             })
         return results
-
-    def _get_user_settings_sync(self, uid: str) -> dict[str, Any]:
-        public_ref = self._user_public_ref(uid)
-        private_ref = self._user_private_ref(uid)
-
-        public_doc = public_ref.get()
-        private_doc = private_ref.get()
-
-        public_data = public_doc.to_dict() or {}
-        private_data = private_doc.to_dict() or {}
-
-        private_updates: dict[str, Any] = {}
-        delete_byok = False
-        delete_google_drive_refresh_token = False
-        delete_google_drive_tokens = False
-
-        legacy_byok = public_data.get("byok")
-        if isinstance(legacy_byok, dict):
-            if not isinstance(private_data.get("byok"), dict):
-                private_updates["byok"] = legacy_byok
-            delete_byok = True
-
-        if "googleDriveRefreshToken" in public_data:
-            if "googleDriveRefreshToken" not in private_data:
-                private_updates["googleDriveRefreshToken"] = public_data.get("googleDriveRefreshToken")
-            delete_google_drive_refresh_token = True
-
-        if "googleDriveTokens" in public_data:
-            delete_google_drive_tokens = True
-
-        if private_updates:
-            private_updates["updatedAt"] = utcnow()
-            self._apply_document_updates_sync(private_ref, private_updates)
-            private_data = {**private_data, **private_updates}
-
-        if delete_byok or delete_google_drive_refresh_token or delete_google_drive_tokens:
-            self._cleanup_public_user_sensitive_fields_sync(
-                uid,
-                delete_byok=delete_byok,
-                delete_google_drive_refresh_token=delete_google_drive_refresh_token,
-                delete_google_drive_tokens=delete_google_drive_tokens,
-            )
-            public_data.pop("byok", None)
-            public_data.pop("googleDriveRefreshToken", None)
-            public_data.pop("googleDriveTokens", None)
-
-        merged = dict(public_data)
-        merged.update(private_data)
-        return merged
-
-    def _update_user_settings_sync(self, uid: str, updates: dict[str, Any]) -> None:
-        public_updates, private_updates = self._partition_user_settings_updates(updates)
-        now = utcnow()
-
-        if public_updates:
-            public_updates.setdefault("updatedAt", now)
-            self._apply_document_updates_sync(self._user_public_ref(uid), public_updates)
-
-        if private_updates:
-            private_updates.setdefault("updatedAt", now)
-            self._apply_document_updates_sync(self._user_private_ref(uid), private_updates)
-            self._cleanup_public_user_sensitive_fields_sync(
-                uid,
-                delete_byok=any(key == "byok" or key.startswith("byok.") for key in private_updates),
-                delete_google_drive_refresh_token=any(
-                    key == "googleDriveRefreshToken" or key.startswith("googleDriveRefreshToken.")
-                    for key in private_updates
-                ),
-                delete_google_drive_tokens="googleDriveRefreshToken" in private_updates,
-            )
-
-    def _integration_public_ref(self, uid: str, connection_id: str):
-        return (
-            self._user_public_ref(uid)
-            .collection("integrations")
-            .document(connection_id)
-        )
-
-    def _integration_private_ref(self, uid: str, connection_id: str):
-        return (
-            self._user_private_ref(uid)
-            .collection("integrations")
-            .document(connection_id)
-        )
-
-    @staticmethod
-    def _public_integration_payload(private_payload: dict[str, Any]) -> dict[str, Any]:
-        tools = private_payload.get("tools") if isinstance(private_payload.get("tools"), list) else []
-        resources = (
-            private_payload.get("resources")
-            if isinstance(private_payload.get("resources"), list)
-            else []
-        )
-        return {
-            "ownerId": private_payload.get("ownerId", ""),
-            "connectorType": private_payload.get("connectorType", ""),
-            "provider": private_payload.get("provider", ""),
-            "name": private_payload.get("name", ""),
-            "enabled": bool(private_payload.get("enabled")),
-            "status": private_payload.get("status", "needs_setup"),
-            "tools": tools,
-            "resources": resources,
-            "toolCount": len(tools),
-            "resourceCount": len(resources),
-            "lastCheckedAt": private_payload.get("lastCheckedAt"),
-            "lastError": private_payload.get("lastError"),
-            "createdAt": private_payload.get("createdAt"),
-            "updatedAt": private_payload.get("updatedAt"),
-        }
-
-    def _sync_integration_summary_sync(self, uid: str) -> None:
-        docs = self._user_public_ref(uid).collection("integrations").stream()
-        summary = []
-        for doc in docs:
-            data = doc.to_dict() or {}
-            summary.append(
-                {
-                    "connectionId": doc.id,
-                    "provider": data.get("provider", ""),
-                    "connectorType": data.get("connectorType", ""),
-                    "name": data.get("name", doc.id),
-                    "enabled": bool(data.get("enabled")),
-                    "status": data.get("status", "needs_setup"),
-                    "toolCount": int(data.get("toolCount", 0) or 0),
-                    "lastError": data.get("lastError"),
-                }
-            )
-        self._user_public_ref(uid).set(
-            {
-                "integrationSummary": summary,
-                "updatedAt": utcnow(),
-            },
-            merge=True,
-        )
-
-    def _get_integration_connection_sync(
-        self,
-        uid: str,
-        connection_id: str,
-    ) -> StoredIntegrationConnection | None:
-        public_doc = self._integration_public_ref(uid, connection_id).get()
-        private_doc = self._integration_private_ref(uid, connection_id).get()
-        if not public_doc.exists and not private_doc.exists:
-            return None
-        public_data = public_doc.to_dict() if public_doc.exists else {}
-        private_data = private_doc.to_dict() if private_doc.exists else {}
-        return self._build_stored_integration_connection(
-            uid,
-            connection_id,
-            public_data or {},
-            private_data or {},
-        )
-
-    def _list_integration_connections_sync(self, uid: str) -> list[StoredIntegrationConnection]:
-        docs = self._user_public_ref(uid).collection("integrations").stream()
-        connections = []
-        for doc in docs:
-            private_doc = self._integration_private_ref(uid, doc.id).get()
-            connections.append(
-                self._build_stored_integration_connection(
-                    uid,
-                    doc.id,
-                    doc.to_dict() or {},
-                    private_doc.to_dict() if private_doc.exists else {},
-                )
-            )
-        connections.sort(key=lambda item: item.updated_at, reverse=True)
-        return connections
-
-    def _list_enabled_integration_connections_sync(self, uid: str) -> list[StoredIntegrationConnection]:
-        return [
-            connection
-            for connection in self._list_integration_connections_sync(uid)
-            if connection.enabled and connection.status == "connected"
-        ]
-
-    def _upsert_mcp_connection_sync(
-        self,
-        uid: str,
-        connection_id: str,
-        name: str,
-        url: str,
-        bearer_token: str,
-        enabled: bool,
-        tools: list[dict[str, Any]] | None,
-        resources: list[dict[str, Any]] | None,
-        status: str,
-        last_error: str | None,
-        latency_ms: int | None,
-    ) -> StoredIntegrationConnection:
-        now = utcnow()
-        existing = self._integration_private_ref(uid, connection_id).get()
-        existing_data = existing.to_dict() if existing.exists else {}
-        private_payload = {
-            **existing_data,
-            "ownerId": uid,
-            "connectorType": "mcp_remote_http",
-            "provider": "mcp",
-            "name": name.strip()[:80] or "MCP Server",
-            "url": url,
-            "authType": "bearer" if bearer_token else existing_data.get("authType", "none"),
-            "enabled": enabled,
-            "tools": tools or [],
-            "resources": resources or [],
-            "status": status,
-            "lastError": last_error,
-            "lastCheckedAt": now,
-            "updatedAt": now,
-        }
-        if bearer_token:
-            private_payload["bearerToken"] = bearer_token
-        if latency_ms is not None:
-            private_payload["latencyMs"] = latency_ms
-        if not existing_data.get("createdAt"):
-            private_payload["createdAt"] = now
-
-        public_payload = self._public_integration_payload(private_payload)
-        batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
-        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
-        batch.commit()
-        self._sync_integration_summary_sync(uid)
-        return self._build_stored_integration_connection(
-            uid,
-            connection_id,
-            public_payload,
-            private_payload,
-        )
-
-    def _upsert_github_connection_sync(
-        self,
-        uid: str,
-        token: str,
-        enabled: bool,
-        status: str,
-        last_error: str | None,
-    ) -> StoredIntegrationConnection:
-        now = utcnow()
-        connection_id = "github"
-        private_payload = {
-            "ownerId": uid,
-            "connectorType": "native",
-            "provider": "github",
-            "name": "GitHub",
-            "token": token,
-            "enabled": enabled,
-            "tools": [
-                {"name": "github_search_repos", "description": "Search GitHub repositories."},
-                {"name": "github_read_file", "description": "Read a repository file."},
-                {"name": "github_list_issues", "description": "List repository issues."},
-                {"name": "github_create_issue", "description": "Create a repository issue."},
-                {"name": "github_summarize_pr", "description": "Fetch PR metadata and changed files."},
-            ],
-            "resources": [],
-            "status": status,
-            "lastError": last_error,
-            "lastCheckedAt": now,
-            "updatedAt": now,
-        }
-        existing = self._integration_private_ref(uid, connection_id).get()
-        existing_data = existing.to_dict() if existing.exists else {}
-        private_payload["createdAt"] = existing_data.get("createdAt") or now
-        public_payload = self._public_integration_payload(private_payload)
-        batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
-        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
-        batch.commit()
-        self._sync_integration_summary_sync(uid)
-        return self._build_stored_integration_connection(
-            uid,
-            connection_id,
-            public_payload,
-            private_payload,
-        )
-
-    def _upsert_google_drive_connection_sync(
-        self,
-        uid: str,
-        enabled: bool,
-        status: str,
-        last_error: str | None,
-    ) -> StoredIntegrationConnection:
-        now = utcnow()
-        specs = {
-            "google_drive": {
-                "provider": "google_drive",
-                "name": "Google Drive",
-                "tools": [
-                    {"name": "search_drive", "description": "Search Google Drive files."},
-                    {"name": "read_drive_file", "description": "Read a Google Drive file."},
-                    {"name": "create_drive_doc", "description": "Create a Google Docs document."},
-                    {"name": "upload_drive_file", "description": "Upload a file to Google Drive."},
-                ],
-            },
-            "gmail": {
-                "provider": "gmail",
-                "name": "Gmail",
-                "tools": [
-                    {"name": "gmail_search", "description": "Search Gmail messages."},
-                    {"name": "gmail_read", "description": "Read a Gmail message."},
-                    {"name": "gmail_send", "description": "Send a Gmail message."},
-                ],
-            },
-            "google_calendar": {
-                "provider": "google_calendar",
-                "name": "Google Calendar",
-                "tools": [
-                    {"name": "calendar_list", "description": "List Google Calendar events."},
-                    {"name": "calendar_create", "description": "Create a Google Calendar event."},
-                ],
-            },
-            "google_tasks": {
-                "provider": "google_tasks",
-                "name": "Google Tasks",
-                "tools": [
-                    {"name": "tasks_list", "description": "List Google Tasks."},
-                    {"name": "tasks_create", "description": "Create a Google Task."},
-                ],
-            },
-        }
-        batch = self._db.batch()
-        private_by_id: dict[str, dict[str, Any]] = {}
-        public_by_id: dict[str, dict[str, Any]] = {}
-        for connection_id, spec in specs.items():
-            existing = self._integration_private_ref(uid, connection_id).get()
-            existing_data = existing.to_dict() if existing.exists else {}
-            private_payload = {
-                "ownerId": uid,
-                "connectorType": "native",
-                "provider": spec["provider"],
-                "name": spec["name"],
-                "enabled": enabled,
-                "tools": spec["tools"],
-                "resources": [],
-                "status": status,
-                "lastError": last_error,
-                "lastCheckedAt": now,
-                "createdAt": existing_data.get("createdAt") or now,
-                "updatedAt": now,
-            }
-            public_payload = self._public_integration_payload(private_payload)
-            private_by_id[connection_id] = private_payload
-            public_by_id[connection_id] = public_payload
-            batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
-            batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
-        batch.commit()
-        self._sync_integration_summary_sync(uid)
-        return self._build_stored_integration_connection(
-            uid,
-            "google_drive",
-            public_by_id["google_drive"],
-            private_by_id["google_drive"],
-        )
-
-    def _update_integration_connection_sync(
-        self,
-        uid: str,
-        connection_id: str,
-        enabled: bool | None,
-        status: str | None,
-        last_error: str | None,
-    ) -> StoredIntegrationConnection | None:
-        existing = self._get_integration_connection_sync(uid, connection_id)
-        if not existing:
-            return None
-        now = utcnow()
-        updates: dict[str, Any] = {"updatedAt": now}
-        if enabled is not None:
-            updates["enabled"] = enabled
-        if status is not None:
-            updates["status"] = status
-        if last_error is not None:
-            updates["lastError"] = last_error
-        private_payload = {**existing.private, **updates}
-        public_payload = self._public_integration_payload(private_payload)
-        batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), updates, merge=True)
-        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
-        batch.commit()
-        self._sync_integration_summary_sync(uid)
-        return self._build_stored_integration_connection(
-            uid,
-            connection_id,
-            public_payload,
-            private_payload,
-        )
-
-    def _delete_integration_connection_sync(self, uid: str, connection_id: str) -> bool:
-        existing = self._get_integration_connection_sync(uid, connection_id)
-        if not existing:
-            return False
-        self._integration_private_ref(uid, connection_id).delete()
-        self._integration_public_ref(uid, connection_id).delete()
-        self._sync_integration_summary_sync(uid)
-        return True
-
-    def _get_beta_application_sync(self, uid: str) -> dict[str, Any] | None:
-        doc = self._db.collection("betaApplications").document(uid).get()
-        if not doc.exists:
-            return None
-        data = doc.to_dict() or {}
-        data["id"] = doc.id
-        return data
-
-    def _upsert_beta_application_sync(self, uid: str, payload: dict[str, Any]) -> dict[str, Any]:
-        now = utcnow()
-        ref = self._db.collection("betaApplications").document(uid)
-        existing = ref.get()
-        current = existing.to_dict() if existing.exists else {}
-        next_payload = {
-            **current,
-            **payload,
-            "userId": uid,
-            "updatedAt": now,
-        }
-        if not current.get("submittedAt"):
-            next_payload["submittedAt"] = now
-        ref.set(next_payload, merge=True)
-        next_payload["id"] = uid
-        return next_payload
-
-    def _set_beta_profile_sync(self, uid: str, payload: dict[str, Any]) -> None:
-        self._db.collection("users").document(uid).set({"betaProfile": payload}, merge=True)
-
-    def _find_user_by_email_sync(self, email: str) -> dict[str, Any] | None:
-        query = (
-            self._db.collection("users")
-            .where(filter=FieldFilter("email", "==", email.strip()))
-            .limit(1)
-        )
-        for doc in query.stream():
-            data = doc.to_dict() or {}
-            data["uid"] = doc.id
-            return data
-        return None
-
-    def _issue_beta_access_code_sync(
-        self,
-        uid: str,
-        admin_email: str,
-        code_hash: str,
-        code_preview: str,
-    ) -> None:
-        now = utcnow()
-        user_ref = self._db.collection("users").document(uid)
-        application_ref = self._db.collection("betaApplications").document(uid)
-        code_ref = self._db.collection("betaAccessCodes").document(code_hash)
-        batch = self._db.batch()
-
-        existing_codes = (
-            self._db.collection("betaAccessCodes")
-            .where(filter=FieldFilter("assignedUserId", "==", uid))
-            .stream()
-        )
-        for doc in existing_codes:
-            data = doc.to_dict() or {}
-            if data.get("status") != "available":
-                continue
-            batch.set(
-                doc.reference,
-                {
-                    "status": "revoked",
-                    "revokedAt": now,
-                    "revokedBy": admin_email,
-                    "revokeReason": "Replaced by a newer beta access code.",
-                },
-                merge=True,
-            )
-
-        user_snapshot = user_ref.get()
-        user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
-        current_profile = normalize_beta_profile(user_data)
-        batch.set(
-            user_ref,
-            {
-                "betaProfile": {
-                    **current_profile,
-                    "status": "approved",
-                    "applicationId": uid,
-                    "applicationSubmittedAt": current_profile.get("applicationSubmittedAt")
-                    or now,
-                    "applicationUpdatedAt": now,
-                    "approvedAt": now,
-                    "rejectedAt": None,
-                    "revokedAt": None,
-                    "redeemedAt": None,
-                    "accessCodeRedeemed": False,
-                    "accessCodeId": None,
-                    "accessCodePreview": None,
-                    "lastDecisionBy": admin_email,
-                    "rejectionReason": None,
-                    "revokedReason": None,
-                }
-            },
-            merge=True,
-        )
-        batch.set(
-            application_ref,
-            {
-                "status": "approved",
-                "reviewedAt": now,
-                "approvedAt": now,
-                "rejectedAt": None,
-                "revokedAt": None,
-                "reviewedBy": admin_email,
-                "accessCodeRedeemedAt": None,
-                "updatedAt": now,
-            },
-            merge=True,
-        )
-        batch.set(
-            code_ref,
-            {
-                "assignedUserId": uid,
-                "status": "available",
-                "createdAt": now,
-                "createdBy": admin_email,
-                "preview": code_preview,
-                "redeemedAt": None,
-                "redeemedBy": None,
-                "revokedAt": None,
-                "revokedBy": None,
-                "revokeReason": None,
-            },
-            merge=True,
-        )
-        batch.commit()
-
-    def _reject_beta_application_sync(self, uid: str, admin_email: str, reason: str | None = None) -> None:
-        now = utcnow()
-        user_ref = self._db.collection("users").document(uid)
-        user_snapshot = user_ref.get()
-        user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
-        current_profile = normalize_beta_profile(user_data)
-        batch = self._db.batch()
-        batch.set(
-            user_ref,
-            {
-                "betaProfile": {
-                    **current_profile,
-                    "status": "rejected",
-                    "applicationId": uid,
-                    "applicationSubmittedAt": current_profile.get("applicationSubmittedAt"),
-                    "applicationUpdatedAt": now,
-                    "approvedAt": None,
-                    "rejectedAt": now,
-                    "revokedAt": None,
-                    "redeemedAt": None,
-                    "accessCodeRedeemed": False,
-                    "accessCodeId": None,
-                    "accessCodePreview": None,
-                    "lastDecisionBy": admin_email,
-                    "rejectionReason": reason[:500] if reason else None,
-                    "revokedReason": None,
-                }
-            },
-            merge=True,
-        )
-        batch.set(
-            self._db.collection("betaApplications").document(uid),
-            {
-                "status": "rejected",
-                "reviewedAt": now,
-                "rejectedAt": now,
-                "reviewedBy": admin_email,
-                "rejectionReason": reason[:500] if reason else None,
-                "updatedAt": now,
-            },
-            merge=True,
-        )
-        batch.commit()
-
-    def _revoke_beta_access_sync(self, uid: str, admin_email: str, reason: str | None = None) -> None:
-        now = utcnow()
-        user_ref = self._db.collection("users").document(uid)
-        user_snapshot = user_ref.get()
-        user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
-        current_profile = normalize_beta_profile(user_data)
-        batch = self._db.batch()
-        batch.set(
-            user_ref,
-            {
-                "betaProfile": {
-                    **current_profile,
-                    "status": "revoked",
-                    "applicationUpdatedAt": now,
-                    "revokedAt": now,
-                    "accessCodeRedeemed": False,
-                    "lastDecisionBy": admin_email,
-                    "revokedReason": reason[:500] if reason else None,
-                }
-            },
-            merge=True,
-        )
-        batch.set(
-            self._db.collection("betaApplications").document(uid),
-            {
-                "status": "revoked",
-                "reviewedAt": now,
-                "revokedAt": now,
-                "reviewedBy": admin_email,
-                "revokeReason": reason[:500] if reason else None,
-                "updatedAt": now,
-            },
-            merge=True,
-        )
-
-        codes = (
-            self._db.collection("betaAccessCodes")
-            .where(filter=FieldFilter("assignedUserId", "==", uid))
-            .stream()
-        )
-        for doc in codes:
-            batch.set(
-                doc.reference,
-                {
-                    "status": "revoked",
-                    "revokedAt": now,
-                    "revokedBy": admin_email,
-                    "revokeReason": reason[:500] if reason else "Beta access revoked.",
-                },
-                merge=True,
-            )
-        batch.commit()
-
-    def _redeem_beta_access_code_sync(self, uid: str, code_hash: str) -> None:
-        transaction = self._db.transaction()
-        user_ref = self._db.collection("users").document(uid)
-        application_ref = self._db.collection("betaApplications").document(uid)
-        code_ref = self._db.collection("betaAccessCodes").document(code_hash)
-
-        @firestore.transactional
-        def _redeem(txn):
-            now = utcnow()
-            user_doc = user_ref.get(transaction=txn)
-            user_data = user_doc.to_dict() if user_doc.exists else {}
-            profile = normalize_beta_profile(user_data)
-            code_doc = code_ref.get(transaction=txn)
-            if not code_doc.exists:
-                raise KeyError("Invalid beta access code.")
-            code_data = code_doc.to_dict() or {}
-            if code_data.get("status") != "available":
-                raise PermissionError("This beta access code is no longer available.")
-            if code_data.get("assignedUserId") != uid:
-                raise PermissionError("This beta access code does not belong to your account.")
-            if profile.get("status") != "approved":
-                raise PermissionError("Your beta application must be approved before you can redeem a code.")
-
-            txn.set(
-                user_ref,
-                {
-                    "betaProfile": {
-                        **profile,
-                        "status": "approved",
-                        "accessCodeRedeemed": True,
-                        "redeemedAt": now,
-                        "applicationUpdatedAt": now,
-                        "accessCodeId": code_ref.id,
-                        "accessCodePreview": code_data.get("preview"),
-                    }
-                },
-                merge=True,
-            )
-            txn.set(
-                code_ref,
-                {
-                    "status": "redeemed",
-                    "redeemedAt": now,
-                    "redeemedBy": uid,
-                },
-                merge=True,
-            )
-            txn.set(
-                application_ref,
-                {
-                    "status": "approved",
-                    "accessCodeRedeemedAt": now,
-                    "updatedAt": now,
-                },
-                merge=True,
-            )
-
-        _redeem(transaction)
-
-    def _get_user_quota_sync(self, uid: str) -> dict[str, Any]:
-        ref = self._db.collection("users").document(uid)
-        doc = ref.get()
-        if not doc.exists:
-            return build_quota_payload(None)
-        data = doc.to_dict() or {}
-        updates = self._build_starter_plan_updates(data, now=utcnow())
-        if updates:
-            ref.set(updates, merge=True)
-            data = {**data, **updates}
-        return build_quota_payload(data)
-
-    def _increment_user_token_usage_sync(self, uid: str, tokens: int) -> dict[str, Any]:
-        if tokens <= 0:
-            return self._get_user_quota_sync(uid)
-
-        ref = self._db.collection("users").document(uid)
-        ref.update({"tokenUsage": firestore.Increment(tokens)})
-        return self._get_user_quota_sync(uid)
-
-    def _increment_user_credit_usage_sync(self, uid: str, credits: int) -> dict[str, Any]:
-        if credits <= 0:
-            return self._get_user_quota_sync(uid)
-
-        ref = self._db.collection("users").document(uid)
-        doc = ref.get()
-        data = doc.to_dict() if doc.exists else {}
-        updates = self._build_starter_plan_updates(data or {}, now=utcnow())
-        if updates:
-            ref.set(updates, merge=True)
-        ref.update({"creditUsage": firestore.Increment(int(credits))})
-        return self._get_user_quota_sync(uid)
-
-    def _get_persistent_sandbox_sync(self, owner_id: str) -> str | None:
-        return self._get_workspace_state_sync(owner_id).get("sandbox_id")
-
-    def _get_workspace_state_sync(self, owner_id: str) -> dict[str, str | None]:
-        doc = self._user_public_ref(owner_id).get()
-        if not doc.exists:
-            return {"sandbox_id": None, "session_id": None}
-        data = doc.to_dict() or {}
-        sandbox_id = data.get("pausedSandboxId") if isinstance(data.get("pausedSandboxId"), str) else None
-        session_id = data.get("pausedSandboxSessionId") if isinstance(data.get("pausedSandboxSessionId"), str) else None
-        return {"sandbox_id": sandbox_id, "session_id": session_id}
-
-    def _save_paused_sandbox_sync(
-        self,
-        owner_id: str,
-        sandbox_id: str | None,
-        session_id: str | None,
-    ) -> None:
-        state = self._get_workspace_state_sync(owner_id)
-        previous_session_id = state.get("session_id")
-        now = utcnow()
-        batch = self._db.batch()
-        user_ref = self._user_public_ref(owner_id)
-        batch.set(
-            user_ref,
-            {
-                "pausedSandboxId": sandbox_id,
-                "pausedSandboxSessionId": session_id,
-                "updatedAt": now,
-            },
-            merge=True,
-        )
-
-        if previous_session_id and previous_session_id != session_id:
-            batch.set(
-                self._db.collection("sessions").document(previous_session_id),
-                {
-                    "canContinueWorkspace": False,
-                    "exactWorkspaceResumeAvailable": False,
-                    "continuationMode": "new_sandbox_resume",
-                    "resumeState": "ended",
-                    "workspaceOwnerSessionId": None,
-                    "canContinueConversation": True,
-                    "updatedAt": now,
-                },
-                merge=True,
-            )
-
-        if session_id:
-            batch.set(
-                self._db.collection("sessions").document(session_id),
-                {
-                    "canContinueWorkspace": True,
-                    "exactWorkspaceResumeAvailable": True,
-                    "continuationMode": "exact_workspace_resume",
-                    "resumeState": "paused",
-                    "workspaceOwnerSessionId": session_id,
-                    "canContinueConversation": True,
-                    "updatedAt": now,
-                },
-                merge=True,
-            )
-        elif previous_session_id:
-            batch.set(
-                self._db.collection("sessions").document(previous_session_id),
-                {
-                    "canContinueWorkspace": False,
-                    "exactWorkspaceResumeAvailable": False,
-                    "continuationMode": "new_sandbox_resume",
-                    "resumeState": "ended",
-                    "workspaceOwnerSessionId": None,
-                    "canContinueConversation": True,
-                    "updatedAt": now,
-                },
-                merge=True,
-            )
-
-        batch.commit()
 
     def _refresh_session_handoff_sync(
         self,
@@ -3525,8 +2576,8 @@ class FirestoreHistoryRepository:
         )
         messages = self._get_session_messages_sync(session_id)
         run = self._get_session_run_sync(session_id)
-        steps = self._list_run_steps_sync(session_id, run.run_id, 50) if run else []
-        artifacts = self._list_run_artifacts_sync(session_id, run.run_id, 25) if run else []
+        steps = self._list_session_steps_sync(session_id, 50)
+        artifacts = self._list_session_artifacts_sync(session_id, 25)
         handoff_summary = self._build_handoff_summary(
             session_id,
             data,

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """Tool context — provides access to the current sandbox and BG task manager.
 
 Stored per-session via contextvars so that tool functions can retrieve
@@ -12,8 +15,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 if TYPE_CHECKING:
     from nexus.background_tasks import BackgroundTaskManager
     from nexus.history_repository import FirestoreHistoryRepository
+    from nexus.production_tasks import ProductionTaskRepository
     from nexus.runtime_config import SessionRuntimeConfig
     from nexus.sandbox import SandboxManager
+    from nexus.subagents import SubagentSupervisor
+    from nexus.subagent_resources import ToolResourceLocks
+    from nexus.task_budget import TaskBudgetGuard
 
 ArtifactCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 SendJsonCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -42,9 +49,86 @@ _current_owner_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 _current_history_repository: contextvars.ContextVar[Optional["FirestoreHistoryRepository"]] = (
     contextvars.ContextVar("_current_history_repository", default=None)
 )
+_current_production_task_repository: contextvars.ContextVar[Optional["ProductionTaskRepository"]] = (
+    contextvars.ContextVar("_current_production_task_repository", default=None)
+)
+_current_task_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_task_id", default=""
+)
 _current_send_json: contextvars.ContextVar[Optional["SendJsonCallback"]] = (
     contextvars.ContextVar("_current_send_json", default=None)
 )
+_current_subagent_supervisor: contextvars.ContextVar[Optional["SubagentSupervisor"]] = (
+    contextvars.ContextVar("_current_subagent_supervisor", default=None)
+)
+_current_subagent_resource_locks: contextvars.ContextVar[Optional["ToolResourceLocks"]] = (
+    contextvars.ContextVar("_current_subagent_resource_locks", default=None)
+)
+_current_task_budget_guard: contextvars.ContextVar[Optional["TaskBudgetGuard"]] = (
+    contextvars.ContextVar("_current_task_budget_guard", default=None)
+)
+# None = unrestricted (empty user selection). A frozenset restricts gateable tools.
+_current_tool_allowlist: contextvars.ContextVar[Optional[frozenset[str]]] = (
+    contextvars.ContextVar("_current_tool_allowlist", default=None)
+)
+
+_ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable[None]]]] = (
+    contextvars.ContextVar("_ensure_sandbox_callback", default=None)
+)
+
+# question, optional multiple-choice labels
+AskUserCallback = Callable[..., Awaitable[Optional[str]]]
+
+_ask_user_callback: contextvars.ContextVar[Optional["AskUserCallback"]] = (
+    contextvars.ContextVar("_ask_user_callback", default=None)
+)
+# Mutable single-element list so increments inside the same turn context are visible
+# across tool invocations without re-setting the contextvar.
+_worker_call_counter: contextvars.ContextVar[Optional[list[int]]] = (
+    contextvars.ContextVar("_worker_call_counter", default=None)
+)
+
+
+def set_ask_user_callback(callback: "AskUserCallback | None") -> contextvars.Token:
+    """Set the async callback that asks the user a question and awaits the answer."""
+    return _ask_user_callback.set(callback)
+
+
+def get_ask_user_callback() -> "AskUserCallback | None":
+    """Retrieve the ask-user callback for the current execution context."""
+    return _ask_user_callback.get()
+
+
+def reset_worker_call_count() -> None:
+    """Reset the per-turn foreground worker invocation counter."""
+    _worker_call_counter.set([0])
+
+
+def increment_worker_call_count() -> int:
+    """Increment and return the per-turn worker invocation count."""
+    counter = _worker_call_counter.get()
+    if counter is None:
+        counter = [0]
+        _worker_call_counter.set(counter)
+    counter[0] += 1
+    return counter[0]
+
+
+def set_ensure_sandbox_callback(callback: Callable[[], Awaitable[None]] | None) -> contextvars.Token:
+    """Set the async callback that boots the sandbox if it isn't already alive."""
+    return _ensure_sandbox_callback.set(callback)
+
+
+async def ensure_sandbox() -> "SandboxManager":
+    """Ensure the sandbox is alive before use. Boots it lazily if needed.
+
+    Call this at the top of any tool that requires sandbox access.
+    Returns the sandbox manager for convenience.
+    """
+    callback = _ensure_sandbox_callback.get()
+    if callback is not None:
+        await callback()
+    return get_sandbox()
 
 
 def set_sandbox(sandbox: "SandboxManager") -> contextvars.Token:
@@ -158,6 +242,28 @@ def get_history_repository() -> Optional["FirestoreHistoryRepository"]:
     return _current_history_repository.get()
 
 
+def set_production_task_repository(
+    repository: Optional["ProductionTaskRepository"],
+) -> contextvars.Token:
+    """Set the durable production task repository for policy approvals."""
+    return _current_production_task_repository.set(repository)
+
+
+def get_production_task_repository() -> Optional["ProductionTaskRepository"]:
+    """Retrieve the durable production task repository, if bound."""
+    return _current_production_task_repository.get()
+
+
+def set_task_id(task_id: str | None) -> contextvars.Token:
+    """Set the durable task ID for the current execution context."""
+    return _current_task_id.set(task_id or "")
+
+
+def get_task_id() -> str:
+    """Retrieve the durable task ID for the current execution context."""
+    return _current_task_id.get()
+
+
 def set_send_json(callback: Optional["SendJsonCallback"]) -> contextvars.Token:
     """Set the WebSocket send_json callback for UI control tools."""
     return _current_send_json.set(callback)
@@ -166,3 +272,54 @@ def set_send_json(callback: Optional["SendJsonCallback"]) -> contextvars.Token:
 def get_send_json() -> Optional["SendJsonCallback"]:
     """Retrieve the WebSocket send_json callback for UI control tools."""
     return _current_send_json.get()
+
+
+def set_subagent_supervisor(
+    supervisor: Optional["SubagentSupervisor"],
+) -> contextvars.Token:
+    """Set the hidden subagent supervisor for actor-model tools."""
+    return _current_subagent_supervisor.set(supervisor)
+
+
+def get_subagent_supervisor() -> Optional["SubagentSupervisor"]:
+    """Retrieve the hidden subagent supervisor, if bound."""
+    return _current_subagent_supervisor.get()
+
+
+def set_subagent_resource_locks(
+    locks: Optional["ToolResourceLocks"],
+) -> contextvars.Token:
+    """Set shared resource locks for parallel subagent tool execution."""
+    return _current_subagent_resource_locks.set(locks)
+
+
+def get_subagent_resource_locks() -> Optional["ToolResourceLocks"]:
+    """Retrieve shared resource locks, if bound."""
+    return _current_subagent_resource_locks.get()
+
+
+def set_task_budget_guard(
+    guard: Optional["TaskBudgetGuard"],
+) -> contextvars.Token:
+    """Bind the mutable durable-run budget guard."""
+    return _current_task_budget_guard.set(guard)
+
+
+def get_task_budget_guard() -> Optional["TaskBudgetGuard"]:
+    """Return the active durable-run budget guard, if any."""
+    return _current_task_budget_guard.get()
+
+
+def set_tool_allowlist(allowlist: frozenset[str] | None) -> contextvars.Token:
+    """Bind the per-turn tool allowlist (None = unrestricted)."""
+    return _current_tool_allowlist.set(allowlist)
+
+
+def get_tool_allowlist() -> frozenset[str] | None:
+    """Return the active per-turn tool allowlist, or None if unrestricted."""
+    return _current_tool_allowlist.get()
+
+
+def clear_tool_allowlist() -> None:
+    """Reset the per-turn tool allowlist to unrestricted."""
+    _current_tool_allowlist.set(None)

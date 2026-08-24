@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 from __future__ import annotations
 
 import sys
@@ -7,26 +10,42 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus import server
+from nexus.routers import files
 from nexus.orchestrator import NexusOrchestrator
 
 
 class SafeWorkspacePathTests(TestCase):
     def test_safe_workspace_relative_path_preserves_valid_upload_path(self) -> None:
         self.assertEqual(
-            server._safe_workspace_relative_path("sources/uploads/report.pdf"),
+            files._safe_workspace_relative_path("sources/uploads/report.pdf"),
             "sources/uploads/report.pdf",
         )
 
     def test_safe_workspace_relative_path_rejects_parent_segments(self) -> None:
         with self.assertRaises(Exception):
-            server._safe_workspace_relative_path("../report.pdf")
+            files._safe_workspace_relative_path("../report.pdf")
+
+    def test_safe_workspace_relative_path_strips_absolute_prefixes(self) -> None:
+        result = files._safe_workspace_relative_path(
+            "/home/user/CoComputer/Workspaces/session-123/964068555373/outputs/report.pdf",
+            session_id="session-123",
+            run_id="964068555373",
+        )
+        self.assertEqual(result, "outputs/report.pdf")
+
+    def test_safe_workspace_relative_path_strips_absolute_session_prefix(self) -> None:
+        result = files._safe_workspace_relative_path(
+            "/home/user/CoComputer/Workspaces/session-123/outputs/report.pdf",
+            session_id="session-123",
+        )
+        self.assertEqual(result, "outputs/report.pdf")
+
 
 
 class DriveMirrorTests(IsolatedAsyncioTestCase):
     async def test_mirror_upload_to_google_drive_skips_when_drive_not_connected(self) -> None:
-        with patch.object(server, "get_google_drive_client_for_user", new=AsyncMock(return_value=None)):
-            result = await server._mirror_upload_to_google_drive(
+        with patch.object(files, "get_google_drive_client_for_user", new=AsyncMock(return_value=None)):
+            result = await files._mirror_upload_to_google_drive(
                 user_id="user-1",
                 session_id="session-1",
                 filename="report.pdf",
@@ -51,8 +70,8 @@ class DriveMirrorTests(IsolatedAsyncioTestCase):
             }
         )
 
-        with patch.object(server, "get_google_drive_client_for_user", new=AsyncMock(return_value=fake_client)):
-            result = await server._mirror_upload_to_google_drive(
+        with patch.object(files, "get_google_drive_client_for_user", new=AsyncMock(return_value=fake_client)):
+            result = await files._mirror_upload_to_google_drive(
                 user_id="user-1",
                 session_id="session-1",
                 filename="report.pdf",

@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import type {
@@ -20,6 +25,9 @@ export type WorkflowTemplateDraft = {
   instructions: string;
   inputFields: WorkflowTemplateInputField[];
 };
+
+export const CREATE_TEMPLATE_PROMPT =
+  "Create a reusable workflow template from this session. Propose a name, instructions, and any input fields, then wait for me to confirm, edit, or dismiss.";
 
 export function queuePendingSessionPrompt(sessionId: string, text: string) {
   if (typeof window === "undefined") {

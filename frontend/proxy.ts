@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 

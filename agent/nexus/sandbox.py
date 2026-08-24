@@ -1,13 +1,18 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
 """E2B Desktop Sandbox wrapper — provides all computer control primitives."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
 import json
 import shlex
 import socket
+import threading
 import time
 from typing import Optional
 
@@ -33,6 +38,146 @@ class SandboxDeadError(RuntimeError):
     """Raised when the E2B sandbox has timed out or been destroyed."""
 
 
+class SandboxSweeper:
+    """Background worker that kills orphaned E2B sandboxes."""
+
+    def __init__(self, history_repo, e2b_api_key: str = ""):
+        self.history_repo = history_repo
+        self.e2b_api_key = e2b_api_key or settings.e2b_api_key
+        self._running = False
+        self._task = None
+
+    async def start(self, interval_seconds: int = 3600):
+        """Start the sweeper loop."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._loop(interval_seconds))
+        logger.info("Sandbox sweeper started (interval=%ds)", interval_seconds)
+
+    async def stop(self):
+        """Stop the sweeper loop."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Sandbox sweeper stopped")
+
+    async def _loop(self, interval_seconds: int):
+        while self._running:
+            try:
+                await self.sweep()
+            except Exception:
+                logger.exception("Error during sandbox sweep")
+            await asyncio.sleep(interval_seconds)
+
+    async def sweep(self):
+        """Find and kill sandboxes that are not associated with any active session."""
+        logger.info("Starting sandbox sweep...")
+        
+        # 1. Get all active sandbox IDs from Firestore
+        active_ids = set(await self.history_repo.list_all_active_sandbox_ids())
+        
+        # 2. List all running sandboxes from E2B
+        running_ids = await list_running_e2b_sandbox_ids(self.e2b_api_key)
+        if running_ids is None:
+            return
+
+        killed_count = 0
+        from e2b_desktop import Sandbox
+
+        for sid in running_ids:
+            if sid not in active_ids:
+                logger.info("Killing orphaned sandbox: %s", sid)
+                try:
+                    await asyncio.to_thread(lambda: Sandbox.connect(sid, api_key=self.e2b_api_key or None).kill())
+                    killed_count += 1
+                except Exception:
+                    logger.warning("Failed to kill orphaned sandbox %s", sid, exc_info=True)
+        
+        if killed_count > 0:
+            logger.info("Sandbox sweep complete. Killed %d orphaned sandboxes.", killed_count)
+        else:
+            logger.info("Sandbox sweep complete. No orphans found.")
+
+
+def _sandbox_info_id(info: object) -> str | None:
+    value = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _paginator_items(paginator: object) -> list[object]:
+    items: list[object] = []
+    current = paginator
+    while True:
+        batch = current.next_items()
+        items.extend(batch)
+        if not current.has_next:
+            break
+    return items
+
+
+async def list_running_e2b_sandbox_ids(e2b_api_key: str = "") -> set[str] | None:
+    """Return running E2B sandbox ids, or None if verification is unavailable."""
+    try:
+        from e2b_desktop import Sandbox
+
+        paginator = await asyncio.to_thread(
+            Sandbox.list,
+            api_key=e2b_api_key or None,
+        )
+        running_sandboxes = await asyncio.to_thread(_paginator_items, paginator)
+        return {
+            sandbox_id
+            for sandbox_id in (_sandbox_info_id(info) for info in running_sandboxes)
+            if sandbox_id
+        }
+    except Exception:
+        logger.warning("Failed to list running E2B sandboxes", exc_info=True)
+        return None
+
+
+class SandboxLifecycleController:
+    """Verifies sandbox truth and reconciles stale Firestore session state."""
+
+    def __init__(self, history_repo, e2b_api_key: str = "") -> None:
+        self.history_repo = history_repo
+        self.e2b_api_key = e2b_api_key or settings.e2b_api_key
+
+    async def list_verified_active_sessions(
+        self,
+        owner_id: str,
+        *,
+        e2b_api_key: str = "",
+    ) -> list[dict]:
+        sessions = await self.history_repo.list_active_sessions(owner_id)
+        if not sessions:
+            return []
+
+        running_ids = await list_running_e2b_sandbox_ids(e2b_api_key or self.e2b_api_key)
+        if running_ids is None:
+            return []
+
+        verified: list[dict] = []
+        for session in sessions:
+            sandbox_id = session.get("sandbox_id")
+            if isinstance(sandbox_id, str) and sandbox_id in running_ids:
+                session["sandbox_verification"] = "verified"
+                verified.append(session)
+                continue
+
+            session_id = session.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                await self.history_repo.mark_session_sandbox_unavailable(
+                    session_id,
+                    reason="sandbox_not_running",
+                )
+        return verified
+
+
 class SandboxManager:
     """Manages a single E2B Desktop sandbox instance."""
 
@@ -40,6 +185,43 @@ class SandboxManager:
         self._sandbox = None
         self._stream_url: Optional[str] = None
         self._e2b_api_key = e2b_api_key
+        # Browser tools may race during a new session. One launch attempt per
+        # sandbox avoids conflicting Chromium processes sharing the CDP port.
+        self._chromium_cdp_lock = threading.Lock()
+        # Display / input / files / browser concerns are delegated to bound
+        # components (built lazily). See __getattr__.
+        self._components = None
+
+    def _ensure_components(self):
+        components = self.__dict__.get("_components")
+        if components is None:
+            from nexus.sandbox_components import (
+                SandboxBrowser,
+                SandboxDisplay,
+                SandboxFiles,
+                SandboxInput,
+            )
+
+            self._display = SandboxDisplay(self)
+            self._input = SandboxInput(self)
+            self._files = SandboxFiles(self)
+            self._browser = SandboxBrowser(self)
+            components = (self._display, self._input, self._files, self._browser)
+            self._components = components
+        return components
+
+    def __getattr__(self, name: str):
+        # Only invoked for methods moved to a bound component (display, input,
+        # files, browser). Method names are unique across components; the
+        # class-level lookup avoids triggering the components' own __getattr__.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        for component in self._ensure_components():
+            if getattr(type(component), name, None) is not None:
+                return getattr(component, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     @property
     def is_alive(self) -> bool:
@@ -76,14 +258,19 @@ class SandboxManager:
         max_backoff = max(settings.sandbox_create_retry_max_seconds, backoff)
 
         def is_transient(exc: Exception) -> bool:
+            # Transient network faults talking to the E2B API must be retried.
+            # WinError 10054 ("connection forcibly closed") surfaces as
+            # httpcore.ReadError (a subclass of httpcore.NetworkError); timeouts
+            # subclass httpcore.TimeoutException; httpx.TransportError is the
+            # base for all httpx connect/read/write/timeout/protocol faults.
             return isinstance(
                 exc,
                 (
                     socket.gaierror,
-                    httpx.ConnectError,
-                    httpx.RemoteProtocolError,
-                    httpx.TimeoutException,
-                    httpcore.ConnectError,
+                    ConnectionError,  # incl. ConnectionResetError (WinError 10054)
+                    httpx.TransportError,
+                    httpcore.NetworkError,
+                    httpcore.TimeoutException,
                     httpcore.RemoteProtocolError,
                 ),
             )
@@ -93,15 +280,19 @@ class SandboxManager:
             try:
                 suffix = f" (attempt {attempt}/{retries})" if retries > 1 else ""
                 logger.info("Creating E2B desktop sandbox%s...", suffix)
-                self._sandbox = Sandbox.create(
+                create_kwargs = dict(
                     api_key=self._e2b_api_key or None,
                     resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
                     timeout=settings.sandbox_timeout_seconds,
                 )
+                if settings.sandbox_template_id:
+                    create_kwargs["template"] = settings.sandbox_template_id
+                self._sandbox = Sandbox.create(**create_kwargs)
                 self._sandbox.stream.start(require_auth=False)
                 self._stream_url = self._sandbox.stream.get_url()
                 logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
                 self._set_wallpaper()
+                self._provision_sandbox()
                 return {
                     "sandbox_id": self._sandbox.sandbox_id,
                     "stream_url": self._stream_url,
@@ -155,10 +346,47 @@ class SandboxManager:
             "true"
         )
         try:
-            self._sandbox.commands.run(cmd, timeout=35)
-            logger.debug("Custom wallpaper applied via curl + xfconf-query")
+            # Background the whole script so boot is not blocked on the curl
+            # download. Wrap in `sh -c` so nohup covers every statement, not
+            # just the leading `sleep`.
+            backgrounded = f"nohup sh -c {shlex.quote(cmd)} >/dev/null 2>&1 & echo scheduled"
+            self._sandbox.commands.run(backgrounded, timeout=10)
+            logger.debug("Custom wallpaper scheduled via curl + xfconf-query (background)")
         except Exception:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
+
+    def _provision_sandbox(self) -> None:
+        """Pre-install task libraries and provision one Chromium CDP target.
+
+        When a pre-baked template is configured the libraries are already in the
+        image, so the boot-time ``pip install`` (up to 300s) is skipped.
+        """
+        if settings.sandbox_template_id:
+            logger.info("Skipping runtime provisioning; using pre-baked template %s", settings.sandbox_template_id)
+        else:
+            libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+            cmd = f"pip install {' '.join(libs)}"
+            try:
+                logger.info("Provisioning sandbox with libraries: %s", libs)
+                self._sandbox.commands.run(cmd, timeout=300)
+            except Exception as e:
+                logger.warning("Sandbox provisioning failed: %s", e)
+
+            # Surface silent degradation: boot-time pip can fail without raising,
+            # or packages may still be missing after a partial install.
+            verify = self.run_command(
+                'python3 -c "import docx, openpyxl, fpdf, markdown2"',
+                timeout=60,
+            )
+            if verify.get("exit_code") != 0:
+                logger.error(
+                    "Sandbox doc-generation dependencies missing after provisioning: %s",
+                    verify.get("stderr") or verify.get("stdout") or verify,
+                )
+        try:
+            self.ensure_chromium_cdp()
+        except Exception as exc:
+            logger.warning("Chromium CDP provisioning failed: %s", exc)
 
     def keep_alive(self, timeout: int = 900) -> None:
         """Extend sandbox timeout."""
@@ -166,45 +394,58 @@ class SandboxManager:
             self._sandbox.set_timeout(timeout)
 
     def pause(self) -> str | None:
-        """Snapshot the sandbox state. Returns the sandbox_id so it can be resumed later.
+        """Pause the sandbox so it can be resumed later via ``connect``/``resume``.
 
-        Clears internal references so ``is_alive`` returns False after this call.
-        Returns None if no sandbox is running or if the E2B API call fails.
+        Current E2B Desktop SDK exposes ``Sandbox.pause()`` which returns the
+        sandbox id. That id is what ``Sandbox.connect(id)`` resumes.
         """
-        if self._sandbox is None:
+        if not self._sandbox:
             return None
         try:
-            sandbox_id: str = self._sandbox.sandbox_id
-            self._sandbox.pause()
+            sandbox_id = self._sandbox.pause()
             logger.info("Sandbox paused (id=%s)", sandbox_id)
-            return sandbox_id
-        except Exception as exc:
-            logger.warning("Failed to pause sandbox: %s", exc)
-            return None
-        finally:
             self._sandbox = None
             self._stream_url = None
+            return str(sandbox_id) if sandbox_id else None
+        except Exception as exc:
+            logger.warning("Sandbox pause failed: %s — destroying instead", exc)
+            try:
+                self.destroy()
+            except Exception:
+                self._sandbox = None
+                self._stream_url = None
+            return None
 
-    def resume(self, sandbox_id: str) -> dict:
-        """Resume a previously paused sandbox. Returns {sandbox_id, stream_url}.
+    def connect(self, sandbox_id: str) -> dict:
+        """Connect to an existing (running or paused) sandbox.
 
-        Raises if the E2B API call fails (e.g. snapshot expired after 24 hours).
+        E2B ``Sandbox.connect`` auto-resumes paused sandboxes.
+        Returns {sandbox_id, stream_url}.
         """
         from e2b_desktop import Sandbox
 
-        logger.info("Resuming sandbox %s ...", sandbox_id)
-        self._sandbox = Sandbox.resume(
+        logger.info("Connecting to sandbox %s ...", sandbox_id)
+        self._sandbox = Sandbox.connect(
             sandbox_id,
             api_key=self._e2b_api_key or None,
             timeout=settings.sandbox_timeout_seconds,
         )
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
-        logger.info("Sandbox resumed -- stream URL: %s", self._stream_url)
+        self.ensure_chromium_cdp()
+        logger.info("Sandbox connected -- stream URL: %s", self._stream_url)
         return {
             "sandbox_id": self._sandbox.sandbox_id,
             "stream_url": self._stream_url,
         }
+
+    def resume(self, sandbox_id: str) -> dict:
+        """Resume a paused sandbox.
+
+        E2B has no ``Sandbox.resume`` — ``Sandbox.connect`` resumes paused
+        sandboxes. This method is the session-layer alias for that path.
+        """
+        return self.connect(sandbox_id)
 
     def destroy(self) -> None:
         """Kill the sandbox."""
@@ -219,111 +460,6 @@ class SandboxManager:
                 self._stream_url = None
 
     # -- Screen --------------------------------------------------------------
-
-    def screenshot(self) -> bytes:
-        """Capture the screen as PNG bytes."""
-        self._require_sandbox()
-        try:
-            return bytes(self._sandbox.screenshot())
-        except Exception as e:
-            if "not found" in str(e).lower() or "timeout" in str(e).lower():
-                self._sandbox = None
-                raise SandboxDeadError("Sandbox timed out while taking screenshot.") from e
-            raise
-
-    def screenshot_base64(self) -> str:
-        """Capture the screen as a base64-encoded PNG string."""
-        return base64.b64encode(self.screenshot()).decode()
-
-    def screenshot_jpeg(self, quality: int = 85, max_dim: int = 1024) -> bytes:
-        """Capture the screen as resized JPEG bytes (smaller for Gemini)."""
-        png_bytes = self.screenshot()
-        img = Image.open(io.BytesIO(png_bytes))
-        img.thumbnail((max_dim, max_dim))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        return buf.getvalue()
-
-    def screenshot_jpeg_base64(self, quality: int = 85) -> str:
-        """Capture as base64-encoded JPEG."""
-        return base64.b64encode(self.screenshot_jpeg(quality)).decode()
-
-    def get_screen_size(self) -> tuple[int, int]:
-        """Return (width, height) of the sandbox screen."""
-        self._require_sandbox()
-        return self._sandbox.get_screen_size()
-
-    def get_cursor_position(self) -> tuple[int, int]:
-        """Return (x, y) cursor position."""
-        self._require_sandbox()
-        return self._sandbox.get_cursor_position()
-
-    # -- Mouse ---------------------------------------------------------------
-
-    def left_click(self, x: int, y: int) -> None:
-        """Left-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.left_click(x, y)
-
-    def right_click(self, x: int, y: int) -> None:
-        """Right-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.right_click(x, y)
-
-    def double_click(self, x: int, y: int) -> None:
-        """Double-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.double_click(x, y)
-
-    def move_mouse(self, x: int, y: int) -> None:
-        """Move mouse to coordinates without clicking."""
-        self._require_sandbox()
-        self._sandbox.move_mouse(x, y)
-
-    def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
-        """Drag from one point to another."""
-        self._require_sandbox()
-        self._sandbox.drag(fr=(from_x, from_y), to=(to_x, to_y))
-
-    def scroll(self, direction: str = "down", amount: int = 3) -> None:
-        """Scroll the screen. direction: 'up' or 'down'."""
-        self._require_sandbox()
-        self._sandbox.scroll(direction, amount)
-
-    # -- Keyboard ------------------------------------------------------------
-
-    def type_text(self, text: str) -> None:
-        """Type text at the current cursor position."""
-        self._require_sandbox()
-        self._sandbox.write(text, chunk_size=25, delay_in_ms=75)
-
-    def press_key(self, key: str) -> None:
-        """Press a key or key combination. Examples: 'enter', 'ctrl+c', 'alt+tab'."""
-        self._require_sandbox()
-        key_aliases = {
-            "return": "enter",
-            "esc": "escape",
-            "del": "delete",
-            "control": "ctrl",
-            "command": "meta",
-            "cmd": "meta",
-            "option": "alt",
-            "spacebar": "space",
-            "pgup": "pageup",
-            "pgdn": "pagedown",
-        }
-
-        def normalize(part: str) -> str:
-            lowered = part.strip().lower()
-            return key_aliases.get(lowered, lowered)
-
-        if "+" in key:
-            combo = [normalize(part) for part in key.split("+") if part.strip()]
-            self._sandbox.press(combo)
-        else:
-            self._sandbox.press(normalize(key))
-
-    # -- Terminal ------------------------------------------------------------
 
     def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
         """Run a shell command. Returns {stdout, stderr, exit_code}."""
@@ -359,138 +495,3 @@ class SandboxManager:
                 "stderr": stderr,
                 "exit_code": exit_code if exit_code is not None else -1,
             }
-
-    def ensure_directory(self, path: str) -> None:
-        """Create a directory and its parents inside the sandbox."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"mkdir -p {safe_path}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) == 0:
-            return
-
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "pathlib.Path(path).mkdir(parents=True, exist_ok=True)"
-        )
-        fallback = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(fallback.get("exit_code", -1)) == 0:
-            logger.warning(
-                "ensure_directory recovered via python fallback for %s after mkdir failed "
-                "(exit=%s, stderr=%s, stdout=%s)",
-                path,
-                result.get("exit_code"),
-                result.get("stderr") or "",
-                result.get("stdout") or "",
-            )
-            return
-
-        logger.error(
-            "ensure_directory failed for %s: mkdir exit=%s stderr=%s stdout=%s; "
-            "python fallback exit=%s stderr=%s stdout=%s",
-            path,
-            result.get("exit_code"),
-            result.get("stderr") or "",
-            result.get("stdout") or "",
-            fallback.get("exit_code"),
-            fallback.get("stderr") or "",
-            fallback.get("stdout") or "",
-        )
-        raise RuntimeError(
-            fallback.get("stderr")
-            or result.get("stderr")
-            or f"Failed to create directory {path}"
-        )
-
-    def write_text_file(self, path: str, content: str, *, append: bool = False) -> None:
-        """Write UTF-8 text into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        mode = "ab" if append else "wb"
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            f"target.open('{mode}').write(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def write_binary_file(self, path: str, content: bytes) -> None:
-        """Write binary content into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            "target.write_bytes(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def read_binary_file(self, path: str) -> bytes:
-        """Read binary content from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib, sys; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "sys.stdout.write(base64.b64encode(pathlib.Path(path).read_bytes()).decode('ascii'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return base64.b64decode(str(result.get("stdout") or ""))
-
-    def read_text_file(self, path: str) -> str:
-        """Read UTF-8 text from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "print(pathlib.Path(path).read_text(encoding='utf-8'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return str(result.get("stdout") or "")
-
-    def path_exists(self, path: str) -> bool:
-        """Return True when the given sandbox path exists."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"test -e {safe_path}", timeout=15)
-        return _coerce_exit_code(result.get("exit_code", -1)) == 0
-
-    def list_directory(self, path: str) -> list[dict[str, object]]:
-        """Return a shallow directory listing for the given sandbox path."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, json, pathlib; "
-            f"path = pathlib.Path(base64.b64decode('{path_b64}').decode('utf-8')); "
-            "entries = []; "
-            "exists = path.exists(); "
-            "iterable = sorted(path.iterdir(), key=lambda item: item.name.lower()) if exists and path.is_dir() else []; "
-            "for item in iterable: "
-            " entries.append({'name': item.name, 'path': str(item), 'is_dir': item.is_dir(), 'size': item.stat().st_size if item.exists() else 0}); "
-            "print(json.dumps(entries))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to list directory {path}")
-        raw = str(result.get("stdout") or "").strip()
-        if not raw:
-            return []
-        return list(json.loads(raw))
-
-    # -- Applications --------------------------------------------------------
-
-    def open_url(self, url: str) -> None:
-        """Open a URL in the default browser."""
-        self._require_sandbox()
-        self._sandbox.open(url)

@@ -1,9 +1,15 @@
+/**
+ * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Proprietary and non-commercial use only.
+ */
+
 "use client";
 
 import {
   GoogleAuthProvider,
+  getRedirectResult,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from "firebase/auth";
@@ -13,6 +19,7 @@ import {
   serverTimestamp,
   setDoc,
 } from "firebase/firestore";
+import type { QueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -23,6 +30,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { clearAuthTokenCache } from "@/lib/api-client";
 import { auth, db, isRecoverableFirestoreError } from "@/lib/firebase-client";
 
 export type AppUser = {
@@ -66,12 +74,28 @@ async function syncUserProfile(user: User) {
   await setDoc(ref, payload, { merge: true });
 }
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export function AuthProvider({
+  children,
+  queryClient,
+}: {
+  children: ReactNode;
+  queryClient: QueryClient;
+}) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Capture the redirect result when the user returns from the Google sign-in page.
+    getRedirectResult(auth).catch((err) => {
+      // Ignore benign redirect errors (e.g. no redirect pending).
+      const code = (err as { code?: string }).code;
+      if (code && code !== "auth/credential-already-in-use") {
+        console.error("[AuthProvider] Redirect result error", err);
+        setError(err instanceof Error ? err.message : "Google sign-in failed");
+      }
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       if (firebaseUser) {
         setUser(mapUser(firebaseUser));
@@ -83,19 +107,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
       } else {
         setUser(null);
+        clearAuthTokenCache();
+        queryClient.clear();
       }
       setIsLoading(false);
     });
 
     return unsubscribe;
-  }, []);
+  }, [queryClient]);
 
   const signInWithGoogle = useCallback(async () => {
     setError(null);
     try {
-      await signInWithPopup(auth, googleProvider);
-      // syncUserProfile is called by the onAuthStateChanged listener; no need
-      // to call it here to avoid duplicate Firestore writes.
+      await signInWithRedirect(auth, googleProvider);
+      // The page will redirect to Google; onAuthStateChanged and
+      // getRedirectResult handle the rest when the user returns.
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sign-in failed");
       throw err;
@@ -105,13 +131,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOutUser = useCallback(async () => {
     try {
       await signOut(auth);
+      clearAuthTokenCache();
+      queryClient.clear();
       setError(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sign-out failed";
       console.error("[signOutUser]", err);
       setError(message);
     }
-  }, [setError]);
+  }, [queryClient, setError]);
 
   const value = useMemo<AuthContextValue>(
     () => ({

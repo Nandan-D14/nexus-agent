@@ -1,0 +1,133 @@
+# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Proprietary and non-commercial use only.
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import TestCase
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.testclient import TestClient
+from google.api_core.exceptions import DeadlineExceeded, ResourceExhausted
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nexus.auth import AuthenticatedUser
+from nexus import server
+from nexus import dependencies
+
+
+class SessionAccessTests(TestCase):
+    def setUp(self) -> None:
+        self._previous_require_byok = server.settings.require_byok
+        server.settings.require_byok = True
+
+        from nexus.auth import require_current_user
+
+        server.app.dependency_overrides[require_current_user] = lambda: AuthenticatedUser(
+            uid="user-123",
+            email="tester@example.com",
+            display_name="Tester",
+        )
+
+    def tearDown(self) -> None:
+        server.settings.require_byok = self._previous_require_byok
+        server.app.dependency_overrides.clear()
+
+    def _make_session_manager(self) -> MagicMock:
+        manager = MagicMock()
+        manager.active_count = 0
+        manager.start_cleanup = MagicMock()
+        manager.stop_cleanup = MagicMock()
+        manager.destroy_all = AsyncMock()
+        manager.create_ticket = MagicMock(return_value="ticket-123")
+        return manager
+
+    def test_google_api_deadline_returns_retryable_response(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock(side_effect=DeadlineExceeded("Firestore unavailable"))
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.post("/sessions", json={"mode": "fresh"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "5")
+        self.assertEqual(response.json()["detail"]["code"], "GOOGLE_SERVICE_UNAVAILABLE")
+
+    def test_google_api_quota_exceeded_returns_429(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock(side_effect=ResourceExhausted("Quota exceeded."))
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.post("/sessions", json={"mode": "fresh"})
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "60")
+        self.assertEqual(response.json()["detail"]["code"], "GOOGLE_QUOTA_EXCEEDED")
+        self.assertIn("quota", response.json()["detail"]["detail"].lower())
+
+    def test_create_session_rejects_missing_keys(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock()
+        repo.get_user_settings = AsyncMock(return_value={})
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", self._make_session_manager()),
+        ):
+            with TestClient(server.app) as client:
+                response = client.post("/sessions", json={"mode": "fresh"})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "BYOK_REQUIRED")
+
+    def test_create_session_allows_configured_user(self) -> None:
+        repo = MagicMock()
+        repo.upsert_user = AsyncMock()
+        repo.get_user_settings = AsyncMock(return_value={"byok": {"llmProvider": "openai"}})
+        repo.get_user_quota = AsyncMock(return_value={"remaining": 100, "used": 0, "limit": 4000})
+        repo.get_session = AsyncMock(return_value=None)
+
+        session = SimpleNamespace(
+            id="session-123",
+            stream_url=None,
+            status="ready",
+            created_at="2026-03-22T00:00:00Z",
+            resume_source_session_id=None,
+            current_run_id=None,
+            run_status=None,
+            artifact_count=0,
+            exact_workspace_resume_available=False,
+            continuation_mode=None,
+        )
+        manager = self._make_session_manager()
+        manager.create_session = AsyncMock(return_value=session)
+
+        from nexus import sessions_helpers
+
+        with (
+            patch.object(dependencies, "history_repository", repo),
+            patch.object(dependencies, "session_manager", manager),
+            patch.object(
+                sessions_helpers,
+                "get_byok_status",
+                return_value=SimpleNamespace(configured=True, missing=()),
+            ),
+        ):
+            with TestClient(server.app) as client:
+                response = client.post("/sessions", json={"mode": "fresh"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["session_id"], "session-123")
+        self.assertEqual(body["ws_ticket"], "ticket-123")
