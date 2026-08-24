@@ -26,6 +26,8 @@ import {
   resolveArtifactUrl,
 } from "@/lib/artifact-url";
 import { ArtifactIcon, DocumentViewerModal } from "@/components/artifacts";
+import { useSessionCanvas } from "@/lib/session-canvas-context";
+import { isCanvasArtifact } from "@/lib/session-canvas";
 
 type Props = {
   artifacts: RunArtifact[];
@@ -52,6 +54,7 @@ export function OutputsPanel({
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const fetchedIds = useRef<Set<string>>(new Set());
+  const canvas = useSessionCanvas();
 
   const deliverables = useMemo(
     () => artifacts.filter(isDeliverableArtifact),
@@ -99,6 +102,10 @@ export function OutputsPanel({
 
   const handleOpenViewer = useCallback(
     async (artifact: RunArtifact) => {
+      if (canvas && isCanvasArtifact(artifact)) {
+        canvas.openFromArtifact(artifact, "user");
+        return;
+      }
       if (!canInlinePreview(artifact)) {
         // The viewer explains why and offers a download instead.
         setViewerUrl(null);
@@ -114,7 +121,7 @@ export function OutputsPanel({
         setLoadingId(null);
       }
     },
-    [resolveUrl],
+    [canvas, resolveUrl],
   );
 
   const closeViewer = useCallback(() => {

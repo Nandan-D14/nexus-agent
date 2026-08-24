@@ -71,10 +71,10 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("triple_click", _tool_names(self.desktop))
         self.assertIn("double_click", _tool_names(self.desktop))
 
-    def test_planner_exposes_worker_agent_tools_not_shell_or_vision(self) -> None:
+    def test_planner_exposes_run_command_and_workers_not_vision(self) -> None:
         tool_names = _tool_names(self.planner)
 
-        self.assertNotIn("run_command", tool_names)
+        self.assertIn("run_command", tool_names)
         self.assertNotIn("take_screenshot", tool_names)
         self.assertIn("terminal_worker", tool_names)
         self.assertIn("desktop_worker", tool_names)
@@ -82,6 +82,9 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("publish_html_artifact", tool_names)
         self.assertIn("invoke_subagent", tool_names)
         self.assertIn("read_skill", tool_names)
+        self.assertIn("propose_workflow_template", tool_names)
+        self.assertIn("update_workflow_template", tool_names)
+        self.assertIn("publish_workflow_template", tool_names)
 
     def test_planner_worker_tools_are_budgeted_agent_tools(self) -> None:
         worker_tools = [
@@ -98,9 +101,12 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("terminal_worker", instruction)
         self.assertIn("desktop_worker", instruction)
         self.assertIn("ask_user", instruction)
+        self.assertIn("propose_workflow_template", instruction)
         self.assertIn("read_skill", instruction)
         self.assertIn("do not stop at raw search results", instruction)
         self.assertIn("never end a turn on a bare tool call", instruction)
+        self.assertIn("run_command", instruction)
+        self.assertIn("mcp__treg__", instruction)
         self.assertNotIn("transfer_to_agent", instruction)
 
     def test_planner_prompt_encodes_self_triage(self) -> None:
@@ -121,6 +127,12 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("generate_docx_report", tool_names)
         self.assertNotIn("take_screenshot", tool_names)
         self.assertNotIn("open_browser", tool_names)
+
+    def test_terminal_worker_prompt_forbids_secret_hunting(self) -> None:
+        instruction = str(self.terminal.instruction).lower()
+        self.assertIn("never run find /", instruction)
+        self.assertIn("api keys", instruction)
+        self.assertIn("this json", instruction)
 
     def test_desktop_worker_surface_is_gui_only(self) -> None:
         tool_names = _tool_names(self.desktop)
@@ -173,6 +185,43 @@ class WorkerBudgetTests(IsolatedAsyncioTestCase):
             blocked = await tool.run_async(args={"request": "noop"}, tool_context=tool_context)
             self.assertEqual(blocked.get("error_code"), "WORKER_BUDGET_EXCEEDED")
             self.assertEqual(mock_run.await_count, settings.max_worker_calls_per_turn)
+
+    async def test_budgeted_agent_tool_maps_deadline_exception_to_json(self) -> None:
+        reset_worker_call_count()
+        worker = create_terminal_worker(_runtime_config())
+        tool = BudgetedAgentTool(agent=worker, skip_summarization=True)
+
+        with patch.object(AgentTool, "run_async", new_callable=AsyncMock) as mock_run:
+            mock_run.side_effect = RuntimeError("Deadline Exceeded")
+            result = await tool.run_async(args={"request": "noop"}, tool_context=MagicMock())
+
+        self.assertEqual(result.get("error_code"), "WORKER_DEADLINE")
+        self.assertTrue(result.get("retryable"))
+        self.assertEqual(result.get("status"), "error")
+
+    async def test_budgeted_agent_tool_maps_deadline_string_to_json(self) -> None:
+        reset_worker_call_count()
+        worker = create_terminal_worker(_runtime_config())
+        tool = BudgetedAgentTool(agent=worker, skip_summarization=True)
+
+        with patch.object(AgentTool, "run_async", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = "504 Stream removed (Deadline Exceeded)"
+            result = await tool.run_async(args={"request": "noop"}, tool_context=MagicMock())
+
+        self.assertEqual(result.get("error_code"), "WORKER_DEADLINE")
+        self.assertTrue(result.get("retryable"))
+
+    async def test_budgeted_agent_tool_maps_plain_string_to_untyped(self) -> None:
+        reset_worker_call_count()
+        worker = create_terminal_worker(_runtime_config())
+        tool = BudgetedAgentTool(agent=worker, skip_summarization=True)
+
+        with patch.object(AgentTool, "run_async", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = "worker printed prose instead of JSON"
+            result = await tool.run_async(args={"request": "noop"}, tool_context=MagicMock())
+
+        self.assertEqual(result.get("error_code"), "WORKER_RESULT_UNTYPED")
+        self.assertTrue(result.get("retryable"))
 
     def test_worker_call_counter_resets_per_turn(self) -> None:
         reset_worker_call_count()

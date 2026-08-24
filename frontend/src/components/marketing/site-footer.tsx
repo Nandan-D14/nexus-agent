@@ -7,8 +7,8 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Terminal } from "lucide-react";
 import { BeamsBackground } from "@/components/react-bits/beams-background";
+import { CocomputerLogo } from "@/components/brand/cocomputer-logo";
 
 type SiteFooterProps = {
   showStatus?: boolean;
@@ -46,16 +46,11 @@ export function SiteFooter({ showStatus = false }: SiteFooterProps) {
         <div className="grid grid-cols-2 md:grid-cols-12 gap-12 mb-16">
           <div className="col-span-2 md:col-span-4 space-y-6">
             <Link href="/" className="flex items-center gap-2 group">
-              <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-blue-500/20">
-                <Terminal className="w-4 h-4" />
-              </div>
-              <span className="font-bold text-xl tracking-tighter text-foreground">
-                CoComputer
-              </span>
+              <CocomputerLogo size={32} wordmarkClassName="text-xl tracking-tighter font-bold" />
             </Link>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-              Autonomous multimodal neural architecture bridging the gap between
-              human language and native Linux environments.
+              A cloud Linux desktop your agent can see and use — chat, terminal,
+              browser, and the connectors you connect.
             </p>
           </div>
 

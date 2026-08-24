@@ -182,7 +182,6 @@ async def add_request_id(request: Request, call_next):
 
 from nexus.routers import (
     health_router,
-    beta_router,
     ws_router,
     auth_router,
     skills_router,
@@ -197,7 +196,6 @@ from nexus.routers import (
 )
 
 app.include_router(health_router)
-app.include_router(beta_router)
 app.include_router(ws_router)
 app.include_router(auth_router)
 app.include_router(skills_router)

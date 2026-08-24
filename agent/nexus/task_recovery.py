@@ -59,27 +59,7 @@ class StaleRunSweeper:
         recovered = 0
         for run in await self.repository.list_stale_runs(limit=100):
             if run.attempt >= max(1, settings.task_worker_max_attempts):
-                summary = (
-                    f"Durable run lease expired after {run.attempt} attempts."
-                )
-                failed = await self.repository.fail_stale_run(
-                    task_id=run.task_id,
-                    run_id=run.run_id,
-                    expected_generation=run.claim_generation,
-                    summary=summary,
-                )
-                if failed:
-                    await self.repository.append_event(
-                        task_id=run.task_id,
-                        owner_id=run.owner_id,
-                        run_id=run.run_id,
-                        event_type="worker_recovery_exhausted",
-                        payload={
-                            "attempt": run.attempt,
-                            "claim_generation": run.claim_generation,
-                            "summary": summary,
-                        },
-                    )
+                if await self._fail_exhausted(run):
                     recovered += 1
                 continue
 
@@ -90,6 +70,12 @@ class StaleRunSweeper:
                 expected_generation=run.claim_generation,
             )
             if requeued is None:
+                # Requeue refuses while the task carries a cancel request, and it
+                # does not bump ``attempt`` — so retrying forever would never
+                # reach the exhausted branch above and the run would stay
+                # ``running`` for good, blocking every later prompt. Settle it.
+                if await self._fail_unrecoverable(run):
+                    recovered += 1
                 continue
             delay = min(
                 int(settings.task_worker_retry_base_seconds)
@@ -126,6 +112,61 @@ class StaleRunSweeper:
                 )
             recovered += 1
         return recovered
+
+    async def _fail_exhausted(self, run) -> bool:
+        summary = f"Durable run lease expired after {run.attempt} attempts."
+        return await self._settle(
+            run,
+            summary=summary,
+            event_type="worker_recovery_exhausted",
+            payload={
+                "attempt": run.attempt,
+                "claim_generation": run.claim_generation,
+                "summary": summary,
+            },
+        )
+
+    async def _fail_unrecoverable(self, run) -> bool:
+        summary = (
+            "Durable run could not be recovered after its lease expired "
+            "(it was cancelled or is no longer requeueable)."
+        )
+        return await self._settle(
+            run,
+            summary=summary,
+            event_type="worker_recovery_abandoned",
+            payload={
+                "attempt": run.attempt,
+                "claim_generation": run.claim_generation,
+                "summary": summary,
+                "error_code": "RUN_NOT_RECOVERABLE",
+            },
+        )
+
+    async def _settle(
+        self,
+        run,
+        *,
+        summary: str,
+        event_type: str,
+        payload: dict,
+    ) -> bool:
+        failed = await self.repository.fail_stale_run(
+            task_id=run.task_id,
+            run_id=run.run_id,
+            expected_generation=run.claim_generation,
+            summary=summary,
+        )
+        if not failed:
+            return False
+        await self.repository.append_event(
+            task_id=run.task_id,
+            owner_id=run.owner_id,
+            run_id=run.run_id,
+            event_type=event_type,
+            payload=payload,
+        )
+        return True
 
 
 __all__ = ["StaleRunSweeper"]

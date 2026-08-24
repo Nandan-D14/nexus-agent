@@ -245,9 +245,8 @@ class NexusOrchestrator:
         # Falls back to the tool_name FIFO maps above when an id is absent.
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._current_thinking: str = ""
-        # Compact-reasoning: whether a "Thinking..." status was already emitted
-        # for the current reasoning burst (reset per turn and per tool phase).
         self._reasoning_status_emitted: bool = False
+        self._streaming_active: bool = False
         self._action_ledger = ActionLedger()
         self.last_turn_result: dict[str, Any] | None = None
         self._resume_checkpoint: dict[str, Any] = {}
@@ -559,6 +558,26 @@ class NexusOrchestrator:
                 github_search_repos, github_read_file, github_list_issues,
                 github_create_issue, github_summarize_pr,
             ])
+        if "vyora" in providers:
+            from nexus.tools.integrations import (
+                vyora_get_call,
+                vyora_list_agents,
+                vyora_list_calls,
+                vyora_list_numbers,
+                vyora_start_call,
+            )
+
+            tools.extend([
+                vyora_list_agents,
+                vyora_list_numbers,
+                vyora_start_call,
+                vyora_list_calls,
+                vyora_get_call,
+            ])
+        if "openai" in providers:
+            from nexus.tools.integrations import openai_web_search
+
+            tools.append(openai_web_search)
         if "tinyfish" in providers:
             from nexus.tools.integrations import tinyfish_web_agent
 
@@ -719,27 +738,45 @@ class NexusOrchestrator:
         """Route a permission_response from the frontend to the bg task manager."""
         self.bg_task_manager.handle_permission_response(task_id, approved)
 
-    async def _ask_user_and_wait(self, question: str) -> str | None:
+    async def _ask_user_and_wait(
+        self,
+        question: str,
+        options: list[str] | None = None,
+    ) -> str | None:
         """ask_user tool callback: surface a question card and await the reply."""
         import uuid as _uuid
+
+        from nexus.tools.ask_user import (
+            format_ask_user_history_text,
+            normalize_ask_user_options,
+        )
 
         question_id = f"q_{_uuid.uuid4().hex[:10]}"
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_user_questions[question_id] = future
-
-        await self._send_json({
+        choices = normalize_ask_user_options(options)
+        persist_text = format_ask_user_history_text(question, choices)
+        payload: dict[str, Any] = {
             "type": "user_question",
             "question_id": question_id,
             "question": question,
             "timeout_seconds": settings.ask_user_timeout_seconds,
-        })
-        await self._persist_message(role="agent", source="ask_user", text=question)
+        }
+        if choices:
+            payload["options"] = choices
+
+        await self._send_json(payload)
+        await self._persist_message(role="agent", source="ask_user", text=persist_text)
         step_id = await self._create_step(
             step_type="ask_user",
             title="Waiting for your answer",
             detail=question,
             source=getattr(self, "_active_agent", "nexus_planner"),
-            metadata={"question_id": question_id, "question": question},
+            metadata={
+                "question_id": question_id,
+                "question": question,
+                **({"options": choices} if choices else {}),
+            },
         )
 
         try:
@@ -1780,6 +1817,7 @@ class NexusOrchestrator:
                     "Sandbox became ready for session %s without a prepared workspace root",
                     self.session.id,
                 )
+            await self._sync_skills_into_sandbox()
             await self._send_json({"type": "sandbox_status", "status": "ready"})
             if getattr(self.session, "stream_url", None):
                 await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
@@ -1898,6 +1936,7 @@ class NexusOrchestrator:
         self.last_turn_result = None
         self._current_thinking = ""
         self._reasoning_status_emitted = False
+        self._streaming_active = False
         self._pending_tool_calls.clear()
         self._budget_stop_requested = False
         self._budget_stop_reason = ""
@@ -2353,6 +2392,9 @@ class NexusOrchestrator:
                             completion_verification.remaining_work[:4]
                         )
                     await self._reconcile_todos_at_turn_end(mark_complete=True)
+                    if self._streaming_active:
+                        await self._send_json({"type": "agent_stream_end", "run_id": self._current_run_id or ""})
+                        self._streaming_active = False
                     await self._send_json({
                         "type": "transcript",
                         "role": "agent",
@@ -2423,9 +2465,10 @@ class NexusOrchestrator:
                 }
 
             if final_response:
-                # Sync the To-dos panel with todo.md before the user sees the answer.
                 await self._reconcile_todos_at_turn_end(mark_complete=True)
-                # Send agent text response
+                if self._streaming_active:
+                    await self._send_json({"type": "agent_stream_end", "run_id": self._current_run_id or ""})
+                    self._streaming_active = False
                 await self._send_json({
                     "type": "transcript",
                     "role": "agent",
@@ -2760,7 +2803,7 @@ class NexusOrchestrator:
             for part in parts:
                 self._raise_if_agent_should_stop()
                 text = getattr(part, "text", None)
-                if text and not is_final:
+                if text:
                     clean = sanitize_stream_text(text)
                     if not clean:
                         continue
@@ -2769,15 +2812,22 @@ class NexusOrchestrator:
                     )
                     if kind == "reasoning":
                         await self._emit_reasoning(clean)
-                    else:
-                        # Genuine intermediate answer text (non-reasoning
-                        # providers): keep prior behavior, sanitized.
-                        if settings.persist_reasoning:
-                            self._current_thinking += clean
+                        continue
+                    if is_final or not self._extract_function_calls(event):
+                        if not self._streaming_active:
+                            self._streaming_active = True
                         await self._send_json({
-                            "type": "agent_thinking",
-                            "content": clean,
+                            "type": "agent_delta",
+                            "delta": clean,
+                            "run_id": self._current_run_id or "",
                         })
+                        continue
+                    if settings.persist_reasoning:
+                        self._current_thinking += clean
+                    await self._send_json({
+                        "type": "agent_thinking",
+                        "content": clean,
+                    })
 
                 fn_resp = getattr(part, "function_response", None)
                 if fn_resp:
@@ -3811,6 +3861,21 @@ class NexusOrchestrator:
                 )
         except Exception:
             logger.exception("Failed to save final response into the workspace")
+
+    async def _sync_skills_into_sandbox(self) -> None:
+        sandbox = getattr(self.session, "sandbox", None)
+        repo = getattr(self, "history_repository", None)
+        owner_id = getattr(self.session, "owner_id", None)
+        if sandbox is None or repo is None or not owner_id:
+            return
+        try:
+            user_settings = await repo.get_user_settings(owner_id)
+            from nexus.skill_runtime import sync_skills_to_sandbox
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sync_skills_to_sandbox, sandbox, user_settings)
+        except Exception:
+            logger.warning("Failed to sync agent skills into sandbox for session %s", self.session.id, exc_info=True)
 
     async def _ensure_session_workspace_root(self) -> bool:
         session_workspace_path = derive_session_workspace_path(self.session.id)

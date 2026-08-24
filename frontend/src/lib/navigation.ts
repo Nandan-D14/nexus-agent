@@ -16,21 +16,32 @@ import {
   Settings2,
 } from "lucide-react";
 
+import {
+  APP_CONNECTORS,
+  APP_HISTORY,
+  APP_HOME,
+  APP_LIBRARY,
+  APP_SCHEDULE,
+  APP_SETTINGS,
+  APP_SKILLS,
+  APP_TEMPLATES,
+} from "./app-paths";
+
 export const NAV_LINKS = [
-  { name: "Chat Console", href: "/dashboard", icon: MessagesSquare },
-  { name: "History", href: "/history", icon: Clock },
-  { name: "Library", href: "/library", icon: Library },
-  { name: "Agent Workflow", href: "/templates", icon: GitBranch },
-  { name: "Agent Skills", href: "/skills", icon: Sparkles },
-  { name: "Connectors", href: "/connectors", icon: Plug },
-  { name: "Settings", href: "/settings", icon: Settings2 },
+  { name: "History", href: APP_HISTORY, icon: MessagesSquare },
+  { name: "Schedule task", href: APP_SCHEDULE, icon: Clock },
+  { name: "Library", href: APP_LIBRARY, icon: Library },
+  { name: "Agent Workflow", href: APP_TEMPLATES, icon: GitBranch },
+  { name: "Agent Skills", href: APP_SKILLS, icon: Sparkles },
+  { name: "Connectors", href: APP_CONNECTORS, icon: Plug },
+  { name: "Settings", href: APP_SETTINGS, icon: Settings2 },
 ] as const;
 
 export const SIDEBAR_ACTIONS = [
-  { name: "New task", icon: PlusCircle, href: "/session/new" },
+  { name: "New task", icon: PlusCircle, href: APP_HOME },
   { name: "Agent", icon: Bot, href: "/agent" },
   { name: "Search", icon: Search, href: "/search" },
-  { name: "Library", icon: Library, href: "/library" },
+  { name: "Library", icon: Library, href: APP_LIBRARY },
 ] as const;
 
 export default NAV_LINKS;

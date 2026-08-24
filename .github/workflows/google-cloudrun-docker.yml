@@ -143,6 +143,7 @@ jobs:
             "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
             "--set-secrets=JWT_SECRET=jwt-secret:latest"
             "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+            "--set-secrets=SLACK_CLIENT_SECRET=slack-client-secret:latest"
             "--set-secrets=TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
           )
           if [[ -n "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" ]]; then
@@ -171,12 +172,9 @@ jobs:
             "SUBAGENT_PARENT_WAIT_SECONDS=300"
             "GCP_TASKS_OIDC_SERVICE_ACCOUNT=${{ secrets.GCP_TASKS_OIDC_SERVICE_ACCOUNT }}"
             "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
-            "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'false' }}"
+            "SLACK_CLIENT_ID=${{ secrets.SLACK_CLIENT_ID }}"
+            "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'true' }}"
             "SHARED_ACCESS_CODE=${{ secrets.SHARED_ACCESS_CODE }}"
-            "BETA_ENFORCE_BYOK=${{ secrets.BETA_ENFORCE_BYOK || 'true' }}"
-            "BETA_ADMIN_EMAILS=${{ secrets.BETA_ADMIN_EMAILS }}"
-            "BETA_GOOGLE_SHEET_ID=${{ secrets.BETA_GOOGLE_SHEET_ID }}"
-            "BETA_GOOGLE_SHEET_NAME=${{ secrets.BETA_GOOGLE_SHEET_NAME || 'beta_applications' }}"
           )
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 

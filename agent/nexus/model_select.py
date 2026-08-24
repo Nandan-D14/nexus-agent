@@ -61,8 +61,10 @@ def is_deepseek_v4_flash_gateway_error(exc: BaseException | str, model: str) -> 
     return any(marker in text for marker in _DEEPSEEK_V4_FLASH_GATEWAY_MARKERS)
 
 
-def _is_supported_text_model(model: str) -> bool:
+def _is_supported_text_model(model: str, *, user_llm: bool = False) -> bool:
     """Check if a model name is supported by the active provider."""
+    if user_llm:
+        return bool(model.strip())
     if settings.model_provider == "qwen":
         return model.lower().startswith(("qwen", "glm-"))
     # Bynara (and future providers) accept any model name — the gateway
@@ -82,10 +84,24 @@ def _parse_models(value: str) -> tuple[str, ...]:
     return tuple(models)
 
 
+def _user_llm_configured(runtime_config: "SessionRuntimeConfig | None") -> bool:
+    return bool(runtime_config is not None and runtime_config.user_llm_configured)
+
+
 def model_name_for_role(
     role: str,
     runtime_config: "SessionRuntimeConfig | None" = None,
 ) -> str:
+    if _user_llm_configured(runtime_config):
+        assert runtime_config is not None
+        if role == "worker_visual" and runtime_config.llm_vision_model.strip():
+            model = runtime_config.llm_vision_model.strip()
+        else:
+            model = runtime_config.llm_model.strip()
+        if not _is_supported_text_model(model, user_llm=True):
+            raise ValueError(f"Role {role} resolved to unsupported model: {model}")
+        return model
+
     runtime_names = {
         "planner": "qwen_planner_model",
         "worker": "qwen_worker_model",
@@ -106,6 +122,9 @@ def model_candidates(
     runtime_config: "SessionRuntimeConfig | None" = None,
 ) -> tuple[str, ...]:
     primary = model_name_for_role(role, runtime_config)
+    if _user_llm_configured(runtime_config):
+        return (primary,)
+
     runtime_fallback_names = {
         "planner": "qwen_planner_fallback_models",
         "worker": "qwen_worker_fallback_models",
@@ -139,10 +158,15 @@ def create_model(
     model_override: str | None = None,
 ):
     """Return a model instance for the active provider and agent role."""
+    user_llm = _user_llm_configured(runtime_config)
     model_name = (model_override or "").strip() or model_name_for_role(role, runtime_config)
-    if not _is_supported_text_model(model_name):
+    if not _is_supported_text_model(model_name, user_llm=user_llm):
         raise ValueError(f"Refusing unsupported model override: {model_name}")
 
+    if user_llm:
+        from nexus.user_llm_router import create_user_llm_model
+        assert runtime_config is not None
+        return create_user_llm_model(model_name, runtime_config)
     if settings.model_provider == "qwen":
         from nexus.qwen_router import create_qwen_model
         return create_qwen_model(model_name)

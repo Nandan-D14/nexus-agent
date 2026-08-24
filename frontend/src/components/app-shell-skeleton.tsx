@@ -4,7 +4,7 @@
  */
 
 /**
- * Static pulse shell shown while auth / beta gates resolve before the real
+ * Static pulse shell shown while auth resolves before the real
  * AppShell + session landing mount. Matches sidebar + landing layout.
  */
 export function AppShellSkeleton() {

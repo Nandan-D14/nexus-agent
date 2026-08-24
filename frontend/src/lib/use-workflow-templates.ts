@@ -5,242 +5,168 @@
 
 "use client";
 
-import { useCallback, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
-import { useToast } from "@/components/toast-provider";
-import { useSettings } from "./settings-context";
-
-import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
+import { apiJson } from "./api-client";
 import type {
   WorkflowTemplateData,
-  WorkflowTemplateInputField,
   WorkflowTemplateRunResult,
 } from "./message-types";
+import { queryKeys } from "./query-keys";
+import {
+  fetchTemplates,
+  useCreateTemplateMutation,
+  useDeleteTemplateMutation,
+  useRunTemplateMutation,
+  useSaveSessionAsTemplateMutation,
+  useUpdateTemplateMutation,
+  type CreateTemplateOptions,
+  type TemplatePayload,
+} from "./queries/templates";
 
-type TemplatePayload = {
-  name?: string;
-  description?: string;
-  instructions?: string;
-  inputFields?: WorkflowTemplateInputField[];
-};
-
-type CreateTemplateOptions = TemplatePayload & {
-  sourceSessionId: string;
-};
+type TemplatePayloadCompat = TemplatePayload;
 
 export interface UseWorkflowTemplatesReturn {
   listTemplates: (query?: string) => Promise<WorkflowTemplateData[]>;
   getTemplate: (templateId: string) => Promise<WorkflowTemplateData | null>;
   createTemplate: (options: CreateTemplateOptions) => Promise<WorkflowTemplateData | null>;
-  saveSessionAsTemplate: (sessionId: string, payload?: TemplatePayload) => Promise<WorkflowTemplateData | null>;
-  updateTemplate: (templateId: string, payload: TemplatePayload) => Promise<WorkflowTemplateData | null>;
+  saveSessionAsTemplate: (sessionId: string, payload?: TemplatePayloadCompat) => Promise<WorkflowTemplateData | null>;
+  updateTemplate: (templateId: string, payload: TemplatePayloadCompat) => Promise<WorkflowTemplateData | null>;
   deleteTemplate: (templateId: string) => Promise<boolean>;
   runTemplate: (templateId: string, inputs: Record<string, string>) => Promise<WorkflowTemplateRunResult | null>;
   isLoading: boolean;
   error: string | null;
 }
 
-function buildTemplateBody(payload?: TemplatePayload) {
-  return {
-    name: payload?.name ?? null,
-    description: payload?.description ?? null,
-    instructions: payload?.instructions ?? null,
-    input_fields: payload?.inputFields ?? [],
-  };
-}
-
 export function useWorkflowTemplates(): UseWorkflowTemplatesReturn {
-  const router = useRouter();
-  const { toast } = useToast();
-  const { openSettings } = useSettings();
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const createMutation = useCreateTemplateMutation();
+  const saveSessionMutation = useSaveSessionAsTemplateMutation();
+  const updateMutation = useUpdateTemplateMutation();
+  const deleteMutation = useDeleteTemplateMutation();
+  const runMutation = useRunTemplateMutation();
 
-  const handleTemplateError = useCallback(async (response: Response) => {
-    const apiError = await readApiError(response);
-    if (apiError.code === "BYOK_REQUIRED") {
-      toast(apiError.message, "error");
-      openSettings("api");
-      return apiError.message;
-    }
-    return apiError.message;
-  }, [toast, openSettings]);
+  const error =
+    (createMutation.error instanceof Error ? createMutation.error.message : null) ??
+    (saveSessionMutation.error instanceof Error ? saveSessionMutation.error.message : null) ??
+    (updateMutation.error instanceof Error ? updateMutation.error.message : null) ??
+    (deleteMutation.error instanceof Error ? deleteMutation.error.message : null) ??
+    (runMutation.error instanceof Error ? runMutation.error.message : null);
 
-  const listTemplates = useCallback(async (query?: string) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const path = query?.trim()
-        ? `/api/v1/templates?q=${encodeURIComponent(query.trim())}`
-        : "/api/v1/templates";
-      const res = await authenticatedFetch(path);
-      if (!res.ok) {
-        throw new Error(await parseApiError(res));
+  const listTemplates = useCallback(
+    async (_query?: string) => {
+      try {
+        return await queryClient.fetchQuery({
+          queryKey: queryKeys.templates(),
+          queryFn: fetchTemplates,
+        });
+      } catch {
+        return [];
       }
-      const body = (await res.json()) as { templates: WorkflowTemplateData[] };
-      return body.templates ?? [];
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to load templates";
-      setError(message);
-      return [];
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+    },
+    [queryClient],
+  );
 
   const getTemplate = useCallback(async (templateId: string) => {
-    setIsLoading(true);
-    setError(null);
     try {
-      const res = await authenticatedFetch(`/api/v1/templates/${encodeURIComponent(templateId)}`);
-      if (!res.ok) {
-        throw new Error(await parseApiError(res));
-      }
-      return (await res.json()) as WorkflowTemplateData;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to load template";
-      setError(message);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const createTemplate = useCallback(async (options: CreateTemplateOptions) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await authenticatedFetch("/api/v1/templates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source_session_id: options.sourceSessionId,
-          ...buildTemplateBody(options),
-        }),
-      });
-      if (!res.ok) {
-        throw new Error(await handleTemplateError(res));
-      }
-      return (await res.json()) as WorkflowTemplateData;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to create template";
-      setError(message);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [handleTemplateError]);
-
-  const saveSessionAsTemplate = useCallback(async (sessionId: string, payload?: TemplatePayload) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await authenticatedFetch(
-        `/api/v1/sessions/${encodeURIComponent(sessionId)}/template`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildTemplateBody(payload)),
-        },
-      );
-      if (!res.ok) {
-        throw new Error(await handleTemplateError(res));
-      }
-      return (await res.json()) as WorkflowTemplateData;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to save session as template";
-      setError(message);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [handleTemplateError]);
-
-  const updateTemplate = useCallback(async (templateId: string, payload: TemplatePayload) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await authenticatedFetch(
+      return await apiJson<WorkflowTemplateData>(
         `/api/v1/templates/${encodeURIComponent(templateId)}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: payload.name ?? null,
-            description: payload.description ?? null,
-            instructions: payload.instructions ?? null,
-            input_fields: payload.inputFields ?? null,
-          }),
-        },
       );
-      if (!res.ok) {
-        throw new Error(await handleTemplateError(res));
-      }
-      return (await res.json()) as WorkflowTemplateData;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to update template";
-      setError(message);
+    } catch {
       return null;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [handleTemplateError]);
-
-  const deleteTemplate = useCallback(async (templateId: string) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await authenticatedFetch(`/api/v1/templates/${encodeURIComponent(templateId)}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) {
-        throw new Error(await parseApiError(res));
-      }
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to delete template";
-      setError(message);
-      return false;
-    } finally {
-      setIsLoading(false);
     }
   }, []);
 
-  const runTemplate = useCallback(async (templateId: string, inputs: Record<string, string>) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await authenticatedFetch(
-        `/api/v1/templates/${encodeURIComponent(templateId)}/run`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ inputs }),
-        },
-      );
-      if (!res.ok) {
-        throw new Error(await handleTemplateError(res));
+  const createTemplate = useCallback(
+    async (options: CreateTemplateOptions) => {
+      try {
+        return await createMutation.mutateAsync(options);
+      } catch {
+        return null;
       }
-      return (await res.json()) as WorkflowTemplateRunResult;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to run template";
-      setError(message);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [handleTemplateError]);
+    },
+    [createMutation.mutateAsync],
+  );
 
-  return {
-    listTemplates,
-    getTemplate,
-    createTemplate,
-    saveSessionAsTemplate,
-    updateTemplate,
-    deleteTemplate,
-    runTemplate,
-    isLoading,
-    error,
-  };
+  const saveSessionAsTemplate = useCallback(
+    async (sessionId: string, payload?: TemplatePayloadCompat) => {
+      try {
+        return await saveSessionMutation.mutateAsync({ sessionId, payload });
+      } catch {
+        return null;
+      }
+    },
+    [saveSessionMutation.mutateAsync],
+  );
+
+  const updateTemplate = useCallback(
+    async (templateId: string, payload: TemplatePayloadCompat) => {
+      try {
+        return await updateMutation.mutateAsync({ templateId, payload });
+      } catch {
+        return null;
+      }
+    },
+    [updateMutation.mutateAsync],
+  );
+
+  const deleteTemplate = useCallback(
+    async (templateId: string) => {
+      try {
+        await deleteMutation.mutateAsync(templateId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [deleteMutation.mutateAsync],
+  );
+
+  const runTemplate = useCallback(
+    async (templateId: string, inputs: Record<string, string>) => {
+      try {
+        return await runMutation.mutateAsync({ templateId, inputs });
+      } catch {
+        return null;
+      }
+    },
+    [runMutation.mutateAsync],
+  );
+
+  return useMemo(
+    () => ({
+      listTemplates,
+      getTemplate,
+      createTemplate,
+      saveSessionAsTemplate,
+      updateTemplate,
+      deleteTemplate,
+      runTemplate,
+      isLoading:
+        createMutation.isPending ||
+        saveSessionMutation.isPending ||
+        updateMutation.isPending ||
+        deleteMutation.isPending ||
+        runMutation.isPending,
+      error,
+    }),
+    [
+      createMutation.isPending,
+      createTemplate,
+      deleteMutation.isPending,
+      deleteTemplate,
+      error,
+      getTemplate,
+      listTemplates,
+      runMutation.isPending,
+      runTemplate,
+      saveSessionAsTemplate,
+      saveSessionMutation.isPending,
+      updateMutation.isPending,
+      updateTemplate,
+    ],
+  );
 }
+
+export type { CreateTemplateOptions, TemplatePayload };

@@ -17,6 +17,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { APP_DASHBOARD } from "@/lib/app-paths";
 import { SiteNav } from "@/components/marketing/site-nav";
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel";
@@ -34,7 +35,7 @@ const plans = [
     features: [
       "10 sessions per month",
       "15 min sandbox per session",
-      "Basic models (Qwen Turbo)",
+      "BYOK / your models",
       "Web search & terminal tools",
       "Community support",
       "Session history (7 days)",
@@ -52,7 +53,7 @@ const plans = [
     features: [
       "Unlimited sessions",
       "2 hour sandbox per session",
-      "All Qwen models (3.7-max, 3.6-max, etc.)",
+      "BYOK / your models",
       "All tools + Google Workspace integrations",
       "Priority email support",
       "Full session history",
@@ -96,7 +97,7 @@ const faqs = [
   {
     question: "Can I use my own API keys?",
     answer:
-      "Yes. CoComputer uses a BYOK (Bring Your Own Key) model. You connect your own API keys for Qwen, Gemini, and other services. We never store your keys on our servers — they're encrypted in your session config.",
+      "Yes. CoComputer uses a BYOK (Bring Your Own Key) model. You connect your own API keys for the providers you choose. Keys are stored encrypted in your session config — you keep control of billing and routing.",
   },
   {
     question: "What's included in Enterprise support?",
@@ -322,7 +323,7 @@ export default function PricingPage() {
       <section className="py-24 px-6">
         <div className="max-w-4xl mx-auto">
           <motion.div {...fadeInUp} className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
+            <h2 className="mb-4 font-serif text-3xl tracking-tight text-foreground md:text-4xl">
               Compare plans
             </h2>
             <p className="text-muted-foreground">
@@ -353,7 +354,7 @@ export default function PricingPage() {
                   {[
                     { feature: "Sessions", free: "10/mo", pro: "Unlimited", enterprise: "Unlimited" },
                     { feature: "Sandbox duration", free: "15 min", pro: "2 hours", enterprise: "Custom" },
-                    { feature: "Models", free: "Qwen Turbo", pro: "All Qwen", enterprise: "All + priority" },
+                    { feature: "Models", free: "BYOK", pro: "BYOK", enterprise: "BYOK + priority" },
                     { feature: "Web search", free: true, pro: true, enterprise: true },
                     { feature: "Terminal & code", free: true, pro: true, enterprise: true },
                     { feature: "Computer control", free: false, pro: true, enterprise: true },
@@ -401,7 +402,7 @@ export default function PricingPage() {
       <section className="py-24 px-6 bg-zinc-50/50 dark:bg-zinc-900/20">
         <div className="max-w-3xl mx-auto">
           <motion.div {...fadeInUp} className="text-center mb-12">
-            <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
+            <h2 className="mb-4 font-serif text-3xl tracking-tight text-foreground md:text-4xl">
               Frequently asked questions
             </h2>
             <p className="text-muted-foreground">
@@ -439,7 +440,7 @@ export default function PricingPage() {
                     <button
                       onClick={() =>
                         user
-                          ? (window.location.href = "/dashboard")
+                          ? (window.location.href = APP_DASHBOARD)
                           : signInWithGoogle()
                       }
                       className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"

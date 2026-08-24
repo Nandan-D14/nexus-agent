@@ -30,7 +30,7 @@ import {
 import { ToolPickerPanel } from "./tool-picker";
 import type { SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
-import { authenticatedFetch } from "@/lib/api-client";
+import { useSkillsQuery, type AgentSkill } from "@/lib/queries/skills";
 import { builtInPaletteItems, type ToolPaletteItem } from "@/lib/tool-catalog";
 import { cx } from "@/utils/cx";
 
@@ -62,17 +62,6 @@ type Props = {
   isLanding?: boolean;
   inputRef?: React.RefObject<HTMLDivElement | null>;
   onEnhance?: (prompt: string, signal?: AbortSignal) => Promise<string>;
-};
-
-type AgentSkill = {
-  skill_id: string;
-  name: string;
-  category: string;
-  description: string;
-  trigger: string;
-  instructions: string;
-  source: "built_in" | "user";
-  enabled: boolean;
 };
 
 type Phase = "idle" | "enhancing" | "enhanced";
@@ -151,7 +140,8 @@ export function ChatComposer({
   const frameRef = useRef<HTMLDivElement>(null);
   const plusRef = useRef<HTMLDivElement>(null);
 
-  const [skills, setSkills] = useState<AgentSkill[]>([]);
+  const { data: skillList } = useSkillsQuery();
+  const skills = (skillList ?? []).filter((skill) => skill.enabled);
   const [menuOpen, setMenuOpen] = useState(false);
   const [skillsExpanded, setSkillsExpanded] = useState(false);
   const [menuPlacement, setMenuPlacement] = useState<"top" | "bottom">("top");
@@ -231,21 +221,6 @@ export function ChatComposer({
   slashOpenRef.current = slashOpen;
   slashIndexRef.current = slashIndex;
   slashResultsRef.current = slashResults;
-
-  useEffect(() => {
-    async function loadSkills() {
-      try {
-        const response = await authenticatedFetch("/api/v1/skills");
-        if (response.ok) {
-          const body = (await response.json()) as { skills?: AgentSkill[] };
-          setSkills((body.skills ?? []).filter((s) => s.enabled));
-        }
-      } catch (err) {
-        console.error("Failed to load skills in ChatComposer:", err);
-      }
-    }
-    void loadSkills();
-  }, []);
 
   const focusEnd = useCallback(() => {
     const editor = editorRef.current;

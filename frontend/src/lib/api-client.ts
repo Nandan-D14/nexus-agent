@@ -23,20 +23,80 @@ export type ApiErrorData = {
   missing?: string[];
 };
 
+const TOKEN_SKEW_MS = 60_000;
+
+type CachedAuthToken = {
+  uid: string;
+  header: string;
+  expMs: number;
+};
+
+let cachedAuthToken: CachedAuthToken | null = null;
+let authHeaderInflight: Promise<string> | null = null;
+
+function jwtExpMs(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
+    const parsed = JSON.parse(atob(`${padded}${pad}`)) as { exp?: unknown };
+    return typeof parsed.exp === "number" ? parsed.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearAuthTokenCache() {
+  cachedAuthToken = null;
+  authHeaderInflight = null;
+}
+
 function mergeHeaders(initHeaders: HeadersInit | undefined, authHeader: string) {
   const headers = new Headers(initHeaders);
   headers.set("Authorization", authHeader);
   return headers;
 }
 
+function cachedAuthHeader(uid: string): string | null {
+  if (!cachedAuthToken || cachedAuthToken.uid !== uid) return null;
+  if (Date.now() >= cachedAuthToken.expMs - TOKEN_SKEW_MS) return null;
+  return cachedAuthToken.header;
+}
+
+async function fetchAndCacheAuthHeader(
+  user: { uid: string; getIdToken: (forceRefresh?: boolean) => Promise<string> },
+  forceRefresh: boolean,
+): Promise<string> {
+  const token = await user.getIdToken(forceRefresh);
+  const header = `Bearer ${token}`;
+  cachedAuthToken = {
+    uid: user.uid,
+    header,
+    expMs: jwtExpMs(token) ?? Date.now() + 50 * 60 * 1000,
+  };
+  return header;
+}
+
 async function getAuthHeader(forceRefresh = false) {
   const user = auth.currentUser;
   if (!user) {
+    clearAuthTokenCache();
     throw new Error("You must sign in before starting or opening a session.");
   }
 
-  const token = await user.getIdToken(forceRefresh);
-  return `Bearer ${token}`;
+  if (!forceRefresh) {
+    const hit = cachedAuthHeader(user.uid);
+    if (hit) return hit;
+    if (authHeaderInflight) return authHeaderInflight;
+    authHeaderInflight = fetchAndCacheAuthHeader(user, false).finally(() => {
+      authHeaderInflight = null;
+    });
+    return authHeaderInflight;
+  }
+
+  authHeaderInflight = null;
+  return fetchAndCacheAuthHeader(user, true);
 }
 
 function isNonReplayableBody(body: BodyInit | null | undefined): boolean {
@@ -120,4 +180,36 @@ export async function readApiError(response: Response): Promise<ApiErrorData> {
 export async function parseApiError(response: Response): Promise<string> {
   const error = await readApiError(response);
   return error.message;
+}
+
+export function getApiErrorCode(error: unknown): string | undefined {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  }
+  return undefined;
+}
+
+/** Throw-on-error JSON helper for TanStack Query. Leaves authenticatedFetch unchanged. */
+export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await authenticatedFetch(path, init);
+  if (!response.ok) {
+    const apiError = await readApiError(response);
+    const error = new Error(apiError.message);
+    if (apiError.code) {
+      (error as Error & { code?: string }).code = apiError.code;
+    }
+    throw error;
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
 }

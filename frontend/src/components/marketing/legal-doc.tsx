@@ -58,7 +58,7 @@ export function LegalDoc({
                 id={section.id}
                 className="scroll-mt-28"
               >
-                <h2 className="text-xl font-semibold tracking-tight text-foreground mb-3">
+                <h2 className="mb-3 font-serif text-xl tracking-tight text-foreground">
                   {section.title}
                 </h2>
                 <div className="space-y-3 text-sm md:text-[15px] text-muted-foreground leading-relaxed [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:space-y-2 [&_a]:text-blue-600 dark:[&_a]:text-blue-400 [&_a]:underline-offset-2 hover:[&_a]:underline [&_strong]:text-foreground [&_strong]:font-medium">

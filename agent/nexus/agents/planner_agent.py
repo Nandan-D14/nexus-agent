@@ -27,11 +27,31 @@ from google.adk.tools.agent_tool import AgentTool
 
 from nexus.config import settings
 from nexus.context_window import make_context_trimmer
+from nexus.resilience import is_remote_deadline_error
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.tool_gateway import gate_tools
 from nexus.tools._context import increment_worker_call_count
 
 logger = logging.getLogger(__name__)
+
+_WORKER_DEADLINE_SUMMARY = (
+    "A model or storage request timed out. Try a narrower request or split it into steps."
+)
+
+
+def _worker_deadline_result(worker_name: str, detail: str = "") -> dict[str, Any]:
+    evidence = [detail[:2000]] if detail.strip() else []
+    return {
+        "status": "error",
+        "summary": _WORKER_DEADLINE_SUMMARY,
+        "evidence": evidence,
+        "artifacts": [],
+        "remaining_work": [
+            f"Retry {worker_name} with a narrower brief, or call run_command for a single shell step."
+        ],
+        "retryable": True,
+        "error_code": "WORKER_DEADLINE",
+    }
 
 
 def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
@@ -39,6 +59,8 @@ def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
     payload: Any = result
     if isinstance(result, str):
         text = result.strip()
+        if is_remote_deadline_error(text):
+            return _worker_deadline_result(worker_name, text)
         fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
         candidate = fenced.group(1) if fenced else text
         try:
@@ -141,21 +163,23 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
 4. SKILLS.
    - Scan the enabled skill catalog at the top of this prompt. If any skill's trigger matches the request, call read_skill(skill_id) BEFORE using other tools, then follow the skill.
    - A slash prefix "/skill_id ..." is a hard directive: call read_skill(skill_id) first.
-   - If multiple skills match, read them in priority order; do not merge conflicting instructions silently.
+   - If the skill lists resources, call read_skill_file(skill_id, path) for the files you need. Enabled skills are also copied to /home/user/skills/<skill_id>/ in the sandbox.
 
 # Tool ladder — smallest correct next action, ONE tool per step
 
 a. read_skill                                        — matching skill first, always.
 b. answer directly (no tool)                         — triage step 1 said no tools.
-c. tavily_search / web_search                        — discovery of live evidence (web_search auto-prefers Tavily when connected).
+c. mcp__exa__web_search_exa / tavily_search / web_search — discovery of live evidence (prefer Exa MCP when connected; web_search auto-prefers Tavily when connected).
 d. scrape_web_page                                   — capture important sources fully.
 e. search_sources                                    — retrieve cited chunks from saved sources/.
 f. publish_html_artifact / render_ui                 — HTML deliverables (no sandbox).
-g. terminal_worker(request=...)                      — shell, files, scripts, code, PDF/XLSX/DOCX generation, save_as_artifact, extract_pdf_text on uploads.
-h. desktop_worker(request=...)                       — GUI/browser: clicks, forms, logins, screenshots, Playwright.
-i. invoke_subagent + get_subagent_result / await_subagents — independent parallel background work (research fan-out, bulk drafting).
-j. request_background_task                           — user-visible long-running work needing durable resume.
-k. ask_user                                          — LAST resort. One focused question. Only when a required input is genuinely missing (path, account, irreversible confirmation). Never re-ask what the current thread already answered.
+g. run_command(command=...)                          — ONE shell command in the sandbox. Use this for a single check (ls, pwd, models list, a test, a script). The sandbox is already the machine — do not hunt for API keys, .env files, or credentials.
+h. terminal_worker(request=...)                      — batched shell, repo work, scripts, PDF/XLSX/DOCX generation, save_as_artifact, extract_pdf_text on uploads. Prefer this when several dependent commands belong together.
+i. desktop_worker(request=...)                       — GUI/browser: clicks, forms, logins, screenshots, Playwright.
+j. invoke_subagent + get_subagent_result / await_subagents — independent parallel background work (research fan-out, bulk drafting).
+k. request_background_task                           — user-visible long-running work needing durable resume.
+l. ask_user                                          — LAST resort. One focused question. Only when a required input is genuinely missing (path, account, irreversible confirmation). Prefer options=[2-5 short choices] when the user is picking an approach; include "Something else" if they might need to type a custom answer. Omit options for values that must be typed (path, id, email). Never re-ask what the current thread already answered.
+m. propose_workflow_template / update_workflow_template / publish_workflow_template — save this conversation as a reusable workflow. Propose a draft, wait for confirm/edit/dismiss. Never start a new session after proposing.
 
 # Typed action loop and worker briefs
 
@@ -175,16 +199,22 @@ After every result, consume its evidence, artifacts, remaining_work, and retryab
 - remember_fact(fact, category) only for lasting preferences/constraints ("always reply in Spanish", "we deploy on Cloud Run"). Saved facts return in future turns under [USER MEMORY]. Never save secrets or one-off task details.
 - recall_facts is available when you need to check what has been remembered.
 
+# Workflow templates
+
+- When the user asks to create, save, or reuse a workflow template from this chat, call propose_workflow_template with a name, reusable instructions, and any input_fields JSON.
+- After proposing, wait for the user to confirm, edit, or dismiss. Use update_workflow_template for requested changes and publish_workflow_template only after they confirm.
+- Do not start a new session when creating or editing a template. Running a published template is a separate user action.
+
 # Connectors
 
-Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file, github_*, tavily_search, tinyfish_web_agent. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop.
+Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file, github_*, Exa MCP search/fetch (mcp__exa__*), tavily_search, tinyfish_web_agent, Treg MCP (mcp__treg__*) for SEO/SERP/backlinks/enrichment/ads — not for ordinary web search. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop.
 
 # Rules
 
 - ONE tool per step, then observe.
 - On a tool error: read error_code and suggested_alternatives. Retry once with a different URL, query, or tool. Never retry the same blocked URL (HTTP_401/403/404/504 or TIMEOUT). After three failed fetches, synthesize what you have and tell the user what is still missing — do not keep scraping until the turn times out. Never clarify-loop instead of retrying.
 - If a tool name is rejected, re-check the tool ladder above — do not invent tool names.
-- The worker call budget is enforced per turn. Batch related shell work into ONE terminal_worker brief.
+- The worker call budget is enforced per turn. One shell command → run_command. Several dependent commands → ONE terminal_worker brief. Never scan the whole filesystem (find /) or dump env for secrets.
 - Before invoking background work, list existing subagents and reuse recovered records; do not duplicate work after a retry or restart. Use only researcher, coder, or writer subagent types.
 - If subagents were invoked, await or collect their results before final synthesis unless the user explicitly asked for background-only work.
 - Never run destructive commands. Ask before irreversible actions.
@@ -225,7 +255,17 @@ class BudgetedAgentTool(AgentTool):
                 "retryable": False,
                 "error_code": "WORKER_BUDGET_EXCEEDED",
             }
-        result = await super().run_async(args=args, tool_context=tool_context)
+        try:
+            result = await super().run_async(args=args, tool_context=tool_context)
+        except Exception as exc:
+            if is_remote_deadline_error(exc):
+                logger.warning(
+                    "%s hit a remote deadline: %s",
+                    self.name,
+                    str(exc)[:300],
+                )
+                return _worker_deadline_result(self.name, str(exc))
+            raise
         return _parse_worker_result(result, self.name)
 
 
@@ -244,7 +284,12 @@ def create_planner_agent(
     from nexus.tools.integrations import render_ui, tavily_search
     from nexus.tools.memory import recall_facts, remember_fact
     from nexus.tools.retrieval import search_sources
-    from nexus.tools.skills import read_skill
+    from nexus.tools.skills import read_skill, read_skill_file
+    from nexus.tools.templates import (
+        propose_workflow_template,
+        publish_workflow_template,
+        update_workflow_template,
+    )
     from nexus.tools.subagents import (
         await_subagents,
         cancel_subagent,
@@ -253,6 +298,7 @@ def create_planner_agent(
         list_subagents,
         send_message,
     )
+    from nexus.tools.bash import run_command
     from nexus.tools.web import scrape_web_page, web_search
     from nexus.tools.workspace import (
         initialize_task_state,
@@ -279,6 +325,7 @@ def create_planner_agent(
         write_workspace_file,
         read_workspace_file,
         list_workspace_files,
+        run_command,
         web_search,
         scrape_web_page,
         tavily_search,
@@ -286,10 +333,14 @@ def create_planner_agent(
         publish_html_artifact,
         render_ui,
         read_skill,
+        read_skill_file,
         remember_fact,
         recall_facts,
         ask_user,
         request_background_task,
+        propose_workflow_template,
+        update_workflow_template,
+        publish_workflow_template,
         invoke_subagent,
         send_message,
         get_subagent_result,

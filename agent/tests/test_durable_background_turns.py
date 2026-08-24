@@ -65,6 +65,7 @@ class FakeOrchestrator:
         self.close = AsyncMock()
         self.bind_durable_run = Mock()
         self.handle_text_input = AsyncMock()
+        self.stop_agent = AsyncMock()
         self.history_repository = kwargs.get("history_repository")
         FakeOrchestrator.instances.append(self)
 
@@ -96,6 +97,8 @@ class DurableRepo:
         self.runs: dict[str, SimpleNamespace] = {}
         self.events: list[SimpleNamespace] = []
         self.created_runs = 0
+        self.cancel_requests = 0
+        self.cleared_cancels = 0
 
     def add_run(self, run_id: str, status: str) -> SimpleNamespace:
         now = datetime.now(timezone.utc)
@@ -115,6 +118,12 @@ class DurableRepo:
         self.task.current_run_id = run_id
         return run
 
+    def age_run(self, run_id: str, seconds: float) -> SimpleNamespace:
+        run = self.runs[run_id]
+        run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        run.created_at = run.updated_at
+        return run
+
     async def get_task(self, task_id: str):
         return self.task if task_id == self.task.task_id else None
 
@@ -129,12 +138,37 @@ class DurableRepo:
 
     async def create_run(self, **kwargs):
         self.created_runs += 1
+        # Mirrors the store: a new run is new intent, so a stale cancel is dropped.
+        self.task.cancel_requested = False
         return self.add_run(f"run_new_{self.created_runs}", "queued")
 
     async def finish_run(self, **kwargs):
         run = self.runs.get(kwargs["run_id"])
         if run is not None:
             run.status = kwargs.get("status") or "failed"
+
+    async def request_cancel(self, *, task_id: str, owner_id: str) -> bool:
+        if task_id != self.task.task_id or owner_id != self.owner_id:
+            return False
+        self.cancel_requests += 1
+        self.task.cancel_requested = True
+        self.task.status = "cancelling"
+        run = self.runs.get(self.task.current_run_id or "")
+        if run is not None and run.status not in {"completed", "failed", "cancelled"}:
+            run.status = "cancelling"
+        return True
+
+    async def clear_cancel_request(self, *, task_id: str, owner_id: str) -> bool:
+        if task_id != self.task.task_id or owner_id != self.owner_id:
+            return False
+        if not self.task.cancel_requested:
+            return False
+        run = self.runs.get(self.task.current_run_id or "")
+        if run is not None and run.status not in {"completed", "failed", "cancelled"}:
+            return False
+        self.cleared_cancels += 1
+        self.task.cancel_requested = False
+        return True
 
     async def append_event(self, **kwargs):
         seq = len(self.events) + 1
@@ -254,15 +288,78 @@ async def test_never_claimed_run_is_failed_instead_of_blocking_forever(
     """
     repo = DurableRepo()
     run = repo.add_run("run_orphan", "queued")
-    run.updated_at = datetime.now(timezone.utc) - timedelta(
-        seconds=settings.task_worker_lease_seconds + 120
-    )
+    repo.age_run("run_orphan", settings.abandoned_run_grace_seconds + 120)
     monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
 
     assert await ws_handler._find_inflight_durable_run(_session(repo)) is None
     assert run.status == "failed"
     assert repo.events[-1].event_type == "worker_failed"
     assert repo.events[-1].payload["error_code"] == "RUN_ABANDONED"
+
+
+@pytest.mark.asyncio
+async def test_running_run_with_a_dead_lease_is_failed(monkeypatch) -> None:
+    """The sweeper owns this case, but it silently no-ops without its index.
+
+    A connecting client is the only recovery path the user can rely on, so a
+    `running` run that nothing has touched for the grace window is settled here.
+    """
+    repo = DurableRepo()
+    run = repo.add_run("run_zombie", "running")
+    repo.age_run("run_zombie", settings.abandoned_run_grace_seconds + 60)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+
+    assert await ws_handler._find_inflight_durable_run(_session(repo)) is None
+    assert run.status == "failed"
+    assert repo.events[-1].payload["error_code"] == "RUN_LEASE_LOST"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_run_without_a_worker_is_settled(monkeypatch) -> None:
+    """Stop was pressed with no worker alive to honor it.
+
+    `cancelRequested` blocks claim_run and requeue_run, so leaving this run open
+    would make the whole task permanently unusable.
+    """
+    repo = DurableRepo()
+    run = repo.add_run("run_cancelling", "cancelling")
+    repo.task.cancel_requested = True
+    repo.age_run("run_cancelling", 300)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+
+    assert await ws_handler._find_inflight_durable_run(_session(repo)) is None
+    assert run.status == "failed"
+    assert repo.events[-1].payload["error_code"] == "RUN_CANCEL_ORPHANED"
+    # The tombstone is released, otherwise every future run stays unclaimable.
+    assert repo.task.cancel_requested is False
+    assert repo.cleared_cancels == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_waiting_approval_is_settled(monkeypatch) -> None:
+    """The approval prompt expires client- and server-side; the run must too."""
+    repo = DurableRepo()
+    run = repo.add_run("run_wait", "waiting_approval")
+    repo.age_run("run_wait", settings.abandoned_approval_grace_seconds + 60)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+
+    assert await ws_handler._find_inflight_durable_run(_session(repo)) is None
+    assert run.status == "failed"
+    assert repo.events[-1].payload["error_code"] == "APPROVAL_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_stale_cancel_flag_is_cleared_when_the_run_is_terminal(
+    monkeypatch,
+) -> None:
+    """Nothing else clears `cancelRequested`, and it blocks every future claim."""
+    repo = DurableRepo()
+    repo.add_run("run_done", "completed")
+    repo.task.cancel_requested = True
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+
+    assert await ws_handler._find_inflight_durable_run(_session(repo)) is None
+    assert repo.task.cancel_requested is False
 
 
 @pytest.mark.asyncio
@@ -299,7 +396,11 @@ async def test_another_owners_task_is_never_adopted(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_second_prompt_does_not_start_a_competing_run(monkeypatch) -> None:
-    """A follow-up prompt must be refused, not turned into a rival worker."""
+    """A follow-up prompt must not become a rival worker.
+
+    It also must not be a dead end: the client is attached to the run that is
+    still executing so its progress stays visible.
+    """
     repo = DurableRepo()
     repo.add_run("run_live", "running")
     queue = FakeQueue()
@@ -313,9 +414,11 @@ async def test_second_prompt_does_not_start_a_competing_run(monkeypatch) -> None
         sent.append(frame)
         return True
 
+    session = _session(repo, current_run_id="run_live")
+    bind = Mock()
     outcome = await ws_handler._try_start_durable_text_run(
-        session=_session(repo, current_run_id="run_live"),
-        orchestrator=SimpleNamespace(bind_durable_run=Mock()),
+        session=session,
+        orchestrator=SimpleNamespace(bind_durable_run=bind),
         text="follow-up",
         connector_ids=[],
         tool_ids=[],
@@ -323,11 +426,16 @@ async def test_second_prompt_does_not_start_a_competing_run(monkeypatch) -> None
         send_json=send_json,
     )
 
-    assert outcome is DurableTurnOutcome.REJECTED
+    assert outcome is DurableTurnOutcome.ATTACHED
     assert repo.created_runs == 0
     assert queue.enqueued == []
     # The user must be told why, otherwise this is just another silent drop.
-    assert sent and sent[0]["code"] == "RUN_IN_PROGRESS"
+    assert sent and sent[0]["type"] == "run_busy"
+    assert sent[0]["code"] == "RUN_IN_PROGRESS"
+    assert sent[0]["run_id"] == "run_live"
+    # Attached, so events from the live run reach this socket.
+    bind.assert_called_once_with(task_id="task_1", run_id="run_live")
+    assert session.current_run_id == "run_live"
 
 
 @pytest.mark.asyncio
@@ -360,7 +468,8 @@ async def test_prompt_after_paused_run_is_queued(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_waiting_approval_still_blocks_a_new_prompt(monkeypatch) -> None:
+async def test_fresh_waiting_approval_attaches_instead_of_erroring(monkeypatch) -> None:
+    """A live approval still owns the turn, but the user must see it, not an error."""
     repo = DurableRepo()
     repo.add_run("run_wait", "waiting_approval")
     queue = FakeQueue()
@@ -384,9 +493,10 @@ async def test_waiting_approval_still_blocks_a_new_prompt(monkeypatch) -> None:
         send_json=send_json,
     )
 
-    assert outcome is DurableTurnOutcome.REJECTED
+    assert outcome is DurableTurnOutcome.ATTACHED
     assert repo.created_runs == 0
-    assert sent and sent[0]["code"] == "RUN_IN_PROGRESS"
+    assert sent and sent[0]["type"] == "run_busy"
+    assert sent[0]["run_status"] == "waiting_approval"
 
 
 @pytest.mark.asyncio
@@ -437,7 +547,69 @@ async def test_rejected_turn_does_not_fall_back_to_live_execution(monkeypatch) -
     orchestrator = FakeOrchestrator.instances[0]
     orchestrator.handle_text_input.assert_not_awaited()
     assert repo.created_runs == 0
-    assert any(frame["code"] == "RUN_IN_PROGRESS" for frame in ws.sent("error"))
+    busy = ws.sent("run_busy")
+    assert busy and busy[0]["code"] == "RUN_IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+async def test_stop_settles_a_run_no_worker_owns(monkeypatch) -> None:
+    """Stop must not leave a cancel tombstone that bricks the task.
+
+    `request_cancel` only raises a flag; with no live lease nothing would ever
+    observe it, and the flag alone makes every future run unclaimable.
+    """
+    repo = DurableRepo()
+    run = repo.add_run("run_live", "running")
+    FakeOrchestrator.instances = []
+    ws = FakeWebSocket(
+        [
+            {"text": json.dumps({"type": "stop_agent"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(ws_handler, "get_task_queue", lambda: FakeQueue())
+    monkeypatch.setattr(ws_handler.settings, "task_worker_enabled", True)
+
+    await ws_handler.handle_websocket(
+        ws, _session(repo, current_run_id="run_live"), _session_manager()
+    )
+
+    assert repo.cancel_requests == 1
+    assert run.status == "failed"
+    assert repo.task.cancel_requested is False
+    finished = ws.sent("worker_finished")
+    assert finished and finished[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_leaves_a_live_worker_to_honor_the_cancel(monkeypatch) -> None:
+    """A worker holding the lease runs its own cancel watcher; do not race it."""
+    repo = DurableRepo()
+    run = repo.add_run("run_live", "running")
+    run.lease_owner = "worker_a"
+    run.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    FakeOrchestrator.instances = []
+    ws = FakeWebSocket(
+        [
+            {"text": json.dumps({"type": "stop_agent"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr(ws_handler, "get_production_task_repository", lambda: repo)
+    monkeypatch.setattr(ws_handler, "get_task_queue", lambda: FakeQueue())
+    monkeypatch.setattr(ws_handler.settings, "task_worker_enabled", True)
+
+    await ws_handler.handle_websocket(
+        ws, _session(repo, current_run_id="run_live"), _session_manager()
+    )
+
+    assert repo.cancel_requests == 1
+    assert run.status == "cancelling"
+    assert repo.task.cancel_requested is True
+    assert ws.sent("worker_finished") == []
 
 
 # ── Re-attaching after a refresh ──────────────────────────────────────

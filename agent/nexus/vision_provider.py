@@ -93,13 +93,18 @@ class VisionProvider(Protocol):
         ...
 
 
-def _parse_models(primary: str, fallbacks: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+def _parse_models(
+    primary: str,
+    fallbacks: tuple[str, ...] | list[str],
+    *,
+    require_qwen_prefix: bool = True,
+) -> tuple[str, ...]:
     ordered: list[str] = []
     for model in (primary, *fallbacks):
         model = str(model).strip()
         if not model or model in ordered:
             continue
-        if not model.lower().startswith("qwen"):
+        if require_qwen_prefix and not model.lower().startswith("qwen"):
             raise ValueError(f"Qwen vision rejected non-Qwen model: {model}")
         ordered.append(model)
     return tuple(ordered)
@@ -200,15 +205,20 @@ class QwenVisionProvider:
         timeout_seconds: float = 60.0,
         attempts_per_model: int = 1,
         retry_base_seconds: float = 1.0,
+        require_qwen_prefix: bool = True,
     ) -> None:
         if not api_key.strip():
-            raise VisionAnalysisError("QWEN_API_KEY is required for screenshot analysis")
+            raise VisionAnalysisError("An API key is required for screenshot analysis")
         self._client = OpenAI(
             api_key=api_key,
             base_url=api_base.rstrip("/"),
             timeout=timeout_seconds,
         )
-        self.models = _parse_models(primary_model, fallback_models)
+        self.models = _parse_models(
+            primary_model,
+            fallback_models,
+            require_qwen_prefix=require_qwen_prefix,
+        )
         self._attempts_per_model = max(1, int(attempts_per_model))
         self._retry_base_seconds = max(0.0, float(retry_base_seconds))
 
@@ -342,9 +352,33 @@ def _emit_vision_model_fallback(
 
 def create_vision_provider(
     *,
+    runtime_config: Any = None,
     primary_model: str | None = None,
     fallback_models: tuple[str, ...] | None = None,
 ) -> QwenVisionProvider:
+    user_llm = bool(runtime_config is not None and getattr(runtime_config, "user_llm_configured", False))
+    if user_llm:
+        vision_model = (
+            (primary_model or "").strip()
+            or str(getattr(runtime_config, "llm_vision_model", "") or "").strip()
+            or str(getattr(runtime_config, "llm_model", "") or "").strip()
+        )
+        chat_model = str(getattr(runtime_config, "llm_model", "") or "").strip()
+        resolved_fallbacks = (
+            fallback_models
+            if fallback_models is not None
+            else ((chat_model,) if chat_model and chat_model != vision_model else ())
+        )
+        return QwenVisionProvider(
+            api_key=str(getattr(runtime_config, "llm_api_key", "") or ""),
+            api_base=str(getattr(runtime_config, "llm_api_base", "") or ""),
+            primary_model=vision_model,
+            fallback_models=resolved_fallbacks,
+            timeout_seconds=settings.vision_request_timeout_seconds,
+            attempts_per_model=settings.vision_attempts_per_model,
+            retry_base_seconds=settings.vision_retry_base_seconds,
+            require_qwen_prefix=False,
+        )
     return QwenVisionProvider(
         api_key=settings.qwen_api_key,
         api_base=settings.qwen_api_base,

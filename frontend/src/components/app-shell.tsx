@@ -8,6 +8,7 @@
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { SettingsModal } from "@/components/application/settings/settings-modal";
+import { isSessionWorkspacePath } from "@/lib/app-paths";
 import { useSettings } from "@/lib/settings-context";
 import { useLandingChrome } from "@/lib/landing-chrome-context";
 import { cx } from "@/utils/cx";
@@ -17,7 +18,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { isSettingsOpen, setIsSettingsOpen, settingsDefaultPage } = useSettings();
   const { isLandingChrome } = useLandingChrome();
   const pathname = usePathname();
-  const isSessionPage = pathname.includes("/session/");
+  const isSessionPage = isSessionWorkspacePath(pathname);
 
   return (
     <div

@@ -7,6 +7,7 @@
 
 import { Signal, Monitor, Maximize, Minimize, MonitorOff, Save } from "lucide-react";
 import { Tooltip } from "@heroui/react";
+import { CocomputerLogo } from "@/components/brand/cocomputer-logo";
 import {
   SessionContextUsage,
   type SessionContextUsageState,
@@ -40,8 +41,8 @@ export function SessionHeader({
   return (
     <header className="h-14 shrink-0 flex items-center justify-between px-6 bg-white dark:bg-[#0d0d0d] z-10">
       <div className="flex items-center gap-4">
-        <button className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100 hover:opacity-80 transition-opacity">
-          CoComputer
+        <button className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+          <CocomputerLogo size={24} wordmarkClassName="text-sm font-semibold text-zinc-900 dark:text-zinc-100" />
           <span className="text-[10px] uppercase font-bold text-zinc-500 dark:text-zinc-400 border border-zinc-300 dark:border-zinc-700 rounded-md px-1.5 py-0.5 bg-zinc-100 dark:bg-zinc-800/50">
             Beta
           </span>
@@ -119,7 +120,7 @@ export function SessionHeader({
               </button>
             </Tooltip.Trigger>
             <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
-              Save Template
+              Create template
             </Tooltip.Content>
           </Tooltip>
         )}

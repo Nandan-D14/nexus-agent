@@ -100,7 +100,7 @@ export default function SecurityPage() {
 
         <section className="py-16 px-6">
           <div className="max-w-3xl mx-auto space-y-6 text-muted-foreground leading-relaxed">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+            <h2 className="font-serif text-2xl tracking-tight text-foreground">
               Shared responsibility
             </h2>
             <p>

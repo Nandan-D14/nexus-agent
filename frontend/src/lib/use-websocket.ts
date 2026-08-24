@@ -61,6 +61,13 @@ const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
 const REPLAY_TIMEOUT_MS = 10_000;
 const REPLAY_PAGE_LIMIT = 200;
 const REPLAY_MAX_PAGES = 50;
+/**
+ * How often the durable event log is polled over HTTP while the socket is down.
+ * A worker-owned run keeps writing events regardless of the socket, so this is
+ * what keeps background progress visible instead of freezing the view until the
+ * user manually reconnects.
+ */
+const DURABLE_POLL_INTERVAL_MS = 4_000;
 
 export type DurableReplayEvent = {
   event_id?: string;
@@ -98,6 +105,9 @@ function isDurableTaskId(value: string | null | undefined): value is string {
 }
 
 function eventKey(message: WsMessage): string | null {
+  if ((message as { type?: string }).type === "agent_delta" || (message as { type?: string }).type === "agent_stream_chunk") {
+    return null;
+  }
   if (message.event_id) {
     return `event:${message.event_id}`;
   }
@@ -521,6 +531,43 @@ export function useWebSocket(
   }, [clearReconnectTimer]);
 
   const isConnected = readyState === ReadyState.OPEN;
+
+  // Keep background progress flowing while the socket is not OPEN. A durable run
+  // is owned by a worker, so it keeps appending events; without this the view
+  // freezes at the last frame received until the socket comes back (or forever,
+  // once the reconnect budget is spent). Events are deduped by seq/event_id in
+  // `dispatchJsonMessage`, so overlap with the socket is harmless.
+  useEffect(() => {
+    if (isConnected || !url) {
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      const taskId = durableTaskIdRef.current;
+      if (cancelled || inFlight || !taskId) {
+        return;
+      }
+      inFlight = true;
+      try {
+        await replayMissedEvents(taskId, lastSeqRef.current);
+      } catch (error) {
+        // Offline/aborted polls are expected; the next tick retries.
+        console.debug("[useWebSocket] Durable poll failed:", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const interval = setInterval(() => void poll(), DURABLE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isConnected, replayMissedEvents, url]);
 
   return {
     send,

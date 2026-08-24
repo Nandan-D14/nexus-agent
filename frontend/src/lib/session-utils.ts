@@ -19,6 +19,7 @@ import {
   isWorkflowVisualTool,
 } from "@/lib/agent-tool-classification";
 import type { WsMessage } from "@/lib/message-types";
+import { coerceAskUserOptions } from "@/lib/ask-user-options";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -48,6 +49,8 @@ export type ChatItem =
       kind: "user_question";
       question_id: string;
       question: string;
+      options?: string[];
+      answer?: string;
       answered?: boolean;
       timedOut?: boolean;
       timeout_seconds?: number;
@@ -59,6 +62,63 @@ export type TodoListItem = {
   status: "pending" | "in_progress" | "done";
   note?: string;
 };
+
+export function upsertTemplateDraftItem(
+  prev: ChatItem[],
+  payload: {
+    template_id: string;
+    status?: "draft" | "published";
+    name?: string;
+    description?: string;
+    instructions?: string;
+    input_fields?: WorkflowTemplateInputField[];
+    source_session_id?: string | null;
+    dismissed?: boolean;
+  },
+  ts: number,
+): ChatItem[] {
+  const templateId = payload.template_id;
+  if (!templateId) return prev;
+  const nextFields = Array.isArray(payload.input_fields) ? payload.input_fields : [];
+  let replaced = false;
+  const mapped = prev.map((item) => {
+    if (
+      item.kind === "event" &&
+      item.type === "template_draft" &&
+      item.template_id === templateId
+    ) {
+      replaced = true;
+      return {
+        ...item,
+        status: payload.status ?? item.status,
+        name: payload.name ?? item.name,
+        description: payload.description ?? item.description,
+        instructions: payload.instructions ?? item.instructions,
+        input_fields: payload.input_fields ?? item.input_fields,
+        source_session_id: payload.source_session_id ?? item.source_session_id,
+        dismissed: payload.dismissed ?? false,
+      };
+    }
+    return item;
+  });
+  if (replaced) return mapped;
+  return [
+    ...prev,
+    {
+      kind: "event",
+      type: "template_draft",
+      template_id: templateId,
+      status: payload.status ?? "draft",
+      name: payload.name ?? "",
+      description: payload.description ?? "",
+      instructions: payload.instructions ?? "",
+      input_fields: nextFields,
+      source_session_id: payload.source_session_id ?? null,
+      dismissed: Boolean(payload.dismissed),
+      ts,
+    },
+  ];
+}
 
 export type HistoryMapMode = "full" | "transcript";
 
@@ -134,22 +194,7 @@ export function numericArg(args: Record<string, unknown>, key: string): number |
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-export function providerLogo(provider: string) {
-  switch (provider) {
-    case "google_drive":
-      return "https://www.gstatic.com/images/branding/product/2x/drive_2020q4_48dp.png";
-    case "gmail":
-      return "https://www.gstatic.com/images/branding/product/2x/gmail_2020q4_48dp.png";
-    case "google_calendar":
-      return "https://www.gstatic.com/images/branding/product/2x/calendar_2020q4_48dp.png";
-    case "google_tasks":
-      return "https://upload.wikimedia.org/wikipedia/commons/5/5f/Google_Tasks_2021.svg";
-    case "github":
-      return "https://upload.wikimedia.org/wikipedia/commons/9/91/Octicons-mark-github.svg";
-    default:
-      return null;
-  }
-}
+export { providerLogo } from "@/lib/connectors";
 
 export function toolAction(tool: string, args: Record<string, unknown>): AgentVisualAction {
   const ts = Date.now();
@@ -240,7 +285,7 @@ export function mapStoredMessagesToChatItems(
   options?: { mode?: HistoryMapMode },
 ): ChatItem[] {
   const mode = options?.mode ?? "full";
-  const items: ChatItem[] = [];
+  let items: ChatItem[] = [];
 
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
@@ -251,6 +296,9 @@ export function mapStoredMessagesToChatItems(
         continue;
       }
       const { tool, args } = parseToolCallText(message.text, message.source);
+      if (isWorkflowVisualTool(tool)) {
+        continue;
+      }
       items.push({
         kind: "event",
         type: "agent_tool_call",
@@ -285,6 +333,26 @@ export function mapStoredMessagesToChatItems(
             component: message.text,
             ts,
           });
+        }
+        continue;
+      }
+
+      if (message.source === "template_draft") {
+        try {
+          const parsed = JSON.parse(message.text) as {
+            template_id?: string;
+            status?: "draft" | "published";
+            name?: string;
+            description?: string;
+            instructions?: string;
+            input_fields?: WorkflowTemplateInputField[];
+            source_session_id?: string | null;
+          };
+          if (parsed.template_id) {
+            items = upsertTemplateDraftItem(items, parsed as { template_id: string }, ts);
+          }
+        } catch {
+          // Ignore malformed template draft history rows.
         }
         continue;
       }
@@ -331,6 +399,7 @@ export function mapStoredMessagesToChatItems(
         kind: "user_question",
         question_id: `history-ask-${message.id}`,
         question: message.text,
+        answer: answered ? next?.text : undefined,
         answered,
         timedOut: !answered && elapsedSec >= timeoutSeconds,
         timeout_seconds: timeoutSeconds,
@@ -577,7 +646,7 @@ export function reduceWorkingLogMessage(
       return {
         chatItems: [
           ...prevChatItems,
-          { kind: "delegation", from: msg.from, to: msg.to, ts },
+          { kind: "event", type: msg.type, from: msg.from, to: msg.to, ts },
         ],
       };
 
@@ -594,6 +663,7 @@ export function reduceWorkingLogMessage(
             kind: "user_question",
             question_id: msg.question_id,
             question: msg.question,
+            options: coerceAskUserOptions(msg.options),
             answered: false,
             timedOut: elapsedSec >= timeoutSeconds,
             timeout_seconds: timeoutSeconds,
@@ -817,6 +887,35 @@ export function reduceWorkingLogMessage(
         todoItems: Array.isArray(msg.items) ? msg.items : [],
       };
 
+    case "agent_delta": {
+      const delta = typeof (msg as unknown as { delta?: unknown }).delta === "string" ? (msg as unknown as { delta: string }).delta : "";
+      if (!delta) return { chatItems: prevChatItems };
+      const lastIdx = prevChatItems.length - 1;
+      const last = prevChatItems[lastIdx];
+      if (last && last.kind === "message" && last.role === "agent") {
+        const updated = [...prevChatItems];
+        updated[lastIdx] = { ...last, text: last.text + delta };
+        return { chatItems: updated };
+      }
+      return { chatItems: [...prevChatItems, { kind: "message", role: "agent", text: delta, ts }] };
+    }
+
+    case "agent_stream_chunk": {
+      const chunk = typeof (msg as unknown as { chunk?: unknown }).chunk === "string" ? (msg as unknown as { chunk: string }).chunk : "";
+      if (!chunk) return { chatItems: prevChatItems };
+      const lastIdx = prevChatItems.length - 1;
+      const last = prevChatItems[lastIdx];
+      if (last && last.kind === "message" && last.role === "agent") {
+        const updated = [...prevChatItems];
+        updated[lastIdx] = { ...last, text: last.text + chunk };
+        return { chatItems: updated };
+      }
+      return { chatItems: [...prevChatItems, { kind: "message", role: "agent", text: chunk, ts }] };
+    }
+
+    case "agent_stream_end":
+      return { chatItems: prevChatItems };
+
     case "error":
       return {
         chatItems: [
@@ -833,7 +932,7 @@ export function reduceWorkingLogMessage(
       };
 
     // Skipped on purpose (history / REST / ephemeral / page-owned side effects):
-    // transcript, generative_ui, artifact_created, run_status, step_*,
+    // transcript, generative_ui, template_draft, artifact_created, run_status, step_*,
     // sandbox_status, voice_status, pong, quota_update, ui_action, vnc_url,
     // token_usage, worker_claimed/worker_finished and other durable lifecycle
     // types the working log does not render.

@@ -66,6 +66,23 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
     ),
     "tavily": frozenset({"tavily_search"}),
     "tinyfish": frozenset({"tinyfish_web_agent"}),
+    "exa": frozenset(),
+    "treg": frozenset(),
+    "linear": frozenset(),
+    "vercel": frozenset(),
+    "cloudflare": frozenset(),
+    "apify": frozenset(),
+    "slack": frozenset(),
+    "vyora": frozenset(
+        {
+            "vyora_list_agents",
+            "vyora_list_numbers",
+            "vyora_start_call",
+            "vyora_list_calls",
+            "vyora_get_call",
+        }
+    ),
+    "openai": frozenset({"openai_web_search"}),
     "thesys": frozenset({"render_ui"}),
     # Legacy "system" connector from the frontend — maps to core sandbox caps.
     "system": frozenset(
@@ -99,6 +116,9 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "read_workspace_file",
         "list_workspace_files",
         "read_skill",
+        "read_skill_file",
+        "read_skill",
+        "read_skill_file",
         "invoke_subagent",
         "send_message",
         "get_subagent_result",
@@ -111,6 +131,9 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "generate_excel_report",
         "generate_docx_report",
         "save_as_artifact",
+        "propose_workflow_template",
+        "update_workflow_template",
+        "publish_workflow_template",
     }
 )
 

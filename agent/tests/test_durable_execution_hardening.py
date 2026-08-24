@@ -67,6 +67,21 @@ class _Transaction:
         ref.set(data, merge=merge)
 
 
+class _Batch:
+    """Collects writes and applies them on commit, like a Firestore batch."""
+
+    def __init__(self) -> None:
+        self._writes = []
+
+    def set(self, ref, data, merge=False):
+        self._writes.append((ref, data, merge))
+
+    def commit(self):
+        for ref, data, merge in self._writes:
+            ref.set(data, merge=merge)
+        self._writes = []
+
+
 class _Firestore:
     def __init__(self) -> None:
         self.collections = {}
@@ -76,6 +91,9 @@ class _Firestore:
 
     def transaction(self):
         return _Transaction()
+
+    def batch(self):
+        return _Batch()
 
 
 class _MissingStaleRunsIndexQuery:
@@ -202,6 +220,64 @@ def test_claim_token_generation_lease_and_stale_requeue(monkeypatch) -> None:
     assert requeued.status == "queued"
     assert requeued.attempt == 2
     assert requeued.claim_token != old_token
+
+
+def test_cancel_request_is_cleared_once_its_run_is_terminal(monkeypatch) -> None:
+    """`cancelRequested` blocks claim_run/requeue_run, so it must not outlive its run."""
+    repo = _repository(monkeypatch)
+    task_ref, run_ref = _seed_run(repo)
+    task_ref.data.update(
+        {
+            "cancelRequested": True,
+            "status": "cancelling",
+            "currentRunId": "run_1",
+        }
+    )
+
+    # Still executing: the flag is the only way a live worker learns to stop.
+    run_ref.data["status"] = "running"
+    assert repo._clear_cancel_request_sync("task_1", "user_1") is False
+    assert task_ref.data["cancelRequested"] is True
+
+    run_ref.data["status"] = "cancelled"
+    assert repo._clear_cancel_request_sync("task_1", "user_1") is True
+    assert task_ref.data["cancelRequested"] is False
+    assert task_ref.data["status"] == "cancelled"
+
+    # Idempotent, and never touches another owner's task.
+    assert repo._clear_cancel_request_sync("task_1", "user_1") is False
+    task_ref.data["cancelRequested"] = True
+    assert repo._clear_cancel_request_sync("task_1", "someone_else") is False
+    assert task_ref.data["cancelRequested"] is True
+
+
+def test_new_run_drops_a_cancel_aimed_at_the_previous_run(monkeypatch) -> None:
+    """A fresh run is new intent; inheriting the flag makes it unclaimable."""
+    repo = _repository(monkeypatch)
+    task_ref, _ = _seed_run(repo)
+    task_ref.data.update({"cancelRequested": True, "status": "cancelling"})
+
+    run = repo._create_run_sync(
+        "task_1",
+        "user_1",
+        "session-1",
+        "hello",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert task_ref.data["cancelRequested"] is False
+    assert repo._claim_run_sync(
+        "task_1",
+        run.run_id,
+        "worker_1",
+        run.claim_token,
+    ) is not None
 
 
 def test_budget_guard_enforces_tools_credits_and_runtime(monkeypatch) -> None:
@@ -427,6 +503,42 @@ async def test_stale_run_sweeper_requeues_with_new_claim_token(
         queue.enqueue_task_run.await_args.kwargs["claim_token"]
         == "claim_new"
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_run_sweeper_fails_a_run_it_cannot_requeue(monkeypatch) -> None:
+    """A refused requeue must not loop forever.
+
+    ``requeue_run`` returns None while the task carries a cancel request, and it
+    does not bump ``attempt``, so the exhausted branch is never reached. Skipping
+    the run would leave it ``running`` for good and block every later prompt.
+    """
+    stale = SimpleNamespace(
+        task_id="task_1",
+        run_id="run_1",
+        owner_id="user_1",
+        attempt=1,
+        claim_generation=3,
+    )
+    repo = SimpleNamespace(
+        list_stale_runs=AsyncMock(return_value=[stale]),
+        requeue_run=AsyncMock(return_value=None),
+        fail_stale_run=AsyncMock(return_value=True),
+        append_event=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
+    queue = SimpleNamespace(enqueue_task_run=AsyncMock())
+    monkeypatch.setattr(settings, "task_worker_max_attempts", 3)
+
+    recovered = await StaleRunSweeper(repo, queue).sweep()
+
+    assert recovered == 1
+    repo.fail_stale_run.assert_awaited_once()
+    assert (
+        repo.append_event.await_args.kwargs["event_type"]
+        == "worker_recovery_abandoned"
+    )
+    queue.enqueue_task_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

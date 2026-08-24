@@ -76,7 +76,8 @@ _ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable
     contextvars.ContextVar("_ensure_sandbox_callback", default=None)
 )
 
-AskUserCallback = Callable[[str], Awaitable[Optional[str]]]
+# question, optional multiple-choice labels
+AskUserCallback = Callable[..., Awaitable[Optional[str]]]
 
 _ask_user_callback: contextvars.ContextVar[Optional["AskUserCallback"]] = (
     contextvars.ContextVar("_ask_user_callback", default=None)

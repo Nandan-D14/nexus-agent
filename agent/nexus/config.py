@@ -30,16 +30,9 @@ class Settings(BaseSettings):
     e2b_api_key: str = ""
 
     # BYO keys
-    require_byok: bool = False
+    require_byok: bool = True
     byok_encryption_key: str = ""
     shared_access_code: str = ""
-    # Future use: keep the controlled beta/access-code system in the codebase,
-    # but ship internal testing with the gate disabled by default.
-    beta_access_enabled: bool = False
-    beta_enforce_byok: bool = True
-    beta_admin_emails: str = ""
-    beta_google_sheet_id: str = ""
-    beta_google_sheet_name: str = "beta_applications"
 
     # Google / Gemini
     google_api_key: str = ""
@@ -152,6 +145,17 @@ class Settings(BaseSettings):
     task_worker_max_attempts: int = 3
     task_worker_retry_base_seconds: int = 10
     stale_run_sweep_interval_seconds: int = 60
+    # How long a durable run may sit in a state nothing is progressing before a
+    # connecting client settles it so the session becomes usable again. Covers
+    # `queued` that no worker ever claimed, `running` whose lease expired without
+    # the sweeper recovering it (e.g. the recovery index is missing), and
+    # `cancelling` that no live worker was around to honor. Without this a single
+    # lost worker wedges the session permanently.
+    abandoned_run_grace_seconds: int = 600
+    # Same idea for `waiting_approval`: the approval prompt has its own timeout
+    # (tool_gateway.APPROVAL_TIMEOUT_SECONDS) and the UI stops offering the
+    # buttons after it, so past this window nobody can ever resolve the run.
+    abandoned_approval_grace_seconds: int = 900
     durable_subagents_enabled: bool = True
     subagent_lease_seconds: int = 600
     subagent_heartbeat_interval_seconds: int = 120
@@ -324,6 +328,16 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
 
+    # GitHub OAuth App (classic) for native github_* tools
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+
+    # Slack app OAuth for mcp.slack.com (not DCR)
+    slack_app_id: str = ""
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
+
     @field_validator("jwt_secret")
     @classmethod
     def pad_jwt_secret(cls, v: str) -> str:
@@ -376,10 +390,10 @@ def validate_startup_settings() -> None:
         issues.append("VULTR_API_KEY is required when MODEL_PROVIDER is 'vultr'")
     if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
         issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
-    if settings.beta_access_enabled and not settings.beta_admin_emails.strip():
-        issues.append("BETA_ADMIN_EMAILS must include at least one admin email")
-    if settings.beta_access_enabled and not settings.beta_google_sheet_id.strip():
-        issues.append("BETA_GOOGLE_SHEET_ID must be configured for beta application sync")
+    if bool(settings.github_oauth_client_id) != bool(settings.github_oauth_client_secret):
+        issues.append("GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET must be configured together")
+    if bool(settings.slack_client_id) != bool(settings.slack_client_secret):
+        issues.append("SLACK_CLIENT_ID and SLACK_CLIENT_SECRET must be configured together")
     if not settings.byok_encryption_key.strip():
         issues.append("BYOK_ENCRYPTION_KEY must be configured for credential safety")
     if settings.is_production:

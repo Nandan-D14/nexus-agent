@@ -18,7 +18,7 @@ export type AgentToolProvider =
   | "worker"
   | "generic";
 
-export type AgentSurface = "workflow" | "desktop";
+export type AgentSurface = "workflow" | "desktop" | "terminal" | "editor";
 
 const DESKTOP_TOOLS = new Set([
   "left_click",
@@ -44,9 +44,12 @@ const WORKFLOW_TOOLS = new Set([
   "publish_html_artifact",
   "render_ui",
   "ask_user",
+  "propose_workflow_template",
+  "update_workflow_template",
+  "publish_workflow_template",
   "request_background_task",
 ]);
-const SKILL_TOOLS = new Set(["read_skill"]);
+const SKILL_TOOLS = new Set(["read_skill", "read_skill_file"]);
 const SUBAGENT_TOOLS = new Set([
   "invoke_subagent",
   "send_message",
@@ -57,7 +60,13 @@ const SUBAGENT_TOOLS = new Set([
 ]);
 const WORKER_TOOLS = new Set(["terminal_worker", "desktop_worker"]);
 
-const WORKFLOW_VISUAL_TOOLS = new Set(["publish_html_artifact", "render_ui"]);
+const WORKFLOW_VISUAL_TOOLS = new Set([
+  "publish_html_artifact",
+  "render_ui",
+  "propose_workflow_template",
+  "update_workflow_template",
+  "publish_workflow_template",
+]);
 
 export function isWorkflowVisualTool(tool = ""): boolean {
   return WORKFLOW_VISUAL_TOOLS.has(tool);
@@ -83,18 +92,30 @@ export function surfaceForAgentTool(tool = ""): AgentSurface {
   const provider = classifyAgentTool(tool);
   if (provider === "desktop") return "desktop";
   if (provider === "browser" && tool === "open_browser") return "desktop";
+  if (provider === "terminal" || tool === "terminal_worker") return "terminal";
+  if (provider === "file" && tool !== "list_workspace_files") return "editor";
   return "workflow";
 }
 
 export function displayAgentToolName(tool = ""): string {
   if (!tool) return "Tool";
   if (tool.startsWith("mcp__")) {
+    if (tool === "mcp__exa__web_search_exa") return "Exa Search";
+    if (tool === "mcp__exa__web_fetch_exa") return "Exa Fetch";
+    if (tool === "mcp__exa__web_search_advanced_exa") return "Exa Advanced Search";
+    if (tool === "mcp__exa__agent_run") return "Exa Agent";
+    if (tool === "mcp__treg__catalog_search") return "Treg Catalog";
+    if (tool === "mcp__treg__catalog_get") return "Treg Endpoint";
+    if (tool === "mcp__treg__call") return "Treg Call";
+    if (tool === "mcp__treg__balance") return "Treg Balance";
+    if (tool === "mcp__treg__my_tools") return "Treg Tools";
     const [, server, remoteTool] = tool.split("__");
     return `MCP: ${formatToolPart(server)}${remoteTool ? ` / ${formatToolPart(remoteTool)}` : ""}`;
   }
 
   const named: Record<string, string> = {
     read_skill: "Read Skill",
+    read_skill_file: "Read Skill File",
     invoke_subagent: "Spawn Subagent",
     send_message: "Message Subagent",
     get_subagent_result: "Check Subagent",
@@ -106,6 +127,9 @@ export function displayAgentToolName(tool = ""): string {
     render_ui: "Render C1 UI",
     publish_html_artifact: "Publish HTML",
     ask_user: "Ask User",
+    propose_workflow_template: "Propose Template",
+    update_workflow_template: "Update Template",
+    publish_workflow_template: "Publish Template",
     prepare_task_workspace: "Prepare Workspace",
     write_todo_list: "Update Todo List",
     update_todo_item: "Update Todo Item",
@@ -117,6 +141,12 @@ export function displayAgentToolName(tool = ""): string {
     search_web: "Web Search",
     scrape_web_page: "Read Web Page",
     tavily_search: "Tavily Search",
+    openai_web_search: "OpenAI Search",
+    vyora_list_agents: "Vyora Agents",
+    vyora_list_numbers: "Vyora Numbers",
+    vyora_start_call: "Vyora Call",
+    vyora_list_calls: "Vyora Calls",
+    vyora_get_call: "Vyora Call Detail",
     run_command: "Terminal Command",
     read_workspace_file: "Read File",
     write_workspace_file: "Write File",
@@ -152,6 +182,13 @@ export function providerLabel(provider: AgentToolProvider, tool?: string): strin
     if (tool === "render_ui") return "C1 Visual";
     if (tool === "publish_html_artifact") return "HTML Artifact";
     if (tool === "ask_user") return "Question";
+    if (
+      tool === "propose_workflow_template" ||
+      tool === "update_workflow_template" ||
+      tool === "publish_workflow_template"
+    ) {
+      return "Template";
+    }
     return "Workflow";
   }
   return "Tool";
@@ -161,9 +198,13 @@ export function providerLabel(provider: AgentToolProvider, tool?: string): strin
 export function toolActionLabel(tool = ""): string {
   const provider = classifyAgentTool(tool);
   if (tool === "read_skill") return "Reading skill";
+  if (tool === "read_skill_file") return "Reading skill file";
   if (tool === "render_ui") return "Rendering C1 UI";
   if (tool === "publish_html_artifact") return "Publishing artifact";
   if (tool === "ask_user") return "Asking user";
+  if (tool === "propose_workflow_template") return "Drafting template";
+  if (tool === "update_workflow_template") return "Updating template";
+  if (tool === "publish_workflow_template") return "Publishing template";
   if (tool === "terminal_worker") return "Terminal worker";
   if (tool === "desktop_worker") return "Desktop worker";
   if (tool === "invoke_subagent") return "Spawning subagent";

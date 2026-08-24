@@ -5,17 +5,16 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertCircle, LayoutGrid, List, Search } from "lucide-react";
 import { motion } from "framer-motion";
 
 import { DocumentViewerModal } from "@/components/artifacts";
+import { sessionPath } from "@/lib/app-paths";
 import { LibraryFileCard } from "@/components/library/library-file-card";
 import { LibrarySkeleton } from "@/components/library/library-skeleton";
 import { PillTab, PillTabList } from "@/components/base/tabs/pill-tab";
-import { useAuth } from "@/lib/auth-context";
-import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 import {
   LIBRARY_FILTERS,
   filterLibraryItems,
@@ -23,65 +22,34 @@ import {
   groupLibraryItems,
   type LibraryFilterId,
 } from "@/lib/library";
-import type { LibraryItem, RunArtifact } from "@/lib/message-types";
+import type { RunArtifact } from "@/lib/message-types";
+import { useLibraryInfiniteQuery } from "@/lib/queries/library";
 import { cx } from "@/utils/cx";
 
 export function LibraryView() {
-  const { user } = useAuth();
   const router = useRouter();
-  const [items, setItems] = useState<LibraryItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [category, setCategory] = useState<LibraryFilterId>("all");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [viewerArtifact, setViewerArtifact] = useState<RunArtifact | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
-  const hasLoadedRef = useRef(false);
+  const libraryQuery = useLibraryInfiniteQuery(searchQuery);
+  const items = useMemo(
+    () => libraryQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [libraryQuery.data],
+  );
+  const nextCursor = libraryQuery.hasNextPage
+    ? (libraryQuery.data?.pages.at(-1)?.nextCursor ?? null)
+    : null;
+  const loading = libraryQuery.isLoading;
+  const loadingMore = libraryQuery.isFetchingNextPage;
+  const error = libraryQuery.error instanceof Error ? libraryQuery.error.message : null;
 
   useEffect(() => {
     const handle = window.setTimeout(() => setSearchQuery(searchInput.trim()), 400);
     return () => window.clearTimeout(handle);
   }, [searchInput]);
-
-  const fetchPage = useCallback(
-    async (cursor: string | null, append: boolean) => {
-      if (!user) return;
-      if (append) setLoadingMore(true);
-      else if (!hasLoadedRef.current) setLoading(true);
-      setError(null);
-      try {
-        const params = new URLSearchParams();
-        params.set("limit", "100");
-        if (cursor) params.set("cursor", cursor);
-        if (searchQuery) params.set("q", searchQuery);
-        const res = await authenticatedFetch(`/api/v1/library?${params.toString()}`);
-        if (!res.ok) throw new Error(await parseApiError(res));
-        const data = (await res.json()) as {
-          items?: LibraryItem[];
-          next_cursor?: string | null;
-        };
-        const page = data.items || [];
-        setItems((prev) => (append ? [...prev, ...page] : page));
-        setNextCursor(data.next_cursor ?? null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load library");
-        if (!append) setItems([]);
-      } finally {
-        hasLoadedRef.current = true;
-        setLoading(false);
-        setLoadingMore(false);
-      }
-    },
-    [searchQuery, user],
-  );
-
-  useEffect(() => {
-    void fetchPage(null, false);
-  }, [fetchPage]);
 
   const groups = useMemo(
     () => groupLibraryItems(filterLibraryItems(items, category)),
@@ -103,7 +71,7 @@ export function LibraryView() {
     <div className="mx-auto flex h-full max-w-7xl flex-col space-y-6 p-4 pb-20 text-zinc-900 md:p-8 dark:text-zinc-100">
       <div className="flex shrink-0 flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+          <h1 className="font-serif text-3xl leading-none tracking-tight text-zinc-900 sm:text-4xl dark:text-white">
             Library
           </h1>
           <p className="mt-2 text-sm text-zinc-500">
@@ -217,7 +185,7 @@ export function LibraryView() {
                       item={item}
                       view={view}
                       onPreview={(url) => openViewer(item.artifact, url)}
-                      onOpenSession={() => router.push(`/session/${item.session_id}`)}
+                      onOpenSession={() => router.push(sessionPath(item.session_id))}
                     />
                   ))}
                 </div>
@@ -230,7 +198,7 @@ export function LibraryView() {
               <div className="flex justify-center pt-2">
                 <button
                   type="button"
-                  onClick={() => void fetchPage(nextCursor, true)}
+                  onClick={() => void libraryQuery.fetchNextPage()}
                   disabled={loadingMore}
                   className="rounded-full border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 >

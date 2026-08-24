@@ -74,8 +74,7 @@ def test_planner_tool_declarations_survive_adk_upgrade() -> None:
         for tool in planner.tools
     }
 
-    assert {"terminal_worker", "desktop_worker", "ask_user", "web_search"} <= names
-    assert "run_command" not in names
+    assert {"terminal_worker", "desktop_worker", "ask_user", "web_search", "run_command", "propose_workflow_template", "update_workflow_template", "publish_workflow_template"} <= names
     assert "take_screenshot" not in names
     worker_tools = [
         tool for tool in planner.tools if getattr(tool, "name", "") in {"terminal_worker", "desktop_worker"}

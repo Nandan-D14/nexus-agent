@@ -19,6 +19,7 @@ import {
   serverTimestamp,
   setDoc,
 } from "firebase/firestore";
+import type { QueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -29,6 +30,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { clearAuthTokenCache } from "@/lib/api-client";
 import { auth, db, isRecoverableFirestoreError } from "@/lib/firebase-client";
 
 export type AppUser = {
@@ -72,7 +74,13 @@ async function syncUserProfile(user: User) {
   await setDoc(ref, payload, { merge: true });
 }
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export function AuthProvider({
+  children,
+  queryClient,
+}: {
+  children: ReactNode;
+  queryClient: QueryClient;
+}) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,12 +107,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
       } else {
         setUser(null);
+        clearAuthTokenCache();
+        queryClient.clear();
       }
       setIsLoading(false);
     });
 
     return unsubscribe;
-  }, []);
+  }, [queryClient]);
 
   const signInWithGoogle = useCallback(async () => {
     setError(null);
@@ -121,13 +131,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOutUser = useCallback(async () => {
     try {
       await signOut(auth);
+      clearAuthTokenCache();
+      queryClient.clear();
       setError(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sign-out failed";
       console.error("[signOutUser]", err);
       setError(message);
     }
-  }, [setError]);
+  }, [queryClient, setError]);
 
   const value = useMemo<AuthContextValue>(
     () => ({

@@ -131,13 +131,45 @@ class FirestoreRepoBase:
             current[parts[-1]] = value
         return nested_updates
 
+    @staticmethod
+    def _flatten_byok_updates(updates: dict[str, Any]) -> dict[str, Any]:
+        """Write BYOK fields with dotted keys so Firestore merges them.
+
+        Nested ``{"byok": {..., "x": None}}`` payloads fail ``update()`` (None is
+        not a Firestore value) and can drop newly saved keys. Dot-paths plus
+        DELETE_FIELD persist secrets reliably.
+        """
+        byok = updates.get("byok")
+        if not isinstance(byok, dict):
+            return updates
+        flattened = {key: value for key, value in updates.items() if key != "byok"}
+        for key, value in byok.items():
+            flattened[f"byok.{key}"] = firestore.DELETE_FIELD if value is None else value
+        return flattened
+
     def _apply_document_updates_sync(self, ref, updates: dict[str, Any]) -> None:
         if not updates:
             return
         try:
             ref.update(updates)
         except Exception:
-            ref.set(self._expand_dot_notation_updates(updates), merge=True)
+            expanded = self._omit_delete_fields(self._expand_dot_notation_updates(updates))
+            ref.set(expanded, merge=True)
+
+    @staticmethod
+    def _omit_delete_fields(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        cleaned: dict[str, Any] = {}
+        for key, nested in value.items():
+            if nested is firestore.DELETE_FIELD:
+                continue
+            cleaned[key] = (
+                FirestoreRepoBase._omit_delete_fields(nested)
+                if isinstance(nested, dict)
+                else nested
+            )
+        return cleaned
 
     @staticmethod
     def _is_private_user_setting_key(key: str) -> bool:
@@ -226,6 +258,10 @@ class FirestoreRepoBase:
             status=data.get("status", "ended"),
             created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
             ended_at=self._coerce_datetime(data.get("endedAt")),
+            updated_at=(
+                self._coerce_datetime(data.get("updatedAt"))
+                or self._coerce_datetime(data.get("lastActiveAt"))
+            ),
             title=title.strip() if isinstance(title, str) and title.strip() else "Untitled session",
             summary=summary if isinstance(summary, str) else None,
             message_count=int(data.get("messageCount", 0)),
@@ -397,8 +433,8 @@ class FirestoreRepoBase:
             description=data.get("description") if isinstance(data.get("description"), str) else "",
             source_session_id=(
                 data.get("sourceSessionId")
-                if isinstance(data.get("sourceSessionId"), str)
-                else ""
+                if isinstance(data.get("sourceSessionId"), str) and data.get("sourceSessionId")
+                else None
             ),
             source_run_id=(
                 data.get("sourceRunId")
@@ -411,6 +447,7 @@ class FirestoreRepoBase:
             created_at=self._coerce_datetime(data.get("createdAt")) or utcnow(),
             updated_at=self._coerce_datetime(data.get("updatedAt")) or utcnow(),
             last_used_at=self._coerce_datetime(data.get("lastUsedAt")),
+            status="draft" if data.get("status") == "draft" else "published",
         )
 
     def _build_stored_integration_connection(

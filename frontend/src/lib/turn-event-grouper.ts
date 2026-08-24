@@ -92,7 +92,8 @@ export type GroupedEvent =
       status: "started" | "progress" | "completed" | "failed";
       detail: string;
       ts: number;
-    };
+    }
+  | { kind: "delegation"; from: string; to: string; ts: number };
 
 export type TaskGroup = {
   id: string;
@@ -116,10 +117,30 @@ export type ArtifactCreatedSegment = {
   ts: number;
 };
 
+export type CanvasDocumentSegment = {
+  kind: "canvas_document";
+  document: Record<string, unknown>;
+  ts: number;
+};
+
+export type TemplateDraftSegment = {
+  kind: "template_draft";
+  template_id: string;
+  status?: "draft" | "published";
+  name?: string;
+  description?: string;
+  instructions?: string;
+  input_fields?: unknown;
+  dismissed?: boolean;
+  ts: number;
+};
+
 export type TurnEventSegment =
   | { kind: "task_group"; data: TaskGroup; ts: number }
   | GenerativeUiSegment
-  | ArtifactCreatedSegment;
+  | ArtifactCreatedSegment
+  | CanvasDocumentSegment
+  | TemplateDraftSegment;
 
 const FILTERED_TYPES = new Set([
   "agent_complete",
@@ -136,6 +157,8 @@ const FILTERED_TYPES = new Set([
   "step_failed",
   "todo_list_updated",
   "ui_action",
+  "sandbox_terminal",
+  "sandbox_editor",
   "vnc_url",
   "transcript",
 ]);
@@ -175,6 +198,41 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         segments.push({
           kind: "artifact_created",
           artifact,
+          ts: event.ts,
+        });
+      }
+      continue;
+    }
+
+    if (event.type === "canvas_document") {
+      finalizeTask();
+      const document =
+        event.document && typeof event.document === "object"
+          ? (event.document as Record<string, unknown>)
+          : null;
+      if (document) {
+        segments.push({
+          kind: "canvas_document",
+          document,
+          ts: event.ts,
+        });
+      }
+      continue;
+    }
+
+    if (event.type === "template_draft") {
+      finalizeTask();
+      const templateId = typeof event.template_id === "string" ? event.template_id : "";
+      if (templateId) {
+        segments.push({
+          kind: "template_draft",
+          template_id: templateId,
+          status: event.status === "published" ? "published" : "draft",
+          name: typeof event.name === "string" ? event.name : "",
+          description: typeof event.description === "string" ? event.description : "",
+          instructions: typeof event.instructions === "string" ? event.instructions : "",
+          input_fields: event.input_fields,
+          dismissed: Boolean(event.dismissed),
           ts: event.ts,
         });
       }
@@ -463,6 +521,26 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         kind: "error",
         message: String(event.message || "Failed"),
         code: typeof event.code === "string" ? event.code : undefined,
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (event.type === "agent_delegation") {
+      if (!currentTask) {
+        taskIndex++;
+        currentTask = {
+          id: `task-${taskIndex}-${event.ts}`,
+          title: "Agent handoff",
+          status: "running",
+          steps: [],
+          ts: event.ts,
+        };
+      }
+      currentTask.steps.push({
+        kind: "delegation",
+        from: String(event.from || ""),
+        to: String(event.to || ""),
         ts: event.ts,
       });
       continue;

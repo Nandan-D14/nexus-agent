@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { Calendar, Dialog, Popover } from "react-aria-components";
-import type { CalendarDate } from "@internationalized/date";
+import type { CalendarDate, DateValue } from "@internationalized/date";
 import { RiCalendarLine } from "@remixicon/react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button } from "@/components/base/buttons/button";
@@ -141,7 +141,16 @@ export function DatePicker({
         className={popoverClassName}
       >
         <Dialog aria-label={ariaLabel} className="outline-none">
-          <Calendar key={openKey} aria-label={ariaLabel} value={pendingValue} onChange={setPendingValue}>
+          {/* Two physical copies of @internationalized/date (3.12.1 vs 3.12.2 via @heroui/react)
+              make CalendarDate nominally incompatible. `overrides` pins CI to 3.12.1;
+              this cast unblocks local builds until node_modules is re-deduped. */}
+          {/* @ts-expect-error duplicate @internationalized/date copies cause spurious DateValue mismatch; safe at runtime */}
+          <Calendar<DateValue>
+            key={openKey}
+            aria-label={ariaLabel}
+            value={pendingValue as unknown as DateValue | null}
+            onChange={(v) => setPendingValue(v as unknown as CalendarDate | null)}
+          >
             <div className="flex flex-col pt-2 pr-2 pb-3 pl-2">
               <MonthPanel offset={0} showPrev showNext />
               <div className="flex items-center justify-between pt-3 pr-4 pl-4">

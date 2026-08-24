@@ -1,5 +1,4 @@
 from .health import router as health_router
-from .beta import router as beta_router
 from .ws import router as ws_router
 from .auth import router as auth_router
 from .skills import router as skills_router
@@ -14,7 +13,6 @@ from .worker import router as worker_router
 
 __all__ = [
     "health_router",
-    "beta_router",
     "ws_router",
     "auth_router",
     "skills_router",

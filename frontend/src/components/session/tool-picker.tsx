@@ -9,7 +9,7 @@ import { useState } from "react";
 import Image from "next/image";
 import { Search, Globe, Check, Wrench } from "lucide-react";
 import type { SessionConnector } from "@/lib/session-utils";
-import { providerLogo } from "@/lib/session-utils";
+import { invertLogoInDark, providerLogo } from "@/lib/connectors";
 import { TOOL_CAPABILITIES } from "@/lib/tool-catalog";
 import { cx } from "@/utils/cx";
 
@@ -249,7 +249,7 @@ export function ToolPickerPanel({
                       onToggle={() => onToggleConnector(connector.connection_id)}
                       logoSrc={logo}
                       logoAlt={connector.provider}
-                      invertLogo={connector.provider === "github"}
+                      invertLogo={invertLogoInDark(connector.provider)}
                     />
                   );
                 })}

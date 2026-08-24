@@ -46,7 +46,9 @@ EPHEMERAL_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "pong",
         "voice_status",
-        "sandbox_status",  # current sandbox status is recomputed on resume
+        "sandbox_status",
+        "agent_delta",
+        "agent_stream_end",
     }
 )
 

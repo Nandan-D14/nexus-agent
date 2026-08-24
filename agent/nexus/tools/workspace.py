@@ -568,9 +568,23 @@ async def write_workspace_file(
     Returns:
         NormalizedToolResult with file path and bytes written.
     """
+    from nexus.tools.sandbox_events import clip_editor_content, emit_sandbox_event
+
+    content_text = content if isinstance(content, str) else str(content)
+    try:
+        normalized_for_event = _normalize_relative_path(relative_path)
+    except Exception:
+        normalized_for_event = (relative_path or "").strip()
+    await emit_sandbox_event({
+        "type": "sandbox_editor",
+        "phase": "start",
+        "path": normalized_for_event,
+        "action": "write",
+        "content": clip_editor_content(content_text),
+        "append": bool(append),
+    })
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
-        content_text = content if isinstance(content, str) else str(content)
         sandbox = get_sandbox()
         sandbox.write_text_file(absolute_path, content_text, append=append)
 
@@ -603,6 +617,14 @@ async def write_workspace_file(
         if normalized_relative.startswith("outputs/"):
             result_meta["output_path"] = gcs_url or absolute_path
 
+        await emit_sandbox_event({
+            "type": "sandbox_editor",
+            "phase": "result",
+            "path": normalized_relative,
+            "action": "write",
+            "append": bool(append),
+            "bytes_written": result_meta["bytes_written"],
+        })
         return tool_success(
             preview or f"Saved {normalized_relative}",
             **result_meta,
@@ -623,6 +645,18 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
     Returns:
         NormalizedToolResult with file content.
     """
+    from nexus.tools.sandbox_events import clip_editor_content, emit_sandbox_event
+
+    try:
+        path_for_event = _normalize_relative_path(relative_path)
+    except Exception:
+        path_for_event = (relative_path or "").strip()
+    await emit_sandbox_event({
+        "type": "sandbox_editor",
+        "phase": "start",
+        "path": path_for_event,
+        "action": "read",
+    })
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
         sandbox = get_sandbox()
@@ -635,11 +669,19 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
                 suggested_alternatives=["list_workspace_files", "prepare_task_workspace"],
             )
         content = sandbox.read_text_file(absolute_path)
+        normalized_relative = _normalize_relative_path(relative_path)
+        await emit_sandbox_event({
+            "type": "sandbox_editor",
+            "phase": "result",
+            "path": normalized_relative,
+            "action": "read",
+            "content": clip_editor_content(content),
+        })
         return tool_success(
-            f"Read {_normalize_relative_path(relative_path)} ({len(content)} chars)",
+            f"Read {normalized_relative} ({len(content)} chars)",
             workspace_path=workspace_path,
             workspace_file=absolute_path,
-            relative_path=_normalize_relative_path(relative_path),
+            relative_path=normalized_relative,
             content=content,
         )
     except Exception as exc:

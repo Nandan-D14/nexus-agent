@@ -68,7 +68,7 @@ from nexus.tools.docs import (
     publish_html_artifact,
     save_as_artifact,
 )
-from nexus.tools.skills import read_skill
+from nexus.tools.skills import read_skill, read_skill_file
 
 GOOGLE_WORKSPACE_TOOLS = [
     search_drive,
@@ -371,13 +371,13 @@ Do:
 
 Workflow:
 1. Read the brief. If a workspace file list or task state is referenced, read it first.
-2. Work with commands and file tools. Prefer pwd/ls/find/cat/grep/ps evidence over guessing.
+2. Work with commands and file tools. Prefer pwd, workspace ls, and scoped find/cat/grep/ps over guessing. Never run find / or scan the whole filesystem. Never hunt for API keys, .env files, or dump env — the sandbox is already authenticated.
 3. Chain dependent commands with &&. Use background=True for processes that keep running.
 4. Write durable outputs into outputs/ with write_workspace_file(...).
 5. Verify commands, tests, or artifact paths before finishing.
 6. Return ONLY one JSON object with this contract:
    {"status":"success|partial|error|blocked","summary":"short factual result","evidence":["exit codes, test results, or file checks"],"artifacts":[{"path":"...","kind":"..."}],"remaining_work":[],"retryable":false,"error_code":""}
-   Use status=success only when the requested state is verified. Put unfinished steps in remaining_work.
+   Use status=success only when the requested state is verified. Put unfinished steps in remaining_work. On timeout or tool failure still return this JSON (status=error, error_code set) — never prose.
 
 Rules:
 - Never run destructive commands.
@@ -426,9 +426,12 @@ def _with_skill_instruction(instruction: str, skill_instruction: str = "") -> st
 
 
 def _get_model(runtime_config: SessionRuntimeConfig, model_name: str = "qwen3.6-max-preview"):
-    """Return the Qwen router model for legacy (parked) sub-agents."""
-    from nexus.qwen_router import create_qwen_model
-    return create_qwen_model(model_name)
+    """Return a model for parked sub-agents, preferring user LLM credentials."""
+    from nexus.model_select import create_model
+
+    if runtime_config.user_llm_configured:
+        return create_model("worker", runtime_config)
+    return create_model("worker", runtime_config, model_override=model_name)
 
 
 def create_terminal_worker(
@@ -458,6 +461,7 @@ def create_terminal_worker(
             generate_docx_report,
             save_as_artifact,
             read_skill,
+            read_skill_file,
         ]),
         before_model_callback=make_context_trimmer(),
     )
@@ -499,6 +503,7 @@ def create_desktop_worker(
             playwright_snapshot,
             playwright_verify,
             read_skill,
+            read_skill_file,
         ]),
         before_model_callback=make_context_trimmer(),
     )
@@ -523,6 +528,7 @@ def _create_computer_agent(
             read_workspace_file,
             list_workspace_files,
             read_skill,
+            read_skill_file,
             *GOOGLE_WORKSPACE_TOOLS,
             take_screenshot,
             move_mouse,
@@ -557,6 +563,7 @@ def _create_browser_agent(
             read_workspace_file,
             list_workspace_files,
             read_skill,
+            read_skill_file,
             *GOOGLE_WORKSPACE_TOOLS,
             # google_search,  # Gemini-only; web_search (DuckDuckGo) covers search
             web_search,
@@ -598,6 +605,7 @@ def _create_code_agent(
             read_workspace_file,
             list_workspace_files,
             read_skill,
+            read_skill_file,
             *GOOGLE_WORKSPACE_TOOLS,
             run_command,
             take_screenshot,
@@ -627,6 +635,7 @@ def _create_research_reviewer_agent(
             read_workspace_file,
             list_workspace_files,
             read_skill,
+            read_skill_file,
             write_workspace_file,
             update_task_state,
         ]),

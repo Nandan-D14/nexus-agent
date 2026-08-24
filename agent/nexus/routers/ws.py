@@ -6,26 +6,15 @@
 from __future__ import annotations
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from fastapi import APIRouter, WebSocket
 
-from nexus.auth import AuthenticatedUser
-from nexus.beta_access import normalize_beta_profile, beta_access_enabled, beta_can_access_app, build_beta_error_payload
-from nexus.dependencies import get_session_manager, get_history_repository, get_ws_connect_limiter, RateLimiter
+from nexus.dependencies import get_session_manager, get_history_repository, get_ws_connect_limiter
 from nexus.runtime_config import resolve_session_runtime_config
 from nexus.ws_handler import handle_websocket
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def _ensure_beta_access(user_settings: dict | None) -> None:
-    if not beta_access_enabled():
-        return
-    profile = normalize_beta_profile(user_settings)
-    if beta_can_access_app(profile):
-        return
-    raise HTTPException(status_code=403, detail=build_beta_error_payload(profile))
-
 
 def _ticket_candidates(ws: WebSocket) -> list[tuple[str, str | None]]:
     query_ticket = str(ws.query_params.get("ticket") or "").strip()
@@ -83,14 +72,12 @@ async def websocket_endpoint(
         return
     try:
         user_settings = await history_repository.get_user_settings(valid_uid)
-        _ensure_beta_access(user_settings)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": str(exc.detail)}
+    except Exception:
         await _reject_ws(
             ws,
             code=4403,
             reason="WS_FORBIDDEN",
-            message=str(detail.get("detail") or "Beta access required"),
+            message="Could not load account settings. Retry in a moment.",
         )
         return
 

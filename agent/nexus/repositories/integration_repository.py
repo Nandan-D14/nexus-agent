@@ -1,6 +1,6 @@
 # Proprietary and non-commercial use only.
 
-"""Integration connection persistence (MCP, GitHub, Tavily, TinyFish, Thesys, Google)."""
+"""Integration connection persistence (MCP, Exa, GitHub, Tavily, TinyFish, Thesys, Google)."""
 
 from __future__ import annotations
 
@@ -48,6 +48,126 @@ class IntegrationRepository(FirestoreRepoBase):
             name,
             url,
             bearer_token,
+            enabled,
+            tools,
+            resources,
+            status,
+            last_error,
+            latency_ms,
+        )
+
+    async def upsert_exa_connection(
+        self,
+        uid: str,
+        *,
+        url: str,
+        bearer_token: str = "",
+        refresh_token: str = "",
+        token_expires_at: str | None = None,
+        oauth_client_id: str = "",
+        oauth_client_secret: str = "",
+        oauth_token_endpoint: str = "",
+        enabled: bool = True,
+        tools: list[dict[str, Any]] | None = None,
+        resources: list[dict[str, Any]] | None = None,
+        status: str = "needs_setup",
+        last_error: str | None = None,
+        latency_ms: int | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_oauth_mcp_connection_sync,
+            uid,
+            "exa",
+            "exa",
+            "Exa",
+            url,
+            bearer_token,
+            refresh_token,
+            token_expires_at,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_token_endpoint,
+            enabled,
+            tools,
+            resources,
+            status,
+            last_error,
+            latency_ms,
+        )
+
+    async def upsert_treg_connection(
+        self,
+        uid: str,
+        *,
+        url: str,
+        bearer_token: str = "",
+        refresh_token: str = "",
+        token_expires_at: str | None = None,
+        oauth_client_id: str = "",
+        oauth_client_secret: str = "",
+        oauth_token_endpoint: str = "",
+        enabled: bool = True,
+        tools: list[dict[str, Any]] | None = None,
+        resources: list[dict[str, Any]] | None = None,
+        status: str = "needs_setup",
+        last_error: str | None = None,
+        latency_ms: int | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_oauth_mcp_connection_sync,
+            uid,
+            "treg",
+            "treg",
+            "Treg",
+            url,
+            bearer_token,
+            refresh_token,
+            token_expires_at,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_token_endpoint,
+            enabled,
+            tools,
+            resources,
+            status,
+            last_error,
+            latency_ms,
+        )
+
+    async def upsert_oauth_mcp_connection(
+        self,
+        uid: str,
+        *,
+        connection_id: str,
+        provider: str,
+        name: str,
+        url: str,
+        bearer_token: str = "",
+        refresh_token: str = "",
+        token_expires_at: str | None = None,
+        oauth_client_id: str = "",
+        oauth_client_secret: str = "",
+        oauth_token_endpoint: str = "",
+        enabled: bool = True,
+        tools: list[dict[str, Any]] | None = None,
+        resources: list[dict[str, Any]] | None = None,
+        status: str = "needs_setup",
+        last_error: str | None = None,
+        latency_ms: int | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_oauth_mcp_connection_sync,
+            uid,
+            connection_id,
+            provider,
+            name,
+            url,
+            bearer_token,
+            refresh_token,
+            token_expires_at,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_token_endpoint,
             enabled,
             tools,
             resources,
@@ -105,6 +225,58 @@ class IntegrationRepository(FirestoreRepoBase):
             self._upsert_tinyfish_connection_sync,
             uid,
             api_key,
+            enabled,
+            status,
+            last_error,
+        )
+
+    async def upsert_vyora_connection(
+        self,
+        uid: str,
+        *,
+        api_key: str,
+        enabled: bool = True,
+        status: str = "connected",
+        last_error: str | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_native_api_key_connection_sync,
+            uid,
+            "vyora",
+            "vyora",
+            "Vyora",
+            api_key,
+            [
+                {"name": "vyora_list_agents", "description": "List Vyora voice agents."},
+                {"name": "vyora_list_numbers", "description": "List Vyora phone numbers."},
+                {"name": "vyora_start_call", "description": "Trigger an outbound Vyora call."},
+                {"name": "vyora_list_calls", "description": "List Vyora calls."},
+                {"name": "vyora_get_call", "description": "Get a Vyora call by id."},
+            ],
+            enabled,
+            status,
+            last_error,
+        )
+
+    async def upsert_openai_connection(
+        self,
+        uid: str,
+        *,
+        api_key: str,
+        enabled: bool = True,
+        status: str = "connected",
+        last_error: str | None = None,
+    ) -> StoredIntegrationConnection:
+        return await asyncio.to_thread(
+            self._upsert_native_api_key_connection_sync,
+            uid,
+            "openai",
+            "openai",
+            "OpenAI",
+            api_key,
+            [
+                {"name": "openai_web_search", "description": "Search the web with OpenAI Responses."},
+            ],
             enabled,
             status,
             last_error,
@@ -323,6 +495,75 @@ class IntegrationRepository(FirestoreRepoBase):
             private_payload,
         )
 
+    def _upsert_oauth_mcp_connection_sync(
+        self,
+        uid: str,
+        connection_id: str,
+        provider: str,
+        name: str,
+        url: str,
+        bearer_token: str,
+        refresh_token: str,
+        token_expires_at: str | None,
+        oauth_client_id: str,
+        oauth_client_secret: str,
+        oauth_token_endpoint: str,
+        enabled: bool,
+        tools: list[dict[str, Any]] | None,
+        resources: list[dict[str, Any]] | None,
+        status: str,
+        last_error: str | None,
+        latency_ms: int | None,
+    ) -> StoredIntegrationConnection:
+        now = utcnow()
+        existing = self._integration_private_ref(uid, connection_id).get()
+        existing_data = existing.to_dict() if existing.exists else {}
+        private_payload = {
+            **existing_data,
+            "ownerId": uid,
+            "connectorType": "mcp_remote_http",
+            "provider": provider,
+            "name": name,
+            "url": url,
+            "authType": "oauth",
+            "enabled": enabled,
+            "tools": tools if tools is not None else existing_data.get("tools") or [],
+            "resources": resources if resources is not None else existing_data.get("resources") or [],
+            "status": status,
+            "lastError": last_error,
+            "lastCheckedAt": now,
+            "updatedAt": now,
+        }
+        if bearer_token:
+            private_payload["bearerToken"] = bearer_token
+        if refresh_token:
+            private_payload["refreshToken"] = refresh_token
+        if token_expires_at:
+            private_payload["tokenExpiresAt"] = token_expires_at
+        if oauth_client_id:
+            private_payload["oauthClientId"] = oauth_client_id
+        if oauth_client_secret:
+            private_payload["oauthClientSecret"] = oauth_client_secret
+        if oauth_token_endpoint:
+            private_payload["oauthTokenEndpoint"] = oauth_token_endpoint
+        if latency_ms is not None:
+            private_payload["latencyMs"] = latency_ms
+        if not existing_data.get("createdAt"):
+            private_payload["createdAt"] = now
+
+        public_payload = self._public_integration_payload(private_payload)
+        batch = self._db.batch()
+        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        batch.commit()
+        self._sync_integration_summary_sync(uid)
+        return self._build_stored_integration_connection(
+            uid,
+            connection_id,
+            public_payload,
+            private_payload,
+        )
+
     def _upsert_github_connection_sync(
         self,
         uid: str,
@@ -431,6 +672,49 @@ class IntegrationRepository(FirestoreRepoBase):
             "tools": [
                 {"name": "tinyfish_web_agent", "description": "Use TinyFish to automate browser tasks on a website using natural language goals."},
             ],
+            "resources": [],
+            "status": status,
+            "lastError": last_error,
+            "lastCheckedAt": now,
+            "updatedAt": now,
+        }
+        existing = self._integration_private_ref(uid, connection_id).get()
+        existing_data = existing.to_dict() if existing.exists else {}
+        private_payload["createdAt"] = existing_data.get("createdAt") or now
+        public_payload = self._public_integration_payload(private_payload)
+        batch = self._db.batch()
+        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
+        batch.commit()
+        self._sync_integration_summary_sync(uid)
+        return self._build_stored_integration_connection(
+            uid,
+            connection_id,
+            public_payload,
+            private_payload,
+        )
+
+    def _upsert_native_api_key_connection_sync(
+        self,
+        uid: str,
+        connection_id: str,
+        provider: str,
+        name: str,
+        api_key: str,
+        tools: list[dict[str, Any]],
+        enabled: bool,
+        status: str,
+        last_error: str | None,
+    ) -> StoredIntegrationConnection:
+        now = utcnow()
+        private_payload = {
+            "ownerId": uid,
+            "connectorType": "native",
+            "provider": provider,
+            "name": name,
+            "apiKey": api_key,
+            "enabled": enabled,
+            "tools": tools,
             "resources": [],
             "status": status,
             "lastError": last_error,

@@ -41,6 +41,8 @@
   --radius-xl: 0.75rem;
   --radius-2xl: 1rem;
   --radius-3xl: 1.5rem;
+
+  --animate-shiny-text: shiny-text 8s infinite;
 }
 
 @layer base {
@@ -269,6 +271,37 @@
 }
 
 /* Animations */
+@keyframes shiny-text {
+  0%,
+  90%,
+  100% {
+    background-position: calc(-100% - var(--shiny-width)) 0;
+  }
+  30%,
+  60% {
+    background-position: calc(100% + var(--shiny-width)) 0;
+  }
+}
+
+@keyframes logo-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.logo-marquee {
+  animation: logo-marquee 32s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .logo-marquee {
+    animation: none;
+  }
+}
+
 @keyframes mesh-flow {
   0% { background-position: 0% 50%; }
   50% { background-position: 100% 50%; }
@@ -327,6 +360,16 @@
 
 .markdown pre {
   @apply my-5 p-5 rounded-2xl overflow-x-auto bg-zinc-100 dark:bg-[#0d0d0f] border border-zinc-300 dark:border-zinc-800/80 shadow-2xl;
+}
+
+.markdown .markdown-code-block {
+  position: relative;
+  margin: 1.25rem 0;
+}
+
+.markdown .markdown-code-block pre {
+  margin: 0;
+  padding-right: 3rem;
 }
 
 .markdown pre code {

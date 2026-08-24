@@ -19,7 +19,6 @@ from google.cloud.firestore_v1 import FieldFilter
 
 from nexus._firestore_base import FirestoreRepoBase
 from nexus.auth import AuthenticatedUser
-from nexus.beta_access import normalize_beta_profile
 from nexus.billing import build_quota_payload, calculate_usage_credits
 from nexus.config import settings
 from nexus.firebase import get_firestore_client
@@ -51,7 +50,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
     The shared Firestore client, document-ref helpers, value coercion, and
     ``StoredX`` projection builders live on :class:`FirestoreRepoBase`.
 
-    Cleanly-separable concerns (users, integrations, beta access, workflow
+    Cleanly-separable concerns (users, integrations, workflow
     templates, sandbox state, audit/GDPR) are delegated to focused
     repositories under :mod:`nexus.repositories`. The interlinked
     session/run/step/artifact/usage/task aggregate remains defined on this
@@ -62,7 +61,6 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
     def __init__(self) -> None:
         from nexus.repositories import (
             AuditRepository,
-            BetaRepository,
             IntegrationRepository,
             SandboxStateRepository,
             UserRepository,
@@ -71,7 +69,6 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
 
         self._users = UserRepository()
         self._integrations = IntegrationRepository()
-        self._beta = BetaRepository()
         self._templates = WorkflowTemplateRepository()
         self._sandbox_state = SandboxStateRepository()
         self._audit = AuditRepository()
@@ -79,7 +76,6 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         self._delegates = (
             self._users,
             self._integrations,
-            self._beta,
             self._templates,
             self._sandbox_state,
             self._audit,

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/base/buttons/button";
 import { fetchUserSettings, patchAppSettings, readAppSettings } from "@/lib/user-settings";
+import { APP_TEMPLATES } from "@/lib/app-paths";
 import { SettingsCard, SettingsSectionLabel } from "./settings-rows";
 
 export function SettingsRules({ onSaved }: { onSaved?: () => void } = {}) {
@@ -79,7 +80,7 @@ export function SettingsRules({ onSaved }: { onSaved?: () => void } = {}) {
           variant="secondary"
           size="small"
           onClick={() => {
-            window.location.assign("/templates");
+            window.location.assign(APP_TEMPLATES);
           }}
         >
           Open templates

@@ -12,7 +12,7 @@ import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel"
 export const metadata: Metadata = {
   title: "About — CoComputer",
   description:
-    "Learn about CoComputer, the AI desktop agent that bridges language and native Linux environments.",
+    "CoComputer gives an agent a real Linux computer in the browser — chat, live desktop, and the connectors you opt in.",
 };
 
 const principles = [
@@ -44,13 +44,13 @@ export default function AboutPage() {
                 Company
               </p>
               <h1 className="font-serif text-3xl md:text-5xl text-white mb-6 leading-[1.15]">
-                Building the agent that can actually use a computer
+                Give an agent a real computer
               </h1>
               <p className="text-blue-100 text-lg leading-relaxed max-w-2xl mx-auto text-balance">
-                CoComputer is an autonomous cloud desktop agent from Agentic
-                Company. We bridge human language and native Linux environments
-                so developers and teams can research, automate, and ship with a
-                real workspace — not just another chatbot.
+                CoComputer is a cloud workspace from Agentic Company: chat on
+                one side, an isolated Linux desktop on the other. The agent can
+                see the screen, run the terminal, browse, and use the tools you
+                connect — not just another chatbot.
               </p>
             </MarketingHeroPanel>
           </div>
@@ -58,7 +58,7 @@ export default function AboutPage() {
 
         <section className="py-12 px-6">
           <div className="max-w-3xl mx-auto space-y-6 text-muted-foreground leading-relaxed">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+            <h2 className="font-serif text-2xl tracking-tight text-foreground">
               Our story
             </h2>
             <p>
@@ -77,7 +77,7 @@ export default function AboutPage() {
 
         <section className="py-12 px-6">
           <div className="max-w-6xl mx-auto">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground text-center mb-10">
+            <h2 className="mb-10 text-center font-serif text-2xl tracking-tight text-foreground">
               What we believe
             </h2>
             <div className="grid md:grid-cols-3 gap-6">
@@ -103,7 +103,7 @@ export default function AboutPage() {
 
         <section className="py-16 px-6">
           <div className="max-w-3xl mx-auto text-center rounded-2xl border border-zinc-100 dark:border-card-border bg-zinc-50/80 dark:bg-zinc-900/40 px-8 py-12">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground mb-3">
+            <h2 className="mb-3 font-serif text-2xl tracking-tight text-foreground">
               Want to work with us?
             </h2>
             <p className="text-muted-foreground mb-6">

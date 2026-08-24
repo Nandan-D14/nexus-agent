@@ -5,14 +5,14 @@
 
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { useToast } from "@/components/toast-provider";
 import { useSettings } from "./settings-context";
 
 import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
-import { isBetaBlockedCode } from "./beta-access";
+import { invalidateSessionLists } from "./queries/invalidate";
 import type {
   ArchivedMessage,
   HistoryReuseMode,
@@ -71,9 +71,9 @@ export interface UseSessionReturn {
 }
 
 export function useSession(): UseSessionReturn {
-  const router = useRouter();
   const { toast } = useToast();
   const { openSettings } = useSettings();
+  const queryClient = useQueryClient();
   const [isCreating, setIsCreating] = useState(false);
   const [isGetting, setIsGetting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -270,12 +270,6 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setCreateError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
@@ -285,7 +279,9 @@ export function useSession(): UseSessionReturn {
         throw new Error(apiError.message);
       }
 
-      return (await res.json()) as SessionData;
+      const session = (await res.json()) as SessionData;
+      invalidateSessionLists(queryClient);
+      return session;
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to create session";
@@ -294,7 +290,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [openSettings, router, toast]);
+  }, [openSettings, queryClient, toast]);
 
   const continueSession = useCallback(async (sessionId: string): Promise<SessionData | null> => {
     setIsCreating(true);
@@ -310,12 +306,6 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setCreateError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
@@ -334,7 +324,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [openSettings, router, toast]);
+  }, [openSettings, toast]);
 
   const getSession = useCallback(async (sessionId: string) => {
     setIsGetting(true);
@@ -447,12 +437,6 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setReuseError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           toast(apiError.message, "error");
           openSettings("api");
@@ -470,7 +454,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [openSettings, router, toast]);
+  }, [openSettings, toast]);
 
   const refreshTicket = useCallback(async (sessionId: string) => {
     setIsRefreshing(true);
@@ -486,12 +470,6 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setRefreshError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setRefreshError(apiError.message);
           toast(apiError.message, "error");
@@ -511,7 +489,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsRefreshing(false);
     }
-  }, [openSettings, router, toast]);
+  }, [openSettings, toast]);
 
   const destroySession = useCallback(async (sessionId: string) => {
     setIsDestroying(true);
@@ -529,6 +507,7 @@ export function useSession(): UseSessionReturn {
         throw new Error(await parseApiError(res));
       }
 
+      invalidateSessionLists(queryClient);
       return true;
     } catch (err) {
       const msg =
@@ -538,7 +517,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsDestroying(false);
     }
-  }, []);
+  }, [queryClient]);
 
   const result = {
     createSession,

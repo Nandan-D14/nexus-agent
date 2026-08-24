@@ -25,6 +25,7 @@ class StoredSession:
     status: str
     created_at: datetime
     ended_at: datetime | None = None
+    updated_at: datetime | None = None
     title: str = "Untitled session"
     summary: str | None = None
     message_count: int = 0
@@ -108,7 +109,7 @@ class StoredWorkflowTemplate:
     owner_id: str
     name: str
     description: str
-    source_session_id: str
+    source_session_id: str | None
     source_run_id: str | None
     instructions: str
     input_fields: list[dict[str, Any]]
@@ -116,6 +117,7 @@ class StoredWorkflowTemplate:
     created_at: datetime
     updated_at: datetime
     last_used_at: datetime | None = None
+    status: str = "published"
 
 
 @dataclass

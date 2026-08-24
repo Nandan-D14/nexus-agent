@@ -568,7 +568,7 @@ class SubagentSupervisor:
         from nexus.tools.docs import publish_html_artifact
         from nexus.tools.integrations import tavily_search
         from nexus.tools.retrieval import search_sources
-        from nexus.tools.skills import read_skill
+        from nexus.tools.skills import read_skill, read_skill_file
         from nexus.tools.web import scrape_web_page, web_search
         from nexus.tools.workspace import (
             list_workspace_files,
@@ -578,7 +578,7 @@ class SubagentSupervisor:
         )
 
         lowered = type_name.lower()
-        tools = [read_skill, read_task_state, read_workspace_file, list_workspace_files]
+        tools = [read_skill, read_skill_file, read_task_state, read_workspace_file, list_workspace_files]
         if any(part in lowered for part in ("research", "browser", "web", "search")):
             tools.extend([web_search, scrape_web_page, tavily_search, search_sources, write_workspace_file])
         if any(part in lowered for part in ("code", "terminal", "shell")):

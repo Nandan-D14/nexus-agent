@@ -23,6 +23,9 @@ import {
 } from "@/components/ai-elements/artifact";
 import { ArtifactIconTile, artifactBadge } from "./artifact-icon";
 import { DocumentViewerModal } from "./document-viewer-modal";
+import { CanvasHandleCard } from "@/components/session/canvas-handle-card";
+import { useSessionCanvas } from "@/lib/session-canvas-context";
+import { canvasKindForArtifact, isCanvasArtifact } from "@/lib/session-canvas";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -33,15 +36,18 @@ type Props = {
 
 /**
  * Chat deliverable card: AI Elements Artifact chrome with Preview / Download.
- * Preview opens the full-screen viewer so the chat transcript never reflows.
+ * In a live session, canvas-worthy artifacts open the right-hand document pane.
+ * Elsewhere, preview still uses the full-screen viewer.
  */
 export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
+  const canvas = useSessionCanvas();
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const previewable = canInlinePreview(artifact);
   const badge = artifactBadge(artifact);
+  const openInCanvas = Boolean(canvas) && isCanvasArtifact(artifact);
 
   const handleDownload = useCallback(async () => {
     setLoading(true);
@@ -69,6 +75,20 @@ export function ArtifactAttachmentCard({ artifact, compact = false }: Props) {
     setViewerOpen(false);
     setViewerUrl(null);
   }, []);
+
+  if (openInCanvas && canvas) {
+    return (
+      <CanvasHandleCard
+        kind={canvasKindForArtifact(artifact)}
+        title={artifact.title || "Untitled"}
+        subtitle={artifact.path || artifact.title || badge}
+        artifact={artifact}
+        onOpen={() => canvas.openFromArtifact(artifact, "user")}
+        onDownload={handleDownload}
+        downloading={loading}
+      />
+    );
+  }
 
   const descriptionParts = [
     badge,

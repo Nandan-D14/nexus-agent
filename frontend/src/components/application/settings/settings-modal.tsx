@@ -29,8 +29,7 @@ import { SettingsTools } from "./settings-tools";
 import { SettingsVoice } from "./settings-voice";
 
 /**
- * App-wide settings modal. Rail is glass so the landing landscape shows
- * through the outer container; the content pane stays opaque to read.
+ * App-wide settings modal. Rail and content pane are both opaque.
  */
 
 export type SettingsPage =
@@ -175,12 +174,12 @@ export function SettingsModal({
         tabIndex={-1}
         className={cx(
           "relative flex h-[614px] max-h-[calc(100dvh-32px)] w-[871px] max-w-[calc(100vw-32px)]",
-          "overflow-clip rounded-3xl bg-transparent shadow-xs outline-none ring-1 ring-white/25 dark:ring-white/15",
+          "overflow-clip rounded-3xl bg-background-full shadow-xs outline-none ring-1 ring-border-button-default",
         )}
       >
         <nav
           aria-label="Settings sections"
-          className="flex w-[274px] shrink-0 flex-col gap-5 overflow-y-auto rounded-l-3xl border-r border-white/20 bg-white/45 p-2.5 backdrop-blur-2xl dark:border-white/10 dark:bg-black/30"
+          className="flex w-[274px] shrink-0 flex-col gap-5 overflow-y-auto rounded-l-3xl border-r border-separator-border bg-background-secondary-default p-2.5"
         >
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="flex w-full flex-col gap-1.5 pt-1">
@@ -229,7 +228,7 @@ export function SettingsModal({
               page === "storage" ? "pb-1.5" : "pb-3",
             )}
           >
-            <h2 className="text-title-3-medium text-text-primary">{PAGE_TITLES[page]}</h2>
+            <h2 className="font-serif text-title-3-medium text-text-primary">{PAGE_TITLES[page]}</h2>
             <button
               type="button"
               aria-label="Close settings"

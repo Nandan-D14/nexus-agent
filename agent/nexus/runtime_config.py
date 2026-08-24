@@ -15,6 +15,15 @@ from google.genai import Client, types
 
 from nexus.config import settings
 from nexus.crypto import decrypt_secret, encrypt_secret
+from nexus.llm_providers import (
+    e2b_setup_public,
+    llm_config_complete,
+    normalize_api_base,
+    normalize_llm_provider,
+    public_provider_catalog,
+    resolve_api_base,
+    resolve_models,
+)
 from nexus.policy import normalize_autonomy_mode
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,13 @@ _E2B_CIPHERTEXT_FIELD = "e2bApiKeyEncrypted"
 _GEMINI_CIPHERTEXT_FIELD = "geminiApiKeyEncrypted"
 _GEMINI_PROVIDER_FIELD = "geminiProvider"
 _SHARED_ACCESS_CODE_HASH_FIELD = "sharedAccessCodeHash"
+_LLM_PROVIDER_FIELD = "llmProvider"
+_LLM_CIPHERTEXT_FIELD = "llmApiKeyEncrypted"
+_LLM_MODEL_FIELD = "llmModel"
+_LLM_VISION_MODEL_FIELD = "llmVisionModel"
+_LLM_API_BASE_FIELD = "llmApiBase"
+_LLM_MODEL_MAX_LEN = 200
+_LLM_API_BASE_MAX_LEN = 500
 
 
 @dataclass(frozen=True)
@@ -33,6 +49,11 @@ class ByokStatus:
     e2b_key_set: bool
     gemini_key_set: bool
     gemini_provider: GeminiProvider
+    llm_key_set: bool
+    llm_provider: str
+    llm_model: str
+    llm_vision_model: str
+    llm_api_base: str
     missing: tuple[str, ...]
     vertex_configured: bool
     shared_access_enabled: bool
@@ -81,6 +102,11 @@ class SessionRuntimeConfig:
     qwen_vision_model: str = ""
     qwen_vision_fallback_models: tuple[str, ...] = ()
     autonomy_mode: str = "manual"
+    llm_provider: str = ""
+    llm_api_key: str = ""
+    llm_api_base: str = ""
+    llm_model: str = ""
+    llm_vision_model: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -102,8 +128,17 @@ class SessionRuntimeConfig:
             f"kilo_model_id='{self.kilo_model_id}', "
             f"kilo_gateway_url='{self.kilo_gateway_url}', "
             f"qwen_planner_model='{self.qwen_planner_model}', "
-            f"qwen_vision_model='{self.qwen_vision_model}')"
+            f"qwen_vision_model='{self.qwen_vision_model}', "
+            f"llm_provider='{self.llm_provider}', "
+            f"llm_api_key='***', "
+            f"llm_api_base='{self.llm_api_base}', "
+            f"llm_model='{self.llm_model}', "
+            f"llm_vision_model='{self.llm_vision_model}')"
         )
+
+    @property
+    def user_llm_configured(self) -> bool:
+        return bool(self.llm_api_key and self.llm_api_base and self.llm_model)
 
     @property
     def use_vertex_ai(self) -> bool:
@@ -151,6 +186,12 @@ def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict
         "qwen_vision_fallback_models": list(runtime_config.qwen_vision_fallback_models),
         "qwen_api_key_set": bool(settings.qwen_api_key),
         "autonomy_mode": runtime_config.autonomy_mode,
+        "llm_provider": runtime_config.llm_provider,
+        "llm_model": runtime_config.llm_model,
+        "llm_vision_model": runtime_config.llm_vision_model,
+        "llm_api_base_set": bool(runtime_config.llm_api_base),
+        "llm_api_key_set": bool(runtime_config.llm_api_key),
+        "user_llm_configured": runtime_config.user_llm_configured,
     }
 
 
@@ -168,9 +209,11 @@ def server_e2b_configured() -> bool:
     return bool(settings.e2b_api_key.strip())
 
 
+def byok_enforced() -> bool:
+    return bool(settings.require_byok)
+
+
 def shared_access_code_configured() -> bool:
-    if settings.model_provider in ("qwen", "bynara", "vultr"):
-        return False
     return bool(settings.shared_access_code.strip())
 
 
@@ -197,38 +240,63 @@ def get_byok_payload(user_settings: Mapping[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+def _clip_stored_text(value: Any, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _resolved_llm_fields(payload: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    """Return provider, api_key, api_base, model, vision_model (with Gemini migration)."""
+    provider = normalize_llm_provider(payload.get(_LLM_PROVIDER_FIELD))
+    llm_key = _decrypt_or_empty(payload.get(_LLM_CIPHERTEXT_FIELD))
+    gemini_key = _decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD))
+    if not provider and gemini_key:
+        provider = "gemini"
+    if not llm_key and provider in ("", "gemini") and gemini_key:
+        llm_key = gemini_key
+        provider = provider or "gemini"
+
+    stored_model = str(payload.get(_LLM_MODEL_FIELD) or "").strip()
+    stored_vision = str(payload.get(_LLM_VISION_MODEL_FIELD) or "").strip()
+    stored_base = str(payload.get(_LLM_API_BASE_FIELD) or "").strip()
+    api_base = ""
+    model = stored_model
+    vision = stored_vision
+    if provider:
+        try:
+            api_base = resolve_api_base(provider, stored_base)
+        except ValueError:
+            api_base = ""
+        model, vision = resolve_models(provider, stored_model, stored_vision)
+    return provider, llm_key, api_base, model, vision
+
+
 def get_byok_status(user_settings: Mapping[str, Any] | None) -> ByokStatus:
     payload = get_byok_payload(user_settings)
     gemini_provider = normalize_gemini_provider(payload.get(_GEMINI_PROVIDER_FIELD))
     e2b_key_set = bool(_decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD)))
     gemini_key_set = bool(_decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD)))
+    llm_provider, llm_key, llm_api_base, llm_model, llm_vision_model = _resolved_llm_fields(payload)
+    llm_key_set = bool(llm_key)
     vertex_configured = server_vertex_configured()
-    shared_access_enabled = _shared_access_enabled(payload) or settings.model_provider in ("qwen", "bynara", "vultr")
+    shared_access_enabled = _shared_access_enabled(payload)
     shared_access_code_is_configured = shared_access_code_configured()
     server_e2b_is_configured = server_e2b_configured()
 
-    can_fallback_to_api_key = gemini_key_set or (
-        not settings.require_byok and bool(settings.google_api_key) and shared_access_enabled
-    )
-
     missing: list[str] = []
-    if not (e2b_key_set or (shared_access_enabled and server_e2b_is_configured)):
+    if not e2b_key_set:
         missing.append("e2b")
-
-    if settings.model_provider not in ("qwen", "bynara", "vultr"):
-        if gemini_provider == "vertex":
-            if not (shared_access_enabled and vertex_configured) and not can_fallback_to_api_key:
-                if not shared_access_enabled:
-                    missing.append("accessCode" if shared_access_code_is_configured else "vertex")
-                else:
-                    missing.append("vertex")
-        elif not gemini_key_set:
-            missing.append("gemini")
+    if not llm_config_complete(llm_provider, llm_key, llm_api_base, llm_model):
+        missing.append("llm")
 
     return ByokStatus(
         e2b_key_set=e2b_key_set,
         gemini_key_set=gemini_key_set,
         gemini_provider=gemini_provider,
+        llm_key_set=llm_key_set,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_vision_model=llm_vision_model,
+        llm_api_base=llm_api_base if llm_provider == "custom" else "",
         missing=tuple(missing),
         vertex_configured=vertex_configured,
         shared_access_enabled=shared_access_enabled,
@@ -249,17 +317,22 @@ def build_public_user_settings(user_settings: Mapping[str, Any] | None) -> dict[
         if isinstance(user_settings, Mapping)
         else None
     )
-    require_byok = settings.require_byok or settings.beta_enforce_byok
-    if settings.model_provider in ("qwen", "bynara", "vultr"):
-        require_byok = False
+    require_byok = byok_enforced()
     return {
         "requireByok": require_byok,
         "googleDriveConnected": google_drive_connected,
         "settings": raw_settings,
+        "llmProviders": public_provider_catalog(),
+        "e2bSetup": e2b_setup_public(),
         "byok": {
             "e2bKeySet": status.e2b_key_set,
             "geminiKeySet": status.gemini_key_set,
             "geminiProvider": status.gemini_provider,
+            "llmKeySet": status.llm_key_set,
+            "llmProvider": status.llm_provider,
+            "llmModel": status.llm_model,
+            "llmVisionModel": status.llm_vision_model,
+            "llmApiBase": status.llm_api_base,
             "missing": list(status.missing),
             "configured": status.configured,
             "vertexConfigured": status.vertex_configured,
@@ -282,6 +355,13 @@ def build_byok_storage_update(
         _GEMINI_CIPHERTEXT_FIELD: payload.get(_GEMINI_CIPHERTEXT_FIELD),
         _GEMINI_PROVIDER_FIELD: current_provider,
         _SHARED_ACCESS_CODE_HASH_FIELD: payload.get(_SHARED_ACCESS_CODE_HASH_FIELD),
+        _LLM_PROVIDER_FIELD: normalize_llm_provider(payload.get(_LLM_PROVIDER_FIELD)),
+        _LLM_CIPHERTEXT_FIELD: payload.get(_LLM_CIPHERTEXT_FIELD),
+        _LLM_MODEL_FIELD: _clip_stored_text(payload.get(_LLM_MODEL_FIELD), _LLM_MODEL_MAX_LEN),
+        _LLM_VISION_MODEL_FIELD: _clip_stored_text(
+            payload.get(_LLM_VISION_MODEL_FIELD), _LLM_MODEL_MAX_LEN
+        ),
+        _LLM_API_BASE_FIELD: payload.get(_LLM_API_BASE_FIELD) or "",
     }
 
     if _GEMINI_PROVIDER_FIELD in updates:
@@ -302,6 +382,41 @@ def build_byok_storage_update(
             updates.get("accessCode")
         )
 
+    if "llmProvider" in updates:
+        next_payload[_LLM_PROVIDER_FIELD] = normalize_llm_provider(updates.get("llmProvider"))
+        if updates.get("llmProvider") and not next_payload[_LLM_PROVIDER_FIELD]:
+            raise ValueError("Unknown LLM provider.")
+
+    if "llmApiKey" in updates:
+        next_payload[_LLM_CIPHERTEXT_FIELD] = _encrypt_or_clear(updates.get("llmApiKey"))
+
+    if "llmModel" in updates:
+        next_payload[_LLM_MODEL_FIELD] = _clip_stored_text(
+            updates.get("llmModel"), _LLM_MODEL_MAX_LEN
+        )
+
+    if "llmVisionModel" in updates:
+        next_payload[_LLM_VISION_MODEL_FIELD] = _clip_stored_text(
+            updates.get("llmVisionModel"), _LLM_MODEL_MAX_LEN
+        )
+
+    if "llmApiBase" in updates:
+        next_payload[_LLM_API_BASE_FIELD] = normalize_api_base(updates.get("llmApiBase"))
+        if len(str(next_payload[_LLM_API_BASE_FIELD])) > _LLM_API_BASE_MAX_LEN:
+            raise ValueError("API base URL is too long.")
+    elif next_payload.get(_LLM_PROVIDER_FIELD) == "custom":
+        stored_base = str(next_payload.get(_LLM_API_BASE_FIELD) or "").strip()
+        if stored_base:
+            next_payload[_LLM_API_BASE_FIELD] = normalize_api_base(stored_base)
+
+    # Migrate a Gemini-only save into the LLM provider fields.
+    if "llmApiKey" not in updates and "geminiApiKey" in updates:
+        gemini_cipher = next_payload.get(_GEMINI_CIPHERTEXT_FIELD)
+        if gemini_cipher and not next_payload.get(_LLM_CIPHERTEXT_FIELD):
+            next_payload[_LLM_CIPHERTEXT_FIELD] = gemini_cipher
+            if not next_payload.get(_LLM_PROVIDER_FIELD):
+                next_payload[_LLM_PROVIDER_FIELD] = "gemini"
+
     return next_payload
 
 
@@ -320,10 +435,15 @@ def resolve_session_runtime_config(
     user_e2b_api_key = _decrypt_or_empty(payload.get(_E2B_CIPHERTEXT_FIELD))
     user_gemini_api_key = _decrypt_or_empty(payload.get(_GEMINI_CIPHERTEXT_FIELD))
     gemini_provider = status.gemini_provider
+    llm_provider, llm_api_key, llm_api_base, llm_model, llm_vision_model = _resolved_llm_fields(
+        payload
+    )
 
     if user_e2b_api_key:
         e2b_api_key = user_e2b_api_key
-    elif status.shared_e2b_available:
+    elif not byok_enforced() and (
+        status.shared_e2b_available or server_e2b_configured()
+    ):
         e2b_api_key = settings.e2b_api_key.strip()
     else:
         e2b_api_key = ""
@@ -410,6 +530,11 @@ def resolve_session_runtime_config(
         autonomy_mode=normalize_autonomy_mode(
             public_settings.get("autonomyMode") or settings.default_autonomy_mode
         ),
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        llm_api_base=llm_api_base,
+        llm_model=llm_model,
+        llm_vision_model=llm_vision_model,
     )
 
 
@@ -467,9 +592,9 @@ def build_genai_client(
 def ensure_selected_gemini_provider_available(
     user_settings: Mapping[str, Any] | None,
 ) -> None:
-    if settings.model_provider in ("qwen", "bynara", "vultr"):
-        return
     status = get_byok_status(user_settings)
+    if status.llm_key_set and status.llm_provider:
+        return
     if status.gemini_provider != "vertex" or status.shared_vertex_available:
         return
 
@@ -517,22 +642,10 @@ def _decrypt_or_empty(value: Any) -> str:
 def _build_byok_error_message(status: ByokStatus) -> str:
     missing_labels: list[str] = []
     if "e2b" in status.missing:
-        if status.shared_access_code_configured and status.server_e2b_configured:
-            missing_labels.append("an E2B API key or a valid access code")
-        else:
-            missing_labels.append("an E2B API key")
+        missing_labels.append("an E2B API key")
 
-    if "accessCode" in status.missing:
-        missing_labels.append("a valid access code for shared Vertex AI credits")
-
-    if "gemini" in status.missing:
-        if status.gemini_provider == "vertex" and not status.vertex_configured:
-            missing_labels.append("server-side Vertex AI configuration")
-        else:
-            missing_labels.append("a Gemini API key or Vertex AI")
-
-    if "vertex" in status.missing:
-        missing_labels.append("server-side Vertex AI configuration")
+    if "llm" in status.missing:
+        missing_labels.append("an LLM provider and API key")
 
     joined = " and ".join(missing_labels) if missing_labels else "your required API keys"
     return f"API & Keys setup is incomplete. Add {joined} in Settings before starting a session."

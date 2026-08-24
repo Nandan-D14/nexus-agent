@@ -44,6 +44,10 @@ class DurableTurnOutcome(str, Enum):
     #: Durable owns this turn but refused it (e.g. one is already running).
     #: The client was already told why, so the caller must do nothing.
     REJECTED = "rejected"
+    #: A run is already executing for this session. The new prompt was not
+    #: accepted, but the caller must stream that run's events so the user sees
+    #: the work that is still happening instead of a dead-end error.
+    ATTACHED = "attached"
 
 
 import redis
@@ -181,27 +185,153 @@ async def _stream_durable_task_events(
         await asyncio.sleep(1.0)
 
 
-def _is_abandoned_queued_run(run) -> bool:
-    """True for a queued run that no worker will ever pick up.
-
-    The stale-run sweeper only recovers runs in ``running`` state with an expired
-    lease, so a run that was enqueued but never claimed (queue dispatch lost, the
-    process restarted before the local worker started, an enqueue that failed
-    half-way) stays ``queued`` forever. Treating those as in-flight would refuse
-    every later prompt on the session, so they are aged out instead.
-    """
-    if str(getattr(run, "status", "") or "") != "queued":
-        return False
-    if lease_is_live(getattr(run, "lease_expires_at", None)):
-        return False
-
+def _run_age_seconds(run) -> float | None:
+    """Seconds since the run last changed, or None when it has no timestamp."""
     started = getattr(run, "updated_at", None) or getattr(run, "created_at", None)
     if started is None:
-        return False
+        return None
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
-    grace = max(60.0, float(settings.task_worker_lease_seconds))
-    return (datetime.now(timezone.utc) - started).total_seconds() > grace
+    return (datetime.now(timezone.utc) - started).total_seconds()
+
+
+def _abandoned_run_reason(run, *, cancel_requested: bool) -> tuple[str, str] | None:
+    """Classify a non-terminal run nothing will ever progress.
+
+    Returns ``(error_code, message)`` when the run must be settled so the
+    session becomes usable, otherwise ``None``.
+
+    Each branch here exists because some other recovery path cannot cover it:
+
+    * ``queued`` — the stale-run sweeper only looks at ``running`` runs, so an
+      enqueue that never reached a worker stays queued forever.
+    * ``running`` with an expired lease — the sweeper *should* own this, but it
+      silently does nothing when its Firestore composite index is missing, and it
+      cannot make progress at all once ``cancelRequested`` is set (``requeue_run``
+      refuses, so ``attempt`` never reaches the fail threshold).
+    * ``cancelling`` — set by the stop button. When no worker held the run there
+      is nothing left to observe the flag and finish the run.
+    * ``waiting_approval`` — the approval expires client- and server-side, after
+      which no one can resolve it.
+
+    A live lease always wins: that means a worker genuinely owns the run.
+    """
+    status = str(getattr(run, "status", "") or "")
+    if status in TERMINAL_TASK_STATUSES:
+        return None
+    if lease_is_live(getattr(run, "lease_expires_at", None)):
+        return None
+
+    age = _run_age_seconds(run)
+    if age is None:
+        return None
+
+    grace = max(60.0, float(settings.abandoned_run_grace_seconds))
+    approval_grace = max(grace, float(settings.abandoned_approval_grace_seconds))
+
+    if status == "queued":
+        if cancel_requested:
+            return (
+                "RUN_CANCELLED_UNCLAIMED",
+                "This request was cancelled before a worker picked it up.",
+            )
+        if age > grace:
+            return (
+                "RUN_ABANDONED",
+                "This request was never picked up by a worker. Please send it again.",
+            )
+        return None
+
+    if status == "cancelling":
+        # Stop was pressed. Give a live worker a short window to honor it, then
+        # settle so `cancelRequested` stops blocking every later prompt.
+        if age > min(grace, 120.0):
+            return (
+                "RUN_CANCEL_ORPHANED",
+                "The previous request was stopped and is no longer running.",
+            )
+        return None
+
+    if status == "running" and age > grace:
+        return (
+            "RUN_LEASE_LOST",
+            "The worker running this request stopped responding. Please send it again.",
+        )
+
+    if status == "waiting_approval" and age > approval_grace:
+        return (
+            "APPROVAL_EXPIRED",
+            "The approval request expired, so this run was closed. Please send it again.",
+        )
+
+    return None
+
+
+async def _settle_abandoned_run(
+    repo,
+    *,
+    session: Session,
+    task_id: str,
+    run_id: str,
+    error_code: str,
+    reason: str,
+) -> None:
+    """Fail an abandoned run and emit a terminal event. Never raises.
+
+    The terminal event matters as much as the status: a client waiting on this
+    run has no other way to learn it is over, and would keep showing a thinking
+    indicator indefinitely.
+    """
+    logger.warning(
+        "Settling abandoned durable run %s/%s (%s) so session %s is usable",
+        task_id,
+        run_id,
+        error_code,
+        session.id,
+    )
+    try:
+        await repo.finish_run(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            summary=reason,
+            error=reason,
+        )
+        await repo.append_event(
+            task_id=task_id,
+            owner_id=session.owner_id,
+            run_id=run_id,
+            event_type="worker_failed",
+            payload={"reason": reason, "error_code": error_code},
+        )
+    except Exception:
+        logger.warning(
+            "Failed to settle abandoned durable run %s/%s",
+            task_id,
+            run_id,
+            exc_info=True,
+        )
+
+
+async def _clear_stuck_cancel_request(repo, *, session: Session, task_id: str) -> None:
+    """Drop a ``cancelRequested`` flag that has outlived its run.
+
+    ``request_cancel`` sets the flag on the *task*, and nothing clears it. Once
+    the run it targeted is terminal the flag only does damage: ``claim_run`` and
+    ``requeue_run`` both refuse outright while it is set, so every future run on
+    the task is unclaimable and the session is permanently dead.
+    """
+    clear_cancel = getattr(repo, "clear_cancel_request", None)
+    if not callable(clear_cancel):
+        return
+    try:
+        await clear_cancel(task_id=task_id, owner_id=session.owner_id)
+    except Exception:
+        logger.warning(
+            "Failed to clear stale cancel request on task %s",
+            task_id,
+            exc_info=True,
+        )
 
 
 async def _find_inflight_durable_run(session: Session) -> tuple[str, str] | None:
@@ -209,6 +339,11 @@ async def _find_inflight_durable_run(session: Session) -> tuple[str, str] | None
 
     This is what makes a refresh survivable: the worker owns the run, so a new
     socket only has to find it and re-attach to its event log.
+
+    It is also the only recovery path a connecting client can rely on, so it
+    settles runs that nothing is progressing (see
+    :func:`_abandoned_run_reason`) instead of reporting them as in-flight
+    forever.
     """
     task_id = getattr(session, "task_id", None)
     if not isinstance(task_id, str) or not task_id.startswith("task_"):
@@ -223,10 +358,13 @@ async def _find_inflight_durable_run(session: Session) -> tuple[str, str] | None
     if task is None or getattr(task, "owner_id", None) != session.owner_id:
         return None
 
+    cancel_requested = bool(getattr(task, "cancel_requested", False))
     run_id = getattr(task, "current_run_id", None) or getattr(
         session, "current_run_id", None
     )
     if not isinstance(run_id, str) or not run_id:
+        if cancel_requested:
+            await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
         return None
 
     try:
@@ -239,37 +377,24 @@ async def _find_inflight_durable_run(session: Session) -> tuple[str, str] | None
         )
         return None
     if run is None or getattr(run, "status", None) in TERMINAL_TASK_STATUSES:
+        # The run is over, so a lingering cancel flag can only block new work.
+        if cancel_requested:
+            await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
         return None
 
-    if _is_abandoned_queued_run(run):
-        logger.warning(
-            "Durable run %s/%s was never claimed; failing it so the session is usable",
-            task_id,
-            run_id,
+    abandoned = _abandoned_run_reason(run, cancel_requested=cancel_requested)
+    if abandoned is not None:
+        error_code, reason = abandoned
+        await _settle_abandoned_run(
+            repo,
+            session=session,
+            task_id=task_id,
+            run_id=run_id,
+            error_code=error_code,
+            reason=reason,
         )
-        reason = "This request was never picked up by a worker. Please send it again."
-        try:
-            await repo.finish_run(
-                task_id=task_id,
-                run_id=run_id,
-                status="failed",
-                summary=reason,
-                error=reason,
-            )
-            await repo.append_event(
-                task_id=task_id,
-                owner_id=session.owner_id,
-                run_id=run_id,
-                event_type="worker_failed",
-                payload={"reason": reason, "error_code": "RUN_ABANDONED"},
-            )
-        except Exception:
-            logger.warning(
-                "Failed to settle abandoned durable run %s/%s",
-                task_id,
-                run_id,
-                exc_info=True,
-            )
+        if cancel_requested:
+            await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
         return None
 
     return task_id, run_id
@@ -329,6 +454,117 @@ async def _supersede_paused_durable_run(
         return False
 
 
+async def _stop_durable_run(*, session: Session, task_id: str, send_json) -> None:
+    """Honor the stop button for a durable run, and never leave it wedged.
+
+    ``request_cancel`` only raises a flag on the task; some live worker has to
+    observe it and finish the run. When no worker holds a live lease nothing ever
+    will, and the flag then blocks ``claim_run``/``requeue_run`` for every future
+    run on the task — so the session would be permanently unusable. In that case
+    settle the run here and release the flag.
+    """
+    repo = get_production_task_repository()
+    try:
+        cancelled = await repo.request_cancel(
+            task_id=task_id, owner_id=session.owner_id
+        )
+    except Exception:
+        logger.warning(
+            "Failed to request durable cancel for task %s", task_id, exc_info=True
+        )
+        return
+    if not cancelled:
+        return
+
+    try:
+        task = await repo.get_task(task_id)
+        run_id = getattr(task, "current_run_id", None) if task else None
+        run = (
+            await repo.get_run(
+                task_id=task_id, run_id=run_id, owner_id=session.owner_id
+            )
+            if isinstance(run_id, str) and run_id
+            else None
+        )
+    except Exception:
+        logger.warning(
+            "Failed to inspect durable run while stopping task %s",
+            task_id,
+            exc_info=True,
+        )
+        return
+
+    if run is None:
+        await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
+        return
+    if str(getattr(run, "status", "") or "") in TERMINAL_TASK_STATUSES:
+        await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
+        return
+    if lease_is_live(getattr(run, "lease_expires_at", None)):
+        # A worker owns this run and its cancel watcher will finish it.
+        return
+
+    reason = "Stopped by user."
+    await _settle_abandoned_run(
+        repo,
+        session=session,
+        task_id=task_id,
+        run_id=str(run_id),
+        error_code="RUN_STOPPED_BY_USER",
+        reason=reason,
+    )
+    await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
+    await send_json(
+        {
+            "type": "worker_finished",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "cancelled",
+            "summary": reason,
+        }
+    )
+
+
+async def _report_busy_durable_run(
+    *,
+    session: Session,
+    task_id: str,
+    run_id: str,
+    status: str,
+    pending_text: str | None = None,
+    send_json,
+) -> DurableTurnOutcome:
+    """Tell the client a run is already in flight and stream it instead.
+
+    The old behavior was a bare ``error`` frame, which left the user with no way
+    to see the work that was still happening — the composer unlocked, the chat
+    went quiet, and every retry produced the same error. Returning ATTACHED lets
+    the caller re-attach to the live event log so the run's progress shows up in
+    the UI as it happens.
+    """
+    logger.info(
+        "Attaching session %s to its in-flight run %s (%s) instead of starting a new turn",
+        session.id,
+        run_id,
+        status or "unknown",
+    )
+    frame: dict[str, object] = {
+        "type": "run_busy",
+        "code": "RUN_IN_PROGRESS",
+        "message": (
+            "This session is still working on the previous request. "
+            "Live progress is shown below — press stop to interrupt it."
+        ),
+        "task_id": task_id,
+        "run_id": run_id,
+        "run_status": status,
+    }
+    if isinstance(pending_text, str) and pending_text.strip():
+        frame["pending_text"] = pending_text[:4000]
+    await send_json(frame)
+    return DurableTurnOutcome.ATTACHED
+
+
 async def _try_start_durable_text_run(
     *,
     session: Session,
@@ -369,41 +605,39 @@ async def _try_start_durable_text_run(
                 run_id=inflight_run_id,
             )
             if not superseded:
-                await send_json(
-                    {
-                        "type": "error",
-                        "code": "RUN_IN_PROGRESS",
-                        "message": (
-                            "The previous request is still running. Wait for it to finish "
-                            "or press stop, then send this again."
-                        ),
-                        "task_id": inflight_task_id,
-                        "run_id": inflight_run_id,
-                    }
+                return await _report_busy_durable_run(
+                    session=session,
+                    task_id=inflight_task_id,
+                    run_id=inflight_run_id,
+                    status=inflight_status,
+                    pending_text=text,
+                    send_json=send_json,
                 )
-                return DurableTurnOutcome.REJECTED
         else:
-            logger.info(
-                "Rejecting durable turn for session %s: run %s is still executing (%s)",
-                session.id,
-                inflight_run_id,
-                inflight_status or "unknown",
+            # Durable execution owns the turn: do not let the live path start a
+            # duplicate agent alongside the worker. Attach to the running one so
+            # its progress is visible rather than leaving the user in the dark.
+            if hasattr(orchestrator, "bind_durable_run"):
+                try:
+                    orchestrator.bind_durable_run(
+                        task_id=inflight_task_id, run_id=inflight_run_id
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to bind session %s to in-flight run %s",
+                        session.id,
+                        inflight_run_id,
+                        exc_info=True,
+                    )
+            session.current_run_id = inflight_run_id
+            return await _report_busy_durable_run(
+                session=session,
+                task_id=inflight_task_id,
+                run_id=inflight_run_id,
+                status=inflight_status,
+                pending_text=text,
+                send_json=send_json,
             )
-            await send_json(
-                {
-                    "type": "error",
-                    "code": "RUN_IN_PROGRESS",
-                    "message": (
-                        "The previous request is still running. Wait for it to finish "
-                        "or press stop, then send this again."
-                    ),
-                    "task_id": inflight_task_id,
-                    "run_id": inflight_run_id,
-                }
-            )
-            # Durable execution owns the turn: refuse it rather than letting the live
-            # path start a duplicate agent alongside the worker.
-            return DurableTurnOutcome.REJECTED
 
     task_id = getattr(session, "task_id", None)
     task = None
@@ -656,6 +890,36 @@ async def handle_websocket(
             t.add_done_callback(_bg_tasks.discard)
             t.add_done_callback(lambda task: _surface_task_exception(task, label=label))
 
+        # Run ids this socket already has a durable event stream for. Streaming
+        # the same run twice would double every frame the user sees.
+        _streamed_run_ids: set[str] = set()
+
+        def _stream_durable_run(
+            *,
+            task_id: str,
+            run_id: str,
+            label: str,
+            after_seq: int = 0,
+        ) -> None:
+            if not task_id or not run_id or run_id in _streamed_run_ids:
+                return
+            _streamed_run_ids.add(run_id)
+
+            async def _stream() -> None:
+                try:
+                    await _stream_durable_task_events(
+                        repo=get_production_task_repository(),
+                        task_id=task_id,
+                        owner_id=session.owner_id,
+                        run_id=run_id,
+                        send_json=_safe_send_json,
+                        after_seq=after_seq,
+                    )
+                finally:
+                    _streamed_run_ids.discard(run_id)
+
+            _track(asyncio.create_task(_stream()), label=label)
+
         # Re-attach to a durable run that is still executing. The worker kept
         # going while the browser was away, so the only thing this socket has to
         # do is resume streaming its event log. The client hydrates events up to
@@ -689,17 +953,9 @@ async def handle_websocket(
                     "reattached": True,
                 }
             )
-            _track(
-                asyncio.create_task(
-                    _stream_durable_task_events(
-                        repo=get_production_task_repository(),
-                        task_id=reattach_task_id,
-                        owner_id=session.owner_id,
-                        run_id=reattach_run_id,
-                        send_json=_safe_send_json,
-                        after_seq=0,
-                    )
-                ),
+            _stream_durable_run(
+                task_id=reattach_task_id,
+                run_id=reattach_run_id,
                 label="reattach_durable_task_events",
             )
 
@@ -808,18 +1064,16 @@ async def handle_websocket(
                                 # The client already has an explanatory error frame.
                                 continue
 
-                            if durable is DurableTurnOutcome.STARTED:
-                                _track(
-                                    asyncio.create_task(
-                                        _stream_durable_task_events(
-                                            repo=get_production_task_repository(),
-                                            task_id=session.task_id,
-                                            owner_id=session.owner_id,
-                                            run_id=session.current_run_id,
-                                            send_json=_safe_send_json,
-                                            after_seq=0,
-                                        )
-                                    ),
+                            if durable in {
+                                DurableTurnOutcome.STARTED,
+                                DurableTurnOutcome.ATTACHED,
+                            }:
+                                # ATTACHED means the prompt was not accepted but a
+                                # run is still executing; stream it so the user can
+                                # watch the work instead of staring at an error.
+                                _stream_durable_run(
+                                    task_id=session.task_id,
+                                    run_id=session.current_run_id,
                                     label="stream_durable_task_events",
                                 )
                                 continue
@@ -865,17 +1119,11 @@ async def handle_websocket(
                         # the live orchestrator is not enough to stop them.
                         durable_task_id = getattr(session, "task_id", None)
                         if isinstance(durable_task_id, str) and durable_task_id.startswith("task_"):
-                            try:
-                                await get_production_task_repository().request_cancel(
-                                    task_id=durable_task_id,
-                                    owner_id=session.owner_id,
-                                )
-                            except Exception:
-                                logger.warning(
-                                    "Failed to request durable cancel for task %s",
-                                    durable_task_id,
-                                    exc_info=True,
-                                )
+                            await _stop_durable_run(
+                                session=session,
+                                task_id=durable_task_id,
+                                send_json=_safe_send_json,
+                            )
 
                     elif msg_type == "permission_response":
                         _touch_session()

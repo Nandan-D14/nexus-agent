@@ -5,9 +5,10 @@
 
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { memo, useCallback, useEffect, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   LogOut,
@@ -24,15 +25,19 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { NAV_LINKS } from "@/lib/navigation";
+import { APP_DASHBOARD, APP_HOME, APP_SETTINGS, sessionPath } from "@/lib/app-paths";
 import { useAuth } from "@/lib/auth-context";
-import { authenticatedFetch } from "@/lib/api-client";
-import { DEFAULT_PLAN_QUOTA, type PlanQuota, type RecentSession } from "@/lib/message-types";
+import { DEFAULT_PLAN_QUOTA, type RecentSession } from "@/lib/message-types";
+import { queryKeys } from "@/lib/query-keys";
+import { useQuotaQuery } from "@/lib/queries/quota";
+import { useRecentSessionsQuery } from "@/lib/queries/sessions";
 import { useSettings } from "@/lib/settings-context";
 import { useLandingChrome } from "@/lib/landing-chrome-context";
 import { useSession } from "@/lib/use-session";
 import { useToast } from "./toast-provider";
 import { useLiveDesktop } from "./live-desktop-provider";
 import { SearchModal } from "./search-modal";
+import { CocomputerMark } from "@/components/brand/cocomputer-logo";
 import { Badge } from "@/components/base/badges/badge";
 import {
   Dropdown,
@@ -137,7 +142,7 @@ function SessionRow({
   return (
     <div className="group relative">
       <Link
-        href={`/session/${session.session_id}`}
+        href={sessionPath(session.session_id)}
         onClick={closeMobile}
         className={cx(
           "flex min-w-0 items-center gap-2 rounded-2lg p-2 pr-8 transition-colors",
@@ -199,20 +204,21 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
   const { user, signOutUser } = useAuth();
   const { isSettingsOpen, setIsSettingsOpen } = useSettings();
   const { isLandingChrome } = useLandingChrome();
-  const { listSessions, destroySession } = useSession();
+  const { destroySession } = useSession();
   const { clearDesktop } = useLiveDesktop();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const pathname = usePathname();
   const router = useRouter();
-  const [quota, setQuota] = useState<PlanQuota | null>(null);
+  const { data: quotaData, isError: quotaError } = useQuotaQuery();
+  const quota = quotaData ?? (quotaError ? DEFAULT_PLAN_QUOTA : null);
+  const { data: sessions = [], isLoading: isSessionsLoading } = useRecentSessionsQuery(15);
   const [isMobile, setIsMobile] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [collapseHydrated, setCollapseHydrated] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [sessions, setSessions] = useState<RecentSession[]>([]);
-  const [isSessionsLoading, setIsSessionsLoading] = useState(false);
   const [activeMenuSessionId, setActiveMenuSessionId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -245,24 +251,6 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
     return () => query.removeEventListener("change", update);
   }, []);
 
-  const fetchSessions = useCallback(() => {
-    setIsSessionsLoading(true);
-    listSessions(15)
-      .then(setSessions)
-      .finally(() => setIsSessionsLoading(false));
-  }, [listSessions]);
-
-  useEffect(() => {
-    if (!user) return;
-    void authenticatedFetch("/api/v1/user/quota")
-      .then(async (response) =>
-        response.ok ? (response.json() as Promise<PlanQuota>) : DEFAULT_PLAN_QUOTA,
-      )
-      .then(setQuota)
-      .catch(() => setQuota(DEFAULT_PLAN_QUOTA));
-    void fetchSessions();
-  }, [fetchSessions, user]);
-
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -291,7 +279,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
   const handleNewSession = () => {
     closeMobile();
-    router.push(user ? "/session/new" : "/");
+    router.push(user ? APP_HOME : "/");
   };
 
   const handleDeleteSession = async (sessionId: string) => {
@@ -299,9 +287,11 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
     if (await destroySession(sessionId)) {
       clearDesktop(sessionId);
-      setSessions((current) => current.filter((session) => session.session_id !== sessionId));
+      queryClient.setQueryData(queryKeys.sessions.recent(15), (current: RecentSession[] | undefined) =>
+        (current ?? []).filter((session) => session.session_id !== sessionId),
+      );
       toast("Conversation deleted", "success");
-      if (pathname.includes(sessionId)) router.push("/dashboard");
+      if (pathname.includes(sessionId)) router.push(APP_DASHBOARD);
       return;
     }
     toast("Failed to delete conversation", "error");
@@ -344,7 +334,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
               onMenuOpenChange={(open) =>
                 setActiveMenuSessionId(open ? session.session_id : null)
               }
-              onOpen={() => router.push(`/session/${session.session_id}`)}
+              onOpen={() => router.push(sessionPath(session.session_id))}
               onDelete={() => void handleDeleteSession(session.session_id)}
               closeMobile={closeMobile}
             />
@@ -388,16 +378,14 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
         <div className="flex min-h-0 flex-1 flex-col gap-3">
           <div className={cx("flex items-center", collapsed ? "flex-col gap-2.5" : "justify-between")}>
             <Link
-              href="/dashboard"
+              href={APP_DASHBOARD}
               className={cx(
                 "flex min-w-0 items-center",
                 collapsed ? "h-9 w-full justify-center" : "gap-2",
               )}
               onClick={closeMobile}
             >
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-blue-500 text-sm font-bold text-white">
-                C
-              </span>
+              <CocomputerMark size={28} className="size-7 rounded-lg" />
               <Collapsible collapsed={collapsed}>
                 <span className="truncate text-title-3-semibold text-text-primary">CoComputer</span>
               </Collapsible>
@@ -465,10 +453,8 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
           <nav className="flex flex-col gap-1" aria-label="Application">
             {NAV_ITEMS.map(({ href, icon: Icon, label, name }) => {
               const title = label ?? name ?? "";
-              const active =
-                pathname.startsWith(href) ||
-                (href === "/dashboard" && pathname.startsWith("/session/"));
-              const settings = href === "/settings";
+              const active = pathname.startsWith(href);
+              const settings = href === APP_SETTINGS;
               const content = (
                 <>
                   <Icon className="size-5 shrink-0" />
@@ -558,8 +544,10 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
             <>
               {usage !== null ? (
                 <RailTooltip label={`Usage ${usage}%`} collapsed>
-                  <div
-                    className="flex size-9 shrink-0 items-center justify-center rounded-2lg bg-background-tertiary-default"
+                  <Link
+                    href={APP_DASHBOARD}
+                    onClick={closeMobile}
+                    className="flex size-9 shrink-0 items-center justify-center rounded-2lg bg-background-tertiary-default hover:bg-background-tertiary-hover"
                     aria-label={`Usage ${usage}%`}
                   >
                     <span
@@ -570,7 +558,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                     >
                       <span className="size-3 rounded-full bg-background-secondary-default" />
                     </span>
-                  </div>
+                  </Link>
                 </RailTooltip>
               ) : null}
               <RailTooltip label="Expand sidebar" collapsed kbd="⌘B">
@@ -586,7 +574,12 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
             </>
           ) : (
             usage !== null && (
-              <div className="rounded-2lg bg-background-tertiary-default p-2.5">
+              <Link
+                href={APP_DASHBOARD}
+                onClick={closeMobile}
+                className="rounded-2lg bg-background-tertiary-default p-2.5 transition-colors hover:bg-background-tertiary-hover"
+                aria-label={`Usage ${usage}%`}
+              >
                 <div className="mb-2 flex items-center justify-between text-caption-1-semibold text-text-secondary">
                   <span>Usage</span>
                   <span>{usage}%</span>
@@ -597,7 +590,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                     style={{ width: `${usage}%` }}
                   />
                 </div>
-              </div>
+              </Link>
             )
           )}
           <Dropdown isOpen={isProfileOpen} onOpenChange={setIsProfileOpen}>

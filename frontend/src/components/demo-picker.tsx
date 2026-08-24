@@ -113,6 +113,7 @@ export function DemoPicker({ onSelect, disabled }: Props) {
               }
             `}
           >
+            {/* @ts-expect-error React 19 ElementType inference — runtime is a lucide icon component */}
             <demo.icon className="w-6 h-6" />
           </div>
 

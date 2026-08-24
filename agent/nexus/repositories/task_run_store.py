@@ -14,6 +14,7 @@ from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1 import FieldFilter
 
 from nexus.production_tasks import (
+    FIELD_CANCEL_REQUESTED,
     TERMINAL_TASK_STATUSES,
     BoundProductionStore,
     _coerce_datetime,
@@ -175,7 +176,15 @@ class TaskRunStore(BoundProductionStore):
         batch.set(self._run_ref(task_id, run_id), payload)
         batch.set(
             self._task_ref(task_id),
-            {"currentRunId": run_id, "status": canonicalize_task_status("queued"), "updatedAt": now},
+            {
+                "currentRunId": run_id,
+                "status": canonicalize_task_status("queued"),
+                "updatedAt": now,
+                # A new run is new user intent, so a cancel aimed at a previous
+                # run must not carry over. Leaving it set makes this run
+                # unclaimable (see claim_run) and the task permanently dead.
+                FIELD_CANCEL_REQUESTED: False,
+            },
             merge=True,
         )
         try:
@@ -701,3 +710,52 @@ class TaskRunStore(BoundProductionStore):
             True,
         )
         return True
+
+    async def clear_cancel_request(self, *, task_id: str, owner_id: str) -> bool:
+        """Release a ``cancelRequested`` flag whose run has already settled.
+
+        ``cancelRequested`` is checked by :meth:`claim_run` and
+        :meth:`requeue_run`, both of which refuse outright while it is set. It is
+        only meaningful for the run that was live when the user pressed stop, so
+        leaving it on after that run is terminal makes every subsequent run on the
+        task unclaimable — the session can never execute anything again.
+        """
+        return await asyncio.to_thread(
+            self._clear_cancel_request_sync, task_id, owner_id
+        )
+
+    def _clear_cancel_request_sync(self, task_id: str, owner_id: str) -> bool:
+        now = utcnow()
+        task_ref = self._task_ref(task_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def transactional_clear(txn):
+            task_doc = task_ref.get(transaction=txn)
+            if not task_doc.exists:
+                return False
+            data = task_doc.to_dict() or {}
+            if data.get("ownerId") != owner_id:
+                return False
+            if not bool(data.get(FIELD_CANCEL_REQUESTED)):
+                return False
+            run_id = data.get("currentRunId")
+            if isinstance(run_id, str) and run_id:
+                # Refuse while the targeted run may still act on the flag.
+                run_doc = self._run_ref(task_id, run_id).get(transaction=txn)
+                if run_doc.exists:
+                    run_data = run_doc.to_dict() or {}
+                    status = canonicalize_task_status(run_data.get("status"))
+                    if status not in TERMINAL_TASK_STATUSES:
+                        return False
+            updates = {FIELD_CANCEL_REQUESTED: False, "updatedAt": now}
+            current_status = canonicalize_task_status(data.get("status"))
+            if current_status == "cancelling":
+                updates["status"] = canonicalize_task_status("cancelled")
+            txn.set(task_ref, updates, merge=True)
+            return True
+
+        cleared = bool(transactional_clear(transaction))
+        if cleared:
+            logger.info("Cleared stale cancel request on task %s", task_id)
+        return cleared

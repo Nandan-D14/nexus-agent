@@ -7,8 +7,9 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Terminal } from "lucide-react";
 import type { AppUser } from "@/lib/auth-context";
+import { APP_DASHBOARD } from "@/lib/app-paths";
+import { CocomputerLogo } from "@/components/brand/cocomputer-logo";
 
 type SiteNavProps = {
   variant: "home" | "pricing" | "marketing";
@@ -49,12 +50,7 @@ export function SiteNav({
       >
         <div className="relative z-10 flex items-center gap-6 min-w-0">
           <Link href="/" className="flex items-center gap-2 group shrink-0">
-            <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold transform group-hover:scale-105 transition-transform shadow-lg shadow-blue-500/20">
-              <Terminal className="w-4 h-4" />
-            </div>
-            <span className="font-semibold text-base sm:text-lg tracking-tight">
-              CoComputer
-            </span>
+            <CocomputerLogo size={32} wordmarkClassName="text-base sm:text-lg" priority />
           </Link>
 
           {variant === "home" ? (
@@ -117,7 +113,7 @@ export function SiteNav({
             user ? (
               <>
                 <Link
-                  href="/dashboard"
+                  href={APP_DASHBOARD}
                   className="hidden sm:block text-sm font-medium text-muted-foreground hover:text-foreground transition-colors px-2"
                 >
                   Dashboard
@@ -154,7 +150,7 @@ export function SiteNav({
             )
           ) : user ? (
             <Link
-              href="/dashboard"
+              href={APP_DASHBOARD}
               className="px-4 py-2 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-95"
             >
               Dashboard

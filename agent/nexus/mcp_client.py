@@ -346,6 +346,9 @@ def build_mcp_adk_tools(
         if not url:
             continue
         bearer_token = str(connection.private.get("bearerToken") or "")
+        auth_type = str(connection.private.get("authType") or "")
+        owner_id = str(getattr(connection, "owner_id", "") or "")
+        provider = str(getattr(connection, "provider", "") or "")
         server_slug = slugify_tool_part(connection.name or connection.connection_id, fallback="mcp")
         tools = connection.private.get("tools")
         if not isinstance(tools, list):
@@ -372,9 +375,32 @@ def build_mcp_adk_tools(
                 _tool_name: str = remote_tool_name,
                 _connection_id: str = connection.connection_id,
                 _connection_name: str = connection.name,
+                _owner_id: str = owner_id,
+                _provider: str = provider,
+                _auth_type: str = auth_type,
             ) -> dict[str, Any]:
                 """Call a configured remote MCP tool with JSON arguments."""
-                client = McpRemoteClient(url=_url, bearer_token=_token)
+                from nexus.exa_oauth import ensure_exa_access_token, is_unauthorized_mcp_error
+                from nexus.mcp_oauth import MCP_OAUTH_SPECS, ensure_mcp_oauth_access_token
+                from nexus.slack_oauth import ensure_slack_access_token
+                from nexus.treg_oauth import ensure_treg_access_token
+
+                token = _token
+                if _auth_type == "oauth" and _owner_id:
+                    if _provider == "exa":
+                        token = await ensure_exa_access_token(_owner_id) or _token
+                    elif _provider == "treg":
+                        token = await ensure_treg_access_token(_owner_id) or _token
+                    elif _provider == "slack":
+                        token = await ensure_slack_access_token(_owner_id) or _token
+                    elif _provider in MCP_OAUTH_SPECS:
+                        spec = MCP_OAUTH_SPECS.get(_provider)
+                        token = await ensure_mcp_oauth_access_token(
+                            _owner_id,
+                            _provider,
+                            resource=spec.mcp_origin if spec else "",
+                        ) or _token
+                client = McpRemoteClient(url=_url, bearer_token=token)
                 try:
                     result = await client.call_tool(
                         tool_name=_tool_name,
@@ -387,6 +413,40 @@ def build_mcp_adk_tools(
                         "arguments": redact_sensitive(arguments or {}),
                     }
                 except Exception as exc:
+                    if (
+                        _provider in {"exa", "treg", "slack", *MCP_OAUTH_SPECS}
+                        and _owner_id
+                        and is_unauthorized_mcp_error(exc)
+                    ):
+                        if _provider == "treg":
+                            retry_token = await ensure_treg_access_token(_owner_id, force=True)
+                        elif _provider == "exa":
+                            retry_token = await ensure_exa_access_token(_owner_id, force=True)
+                        elif _provider == "slack":
+                            retry_token = await ensure_slack_access_token(_owner_id, force=True)
+                        else:
+                            spec = MCP_OAUTH_SPECS.get(_provider)
+                            retry_token = await ensure_mcp_oauth_access_token(
+                                _owner_id,
+                                _provider,
+                                force=True,
+                                resource=spec.mcp_origin if spec else "",
+                            )
+                        if retry_token and retry_token != token:
+                            try:
+                                retry_client = McpRemoteClient(url=_url, bearer_token=retry_token)
+                                result = await retry_client.call_tool(
+                                    tool_name=_tool_name,
+                                    arguments=arguments or {},
+                                )
+                                return {
+                                    **result,
+                                    "connection_id": _connection_id,
+                                    "connector": _connection_name,
+                                    "arguments": redact_sensitive(arguments or {}),
+                                }
+                            except Exception as retry_exc:
+                                exc = retry_exc
                     return {
                         "status": "error",
                         "error": str(exc)[:500] or "MCP tool call failed",

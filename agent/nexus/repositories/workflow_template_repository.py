@@ -21,13 +21,14 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
         self,
         *,
         owner_id: str,
-        source_session_id: str,
+        source_session_id: str | None,
         source_run_id: str | None,
         name: str,
         description: str,
         instructions: str,
         input_fields: list[dict[str, Any]],
         source_artifacts: list[str],
+        status: str = "published",
     ) -> StoredWorkflowTemplate:
         return await asyncio.to_thread(
             self._create_workflow_template_sync,
@@ -39,6 +40,7 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
             instructions,
             input_fields,
             source_artifacts,
+            status,
         )
 
     async def list_workflow_templates(
@@ -75,6 +77,7 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
         description: str | None = None,
         instructions: str | None = None,
         input_fields: list[dict[str, Any]] | None = None,
+        status: str | None = None,
     ) -> StoredWorkflowTemplate | None:
         return await asyncio.to_thread(
             self._update_workflow_template_sync,
@@ -84,6 +87,7 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
             description,
             instructions,
             input_fields,
+            status,
         )
 
     async def delete_workflow_template(
@@ -114,13 +118,14 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
     def _create_workflow_template_sync(
         self,
         owner_id: str,
-        source_session_id: str,
+        source_session_id: str | None,
         source_run_id: str | None,
         name: str,
         description: str,
         instructions: str,
         input_fields: list[dict[str, Any]],
         source_artifacts: list[str],
+        status: str = "published",
     ) -> StoredWorkflowTemplate:
         now = utcnow()
         template_id = uuid.uuid4().hex[:12]
@@ -128,13 +133,15 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
             "ownerId": owner_id,
             "name": name,
             "description": description,
-            "sourceSessionId": source_session_id,
             "instructions": instructions,
             "inputFields": input_fields,
             "sourceArtifacts": source_artifacts,
+            "status": "draft" if status == "draft" else "published",
             "createdAt": now,
             "updatedAt": now,
         }
+        if source_session_id:
+            payload["sourceSessionId"] = source_session_id
         if source_run_id:
             payload["sourceRunId"] = source_run_id
         self._workflow_templates_collection_ref(owner_id).document(template_id).set(payload)
@@ -186,6 +193,7 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
         description: str | None,
         instructions: str | None,
         input_fields: list[dict[str, Any]] | None,
+        status: str | None,
     ) -> StoredWorkflowTemplate | None:
         ref = self._workflow_templates_collection_ref(owner_id).document(template_id)
         doc = ref.get()
@@ -202,6 +210,8 @@ class WorkflowTemplateRepository(FirestoreRepoBase):
             updates["instructions"] = instructions
         if input_fields is not None:
             updates["inputFields"] = input_fields
+        if status is not None:
+            updates["status"] = "draft" if status == "draft" else "published"
         ref.set(updates, merge=True)
         merged = {**(doc.to_dict() or {}), **updates}
         return self._build_stored_workflow_template(template_id, merged)

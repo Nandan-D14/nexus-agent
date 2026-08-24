@@ -167,6 +167,7 @@ class UserRepository(FirestoreRepoBase):
 
         if private_updates:
             private_updates.setdefault("updatedAt", now)
+            private_updates = self._flatten_byok_updates(private_updates)
             self._apply_document_updates_sync(self._user_private_ref(uid), private_updates)
             self._cleanup_public_user_sensitive_fields_sync(
                 uid,

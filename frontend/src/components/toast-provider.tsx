@@ -31,15 +31,25 @@ export interface ToastItem {
   message: string;
   type: ToastType;
   duration?: number;
+  persistent?: boolean;
+  action?: { label: string; onClick: () => void };
+}
+
+export interface ToastOptions {
+  duration?: number;
+  id?: string;
+  persistent?: boolean;
+  action?: { label: string; onClick: () => void };
 }
 
 export interface ToastContextType {
-  toast: ((message: string, type?: ToastType) => void) & {
-    success?: (message: string) => void;
-    error?: (message: string) => void;
-    info?: (message: string) => void;
-    warning?: (message: string) => void;
+  toast: ((message: string, type?: ToastType, options?: ToastOptions) => string | void) & {
+    success?: (message: string, options?: ToastOptions) => string | void;
+    error?: (message: string, options?: ToastOptions) => string | void;
+    info?: (message: string, options?: ToastOptions) => string | void;
+    warning?: (message: string, options?: ToastOptions) => string | void;
   };
+  removeToast: (id: string) => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -78,30 +88,44 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const showToast = useCallback(
-    (message: string, type: ToastType = "info", duration?: number) => {
+    (message: string, type: ToastType = "info", options?: ToastOptions) => {
       if (!message) return;
-      const id = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      const timeoutDuration = duration ?? TOAST_TIMEOUT_MS[type] ?? 3500;
+      const id = options?.id ?? `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const persistent = options?.persistent ?? false;
+      const durationOpt = options?.duration;
+      const timeoutDuration = durationOpt ?? TOAST_TIMEOUT_MS[type] ?? 3500;
+      const isPersistent = persistent || timeoutDuration === Infinity;
 
-      setToasts((prev) => [...prev.slice(-4), { id, message, type, duration: timeoutDuration }]);
+      setToasts((prev) => {
+        const filtered = prev.filter((t) => t.id !== id);
+        const nonPersistent = filtered.filter((t) => !t.persistent);
+        const persistentToasts = filtered.filter((t) => t.persistent);
+        const nextItem: ToastItem = { id, message, type, duration: timeoutDuration, persistent: isPersistent, action: options?.action };
+        if (isPersistent) return [...filtered, nextItem];
+        const trimmed = nonPersistent.slice(-4);
+        return [...persistentToasts, ...trimmed, nextItem];
+      });
 
-      setTimeout(() => {
-        removeToast(id);
-      }, timeoutDuration);
+      if (!isPersistent) {
+        setTimeout(() => {
+          removeToast(id);
+        }, timeoutDuration);
+      }
+      return id;
     },
     [removeToast]
   );
 
   const toastFn = useMemo(() => {
-    const fn = (message: string, type?: ToastType) => showToast(message, type);
-    fn.success = (message: string) => showToast(message, "success");
-    fn.error = (message: string) => showToast(message, "error");
-    fn.info = (message: string) => showToast(message, "info");
-    fn.warning = (message: string) => showToast(message, "warning");
+    const fn = (message: string, type?: ToastType, options?: ToastOptions) => showToast(message, type, options);
+    fn.success = (message: string, options?: ToastOptions) => showToast(message, "success", options);
+    fn.error = (message: string, options?: ToastOptions) => showToast(message, "error", options);
+    fn.info = (message: string, options?: ToastOptions) => showToast(message, "info", options);
+    fn.warning = (message: string, options?: ToastOptions) => showToast(message, "warning", options);
     return fn;
   }, [showToast]);
 
-  const value = useMemo(() => ({ toast: toastFn }), [toastFn]);
+  const value = useMemo(() => ({ toast: toastFn, removeToast }), [toastFn, removeToast]);
 
   return (
     <ToastContext.Provider value={value}>
@@ -133,20 +157,32 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                       <IconComponent className="w-4 h-4" />
                     </div>
 
-                    <div className="flex-1 pt-1 min-w-0 pr-1">
+                    <div className="flex-1 pt-0.5 min-w-0 pr-1">
                       <p className="text-sm font-medium leading-snug break-words">
                         {item.message}
                       </p>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => removeToast(item.id)}
-                      className="flex-shrink-0 p-1 -mr-1 -mt-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
-                      aria-label="Dismiss toast"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                    {item.action ? (
+                      <button
+                        type="button"
+                        onClick={item.action.onClick}
+                        className="flex-shrink-0 self-center rounded-full border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
+                      >
+                        {item.action.label}
+                      </button>
+                    ) : null}
+
+                    {!item.persistent ? (
+                      <button
+                        type="button"
+                        onClick={() => removeToast(item.id)}
+                        className="flex-shrink-0 p-1 -mr-1 -mt-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
+                        aria-label="Dismiss toast"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    ) : null}
                   </motion.div>
                 );
               })}

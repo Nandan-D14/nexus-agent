@@ -43,6 +43,15 @@ def test_connector_map_covers_native_providers():
         "github",
         "tavily",
         "tinyfish",
+        "exa",
+        "treg",
+        "linear",
+        "vercel",
+        "cloudflare",
+        "apify",
+        "slack",
+        "vyora",
+        "openai",
     }
     assert expected_keys.issubset(set(CONNECTOR_TOOLS))
 
@@ -60,10 +69,15 @@ def test_infrastructure_tools_always_allowed_under_restriction():
     for name in (
         "ask_user",
         "read_skill",
+        "read_skill_file",
+        "read_skill_file",
         "write_workspace_file",
         "read_workspace_file",
         "write_todo_list",
         "initialize_task_state",
+        "propose_workflow_template",
+        "update_workflow_template",
+        "publish_workflow_template",
     ):
         assert name in ALWAYS_ALLOWED
         assert is_tool_allowed(name, allowlist) is True

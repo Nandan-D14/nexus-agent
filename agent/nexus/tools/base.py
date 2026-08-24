@@ -106,16 +106,19 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
     """
 
     def decorator(fn: Callable) -> Callable:
+        is_coro = asyncio.iscoroutinefunction(fn)
+
         @wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
             try:
                 if needs_sandbox:
                     from nexus.tools._context import ensure_sandbox
                     await ensure_sandbox()
-                if asyncio.iscoroutinefunction(fn):
+                if is_coro:
                     result = await fn(*args, **kwargs)
                 else:
-                    result = fn(*args, **kwargs)
+                    # Keep blocking I/O (E2B commands, screenshots) off the loop.
+                    result = await asyncio.to_thread(fn, *args, **kwargs)
                 return _normalize(fn.__name__, result)
             except Exception as e:
                 logger.exception("Tool %s failed", fn.__name__)
@@ -138,7 +141,10 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
                     tool_name=fn.__name__,
                 )
 
-        return async_wrapper if asyncio.iscoroutinefunction(fn) else sync_wrapper
+        # Sandbox tools must be async so ensure_sandbox() runs before the body.
+        if needs_sandbox or is_coro:
+            return async_wrapper
+        return sync_wrapper
 
     if func is not None:
         return decorator(func)

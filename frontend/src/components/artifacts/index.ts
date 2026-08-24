@@ -4,6 +4,7 @@
  */
 
 export { DocumentViewerModal } from "./document-viewer-modal";
+export { ArtifactPreview } from "./artifact-preview";
 export { ArtifactAttachmentCard } from "./attachment-card";
 export {
   ArtifactIcon,

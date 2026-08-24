@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus.skills import build_enabled_skills_prompt, build_skill_prompt_for_agent
-from nexus.tools.skills import read_skill
+from nexus.skills import build_enabled_skills_prompt, build_skill_prompt_for_agent, list_agent_skills, skill_from_parsed
+from nexus.skill_format import parse_skill_md, render_skill_md, safe_skill_relpath
+from nexus.tools.skills import read_skill, read_skill_file
 
 
 class AgentSkillsPromptTests(TestCase):
@@ -20,6 +21,7 @@ class AgentSkillsPromptTests(TestCase):
 
         self.assertIn("scan this skill catalog", prompt)
         self.assertIn("read_skill(skill_id)", prompt)
+        self.assertIn("read_skill_file(skill_id, path)", prompt)
         self.assertIn("not a connector by itself", prompt)
         self.assertIn("codebase-engineering", prompt)
         self.assertNotIn("Instructions:", prompt)
@@ -34,6 +36,11 @@ class AgentSkillsPromptTests(TestCase):
         self.assertIn("codebase-engineering", planner_prompt)
         self.assertIn("codebase-engineering", terminal_prompt)
         self.assertIn("desktop-control", desktop_prompt)
+
+    def test_bundled_playbooks_expose_resources(self) -> None:
+        skills = {skill["skill_id"]: skill for skill in list_agent_skills(None)}
+        self.assertIn("references/deliverable-checklist.md", skills["document-work"]["resources"])
+        self.assertIn("scripts/csv_preview.py", skills["spreadsheet-work"]["resources"])
 
 
 class ReadSkillToolTests(IsolatedAsyncioTestCase):
@@ -58,3 +65,13 @@ class ReadSkillToolTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error_code"], "SKILL_DISABLED")
         self.assertEqual(result["metadata"]["skill_id"], "codebase-engineering")
+
+    async def test_read_skill_file_returns_bundled_resource(self) -> None:
+        result = await read_skill_file("document-work", "references/deliverable-checklist.md")
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Filename is specific", result["metadata"]["content"])
+
+    async def test_read_skill_file_rejects_path_traversal(self) -> None:
+        result = await read_skill_file("document-work", "../secrets.txt")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "INVALID_SKILL_PATH")

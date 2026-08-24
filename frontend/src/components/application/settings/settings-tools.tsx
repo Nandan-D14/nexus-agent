@@ -1,35 +1,26 @@
 "use client";
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { Button } from "@/components/base/buttons/button";
 import { Input } from "@/components/base/input/input";
 import { Switch } from "@/components/base/switch/switch";
-import { authenticatedFetch, parseApiError } from "@/lib/api-client";
+import { APP_CONNECTORS } from "@/lib/app-paths";
+import { isGoogleProvider } from "@/lib/connectors";
+import {
+  useConnectMcpMutation,
+  useDeleteIntegrationMutation,
+  useIntegrationsConnectionsQuery,
+  useToggleIntegrationMutation,
+} from "@/lib/queries/integrations";
 import { SettingsCard, SettingsRow, SettingsSectionLabel } from "./settings-rows";
 
-type IntegrationTool = {
-  name: string;
-};
-
-type IntegrationConnection = {
-  connection_id: string;
-  connector_type: string;
-  provider: string;
-  name: string;
-  enabled: boolean;
-  status: string;
-  tools: IntegrationTool[];
-  tool_count: number;
-  last_error?: string | null;
-};
-
-function isGoogleProvider(provider: string) {
-  return ["google_drive", "gmail", "google_calendar", "google_tasks"].includes(provider);
-}
-
 export function SettingsTools() {
-  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
-  const [loading, setLoading] = useState(true);
+  const connectionsQuery = useIntegrationsConnectionsQuery();
+  const toggleMutation = useToggleIntegrationMutation();
+  const deleteMutation = useDeleteIntegrationMutation();
+  const connectMcpMutation = useConnectMcpMutation();
+  const connections = connectionsQuery.data ?? [];
+  const loading = connectionsQuery.isLoading;
   const [error, setError] = useState<string | null>(null);
   const [showMcp, setShowMcp] = useState(false);
   const [mcpName, setMcpName] = useState("");
@@ -37,51 +28,27 @@ export function SettingsTools() {
   const [mcpToken, setMcpToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await authenticatedFetch("/api/v1/integrations/connections");
-      if (!response.ok) throw new Error(await parseApiError(response));
-      const body = (await response.json()) as { connections?: IntegrationConnection[] };
-      setConnections(body.connections ?? []);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load tools.");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const displayError =
+    error ||
+    (connectionsQuery.error instanceof Error ? connectionsQuery.error.message : null);
 
-  useEffect(() => {
-    void load();
-  }, []);
-
-  const toggleConnection = async (connection: IntegrationConnection) => {
+  const toggleConnection = async (connection: (typeof connections)[number]) => {
     if (isGoogleProvider(connection.provider)) return;
     setError(null);
-    const response = await authenticatedFetch(`/api/v1/integrations/${connection.connection_id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: !connection.enabled }),
-    });
-    if (!response.ok) {
-      setError(await parseApiError(response));
-      return;
+    try {
+      await toggleMutation.mutateAsync(connection);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to update tool.");
     }
-    await load();
   };
 
-  const deleteConnection = async (connection: IntegrationConnection) => {
+  const deleteConnection = async (connection: (typeof connections)[number]) => {
     setError(null);
-    const path = isGoogleProvider(connection.provider)
-      ? "/api/v1/auth/google"
-      : `/api/v1/integrations/${connection.connection_id}`;
-    const response = await authenticatedFetch(path, { method: "DELETE" });
-    if (!response.ok) {
-      setError(await parseApiError(response));
-      return;
+    try {
+      await deleteMutation.mutateAsync(connection);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to remove tool.");
     }
-    await load();
   };
 
   const submitMcp = async (event: FormEvent) => {
@@ -89,22 +56,15 @@ export function SettingsTools() {
     setSubmitting(true);
     setError(null);
     try {
-      const response = await authenticatedFetch("/api/v1/integrations/mcp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: mcpName,
-          url: mcpUrl,
-          bearer_token: mcpToken || null,
-          enabled: true,
-        }),
+      await connectMcpMutation.mutateAsync({
+        name: mcpName,
+        url: mcpUrl,
+        bearerToken: mcpToken,
       });
-      if (!response.ok) throw new Error(await parseApiError(response));
       setShowMcp(false);
       setMcpName("");
       setMcpUrl("");
       setMcpToken("");
-      await load();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to add MCP server.");
     } finally {
@@ -114,12 +74,12 @@ export function SettingsTools() {
 
   return (
     <div className="flex w-full flex-col gap-6">
-      {error ? (
+      {displayError ? (
         <div
           role="alert"
           className="rounded-2lg border border-status-rose-text/20 bg-status-rose-background px-3 py-2 text-body-2-regular text-status-rose-text"
         >
-          {error}
+          {displayError}
         </div>
       ) : null}
 
@@ -173,7 +133,7 @@ export function SettingsTools() {
           variant="secondary"
           size="small"
           onClick={() => {
-            window.location.assign("/connectors");
+            window.location.assign(APP_CONNECTORS);
           }}
         >
           Open connectors

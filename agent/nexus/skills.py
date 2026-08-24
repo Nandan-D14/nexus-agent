@@ -10,6 +10,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from nexus.bundled_skill_files import BUNDLED_SKILL_FILES
+from nexus.skill_format import ParsedSkill, normalize_skill_files, skill_sandbox_path
+
 
 DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
     {
@@ -88,7 +91,15 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Documents",
         "description": "Create and edit spreadsheets, formulas, tables, and charts.",
         "trigger": "Use for XLSX/CSV work, financial tables, formulas, and spreadsheet exports.",
-        "instructions": "Preserve formulas and formatting, and validate generated sheets.",
+        "instructions": (
+            "Build the table in structured data first, then export.\n"
+            "1. Confirm columns, units, and the output filename.\n"
+            "2. Preview CSV sources with scripts/csv_preview.py in this skill folder "
+            "(`/home/user/skills/spreadsheet-work/scripts/csv_preview.py`) when the sandbox is up.\n"
+            "3. Use generate_excel_report for XLSX deliverables; keep formulas/notes explicit.\n"
+            "4. Read references/sheet-checklist.md before finishing.\n"
+            "Call read_skill_file for resource files instead of guessing their contents."
+        ),
         "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker"],
     },
     {
@@ -97,7 +108,15 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Documents",
         "description": "Draft, edit, summarize, and format documents.",
         "trigger": "Use for DOCX, Markdown, reports, summaries, and written deliverables.",
-        "instructions": "Produce concise, well-structured documents with clear filenames.",
+        "instructions": (
+            "Draft in Markdown, then convert to the requested format.\n"
+            "1. Confirm audience, filename, and whether the output is PDF, DOCX, or Markdown.\n"
+            "2. Outline headings, then write the body.\n"
+            "3. Convert with generate_pdf_report or generate_docx_report; never invent file bytes.\n"
+            "4. Save with save_as_artifact. Read references/deliverable-checklist.md before finishing.\n"
+            "Skill files mount at `/home/user/skills/document-work/`. "
+            "Call read_skill_file(skill_id, path) for bundled resources."
+        ),
         "agent_scope": ["nexus_planner", "terminal_worker", "writer", "researcher"],
     },
     {
@@ -115,7 +134,14 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Developer",
         "description": "Review PRs, issues, diffs, and repository changes.",
         "trigger": "Use for GitHub issues, pull requests, code review, and CI context.",
-        "instructions": "Prioritize correctness, security, regressions, and test gaps.",
+        "instructions": (
+            "Review the diff, not the vibe.\n"
+            "1. Identify the PR/issue and the claimed intent.\n"
+            "2. Use github_summarize_pr / github_read_file / github_list_issues when connected.\n"
+            "3. Report blocking issues first (correctness, security, tests), then nits.\n"
+            "4. Quote file paths. Read references/review-checklist.md before the final summary.\n"
+            "Call read_skill_file for bundled resources."
+        ),
         "agent_scope": ["nexus_planner", "terminal_worker", "coder", "researcher"],
     },
     {
@@ -151,7 +177,14 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Automation",
         "description": "Reuse saved task workflows and repeatable operating procedures.",
         "trigger": "Use when a task matches a saved workflow or should become repeatable.",
-        "instructions": "Follow the saved process and adapt only the user-provided inputs.",
+        "instructions": (
+            "When the user wants to save this conversation as a reusable workflow, "
+            "call propose_workflow_template with a name, instructions, and input fields, "
+            "then wait for confirm, edit, or dismiss. Use update_workflow_template for "
+            "requested changes and publish_workflow_template only after they confirm. "
+            "Do not start a new session. When running an already published template, "
+            "follow the saved process and adapt only the user-provided inputs."
+        ),
         "agent_scope": ["nexus_planner"],
     },
 ]
@@ -193,6 +226,18 @@ DEFAULT_AGENT_SKILLS = [
 ]
 
 
+def _attach_bundled_skill_files() -> None:
+    for skill in DEFAULT_AGENT_SKILLS:
+        files = BUNDLED_SKILL_FILES.get(str(skill.get("skill_id") or ""))
+        if not files:
+            continue
+        skill["files"] = dict(files)
+        skill["format"] = "agent_skill"
+
+
+_attach_bundled_skill_files()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -203,12 +248,19 @@ def _slug(value: str, fallback: str = "skill") -> str:
 
 
 def _default_skill(raw: dict[str, Any]) -> dict[str, Any]:
+    files = normalize_skill_files(raw.get("files"))
     return {
         **raw,
         "source": "built_in",
         "enabled": True,
         "created_at": None,
         "updated_at": None,
+        "format": raw.get("format") or ("agent_skill" if files else "legacy"),
+        "files": files,
+        "license": str(raw.get("license") or ""),
+        "compatibility": str(raw.get("compatibility") or ""),
+        "allowed_tools": str(raw.get("allowed_tools") or ""),
+        "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
     }
 
 
@@ -216,24 +268,54 @@ def _custom_skill(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     name = str(raw.get("name") or "").strip()
-    instructions = str(raw.get("instructions") or "").strip()
+    instructions = str(raw.get("instructions") or "").strip() or str(raw.get("description") or "").strip()
     if not name or not instructions:
         return None
     skill_id = str(raw.get("skill_id") or raw.get("id") or "").strip()
     if not skill_id:
         skill_id = f"user-{_slug(name)}-{uuid.uuid4().hex[:6]}"
+    files = normalize_skill_files(raw.get("files"))
+    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     return {
         "skill_id": skill_id[:96],
         "name": name[:80],
         "category": str(raw.get("category") or "Custom").strip()[:40] or "Custom",
-        "description": str(raw.get("description") or "").strip()[:240],
+        "description": str(raw.get("description") or "").strip()[:1024],
         "trigger": str(raw.get("trigger") or "").strip()[:500],
-        "instructions": instructions[:4000],
+        "instructions": instructions[:16000],
         "source": "user",
         "enabled": bool(raw.get("enabled", True)),
         "created_at": raw.get("created_at") or _now_iso(),
         "updated_at": raw.get("updated_at") or _now_iso(),
+        "format": "agent_skill" if raw.get("format") == "agent_skill" or files else "legacy",
+        "files": files,
+        "license": str(raw.get("license") or "")[:200],
+        "compatibility": str(raw.get("compatibility") or "")[:500],
+        "allowed_tools": str(raw.get("allowed_tools") or "")[:500],
+        "metadata": {str(key): str(val) for key, val in metadata.items()},
     }
+
+
+def _finalize_skill(skill: dict[str, Any], *, include_files: bool) -> dict[str, Any]:
+    files = normalize_skill_files(skill.get("files"))
+    out = {
+        **skill,
+        "files": files,
+        "format": skill.get("format") or ("agent_skill" if files else "legacy"),
+        "resources": sorted(files),
+        "sandbox_path": skill_sandbox_path(str(skill.get("skill_id") or "skill")),
+        "license": str(skill.get("license") or ""),
+        "compatibility": str(skill.get("compatibility") or ""),
+        "allowed_tools": str(skill.get("allowed_tools") or ""),
+        "metadata": skill.get("metadata") if isinstance(skill.get("metadata"), dict) else {},
+    }
+    if not include_files:
+        out.pop("files", None)
+    return out
+
+
+def public_skill(skill: dict[str, Any]) -> dict[str, Any]:
+    return _finalize_skill(skill, include_files=False)
 
 
 def _clip_prompt_text(value: Any, limit: int = 700) -> str:
@@ -248,7 +330,11 @@ def get_agent_skill_state(user_settings: dict[str, Any] | None) -> dict[str, Any
     return state if isinstance(state, dict) else {}
 
 
-def list_agent_skills(user_settings: dict[str, Any] | None) -> list[dict[str, Any]]:
+def list_agent_skills(
+    user_settings: dict[str, Any] | None,
+    *,
+    include_files: bool = True,
+) -> list[dict[str, Any]]:
     state = get_agent_skill_state(user_settings)
     disabled_defaults = set(state.get("disabledDefaults") or [])
     defaults = [
@@ -260,7 +346,65 @@ def list_agent_skills(user_settings: dict[str, Any] | None) -> list[dict[str, An
         for raw in (state.get("custom") or [])
         if (skill := _custom_skill(raw))
     ]
-    return [*defaults, *custom]
+    custom_by_id = {skill["skill_id"]: skill for skill in custom}
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for skill in defaults:
+        skill_id = skill["skill_id"]
+        merged = custom_by_id.get(skill_id, skill)
+        if skill_id in custom_by_id:
+            merged = {**merged, "enabled": custom_by_id[skill_id].get("enabled", True)}
+        result.append(_finalize_skill(merged, include_files=include_files))
+        seen.add(skill_id)
+    for skill in custom:
+        if skill["skill_id"] not in seen:
+            result.append(_finalize_skill(skill, include_files=include_files))
+    return result
+
+
+def get_agent_skill(
+    user_settings: dict[str, Any] | None,
+    skill_id: str,
+    *,
+    include_files: bool = True,
+) -> dict[str, Any] | None:
+    target = str(skill_id or "").strip()
+    if not target:
+        return None
+    for skill in list_agent_skills(user_settings, include_files=include_files):
+        if skill.get("skill_id") == target:
+            return skill
+    return None
+
+
+def skill_from_parsed(
+    parsed: ParsedSkill,
+    *,
+    files: dict[str, str] | None = None,
+    enabled: bool = True,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    display_name = parsed.name.replace("-", " ").title()
+    payload = {
+        **(existing or {}),
+        "skill_id": parsed.name,
+        "name": display_name[:80],
+        "category": parsed.category[:40],
+        "description": parsed.description,
+        "trigger": parsed.trigger,
+        "instructions": parsed.body or parsed.description,
+        "enabled": enabled,
+        "format": "agent_skill",
+        "license": parsed.license,
+        "compatibility": parsed.compatibility,
+        "allowed_tools": parsed.allowed_tools,
+        "metadata": parsed.metadata,
+        "files": normalize_skill_files(files),
+        "updated_at": _now_iso(),
+    }
+    if existing and existing.get("created_at"):
+        payload["created_at"] = existing.get("created_at")
+    return _custom_skill(payload)
 
 
 def build_agent_skills_update(
@@ -297,6 +441,7 @@ def build_enabled_skills_prompt(
         "Enabled CoComputer skills:",
         "Before choosing an agent or tool, scan this skill catalog and apply every matching skill's instructions.",
         "Call read_skill(skill_id) when you need the full instructions or exact custom workflow.",
+        "If a catalog entry lists Resources, call read_skill_file(skill_id, path) for that file. Enabled skills are also mounted at /home/user/skills/<skill_id>/ when the sandbox is running.",
         "A skill is reusable instructions and routing guidance, not a connector by itself. Use the matching callable tools only when they are available.",
         "If no skill matches, continue with the normal routing policy.",
     ]
@@ -304,9 +449,11 @@ def build_enabled_skills_prompt(
         trigger = skill.get("trigger") or skill.get("description") or ""
         description = skill.get("description") or ""
         scope = ", ".join(skill.get("agent_scope") or [])
+        resources = ", ".join((skill.get("resources") or [])[:8])
+        extra = f" Resources: {resources}." if resources else ""
         lines.append(
             f"- {skill['skill_id']}: {skill['name']} ({skill['category']}): "
-            f"{trigger} Description: {description} Scope: {scope}."
+            f"{trigger} Description: {description} Scope: {scope}.{extra}"
         )
 
     if mcp_tools:
@@ -359,6 +506,7 @@ def build_skill_prompt_for_agent(
         "Enabled CoComputer skills:",
         "Before choosing an agent or tool, scan this skill catalog and apply every matching skill's instructions.",
         "Call read_skill(skill_id) when you need the full instructions or exact custom workflow.",
+        "If a catalog entry lists Resources, call read_skill_file(skill_id, path) for that file. Enabled skills are also mounted at /home/user/skills/<skill_id>/ when the sandbox is running.",
         "A skill is reusable instructions and routing guidance, not a connector by itself. Use the matching callable tools only when they are available.",
         "If no skill matches, continue with the normal routing policy.",
     ]
@@ -366,9 +514,11 @@ def build_skill_prompt_for_agent(
         trigger = skill.get("trigger") or skill.get("description") or ""
         description = skill.get("description") or ""
         scope = ", ".join(skill.get("agent_scope") or [])
+        resources = ", ".join((skill.get("resources") or [])[:8])
+        extra = f" Resources: {resources}." if resources else ""
         lines.append(
             f"- {skill['skill_id']}: {skill['name']} ({skill['category']}): "
-            f"{trigger} Description: {description} Scope: {scope}. "
+            f"{trigger} Description: {description} Scope: {scope}.{extra} "
             f"Instructions: {_clip_prompt_text(skill.get('instructions'))}"
         )
 
@@ -382,3 +532,8 @@ def build_skill_prompt_for_agent(
         lines.append("Use MCP tools when they match the task. Request permission for risky MCP actions.")
 
     return "\n".join(lines)
+
+
+public_skill = public_skill
+skill_from_parsed = skill_from_parsed
+get_agent_skill = get_agent_skill

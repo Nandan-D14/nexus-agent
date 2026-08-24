@@ -259,7 +259,10 @@ def take_screenshot() -> dict:
             cached_perceptual_hash = getattr(_last_analysis, "perceptual_hash", None)
             cached_time = float(getattr(_last_analysis, "captured_at", 0.0) or 0.0)
             cached_action_seq = int(getattr(_last_analysis, "action_seq", -1) or -1)
-            model_id = runtime_config.qwen_vision_model or "qwen-vision"
+            if runtime_config.user_llm_configured:
+                model_id = runtime_config.llm_vision_model or runtime_config.llm_model or "user-llm"
+            else:
+                model_id = runtime_config.qwen_vision_model or "qwen-vision"
             cache_doc_id = _vision_cache_doc_id(screenshot_hash, model_id)
             used_cache = False
             analysis_mode = "vision_full"
@@ -301,8 +304,17 @@ def take_screenshot() -> dict:
                 from nexus.vision_provider import create_vision_provider
 
                 provider = create_vision_provider(
-                    primary_model=runtime_config.qwen_vision_model or None,
-                    fallback_models=runtime_config.qwen_vision_fallback_models or None,
+                    runtime_config=runtime_config,
+                    primary_model=(
+                        (runtime_config.llm_vision_model or runtime_config.llm_model or None)
+                        if runtime_config.user_llm_configured
+                        else (runtime_config.qwen_vision_model or None)
+                    ),
+                    fallback_models=(
+                        None
+                        if runtime_config.user_llm_configured
+                        else (runtime_config.qwen_vision_fallback_models or None)
+                    ),
                 )
                 observation = provider.analyze(
                     jpeg_bytes,

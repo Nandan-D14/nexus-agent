@@ -162,10 +162,21 @@ export type WsMessage = WsEventMeta & (
       component?: unknown;
     }
   | {
+      type: "template_draft";
+      template_id: string;
+      status?: "draft" | "published";
+      name?: string;
+      description?: string;
+      instructions?: string;
+      input_fields?: WorkflowTemplateInputField[];
+      source_session_id?: string | null;
+    }
+  | {
       type: "user_question";
       question_id: string;
       question: string;
       timeout_seconds?: number;
+      options?: string[];
     }
   | { type: "user_question_resolved"; question_id: string; answered: boolean }
   | {
@@ -207,6 +218,18 @@ export type WsMessage = WsEventMeta & (
   | { type: "worker_claimed"; worker_id?: string; attempt?: number; claim_generation?: number; reattached?: boolean }
   | { type: "worker_finished"; status?: string; summary?: string }
   | { type: "enqueue_rejected"; provider?: string; reason?: string }
+  // A prompt arrived while a run was still executing. The server did NOT accept
+  // the prompt, but it re-attached this socket to the running run, so live
+  // progress follows. Distinct from `error` so the UI shows work in progress
+  // rather than a dead end. `pending_text` echoes the refused prompt so the
+  // composer can restore it instead of silently dropping it.
+  | {
+      type: "run_busy";
+      code?: string;
+      message?: string;
+      run_status?: string;
+      pending_text?: string;
+    }
   // Coarse orchestrator progress that is not tied to a tool call, e.g. a turn
   // waiting behind the previous turn on the same session.
   | { type: "agent_status"; status: string; message?: string }
@@ -280,7 +303,12 @@ export type WsMessage = WsEventMeta & (
     }
   | { type: "error"; code: string; message: string; detail?: string }
   | { type: "pong" }
-  | { type: "ui_action"; action: "switch_tab"; target: "workflow" | "desktop"; reason?: string }
+  | { type: "ui_action"; action: "switch_tab"; target: "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "artifacts" | "files" | "workspace"; reason?: string }
+  | { type: "sandbox_terminal"; phase: "start" | "result"; command?: string; cwd?: string; stdout?: string; stderr?: string; exit_code?: number }
+  | { type: "sandbox_editor"; phase: "start" | "result"; path?: string; action?: "write" | "read" | "list"; content?: string; append?: boolean; bytes_written?: number }
+  | { type: "agent_delta"; delta: string; seq?: number; run_id?: string }
+  | { type: "agent_stream_chunk"; chunk: string; seq?: number; run_id?: string }
+  | { type: "agent_stream_end"; run_id?: string }
 );
 
 // ── Client -> Server (Text frames) ─────────────────────────────────
@@ -411,6 +439,7 @@ export type RecentSession = {
   summary: string | null;
   created_at: string | null;
   updated_at: string | null;
+  ended_at?: string | null;
   message_count: number;
   handoff_summary?: HandoffSummary | null;
   can_continue_workspace?: boolean;
@@ -423,6 +452,7 @@ export type RecentSession = {
   can_continue_conversation?: boolean;
   exact_workspace_resume_available?: boolean;
   continuation_mode?: string | null;
+  context_packet?: { summary?: string | null } | null;
 };
 
 export type RunInfo = {
@@ -512,11 +542,12 @@ export type WorkflowTemplateData = {
   owner_id: string;
   name: string;
   description: string;
-  source_session_id: string;
+  source_session_id?: string | null;
   source_run_id?: string | null;
   instructions: string;
   input_fields: WorkflowTemplateInputField[];
   source_artifacts: string[];
+  status?: "draft" | "published";
   created_at: string | null;
   updated_at: string | null;
   last_used_at?: string | null;

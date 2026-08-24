@@ -1,4 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
+import Link from "next/link";
 import { cx } from "@/utils/cx";
 
 /**
@@ -45,10 +46,14 @@ export function SettingsSectionLabel({ className, children }: { className?: stri
 export function SettingsRow({
   label,
   description,
+  href,
+  onNavigate,
   children,
 }: {
   label: string;
   description?: string;
+  href?: string;
+  onNavigate?: () => void;
   children?: ReactNode;
 }) {
   return (
@@ -59,7 +64,17 @@ export function SettingsRow({
       )}
     >
       <div className="flex min-w-0 flex-col">
-        <p className="text-body-regular text-text-primary">{label}</p>
+        {href ? (
+          <Link
+            href={href}
+            onClick={onNavigate}
+            className="text-body-regular text-text-primary hover:underline"
+          >
+            {label}
+          </Link>
+        ) : (
+          <p className="text-body-regular text-text-primary">{label}</p>
+        )}
         {description && (
           <p className="text-body-2-regular text-text-secondary">{description}</p>
         )}

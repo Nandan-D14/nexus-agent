@@ -13,7 +13,6 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
-import { CitationInline } from "@/components/agent-ui/citation-inline";
 import { TextResponse } from "@/components/agent-ui/text-response";
 import {
   extractMarkdownCitations,
@@ -22,118 +21,26 @@ import {
 import type { SearchCiteRef } from "@/lib/search-result-utils";
 import { cx } from "@/utils/cx";
 
-const WORD_MS = 80;
-
 type Props = {
   text: string;
   isStreaming: boolean;
   className?: string;
-  /** Search / tool results to merge into the Sources UI (markdown citations win on URL clash). */
   extraSources?: SearchCiteRef[];
 };
 
-type RevealToken =
-  | { kind: "word"; text: string }
-  | { kind: "cite"; ref: CiteRef };
-
-function usePrefersReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(false);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduced(mq.matches);
-    const onChange = () => setReduced(mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-
-  return reduced;
-}
-
-/** Structured markdown that would look broken as word spans. */
-function isMarkdownHeavy(text: string): boolean {
-  return (
-    /```/.test(text) ||
-    /^\s{0,3}#{1,6}\s/m.test(text) ||
-    /^\s*\|.+\|/m.test(text) ||
-    /^\s*>\s/m.test(text)
-  );
-}
-
-/**
- * Build demo-like reveal tokens from real agent text:
- * markdown links → label words + one citation pill per distinct URL.
- */
-function buildRevealTokens(text: string, refs: CiteRef[]): RevealToken[] {
-  const tokens: RevealToken[] = [];
-  const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
-  let last = 0;
-  let match: RegExpExecArray | null;
-  const citedUrls = new Set<string>();
-
-  const pushPlain = (chunk: string) => {
-    const words = chunk.match(/\S+\s*/g) ?? [];
-    for (const w of words) {
-      tokens.push({ kind: "word", text: w });
-    }
-  };
-
-  const stripInline = (chunk: string) =>
-    chunk
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/\*\*([^*]+)\*\*/g, "$1")
-      .replace(/\*([^*]+)\*/g, "$1")
-      .replace(/_([^_]+)_/g, "$1");
-
-  while ((match = re.exec(text)) !== null) {
-    pushPlain(stripInline(text.slice(last, match.index)));
-    const label = match[1]?.trim() || "";
-    const url = match[2]?.trim() || "";
-    pushPlain(stripInline(label) + " ");
-    if (url && !citedUrls.has(url)) {
-      citedUrls.add(url);
-      const ref = refs.find((r) => r.url === url);
-      if (ref) {
-        tokens.push({ kind: "cite", ref });
-      }
-    }
-    last = match.index + match[0].length;
-  }
-  pushPlain(stripInline(text.slice(last)));
-  return tokens;
-}
-
-function faviconUrl(host: string): string {
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
-}
-
-function wordPrefix(text: string, count: number): string {
-  const words = text.match(/\S+\s*/g) ?? (text ? [text] : []);
-  if (count >= words.length) return text;
-  return words.slice(0, Math.max(0, count)).join("");
-}
-
-/**
- * Markdown citations first; append search-only URLs.
- * On URL clash prefer markdown label; keep search description if markdown has none.
- */
 function mergeCitationRefs(
   text: string,
   extraSources?: SearchCiteRef[],
 ): CiteRef[] {
   const { refs: markdownRefs } = extractMarkdownCitations(text);
   if (!extraSources?.length) return markdownRefs;
-
   const merged: CiteRef[] = markdownRefs.map((r) => ({ ...r }));
   const byUrl = new Map(merged.map((r) => [r.url, r]));
-
   for (const src of extraSources) {
     if (!src.url) continue;
     const existing = byUrl.get(src.url);
     if (existing) {
-      if (!existing.description && src.description) {
-        existing.description = src.description;
-      }
+      if (!existing.description && src.description) existing.description = src.description;
       continue;
     }
     const ref: CiteRef = {
@@ -149,56 +56,19 @@ function mergeCitationRefs(
   return merged;
 }
 
-/**
- * Agent answer shell — demo-style word fade-in while streaming, then
- * Copy / Retry / thumbs + expandable sources (BoardUI tokens).
- */
+function faviconUrl(host: string): string {
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
+}
+
 export function StreamingText({
   text,
   isStreaming,
   className,
   extraSources,
 }: Props) {
-  const reducedMotion = usePrefersReducedMotion();
-  const refs = useMemo(
-    () => mergeCitationRefs(text, extraSources),
-    [text, extraSources],
-  );
-  const heavyMd = useMemo(() => isMarkdownHeavy(text), [text]);
-  const revealTokens = useMemo(() => buildRevealTokens(text, refs), [text, refs]);
-  const totalTokens = revealTokens.length;
-  const totalWords = useMemo(() => {
-    const words = text.match(/\S+\s*/g);
-    return words?.length ?? (text ? 1 : 0);
-  }, [text]);
-
-  const shouldAnimate = isStreaming && !reducedMotion;
-  const useWordSpans = shouldAnimate && !heavyMd;
-
-  const [visibleCount, setVisibleCount] = useState(() =>
-    shouldAnimate ? 0 : useWordSpans ? totalTokens : totalWords,
-  );
+  const refs = useMemo(() => mergeCitationRefs(text, extraSources), [text, extraSources]);
   const [copied, setCopied] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
-
-  useEffect(() => {
-    if (!shouldAnimate) {
-      setVisibleCount(useWordSpans ? totalTokens : totalWords);
-      return;
-    }
-    setVisibleCount(0);
-  }, [text, shouldAnimate, totalTokens, totalWords, useWordSpans]);
-
-  const animateTotal = useWordSpans ? totalTokens : totalWords;
-
-  useEffect(() => {
-    if (!shouldAnimate) return;
-    if (visibleCount >= animateTotal) return;
-    const id = window.setTimeout(() => {
-      setVisibleCount((c) => Math.min(c + 1, animateTotal));
-    }, WORD_MS);
-    return () => window.clearTimeout(id);
-  }, [shouldAnimate, visibleCount, animateTotal]);
 
   useEffect(() => {
     if (!copied) return;
@@ -206,75 +76,32 @@ export function StreamingText({
     return () => window.clearTimeout(id);
   }, [copied]);
 
-  const revealDone = !shouldAnimate || visibleCount >= animateTotal;
-  const showCaret = shouldAnimate && !revealDone;
-  const showActions = revealDone;
+  const showCaret = isStreaming;
+  const showActions = !isStreaming;
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-    } catch {
-      // Clipboard may be denied; leave UI unchanged.
-    }
+    } catch {}
   };
 
   return (
     <div className={cx("relative w-full", className)}>
-      {/* Prose */}
-      {revealDone || !shouldAnimate ? (
+      <div className="relative">
         <TextResponse content={text} hideCitations sources={refs} />
-      ) : useWordSpans ? (
-        <p className="m-0 text-[15px] leading-[1.75] font-medium text-text-primary">
-          {revealTokens.slice(0, visibleCount).map((token, i) =>
-            token.kind === "cite" ? (
-              <CitationInline
-                key={`cite-${token.ref.url}-${i}`}
-                active={token.ref}
-                sources={refs}
-                className="animate-pop-in"
-              />
-            ) : (
-              <span
-                key={`w-${i}`}
-                className="inline animate-fade-in"
-                style={{ animationDuration: "250ms" }}
-              >
-                {token.text}
-              </span>
-            ),
-          )}
-          {showCaret ? <StreamCaret /> : null}
-        </p>
-      ) : (
-        <div>
-          <TextResponse
-            content={wordPrefix(text, visibleCount)}
-            hideCitations
-            sources={refs}
-          />
-          {showCaret ? <StreamCaret /> : null}
-        </div>
-      )}
-
-      {/* Action icons + sources toggle — demo layout */}
+        {showCaret ? <StreamCaret /> : null}
+      </div>
       <div
-        className="mt-2 flex items-center gap-0.5 transition-opacity duration-[400ms]"
+        className="mt-2 flex items-center gap-0.5 transition-opacity duration-200"
         style={{
           opacity: showActions ? 1 : 0,
           pointerEvents: showActions ? "auto" : "none",
         }}
         aria-hidden={!showActions}
       >
-        <ActionIconButton
-          label={copied ? "Copied" : "Copy response"}
-          onClick={handleCopy}
-        >
-          {copied ? (
-            <Check className="size-[15px] text-emerald-500" aria-hidden />
-          ) : (
-            <Clipboard className="size-[15px]" aria-hidden />
-          )}
+        <ActionIconButton label={copied ? "Copied" : "Copy response"} onClick={handleCopy}>
+          {copied ? <Check className="size-[15px] text-emerald-500" aria-hidden /> : <Clipboard className="size-[15px]" aria-hidden />}
         </ActionIconButton>
         <ActionIconButton label="Retry" title="Coming soon" disabled>
           <RotateCcw className="size-[15px]" aria-hidden />
@@ -285,7 +112,6 @@ export function StreamingText({
         <ActionIconButton label="Thumbs down" title="Coming soon" disabled>
           <ThumbsDown className="size-[15px]" aria-hidden />
         </ActionIconButton>
-
         {refs.length > 0 ? (
           <button
             type="button"
@@ -304,8 +130,6 @@ export function StreamingText({
           </button>
         ) : null}
       </div>
-
-      {/* Expandable sources — grid collapse like demo */}
       {refs.length > 0 ? (
         <div
           className="grid transition-[grid-template-rows,opacity] duration-300"
@@ -328,9 +152,7 @@ export function StreamingText({
                 >
                   <SourceFavicon host={ref.host} size="md" rounded="sm" />
                   <span className="min-w-0 flex-1 truncate">{ref.label}</span>
-                  <span className="ml-auto shrink-0 font-mono text-[10.5px] text-text-tertiary">
-                    {ref.host}
-                  </span>
+                  <span className="ml-auto shrink-0 font-mono text-[10.5px] text-text-tertiary">{ref.host}</span>
                 </a>
               ))}
             </div>
@@ -343,27 +165,11 @@ export function StreamingText({
 
 function StreamCaret() {
   return (
-    <span
-      className="animate-fade-in ml-0.5 inline-block h-3 w-0.5 translate-y-0.5 rounded-full bg-text-primary"
-      style={{ animationDuration: "150ms" }}
-      aria-hidden
-    />
+    <span className="ml-0.5 inline-block h-3 w-0.5 translate-y-0.5 animate-pulse rounded-full bg-text-primary" aria-hidden />
   );
 }
 
-function ActionIconButton({
-  children,
-  label,
-  onClick,
-  disabled,
-  title,
-}: {
-  children: ReactNode;
-  label: string;
-  onClick?: () => void;
-  disabled?: boolean;
-  title?: string;
-}) {
+function ActionIconButton({ children, label, onClick, disabled, title }: { children: ReactNode; label: string; onClick?: () => void; disabled?: boolean; title?: string }) {
   return (
     <button
       type="button"
@@ -373,9 +179,7 @@ function ActionIconButton({
       onClick={onClick}
       className={cx(
         "flex size-6 items-center justify-center rounded-[6px] text-text-tertiary transition-colors duration-100",
-        disabled
-          ? "cursor-default opacity-50"
-          : "hover:bg-background-tertiary-hover hover:text-text-secondary",
+        disabled ? "cursor-default opacity-50" : "hover:bg-background-tertiary-hover hover:text-text-secondary",
       )}
     >
       {children}
@@ -383,52 +187,25 @@ function ActionIconButton({
   );
 }
 
-function SourceFavicon({
-  host,
-  size = "sm",
-  stacked = false,
-  rounded = "full",
-}: {
-  host: string;
-  size?: "xs" | "sm" | "md";
-  stacked?: boolean;
-  rounded?: "full" | "sm";
-}) {
+function SourceFavicon({ host, size = "sm", stacked = false, rounded = "full" }: { host: string; size?: "xs" | "sm" | "md"; stacked?: boolean; rounded?: "full" | "sm" }) {
   const [failed, setFailed] = useState(false);
-  const dim =
-    size === "md" ? "size-4" : size === "xs" ? "size-3" : "size-3.5";
+  const dim = size === "md" ? "size-4" : size === "xs" ? "size-3" : "size-3.5";
   const radius = rounded === "sm" ? "rounded-[3px]" : "rounded-full";
-
   if (failed) {
     return (
-      <span
-        className={cx(
-          dim,
-          radius,
-          "inline-flex shrink-0 items-center justify-center border border-separator-border bg-background-tertiary-default text-[8px] font-semibold uppercase text-text-tertiary",
-          stacked && "bg-background-primary-default shadow-[0_0_0_1.5px_var(--color-background-primary-default)]",
-        )}
-        aria-hidden
-      >
+      <span className={cx(dim, radius, "inline-flex shrink-0 items-center justify-center border border-separator-border bg-background-tertiary-default text-[8px] font-semibold uppercase text-text-tertiary", stacked && "bg-background-primary-default shadow-[0_0_0_1.5px_var(--color-background-primary-default)]")} aria-hidden>
         {host.charAt(0) || "?"}
       </span>
     );
   }
-
   return (
-    // eslint-disable-next-line @next/next/no-img-element -- remote favicon URLs
+    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={faviconUrl(host)}
       alt=""
       width={size === "md" ? 16 : size === "xs" ? 12 : 14}
       height={size === "md" ? 16 : size === "xs" ? 12 : 14}
-      className={cx(
-        dim,
-        radius,
-        "shrink-0 bg-background-secondary-default",
-        stacked &&
-          "bg-background-primary-default shadow-[0_0_0_1.5px_var(--color-background-primary-default)]",
-      )}
+      className={cx(dim, radius, "shrink-0 bg-background-secondary-default", stacked && "bg-background-primary-default shadow-[0_0_0_1.5px_var(--color-background-primary-default)]")}
       loading="lazy"
       onError={() => setFailed(true)}
     />

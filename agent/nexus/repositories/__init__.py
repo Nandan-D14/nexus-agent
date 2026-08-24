@@ -9,7 +9,6 @@ them and delegates via ``__getattr__`` so existing call sites are unchanged.
 """
 
 from nexus.repositories.audit_repository import AuditRepository
-from nexus.repositories.beta_repository import BetaRepository
 from nexus.repositories.integration_repository import IntegrationRepository
 from nexus.repositories.sandbox_state_repository import SandboxStateRepository
 from nexus.repositories.user_repository import UserRepository
@@ -17,7 +16,6 @@ from nexus.repositories.workflow_template_repository import WorkflowTemplateRepo
 
 __all__ = [
     "AuditRepository",
-    "BetaRepository",
     "IntegrationRepository",
     "SandboxStateRepository",
     "UserRepository",

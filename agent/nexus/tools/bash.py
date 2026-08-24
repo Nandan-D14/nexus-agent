@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
 logger = logging.getLogger(__name__)
 
-_MAX_EXCERPT_CHARS = 480
+_MAX_EXCERPT_CHARS = 8_000
 _MAX_SUMMARY_CHARS = 220
+_MAX_PANE_CHARS = 12_000
 
 
 def _coerce_exit_code(value: object) -> int:
@@ -21,18 +23,6 @@ def _coerce_exit_code(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return -1
-
-
-def _useful_lines(text: str, *, limit: int = 4) -> list[str]:
-    lines = []
-    for raw in text.splitlines():
-        line = " ".join(raw.split()).strip()
-        if not line:
-            continue
-        lines.append(line)
-    if len(lines) <= limit * 2:
-        return lines
-    return lines[:limit] + lines[-limit:]
 
 
 def _clip_text(value: str, limit: int) -> str:
@@ -45,8 +35,7 @@ def _clip_text(value: str, limit: int) -> str:
 def _compact_output(text: str, *, limit: int = _MAX_EXCERPT_CHARS) -> str:
     if not text:
         return ""
-    excerpt = "\n".join(_useful_lines(text))
-    excerpt = re.sub(r"\n{3,}", "\n\n", excerpt).strip()
+    excerpt = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(excerpt) <= limit:
         return excerpt
     return excerpt[: limit - 1].rstrip() + "…"
@@ -72,7 +61,7 @@ def _blocked_binary_dump(command: str) -> bool:
 from nexus.tools.base import normalized_tool
 
 @normalized_tool(needs_sandbox=True)
-def run_command(command: str, background: bool = False) -> dict:
+async def run_command(command: str, background: bool = False) -> dict:
     """Run a shell command in the Linux terminal and return the output.
 
     Use this to execute any bash command: file operations, package installs,
@@ -89,13 +78,22 @@ def run_command(command: str, background: bool = False) -> dict:
     Returns:
         dict with stdout, stderr, and exit_code.
     """
+    from nexus.tools.sandbox_events import emit_sandbox_event, redact_command_text
+
+    visible_command = redact_command_text(command)
+    await emit_sandbox_event({
+        "type": "sandbox_terminal",
+        "phase": "start",
+        "command": visible_command,
+        "cwd": "~",
+    })
     try:
         if _blocked_binary_dump(command):
             message = (
                 "Skipped PDF/base64 dump. PDFs should be returned as artifacts; "
                 "use extract_pdf_text(path=...) only when you need to read their text."
             )
-            return {
+            compact = {
                 "status": "success",
                 "command": command,
                 "summary": message,
@@ -105,10 +103,22 @@ def run_command(command: str, background: bool = False) -> dict:
                 "truncated": False,
                 "exit_code": 0,
             }
+            await emit_sandbox_event({
+                "type": "sandbox_terminal",
+                "phase": "result",
+                "command": visible_command,
+                "cwd": "~",
+                "stdout": "",
+                "stderr": message,
+                "exit_code": 0,
+            })
+            return compact
 
         from nexus.tools._context import get_sandbox
         sandbox = get_sandbox()
-        result = sandbox.run_command(command, timeout=120, background=background)
+        result = await asyncio.to_thread(
+            lambda: sandbox.run_command(command, timeout=120, background=background),
+        )
         stdout = str(result.get("stdout") or "")
         stderr = str(result.get("stderr") or "")
         exit_code = _coerce_exit_code(result.get("exit_code", -1))
@@ -125,13 +135,30 @@ def run_command(command: str, background: bool = False) -> dict:
         if exit_code != 0:
             compact["error_code"] = "NONZERO_EXIT"
             compact["retryable"] = True
-        # Reset screenshot cooldown so agent can screenshot right after
         from nexus.tools.screen import _last_call_time
         _last_call_time.t = 0.0
+        await emit_sandbox_event({
+            "type": "sandbox_terminal",
+            "phase": "result",
+            "command": visible_command,
+            "cwd": "~",
+            "stdout": _compact_output(stdout, limit=_MAX_PANE_CHARS),
+            "stderr": _compact_output(stderr, limit=_MAX_PANE_CHARS),
+            "exit_code": exit_code,
+        })
         return compact
     except Exception as e:
         logger.error("run_command failed: %s", e)
         error_text = str(e)
+        await emit_sandbox_event({
+            "type": "sandbox_terminal",
+            "phase": "result",
+            "command": visible_command,
+            "cwd": "~",
+            "stdout": "",
+            "stderr": _compact_output(error_text, limit=_MAX_PANE_CHARS),
+            "exit_code": -1,
+        })
         return {
             "status": "error",
             "command": command,

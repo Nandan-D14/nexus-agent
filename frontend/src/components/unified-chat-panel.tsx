@@ -27,7 +27,6 @@ import {
   ChevronRight,
   Eye,
   Terminal as TerminalIcon,
-  Code2,
   Globe,
   Mail,
   Calendar,
@@ -39,6 +38,10 @@ import {
   BookOpen,
   Bot,
   LayoutGrid,
+  ArrowLeftRight,
+  Sparkles,
+  Layers,
+  Wrench,
 } from "lucide-react";
 import {
   classifyAgentTool,
@@ -51,11 +54,17 @@ import {
   groupTurnEvents,
   type GenerativeUiSegment,
   type ArtifactCreatedSegment,
+  type CanvasDocumentSegment,
+  type TemplateDraftSegment,
   type TaskGroup,
   type GroupedEvent,
 } from "@/lib/turn-event-grouper";
 import { GenerativeUICard } from "@/components/generative-ui-card";
+import { TemplateDraftCard, type TemplateDraftCardValue } from "@/components/session/template-draft-card";
 import { ArtifactAttachmentCard } from "@/components/artifacts";
+import { CanvasHandleCard } from "@/components/session/canvas-handle-card";
+import { useSessionCanvas } from "@/lib/session-canvas-context";
+import type { SessionCanvasDocument, SessionCanvasKind } from "@/lib/session-canvas";
 import {
   DOC_ARTIFACT_TOOLS,
   artifactFromToolResult,
@@ -86,6 +95,8 @@ type ChatItem =
       kind: "user_question";
       question_id: string;
       question: string;
+      options?: string[];
+      answer?: string;
       answered?: boolean;
       timedOut?: boolean;
       timeout_seconds?: number;
@@ -96,6 +107,10 @@ type Props = {
   items: ChatItem[];
   isThinking: boolean;
   phase?: "idle" | "listening" | "thinking" | "acting" | "done";
+  /** Live server status (e.g. "Reconnected — still working...") shown instead of
+   * the generic phase label, so background work is visible in the chat itself
+   * rather than only on the desktop tab. */
+  statusLabel?: string;
   onPermissionRespond: (
     taskId: string,
     approved: boolean,
@@ -103,6 +118,7 @@ type Props = {
     durableTaskId?: string,
   ) => void;
   onQuestionRespond?: (questionId: string, answer: string) => void;
+  onTemplateDraftChange?: (patch: TemplateDraftCardValue) => void;
   /** Sticky dock rendered inside the chat scroll column (e.g. todos + composer). */
   footer?: ReactNode;
 };
@@ -132,11 +148,25 @@ function getToolIcon(provider: AgentToolProvider, className: string) {
     case "tasks": return <ListTodo className={className} />;
     case "skill": return <BookOpen className={className} />;
     case "subagent": return <Bot className={className} />;
-    case "worker": return <TerminalIcon className={className} />;
+    case "worker": return <Layers className={className} />;
     case "workflow": return <LayoutGrid className={className} />;
     case "mcp": return <Plug className={className} />;
-    default: return <Code2 className={className} />;
+    default: return <Wrench className={className} />;
   }
+}
+
+function formatAgentName(name: string): string {
+  const cleaned = name.replace(/^nexus_/i, "").replace(/_/g, " ");
+  return cleaned.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || name;
+}
+
+function getAgentIcon(name: string, className: string) {
+  const lower = name.toLowerCase();
+  if (lower.includes("planner")) return <Sparkles className={className} />;
+  if (lower.includes("orchestrator")) return <Bot className={className} />;
+  if (lower.includes("worker") || lower.includes("terminal") || lower.includes("desktop")) return <Layers className={className} />;
+  if (lower.includes("subagent")) return <Bot className={className} />;
+  return <Bot className={className} />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -165,6 +195,7 @@ function getInlineSummary(
   if (typeof args.TargetFile === "string" && args.TargetFile) return args.TargetFile;
   if (typeof args.AbsolutePath === "string" && args.AbsolutePath) return args.AbsolutePath;
   if (typeof args.path === "string" && args.path) return args.path;
+  if (typeof args.relative_path === "string" && args.relative_path) return args.relative_path;
   if (typeof args.file === "string" && args.file) return args.file;
 
   if (typeof args.CommandLine === "string" && args.CommandLine) return args.CommandLine;
@@ -204,9 +235,10 @@ type TimelineItem =
   | { kind: "taskGroup"; data: TaskGroup; ts: number }
   | { kind: "generative_ui"; data: GenerativeUiSegment; ts: number }
   | { kind: "artifact_created"; data: ArtifactCreatedSegment; ts: number }
+  | { kind: "canvas_document"; data: CanvasDocumentSegment; ts: number }
+  | { kind: "template_draft"; data: TemplateDraftSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
   | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
-  | { kind: "delegation"; from: string; to: string; ts: number }
   | { kind: "user_question"; data: Extract<ChatItem, { kind: "user_question" }>; ts: number };
 
 /* ------------------------------------------------------------------ */
@@ -217,8 +249,10 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   items,
   isThinking,
   phase = "idle",
+  statusLabel,
   onPermissionRespond,
   onQuestionRespond,
+  onTemplateDraftChange,
   footer,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -244,7 +278,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
     if (el && isNearBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [items, isThinking]);
+  }, [items, isThinking, phase]);
 
   const scrollToBottom = () => {
     const el = scrollRef.current;
@@ -284,16 +318,20 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
     return grouped.filter(hasContent);
   }, [items]);
 
-  const totalAgentMessages = turns.reduce((sum, t) => sum + t.agentMessages.length, 0);
+  // "acting" is real work too (tool calls, a durable worker we re-attached to).
+  // Treating only "thinking" as busy is why a background run could look idle.
+  const isBusy = isThinking || phase === "thinking" || phase === "acting";
 
-  const phaseLabel = phase === "thinking" ? "Thinking…"
+  const phaseLabel = statusLabel?.trim()
+    ? statusLabel.trim()
+    : phase === "thinking" ? "Thinking…"
     : phase === "acting" ? "Working through..."
     : phase === "listening" ? "Listening..."
     : "Generating...";
 
   // Hide bottom ThinkingState when the last active task group already shows ThinkingReasoning.
   const showPhaseShimmer = useMemo(() => {
-    if (!isThinking || turns.length === 0) return false;
+    if (!isBusy || turns.length === 0) return false;
     const lastTurn = turns[turns.length - 1];
     if (!lastTurn) return false;
     const segs = groupTurnEvents(lastTurn.events);
@@ -304,7 +342,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
       .map((s) => s.text);
     const show = !hasRealReasoning(chunks);
     return show;
-  }, [isThinking, turns]);
+  }, [isBusy, turns]);
 
   return (
     <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
@@ -322,16 +360,16 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
           <AnimatePresence initial={false}>
             {turns.map((turn, i) => {
               const isLastTurn = i === turns.length - 1;
-              const isWorking = isLastTurn && isThinking;
+              const isWorking = isLastTurn && isBusy;
               return (
                 <TurnBlock
                   key={turn.id}
                   turn={turn}
                   isWorking={isWorking}
                   isLastTurn={isLastTurn}
-                  totalAgentMessages={totalAgentMessages}
                   onPermissionRespond={onPermissionRespond}
                   onQuestionRespond={onQuestionRespond}
+                  onTemplateDraftChange={onTemplateDraftChange}
                 />
               );
             })}
@@ -409,16 +447,16 @@ function TurnBlock({
   turn,
   isWorking,
   isLastTurn,
-  totalAgentMessages,
   onPermissionRespond,
   onQuestionRespond,
+  onTemplateDraftChange,
 }: {
   turn: Turn;
   isWorking: boolean;
   isLastTurn: boolean;
-  totalAgentMessages: number;
   onPermissionRespond: Props["onPermissionRespond"];
   onQuestionRespond?: Props["onQuestionRespond"];
+  onTemplateDraftChange?: Props["onTemplateDraftChange"];
 }) {
   // Build an interleaved timeline from event segments + messages + cards
   const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
@@ -438,6 +476,10 @@ function TurnBlock({
         items.push({ kind: "generative_ui", data: seg, ts: seg.ts });
       } else if (seg.kind === "artifact_created") {
         items.push({ kind: "artifact_created", data: seg, ts: seg.ts });
+      } else if (seg.kind === "canvas_document") {
+        items.push({ kind: "canvas_document", data: seg, ts: seg.ts });
+      } else if (seg.kind === "template_draft") {
+        items.push({ kind: "template_draft", data: seg, ts: seg.ts });
       }
     }
     for (const msg of turn.agentMessages) {
@@ -446,16 +488,13 @@ function TurnBlock({
     for (const perm of turn.permissions) {
       items.push({ kind: "permission", data: perm, ts: perm.ts });
     }
-    for (const del of turn.delegations) {
-      items.push({ kind: "delegation", from: del.from, to: del.to, ts: del.ts });
-    }
     for (const question of turn.questions) {
       items.push({ kind: "user_question", data: question, ts: question.ts });
     }
 
     items.sort((a, b) => a.ts - b.ts);
     return items;
-  }, [eventSegments, turn.agentMessages, turn.permissions, turn.delegations, turn.questions]);
+  }, [eventSegments, turn.agentMessages, turn.permissions, turn.questions]);
 
   return (
     <motion.div
@@ -497,6 +536,43 @@ function TurnBlock({
           );
         }
 
+        if (item.kind === "template_draft") {
+          const fields = Array.isArray(item.data.input_fields)
+            ? item.data.input_fields
+            : [];
+          return (
+            <motion.div
+              layout
+              key={`template-draft-${item.data.template_id}`}
+              className="w-full py-1"
+            >
+              <TemplateDraftCard
+                value={{
+                  template_id: item.data.template_id,
+                  status: item.data.status,
+                  name: item.data.name,
+                  description: item.data.description,
+                  instructions: item.data.instructions,
+                  input_fields: fields as TemplateDraftCardValue["input_fields"],
+                  dismissed: item.data.dismissed,
+                }}
+                onChange={(patch) =>
+                  onTemplateDraftChange?.({
+                    template_id: item.data.template_id,
+                    status: item.data.status,
+                    name: item.data.name,
+                    description: item.data.description,
+                    instructions: item.data.instructions,
+                    input_fields: fields as TemplateDraftCardValue["input_fields"],
+                    dismissed: item.data.dismissed,
+                    ...patch,
+                  })
+                }
+              />
+            </motion.div>
+          );
+        }
+
         if (item.kind === "artifact_created") {
           const raw = item.data.artifact;
           const artifact = coerceRunArtifact(raw);
@@ -512,10 +588,24 @@ function TurnBlock({
           );
         }
 
+        if (item.kind === "canvas_document") {
+          const doc = coerceCanvasDocument(item.data.document);
+          if (!doc) return null;
+          return (
+            <motion.div
+              layout
+              key={`canvas-doc-${doc.id}-${idx}`}
+              className="w-full max-w-xl py-1"
+            >
+              <CanvasDocumentHandleCard document={doc} />
+            </motion.div>
+          );
+        }
+
         if (item.kind === "agentMessage") {
           const msgIdx = turn.agentMessages.findIndex(m => m.ts === item.ts);
           const isLastMsg = isLastTurn && msgIdx === turn.agentMessages.length - 1;
-          const shouldStream = isLastMsg && !isWorking && totalAgentMessages <= 3;
+          const shouldStream = isLastMsg && isWorking;
           return (
             <AgentMessageCard
               key={`msg-${item.ts}-${idx}`}
@@ -545,16 +635,14 @@ function TurnBlock({
           );
         }
 
-        if (item.kind === "delegation") {
-          return <DelegationBadge key={`del-${idx}`} from={item.from} to={item.to} />;
-        }
-
         if (item.kind === "user_question") {
           return (
             <motion.div layout key={`question-${item.data.question_id}`} className="py-1">
               <AgentQuestionCard
                 questionId={item.data.question_id}
                 question={item.data.question}
+                options={item.data.options}
+                answer={item.data.answer}
                 answered={item.data.answered}
                 timedOut={item.data.timedOut}
                 timeoutSeconds={item.data.timeout_seconds}
@@ -593,6 +681,42 @@ function coerceRunArtifact(raw: Record<string, unknown>): RunArtifact | null {
         ? (raw.metadata as Record<string, unknown>)
         : {},
   };
+}
+
+function coerceCanvasKind(value: unknown): SessionCanvasKind | null {
+  if (value === "plan" || value === "file" || value === "document") return value;
+  return null;
+}
+
+function coerceCanvasDocument(raw: Record<string, unknown>): SessionCanvasDocument | null {
+  const id = typeof raw.id === "string" ? raw.id : null;
+  const kind = coerceCanvasKind(raw.kind);
+  if (!id || !kind) return null;
+  const artifactRaw =
+    raw.artifact && typeof raw.artifact === "object"
+      ? coerceRunArtifact(raw.artifact as Record<string, unknown>)
+      : undefined;
+  return {
+    id,
+    kind,
+    title: typeof raw.title === "string" ? raw.title : "Untitled",
+    artifact: artifactRaw || undefined,
+    markdown: typeof raw.markdown === "string" ? raw.markdown : undefined,
+    path: typeof raw.path === "string" ? raw.path : undefined,
+  };
+}
+
+function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocument }) {
+  const canvas = useSessionCanvas();
+  return (
+    <CanvasHandleCard
+      kind={document.kind}
+      title={document.title}
+      subtitle={document.path || document.title}
+      artifact={document.artifact}
+      onOpen={() => canvas?.openDocument(document, "user")}
+    />
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -662,8 +786,10 @@ function buildSummary(task: TaskGroup): string {
     else otherCount++;
   }
 
+  const hasHandoff = task.steps.some((s) => s.kind === "delegation");
   const parts: string[] = [];
   if (hasThinking) parts.push("Thought");
+  if (hasHandoff) parts.push("Handoff");
   if (skillCount > 0) parts.push(`Read ${skillCount} skill(s)`);
   if (workerCount > 0) parts.push(`Called ${workerCount} worker(s)`);
   if (subagentCount > 0) parts.push(`Spawned ${subagentCount} subagent(s)`);
@@ -766,7 +892,7 @@ function ThoughtAccordion({
   const reasoningIsLive = isActive && lastStep?.kind === "thinking";
   const hasToolSteps = displayRows.some(
     (r) => r.kind === "step" || r.kind === "tool_group",
-  );
+  ) || task.steps.some((s) => s.kind === "delegation");
   const hasReasoningRows = displayRows.some((r) => r.kind === "reasoning");
   const hasRunningTool = task.steps.some(
     (s) => s.kind === "tool_invocation" && s.status === "running",
@@ -861,6 +987,7 @@ function StepRow({ item }: { item: GroupedEvent }) {
   if (item.kind === "tool_invocation") return <ToolLine invocation={item} />;
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
   if (item.kind === "error") return <ErrorLine message={item.message} />;
+  if (item.kind === "delegation") return <HandoffLogLine from={item.from} to={item.to} />;
   if (item.kind === "bg_progress") {
     const suffix =
       typeof item.progress === "number" ? ` (${item.progress}%)` : "";
@@ -1278,16 +1405,23 @@ function ScreenshotCard({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Delegation Badge                                                   */
-/* ------------------------------------------------------------------ */
-
-function DelegationBadge({ from, to }: { from: string; to: string }) {
+function HandoffLogLine({ from, to }: { from: string; to: string }) {
   return (
-    <div className="flex justify-center py-4">
-      <span className="text-[12px] font-medium text-zinc-400 dark:text-zinc-600 italic">
-        {from} handed off to {to}
+    <div className="flex items-center gap-2 text-[13px] min-w-0">
+      <span className="flex items-center gap-1 shrink-0">
+        <span className="flex size-5 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+          {getAgentIcon(from, "w-3 h-3")}
+        </span>
+        <span className="text-zinc-500 dark:text-zinc-400 font-medium">{formatAgentName(from)}</span>
       </span>
+      <ArrowLeftRight className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
+      <span className="flex items-center gap-1 shrink-0">
+        <span className="flex size-5 items-center justify-center rounded-md bg-violet-500/10 text-violet-600 dark:text-violet-400">
+          {getAgentIcon(to, "w-3 h-3")}
+        </span>
+        <span className="text-zinc-500 dark:text-zinc-400 font-medium">{formatAgentName(to)}</span>
+      </span>
+      <span className="text-zinc-400 dark:text-zinc-500 text-[11px] ml-1 hidden sm:inline">handoff</span>
     </div>
   );
 }

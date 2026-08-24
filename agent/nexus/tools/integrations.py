@@ -785,6 +785,239 @@ async def tinyfish_web_agent(url: str, goal: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Vyora voice calls
+# ---------------------------------------------------------------------------
+
+_VYORA_BASE = "https://api.vyora.ai"
+
+
+async def _native_api_key(connection_id: str) -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, connection_id)
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+async def _vyora_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    api_key = await _native_api_key("vyora")
+    if not api_key:
+        return tool_error("Vyora is not connected for this user.", error_code="AUTH_REQUIRED")
+    async with httpx.AsyncClient(
+        base_url=_VYORA_BASE,
+        timeout=30.0,
+        headers={"X-API-KEY": api_key, "Accept": "application/json"},
+    ) as client:
+        response = await client.request(method, path, **kwargs)
+        if response.status_code >= 400:
+            return tool_error(
+                f"Vyora API returned HTTP {response.status_code}.",
+                error_code=f"HTTP_{response.status_code}",
+                detail=response.text[:500],
+            )
+        return {"data": response.json() if response.content else {}}
+
+
+@normalized_tool
+async def vyora_list_agents(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """List Vyora voice agents in the connected workspace.
+
+    Args:
+        limit: Max agents to return (1-100).
+        offset: Number of agents to skip.
+
+    Returns:
+        NormalizedToolResult with agents and their variable names.
+    """
+    result = await _vyora_request(
+        "GET",
+        "/v1/agents",
+        params={"limit": max(1, min(limit, 100)), "offset": max(0, offset)},
+    )
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+    return tool_success(
+        f"Listed {len(agents)} Vyora agents",
+        agents=agents,
+        total=data.get("total"),
+        limit=data.get("limit"),
+        offset=data.get("offset"),
+    )
+
+
+@normalized_tool
+async def vyora_list_numbers() -> dict[str, Any]:
+    """List Vyora caller-line numbers. Use each id as from_number_id when starting a call.
+
+    Returns:
+        NormalizedToolResult with assigned numbers.
+    """
+    result = await _vyora_request("GET", "/v1/numbers")
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    numbers = data.get("numbers") if isinstance(data.get("numbers"), list) else []
+    return tool_success(f"Listed {len(numbers)} Vyora numbers", numbers=numbers)
+
+
+@normalized_tool
+async def vyora_start_call(
+    phone_number: str,
+    agent_id: str,
+    from_number_id: str,
+    custom_args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Trigger an outbound Vyora AI voice call. This is a write action.
+
+    Args:
+        phone_number: Recipient in E.164 format, e.g. +919876543210.
+        agent_id: Agent id from vyora_list_agents.
+        from_number_id: Caller-line id from vyora_list_numbers.
+        custom_args: Optional values for the agent's declared variables.
+
+    Returns:
+        NormalizedToolResult with call_id and status.
+    """
+    body: dict[str, Any] = {
+        "phone_number": phone_number,
+        "agent_id": agent_id,
+        "from_number_id": from_number_id,
+    }
+    if custom_args:
+        body["custom_args"] = custom_args
+    result = await _vyora_request("POST", "/v1/calls", json=body)
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    return tool_success(
+        f"Started Vyora call {data.get('call_id') or ''} to {phone_number}".strip(),
+        call_id=data.get("call_id"),
+        call_status=data.get("status"),
+        warnings=data.get("warnings"),
+    )
+
+
+@normalized_tool
+async def vyora_list_calls(limit: int = 20, offset: int = 0, status: str = "") -> dict[str, Any]:
+    """List recent Vyora calls, most recent first.
+
+    Args:
+        limit: Max calls to return (1-100).
+        offset: Number of calls to skip.
+        status: Optional filter such as completed, failed, ongoing, registered.
+
+    Returns:
+        NormalizedToolResult with calls.
+    """
+    params: dict[str, Any] = {"limit": max(1, min(limit, 100)), "offset": max(0, offset)}
+    if status.strip():
+        params["status"] = status.strip()
+    result = await _vyora_request("GET", "/v1/calls", params=params)
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    calls = data.get("calls") if isinstance(data.get("calls"), list) else []
+    return tool_success(
+        f"Listed {len(calls)} Vyora calls",
+        calls=calls,
+        total=data.get("total"),
+    )
+
+
+@normalized_tool
+async def vyora_get_call(call_id: str) -> dict[str, Any]:
+    """Get a Vyora call including transcript and analysis when available.
+
+    Args:
+        call_id: Call id returned by vyora_start_call or vyora_list_calls.
+
+    Returns:
+        NormalizedToolResult with the call record.
+    """
+    result = await _vyora_request("GET", f"/v1/calls/{call_id}")
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    return tool_success(
+        f"Fetched Vyora call {call_id}",
+        call=data,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses web search
+# ---------------------------------------------------------------------------
+
+@normalized_tool
+async def openai_web_search(query: str) -> dict[str, Any]:
+    """Search the live web using the connected OpenAI Responses API.
+
+    Args:
+        query: Search query.
+
+    Returns:
+        NormalizedToolResult with a synthesized search summary.
+    """
+    api_key = await _native_api_key("openai")
+    if not api_key:
+        return tool_error("OpenAI is not connected for this user.", error_code="AUTH_REQUIRED")
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4.1-mini",
+                    "tools": [{"type": "web_search"}],
+                    "input": query,
+                },
+            )
+            if response.status_code >= 400:
+                return tool_error(
+                    f"OpenAI API returned HTTP {response.status_code}.",
+                    error_code=f"HTTP_{response.status_code}",
+                    detail=response.text[:500],
+                    suggested_alternatives=["web_search", "tavily_search"],
+                )
+            data = response.json() if response.content else {}
+            text = ""
+            if isinstance(data, dict):
+                text = str(data.get("output_text") or "")
+                if not text:
+                    output = data.get("output")
+                    if isinstance(output, list):
+                        parts: list[str] = []
+                        for item in output:
+                            if not isinstance(item, dict):
+                                continue
+                            content = item.get("content")
+                            if not isinstance(content, list):
+                                continue
+                            for block in content:
+                                if isinstance(block, dict) and block.get("text"):
+                                    parts.append(str(block["text"]))
+                        text = "\n".join(parts)
+            return tool_success(
+                f"OpenAI web search for '{query}'",
+                query=query,
+                text=text,
+                response_id=data.get("id") if isinstance(data, dict) else None,
+            )
+    except Exception as exc:
+        return tool_error(
+            f"OpenAI web search failed: {exc}",
+            suggested_alternatives=["web_search", "tavily_search"],
+        )
+
+
+# ---------------------------------------------------------------------------
 # Thesys Generative UI (C1)
 # ---------------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ _EXTERNAL_SIDE_EFFECT_TOOLS = {
     "calendar_create",
     "tasks_create",
     "github_create_issue",
+    "vyora_start_call",
     "upload_drive_file",
     "create_drive_doc",
 }
@@ -58,8 +59,11 @@ _SECRET_EXFIL_RE = re.compile(
     r"authorization|"
     r"bearer\s+[A-Za-z0-9._-]+|"
     r"\.config/rclone|"
-    r"userPrivate)"
+    r"userPrivate|"
+    r"\benv\b[\s\S]{0,80}\bgrep\b|"
+    r"\bprintenv\b)"
 )
+_UNBOUNDED_FIND_RE = re.compile(r"(?is)\bfind\s+/(?:\s|$|;)")
 _MCP_SIDE_EFFECT_RE = re.compile(
     r"(?:^|_)(create|update|delete|remove|destroy|write|drop|deploy|"
     r"send|upload|insert|execute|run|publish|post|put|patch)(?:_|$)",
@@ -120,6 +124,12 @@ def evaluate_tool_policy(
             return ToolPolicyDecision(
                 "deny",
                 "Command appears to read or expose credentials/secrets.",
+                "blocked",
+            )
+        if _UNBOUNDED_FIND_RE.search(command):
+            return ToolPolicyDecision(
+                "deny",
+                "Unbounded filesystem walk (find /) is not allowed. Search a specific directory.",
                 "blocked",
             )
         if _DESTRUCTIVE_COMMAND_RE.search(command):
