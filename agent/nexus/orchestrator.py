@@ -1167,11 +1167,7 @@ class NexusOrchestrator:
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
     def _should_fallback_task_model(self, exc: BaseException, task_model: str) -> bool:
-        from nexus.model_select import is_deepseek_v4_flash_gateway_error
-
-        return self._is_rate_limit_error(exc) or is_deepseek_v4_flash_gateway_error(
-            exc, task_model
-        )
+        return self._is_rate_limit_error(exc)
 
     def _task_model_candidates(self) -> tuple[str, ...]:
         from nexus.model_select import model_candidates
@@ -1254,9 +1250,6 @@ class NexusOrchestrator:
                 except Exception as exc:
                     if getattr(self, "_stop_requested", False):
                         raise _AgentStopped() from exc
-                    from nexus.model_select import is_deepseek_v4_flash_gateway_error
-
-                    flash_gateway = is_deepseek_v4_flash_gateway_error(exc, task_model)
                     if not self._should_fallback_task_model(exc, task_model):
                         logger.error(
                             "Agent turn failed with unexpected error for session %s",
@@ -1272,46 +1265,6 @@ class NexusOrchestrator:
                     last_exc = exc
                     is_last_retry = attempt == self._RATE_LIMIT_MAX_RETRIES
                     has_next_model = model_index < len(model_candidates)
-
-                    # LiteLLM already retried DeepSeek-V4-Flash 504s; do not
-                    # wait out the 429 backoff on the same dead model.
-                    if flash_gateway:
-                        if has_next_model:
-                            next_model = model_candidates[model_index]
-                            logger.warning(
-                                "DeepSeek-V4-Flash gateway 504 for session %s — switching to %s: %s",
-                                self.session.id,
-                                next_model,
-                                exc,
-                            )
-                            quota_content = (
-                                f"Task model {task_model} timed out at the gateway. "
-                                f"Switching to fallback model {next_model}."
-                            )
-                            await self._send_json({
-                                "type": "agent_model_fallback",
-                                "from_model": task_model,
-                                "to_model": next_model,
-                                "provider": settings.model_provider,
-                                "reason": self._clip_text(str(exc), 500),
-                                "attempt": attempt,
-                                "step_id": new_step_id("fallback"),
-                            })
-                            await self._send_json({
-                                "type": "agent_thinking",
-                                "content": quota_content,
-                            })
-                            await self._persist_message(
-                                role="thinking",
-                                source=getattr(self, "_active_agent", "nexus_orchestrator"),
-                                text=quota_content,
-                            )
-                            break
-                        return AgentTurnResult(
-                            response=None,
-                            usage_records=[],
-                            error=str(exc) or "DeepSeek-V4-Flash gateway timed out.",
-                        )
 
                     if is_last_retry:
                         if has_next_model:

@@ -35,7 +35,7 @@ EXPECTED_ADK_VERSION = "2.4.0"
 def _avoid_live_router_initialization(monkeypatch):
     """Agent construction must not initialize LiteLLM's network-aware router."""
     monkeypatch.setattr(
-        "nexus.qwen_router.get_qwen_router",
+        "nexus.bynara_router.get_bynara_router",
         lambda: SimpleNamespace(),
     )
 

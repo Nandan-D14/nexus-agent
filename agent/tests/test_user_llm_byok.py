@@ -203,8 +203,8 @@ class UserLlmRuntimeTests(TestCase):
     def test_create_model_uses_user_credentials_not_server_qwen(self) -> None:
         runtime = _user_runtime()
         with patch(
-            "nexus.qwen_router.create_qwen_model",
-            side_effect=AssertionError("server Qwen must not be used"),
+            "nexus.bynara_router.create_bynara_model",
+            side_effect=AssertionError("server Bynara must not be used"),
         ):
             model = create_model("planner", runtime)
         self.assertIsInstance(model.llm_client, UserLlmClient)
@@ -221,8 +221,8 @@ class UserLlmRuntimeTests(TestCase):
     def test_vision_provider_uses_user_credentials(self) -> None:
         runtime = _user_runtime(llm_vision_model="gpt-4o")
         with patch(
-            "nexus.vision_provider.settings.qwen_api_key",
-            "server-qwen-key",
+            "nexus.vision_provider.settings.bynara_api_key",
+            "server-bynara-key",
         ):
             provider = create_vision_provider(runtime_config=runtime)
         self.assertEqual(provider.models[0], "gpt-4o")

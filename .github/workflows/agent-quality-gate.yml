@@ -67,7 +67,6 @@ jobs:
           tests/test_adk_compatibility.py
           tests/test_production_eval.py
           tests/test_runtime_tracing.py
-          tests/test_qwen_core.py
           tests/test_computer_control_loop.py
           tests/test_durable_execution_hardening.py
           tests/test_durable_subagents.py

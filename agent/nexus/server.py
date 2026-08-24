@@ -56,27 +56,6 @@ async def lifespan(app: FastAPI):
     apply_runtime_env_overrides()
     validate_startup_settings()
     module_logger.info("CoComputer agent service starting...")
-    if settings.qwen_capability_probe_on_startup:
-        should_probe = settings.is_production or settings.strict_config_validation
-        if should_probe:
-            from nexus.vision_provider import probe_qwen_capabilities
-
-            report = await probe_qwen_capabilities()
-            module_logger.info(
-                "Qwen capability probe passed text_model=%s vision_model=%s",
-                report.text_model,
-                report.vision_model,
-            )
-        elif settings.qwen_api_key.strip():
-            module_logger.info(
-                "Qwen capability probe deferred (non-production); "
-                "set STRICT_CONFIG_VALIDATION=true to force at startup"
-            )
-        else:
-            module_logger.warning(
-                "Qwen capability probe skipped: QWEN_API_KEY is not configured"
-            )
-    
     session_manager = get_session_manager()
     history_repository = get_history_repository()
     

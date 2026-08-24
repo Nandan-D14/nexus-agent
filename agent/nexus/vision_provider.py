@@ -1,18 +1,18 @@
 # Copyright (c) 2026 Agentic Company. All rights reserved.
 # Proprietary and non-commercial use only.
 
-"""Provider-neutral screenshot grounding backed by Qwen vision."""
+"""Provider-neutral screenshot grounding for autonomous computer agents."""
 
 from __future__ import annotations
 
 import base64
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import json
 import logging
 import re
 from typing import Any, Protocol
 
-from openai import AsyncOpenAI, OpenAI
+from openai import OpenAI
 
 from nexus.config import settings
 from nexus.resilience import retry_sync
@@ -22,11 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class VisionAnalysisError(RuntimeError):
-    """Raised when every configured Qwen vision tier fails."""
-
-
-class QwenCapabilityError(RuntimeError):
-    """Raised when required Qwen text/tool or multimodal capability is absent."""
+    """Raised when screenshot analysis fails across all configured models."""
 
 
 @dataclass(frozen=True)
@@ -96,16 +92,12 @@ class VisionProvider(Protocol):
 def _parse_models(
     primary: str,
     fallbacks: tuple[str, ...] | list[str],
-    *,
-    require_qwen_prefix: bool = True,
 ) -> tuple[str, ...]:
     ordered: list[str] = []
     for model in (primary, *fallbacks):
         model = str(model).strip()
         if not model or model in ordered:
             continue
-        if require_qwen_prefix and not model.lower().startswith("qwen"):
-            raise ValueError(f"Qwen vision rejected non-Qwen model: {model}")
         ordered.append(model)
     return tuple(ordered)
 
@@ -120,10 +112,10 @@ def _json_object(text: str) -> dict[str, Any]:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start < 0 or end <= start:
-            raise VisionAnalysisError("Qwen vision did not return a JSON object")
+            raise VisionAnalysisError("Vision model did not return a JSON object")
         value = json.loads(cleaned[start : end + 1])
     if not isinstance(value, dict):
-        raise VisionAnalysisError("Qwen vision response must be a JSON object")
+        raise VisionAnalysisError("Vision model response must be a JSON object")
     return value
 
 
@@ -194,7 +186,7 @@ def _observation_from_payload(
     )
 
 
-class QwenVisionProvider:
+class OpenAiVisionProvider:
     def __init__(
         self,
         *,
@@ -205,7 +197,6 @@ class QwenVisionProvider:
         timeout_seconds: float = 60.0,
         attempts_per_model: int = 1,
         retry_base_seconds: float = 1.0,
-        require_qwen_prefix: bool = True,
     ) -> None:
         if not api_key.strip():
             raise VisionAnalysisError("An API key is required for screenshot analysis")
@@ -217,7 +208,6 @@ class QwenVisionProvider:
         self.models = _parse_models(
             primary_model,
             fallback_models,
-            require_qwen_prefix=require_qwen_prefix,
         )
         self._attempts_per_model = max(1, int(attempts_per_model))
         self._retry_base_seconds = max(0.0, float(retry_base_seconds))
@@ -282,19 +272,23 @@ class QwenVisionProvider:
                     _ground,
                     attempts=self._attempts_per_model,
                     base_delay=self._retry_base_seconds,
-                    label=f"qwen vision grounding ({model})",
+                    label=f"vision grounding ({model})",
                 )
             except Exception as exc:
                 errors.append(f"{model}: {type(exc).__name__}: {str(exc)[:240]}")
                 logger.warning(
-                    "Qwen vision model %s failed after %d attempt(s)",
+                    "Vision model %s failed after %d attempt(s)",
                     model,
                     self._attempts_per_model,
                     exc_info=True,
                 )
         raise VisionAnalysisError(
-            "All Qwen vision models failed: " + " | ".join(errors)
+            "All vision models failed: " + " | ".join(errors)
         )
+
+
+# Backward compatibility alias
+QwenVisionProvider = OpenAiVisionProvider
 
 
 def _emit_vision_model_fallback(
@@ -303,7 +297,7 @@ def _emit_vision_model_fallback(
     to_model: str,
     reason: str,
 ) -> None:
-    """Emit a correlated fallback event before changing Qwen vision tiers."""
+    """Emit a correlated fallback event before changing vision tiers."""
     from nexus.event_sink import prepare_correlated_event
     from nexus.tracing import get_trace_context
 
@@ -313,7 +307,7 @@ def _emit_vision_model_fallback(
         "from_model": from_model,
         "to_model": to_model,
         "reason": reason[:500],
-        "provider": "qwen",
+        "provider": settings.model_provider,
     }
     try:
         payload = prepare_correlated_event(payload, get_trace_context())
@@ -326,7 +320,6 @@ def _emit_vision_model_fallback(
         if send_json is not None:
             result = send_json(payload)
             if hasattr(result, "__await__"):
-                # Best-effort: sync vision path cannot await; schedule if loop exists.
                 try:
                     import asyncio
 
@@ -355,7 +348,7 @@ def create_vision_provider(
     runtime_config: Any = None,
     primary_model: str | None = None,
     fallback_models: tuple[str, ...] | None = None,
-) -> QwenVisionProvider:
+) -> OpenAiVisionProvider:
     user_llm = bool(runtime_config is not None and getattr(runtime_config, "user_llm_configured", False))
     if user_llm:
         vision_model = (
@@ -369,7 +362,7 @@ def create_vision_provider(
             if fallback_models is not None
             else ((chat_model,) if chat_model and chat_model != vision_model else ())
         )
-        return QwenVisionProvider(
+        return OpenAiVisionProvider(
             api_key=str(getattr(runtime_config, "llm_api_key", "") or ""),
             api_base=str(getattr(runtime_config, "llm_api_base", "") or ""),
             primary_model=vision_model,
@@ -377,18 +370,17 @@ def create_vision_provider(
             timeout_seconds=settings.vision_request_timeout_seconds,
             attempts_per_model=settings.vision_attempts_per_model,
             retry_base_seconds=settings.vision_retry_base_seconds,
-            require_qwen_prefix=False,
         )
-    return QwenVisionProvider(
-        api_key=settings.qwen_api_key,
-        api_base=settings.qwen_api_base,
-        primary_model=primary_model or settings.qwen_vision_model,
+    return OpenAiVisionProvider(
+        api_key=settings.bynara_api_key,
+        api_base=settings.bynara_api_base,
+        primary_model=primary_model or settings.worker_visual_model,
         fallback_models=(
             fallback_models
             if fallback_models is not None
             else tuple(
                 model.strip()
-                for model in settings.qwen_vision_fallback_models.split(",")
+                for model in settings.worker_visual_fallback_models.split(",")
                 if model.strip()
             )
         ),
@@ -398,110 +390,12 @@ def create_vision_provider(
     )
 
 
-@dataclass(frozen=True)
-class QwenCapabilityReport:
-    text_tool_calling: bool
-    vision: bool
-    text_model: str
-    vision_model: str
-
-
-async def probe_qwen_capabilities() -> QwenCapabilityReport:
-    """Probe required production capabilities without forcing tool_choice."""
-
-    if not settings.qwen_api_key.strip():
-        raise QwenCapabilityError("QWEN_API_KEY is not configured")
-    client = AsyncOpenAI(
-        api_key=settings.qwen_api_key,
-        base_url=settings.qwen_api_base.rstrip("/"),
-        timeout=30.0,
-    )
-    try:
-        text_response = await client.chat.completions.create(
-            model=settings.planner_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Call capability_probe with value qwen_tool_ok. Do not answer in prose.",
-                }
-            ],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "capability_probe",
-                        "description": "Return a capability probe value.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"value": {"type": "string"}},
-                            "required": ["value"],
-                        },
-                    },
-                }
-            ],
-            tool_choice="auto",
-            max_tokens=128,
-        )
-        text_tool_calling = bool(text_response.choices[0].message.tool_calls)
-    except Exception as exc:
-        raise QwenCapabilityError(
-            f"Qwen text/tool capability probe failed: {type(exc).__name__}: {str(exc)[:300]}"
-        ) from exc
-    if not text_tool_calling:
-        raise QwenCapabilityError(
-            f"Qwen model {settings.planner_model} did not produce a tool call"
-        )
-
-    one_pixel_png = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-        "/x8AAusB9Y9Z4VQAAAAASUVORK5CYII="
-    )
-    try:
-        vision_response = await client.chat.completions.create(
-            model=settings.qwen_vision_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Reply with VISION_OK if you can inspect this image."},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{one_pixel_png}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=32,
-        )
-        vision_ok = "VISION_OK" in (
-            vision_response.choices[0].message.content or ""
-        ).upper()
-    except Exception as exc:
-        raise QwenCapabilityError(
-            f"Qwen vision capability probe failed: {type(exc).__name__}: {str(exc)[:300]}"
-        ) from exc
-    if not vision_ok:
-        raise QwenCapabilityError(
-            f"Qwen model {settings.qwen_vision_model} did not confirm multimodal input"
-        )
-    return QwenCapabilityReport(
-        text_tool_calling=True,
-        vision=True,
-        text_model=settings.planner_model,
-        vision_model=settings.qwen_vision_model,
-    )
-
-
 __all__ = [
-    "QwenCapabilityError",
-    "QwenCapabilityReport",
+    "OpenAiVisionProvider",
     "QwenVisionProvider",
     "ScreenObservation",
     "VisionAnalysisError",
     "VisionProvider",
     "VisionTarget",
     "create_vision_provider",
-    "probe_qwen_capabilities",
 ]
