@@ -86,6 +86,8 @@ frontend/*.log
 
 # ── Test artefacts ────────────────────────────────────────────
 test_screenshot.png
+reports/
+agent/reports/
 
 # ── Plan / draft files (dev only) ────────────────────────────
 plans/

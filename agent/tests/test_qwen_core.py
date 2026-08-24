@@ -10,11 +10,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.config import settings
 from nexus.model_select import model_candidates
 from nexus.qwen_router import _normalize_qwen_request_kwargs
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.usage import get_agent_usage_source
 from nexus.vision_provider import QwenVisionProvider
+
+
+@pytest.fixture(autouse=True)
+def _set_qwen_provider(monkeypatch):
+    monkeypatch.setattr(settings, "model_provider", "qwen")
 
 
 def _runtime(
@@ -63,7 +69,7 @@ def test_glm_planner_can_fall_back_to_qwen() -> None:
 
 
 def test_unsupported_fallback_is_rejected() -> None:
-    with pytest.raises(ValueError, match="Unsupported Model Studio"):
+    with pytest.raises(ValueError, match="Unsupported fallback model"):
         model_candidates(
             "planner",
             _runtime(fallbacks=("deepseek-v4-flash",)),
