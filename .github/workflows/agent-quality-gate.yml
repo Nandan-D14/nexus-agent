@@ -44,6 +44,8 @@ on:
 jobs:
   compatibility-and-eval-contract:
     runs-on: ubuntu-latest
+    env:
+      FIREBASE_PROJECT_ID: "ci-project"
     defaults:
       run:
         working-directory: agent

@@ -327,10 +327,20 @@ class ProductionRepoBase:
     (emitting events, reading the parent task) resolve to inherited methods.
     """
 
-    def __init__(self) -> None:
-        self._db = get_firestore_client()
+    def __init__(self, db: Any = None) -> None:
+        self._custom_db = db
         self._has_seq_cache: set[str] = set()
         self._stale_runs_index_warning_emitted = False
+
+    @property
+    def _db(self):
+        if self._custom_db is not None:
+            return self._custom_db
+        return get_firestore_client()
+
+    @_db.setter
+    def _db(self, value: Any) -> None:
+        self._custom_db = value
 
     def _task_ref(self, task_id: str):
         return self._db.collection("tasks").document(task_id)
