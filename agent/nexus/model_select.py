@@ -3,9 +3,8 @@
 
 """Provider-aware role-based model selection for Agent V2.
 
-Supports multiple providers (qwen, bynara). The active provider is set via
-MODEL_PROVIDER in settings. Model fallback tiers remain visible to the
-orchestrator trace.
+Supports Bynara as the default server provider and BYOK (Bring Your Own Key) for
+user-configured models.
 
 Roles:
   planner        — top-level loop agent (strongest tier)
@@ -37,39 +36,10 @@ _ROLE_FALLBACKS = {
     "micro": lambda: settings.micro_fallback_models,
 }
 
-# Bynara/DeepSeek-V4-Flash returns HTTP 504 empty bodies; other models keep
-# their existing hard-fail behaviour for gateway errors.
-_DEEPSEEK_V4_FLASH_MARKER = "deepseek-v4-flash"
-_DEEPSEEK_V4_FLASH_GATEWAY_MARKERS = (
-    "badgateway",
-    "bad gateway",
-    "http 504",
-    "upstream returned empty body",
-)
-
-
-def is_deepseek_v4_flash(model: str) -> bool:
-    """True for DeepSeek-V4-Flash, including the Bynara `deepseek-ai/` id."""
-    return _DEEPSEEK_V4_FLASH_MARKER in (model or "").lower().replace("_", "-")
-
-
-def is_deepseek_v4_flash_gateway_error(exc: BaseException | str, model: str) -> bool:
-    """True when DeepSeek-V4-Flash died with a gateway 504 / empty body."""
-    if not is_deepseek_v4_flash(model):
-        return False
-    text = str(exc).lower()
-    return any(marker in text for marker in _DEEPSEEK_V4_FLASH_GATEWAY_MARKERS)
-
 
 def _is_supported_text_model(model: str, *, user_llm: bool = False) -> bool:
-    """Check if a model name is supported by the active provider."""
-    if user_llm:
-        return bool(model.strip())
-    if settings.model_provider == "qwen":
-        return model.lower().startswith(("qwen", "glm-"))
-    # Bynara (and future providers) accept any model name — the gateway
-    # handles routing.
-    return bool(model.strip())
+    """Check if a model name is valid and supported."""
+    return bool(model and model.strip())
 
 
 def _parse_models(value: str) -> tuple[str, ...]:
@@ -167,23 +137,15 @@ def create_model(
         from nexus.user_llm_router import create_user_llm_model
         assert runtime_config is not None
         return create_user_llm_model(model_name, runtime_config)
-    if settings.model_provider == "qwen":
-        from nexus.qwen_router import create_qwen_model
-        return create_qwen_model(model_name)
     elif settings.model_provider == "bynara":
         from nexus.bynara_router import create_bynara_model
         return create_bynara_model(model_name)
-    elif settings.model_provider == "vultr":
-        from nexus.vultr_router import create_vultr_model
-        return create_vultr_model(model_name)
     else:
         raise RuntimeError(f"Unknown model provider: {settings.model_provider}")
 
 
 __all__ = [
     "create_model",
-    "is_deepseek_v4_flash",
-    "is_deepseek_v4_flash_gateway_error",
     "model_candidates",
     "model_name_for_role",
 ]

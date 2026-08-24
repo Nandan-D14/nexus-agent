@@ -143,7 +143,6 @@ jobs:
         run: |-
           SECRET_FLAGS=(
             "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
-            "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
             "--set-secrets=JWT_SECRET=jwt-secret:latest"
             "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
             "--set-secrets=SLACK_CLIENT_SECRET=slack-client-secret:latest"
@@ -155,7 +154,7 @@ jobs:
 
           AGENT_ENV_VARS=(
             "APP_ENV=production"
-            "MODEL_PROVIDER=qwen"
+            "MODEL_PROVIDER=bynara"
             "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
             "GOOGLE_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_REGION=${{ env.GEMINI_REGION }}"

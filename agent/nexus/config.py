@@ -12,6 +12,8 @@ MODULE_DIR = Path(__file__).resolve().parent
 AGENT_DIR = MODULE_DIR.parent
 WORKSPACE_DIR = AGENT_DIR.parent
 
+from typing import Any
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -62,25 +64,9 @@ class Settings(BaseSettings):
     kilo_model_id: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     kilo_gateway_url: str = "https://api.kilo.ai/api/gateway"
 
-    # Alibaba Model Studio settings (Qwen text/vision and GLM text)
-    # Kept for future use — activate by setting MODEL_PROVIDER=qwen
-    qwen_api_key: str = ""
-    qwen_api_base: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    qwen_vision_model: str = "qwen3-vl-plus"
-    qwen_vision_fallback_models: str = "qwen-vl-max,qwen-vl-plus"
-    qwen_capability_probe_on_startup: bool = True
-
     # Bynara OpenAI-compatible gateway
     bynara_api_key: str = ""
     bynara_api_base: str = "https://router.bynara.id/v1"
-
-    # Vultr Inference OpenAI-compatible gateway
-    # Activate by setting MODEL_PROVIDER=vultr. Key belongs in .env (VULTR_API_KEY).
-    vultr_api_key: str = ""
-    vultr_api_base: str = "https://api.vultrinference.com/v1"
-    # Append "-normalize" to model names so Vultr smooths non-standard OpenAI
-    # responses (reasoning_content, tool-call IDs, content=None with tool_calls).
-    vultr_normalize: bool = True
 
     # --- Context-window budget (prevents input > model context limit) ---
     # Active model context window (Kimi-K2.6 = 262144). The trimmer keeps the
@@ -109,8 +95,8 @@ class Settings(BaseSettings):
 
     @property
     def use_vision(self) -> bool:
-        """True when Qwen multimodal screenshot analysis is available."""
-        return bool(self.qwen_api_key)
+        """True when multimodal screenshot analysis is available."""
+        return True
 
     # Server
     app_env: str = "development"
@@ -349,9 +335,9 @@ class Settings(BaseSettings):
     @classmethod
     def validate_model_provider(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in ("qwen", "bynara", "vultr"):
-            raise ValueError("MODEL_PROVIDER must be 'qwen', 'bynara', or 'vultr'")
-        return normalized
+        if normalized in ("bynara", "qwen", "vultr"):
+            return "bynara"
+        raise ValueError("MODEL_PROVIDER must be 'bynara'")
 
     @property
     def is_production(self) -> bool:
@@ -384,10 +370,6 @@ def validate_startup_settings() -> None:
         issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
     if not settings.require_byok and not settings.e2b_api_key:
         issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
-    if not settings.qwen_api_key:
-        issues.append("QWEN_API_KEY is required for Model Studio Qwen/GLM reasoning and Qwen vision")
-    if settings.model_provider == "vultr" and not settings.vultr_api_key:
-        issues.append("VULTR_API_KEY is required when MODEL_PROVIDER is 'vultr'")
     if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
         issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
     if bool(settings.github_oauth_client_id) != bool(settings.github_oauth_client_secret):

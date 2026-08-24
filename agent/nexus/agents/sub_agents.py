@@ -425,7 +425,7 @@ def _with_skill_instruction(instruction: str, skill_instruction: str = "") -> st
     return f"{instruction}\n\n{skill_instruction.strip()}"
 
 
-def _get_model(runtime_config: SessionRuntimeConfig, model_name: str = "qwen3.6-max-preview"):
+def _get_model(runtime_config: SessionRuntimeConfig, model_name: str | None = None):
     """Return a model for parked sub-agents, preferring user LLM credentials."""
     from nexus.model_select import create_model
 
@@ -517,7 +517,7 @@ def _create_computer_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config, "qwen3.7-plus"),
+        model=_get_model(runtime_config),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -552,7 +552,7 @@ def _create_browser_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config, "qwen3.6-max"),
+        model=_get_model(runtime_config),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -594,7 +594,7 @@ def _create_code_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config, "qwen3.6-max-preview"),
+        model=_get_model(runtime_config),
         instruction=instruction,
         tools=gate_tools([
             prepare_task_workspace,
@@ -628,7 +628,7 @@ def _create_research_reviewer_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=_get_model(runtime_config, "qwen3.7-plus"),
+        model=_get_model(runtime_config),
         instruction=instruction,
         tools=gate_tools([
             read_task_state,

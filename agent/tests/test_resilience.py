@@ -135,7 +135,7 @@ def test_vision_retries_each_model_then_falls_back() -> None:
             attempts_per_model=3,
             retry_base_seconds=0,
         )
-        with pytest.raises(VisionAnalysisError, match="All Qwen vision models failed"):
+        with pytest.raises(VisionAnalysisError, match="All vision models failed"):
             provider.analyze(b"jpeg", width=800, height=600)
 
     # 2 models x 3 attempts, then give up — a bounded, predictable ceiling.

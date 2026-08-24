@@ -522,10 +522,10 @@ def resolve_session_runtime_config(
             settings.micro_fallback_models,
             exclude=settings.micro_model,
         ),
-        qwen_vision_model=settings.qwen_vision_model,
+        qwen_vision_model=settings.worker_visual_model,
         qwen_vision_fallback_models=_parse_model_list(
-            settings.qwen_vision_fallback_models,
-            exclude=settings.qwen_vision_model,
+            settings.worker_visual_fallback_models,
+            exclude=settings.worker_visual_model,
         ),
         autonomy_mode=normalize_autonomy_mode(
             public_settings.get("autonomyMode") or settings.default_autonomy_mode

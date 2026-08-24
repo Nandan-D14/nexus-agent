@@ -222,7 +222,7 @@ def test_planner_exposes_workflow_only_behind_pilot_flag() -> None:
             True,
         ),
         patch(
-            "nexus.qwen_router.get_qwen_router",
+            "nexus.bynara_router.get_bynara_router",
             return_value=SimpleNamespace(),
         ),
     ):

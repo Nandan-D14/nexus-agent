@@ -248,6 +248,7 @@ class TemplateEndpointSmokeTests(TestCase):
 
     def test_update_template(self) -> None:
         repo = MagicMock()
+        repo.get_workflow_template = AsyncMock(return_value=_stored_template())
         repo.update_workflow_template = AsyncMock(
             return_value=_stored_template(name="Updated name", instructions="New instructions")
         )

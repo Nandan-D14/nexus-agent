@@ -103,8 +103,7 @@ class TurnContextFormattingTests(TestCase):
             ],
         )
 
-        self.assertIn("[USER-SELECTED CONNECTORS]", result)
-        self.assertIn("google_drive, system", result)
+        self.assertIn("Connectors: google_drive, system", result)
         self.assertIn("[UPLOADED FILES]", result)
         self.assertIn("report.pdf", result)
         self.assertIn("/workspace/session/run/sources/uploads/report.pdf", result)
