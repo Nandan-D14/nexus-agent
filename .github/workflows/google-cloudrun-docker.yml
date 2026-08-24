@@ -127,6 +127,7 @@ jobs:
 
       - name: 'Ensure durable Cloud Tasks queue exists'
         run: |-
+          gcloud services enable cloudtasks.googleapis.com --project="${{ env.PROJECT_ID }}" 2>/dev/null || true
           gcloud tasks queues describe cocomputer-tasks \
             --project="${{ env.PROJECT_ID }}" \
             --location="${{ env.REGION }}" >/dev/null 2>&1 || \
@@ -136,7 +137,7 @@ jobs:
             --max-attempts=3 \
             --min-backoff=10s \
             --max-backoff=300s \
-            --max-concurrent-dispatches=10
+            --max-concurrent-dispatches=10 2>/dev/null || true
 
       - name: 'Deploy Agent to Cloud Run'
         run: |-
