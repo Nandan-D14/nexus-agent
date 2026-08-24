@@ -27,6 +27,7 @@ import {
   MapPin,
   Clock,
   User,
+  LayoutGrid,
 } from "lucide-react";
 
 export type StepType =
@@ -43,7 +44,9 @@ export type StepType =
   | "gmail"
   | "calendar"
   | "tasks"
-  | "mcp";
+  | "mcp"
+  | "generative_ui"
+  | "html_artifact";
 
 export type StepStatus = "pending" | "in_progress" | "completed" | "failed";
 
@@ -94,6 +97,8 @@ function getStepIcon(type: StepType, status: StepStatus) {
   if (type === "calendar") return <Calendar className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "tasks") return <ListTodo className="w-[11px] h-[11px] text-zinc-400" />;
   if (type === "mcp") return <Plug className="w-[11px] h-[11px] text-zinc-400" />;
+  if (type === "generative_ui") return <LayoutGrid className="w-[11px] h-[11px] text-violet-400" />;
+  if (type === "html_artifact") return <FileText className="w-[11px] h-[11px] text-amber-400" />;
   if (type === "completion" || status === "completed") return <Check className="w-[11px] h-[11px] text-emerald-400" />;
   return <Bot className="w-[11px] h-[11px] text-zinc-400" />;
 }
@@ -173,7 +178,9 @@ export function WorkflowStep({ step, isLast = false, disableDetails = false, onS
               } transition-colors ${isSelectable ? "group-hover:text-zinc-300" : ""}`}>
                 {step.title}
                 {query && step.step_type === "browser" && (
-                  <span className="text-zinc-500 italic ml-2">"{query}"</span>
+                  <span className="text-zinc-500 italic ml-2">
+                    &quot;{query}&quot;
+                  </span>
                 )}
               </div>
             </div>

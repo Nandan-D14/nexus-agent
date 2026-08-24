@@ -12,6 +12,7 @@ import logging
 import json
 import shlex
 import socket
+import threading
 import time
 from typing import Optional
 
@@ -184,6 +185,43 @@ class SandboxManager:
         self._sandbox = None
         self._stream_url: Optional[str] = None
         self._e2b_api_key = e2b_api_key
+        # Browser tools may race during a new session. One launch attempt per
+        # sandbox avoids conflicting Chromium processes sharing the CDP port.
+        self._chromium_cdp_lock = threading.Lock()
+        # Display / input / files / browser concerns are delegated to bound
+        # components (built lazily). See __getattr__.
+        self._components = None
+
+    def _ensure_components(self):
+        components = self.__dict__.get("_components")
+        if components is None:
+            from nexus.sandbox_components import (
+                SandboxBrowser,
+                SandboxDisplay,
+                SandboxFiles,
+                SandboxInput,
+            )
+
+            self._display = SandboxDisplay(self)
+            self._input = SandboxInput(self)
+            self._files = SandboxFiles(self)
+            self._browser = SandboxBrowser(self)
+            components = (self._display, self._input, self._files, self._browser)
+            self._components = components
+        return components
+
+    def __getattr__(self, name: str):
+        # Only invoked for methods moved to a bound component (display, input,
+        # files, browser). Method names are unique across components; the
+        # class-level lookup avoids triggering the components' own __getattr__.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        for component in self._ensure_components():
+            if getattr(type(component), name, None) is not None:
+                return getattr(component, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     @property
     def is_alive(self) -> bool:
@@ -220,14 +258,19 @@ class SandboxManager:
         max_backoff = max(settings.sandbox_create_retry_max_seconds, backoff)
 
         def is_transient(exc: Exception) -> bool:
+            # Transient network faults talking to the E2B API must be retried.
+            # WinError 10054 ("connection forcibly closed") surfaces as
+            # httpcore.ReadError (a subclass of httpcore.NetworkError); timeouts
+            # subclass httpcore.TimeoutException; httpx.TransportError is the
+            # base for all httpx connect/read/write/timeout/protocol faults.
             return isinstance(
                 exc,
                 (
                     socket.gaierror,
-                    httpx.ConnectError,
-                    httpx.RemoteProtocolError,
-                    httpx.TimeoutException,
-                    httpcore.ConnectError,
+                    ConnectionError,  # incl. ConnectionResetError (WinError 10054)
+                    httpx.TransportError,
+                    httpcore.NetworkError,
+                    httpcore.TimeoutException,
                     httpcore.RemoteProtocolError,
                 ),
             )
@@ -237,11 +280,14 @@ class SandboxManager:
             try:
                 suffix = f" (attempt {attempt}/{retries})" if retries > 1 else ""
                 logger.info("Creating E2B desktop sandbox%s...", suffix)
-                self._sandbox = Sandbox.create(
+                create_kwargs = dict(
                     api_key=self._e2b_api_key or None,
                     resolution=(settings.sandbox_resolution_w, settings.sandbox_resolution_h),
                     timeout=settings.sandbox_timeout_seconds,
                 )
+                if settings.sandbox_template_id:
+                    create_kwargs["template"] = settings.sandbox_template_id
+                self._sandbox = Sandbox.create(**create_kwargs)
                 self._sandbox.stream.start(require_auth=False)
                 self._stream_url = self._sandbox.stream.get_url()
                 logger.info("Sandbox ready -- stream URL: %s", self._stream_url)
@@ -300,22 +346,47 @@ class SandboxManager:
             "true"
         )
         try:
-            self._sandbox.commands.run(cmd, timeout=35)
-            logger.debug("Custom wallpaper applied via curl + xfconf-query")
+            # Background the whole script so boot is not blocked on the curl
+            # download. Wrap in `sh -c` so nohup covers every statement, not
+            # just the leading `sleep`.
+            backgrounded = f"nohup sh -c {shlex.quote(cmd)} >/dev/null 2>&1 & echo scheduled"
+            self._sandbox.commands.run(backgrounded, timeout=10)
+            logger.debug("Custom wallpaper scheduled via curl + xfconf-query (background)")
         except Exception:
             logger.debug("Wallpaper setup failed (non-critical)", exc_info=True)
 
     def _provision_sandbox(self) -> None:
-        """Pre-install common libraries to speed up agent tasks."""
-        libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
-        cmd = f"pip install {' '.join(libs)}"
+        """Pre-install task libraries and provision one Chromium CDP target.
+
+        When a pre-baked template is configured the libraries are already in the
+        image, so the boot-time ``pip install`` (up to 300s) is skipped.
+        """
+        if settings.sandbox_template_id:
+            logger.info("Skipping runtime provisioning; using pre-baked template %s", settings.sandbox_template_id)
+        else:
+            libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+            cmd = f"pip install {' '.join(libs)}"
+            try:
+                logger.info("Provisioning sandbox with libraries: %s", libs)
+                self._sandbox.commands.run(cmd, timeout=300)
+            except Exception as e:
+                logger.warning("Sandbox provisioning failed: %s", e)
+
+            # Surface silent degradation: boot-time pip can fail without raising,
+            # or packages may still be missing after a partial install.
+            verify = self.run_command(
+                'python3 -c "import docx, openpyxl, fpdf, markdown2"',
+                timeout=60,
+            )
+            if verify.get("exit_code") != 0:
+                logger.error(
+                    "Sandbox doc-generation dependencies missing after provisioning: %s",
+                    verify.get("stderr") or verify.get("stdout") or verify,
+                )
         try:
-            # We run this in the background or with a long timeout
-            # For simplicity, we'll just run it with a timeout.
-            logger.info("Provisioning sandbox with libraries: %s", libs)
-            self._sandbox.commands.run(cmd, timeout=300)
-        except Exception as e:
-            logger.warning("Sandbox provisioning failed: %s", e)
+            self.ensure_chromium_cdp()
+        except Exception as exc:
+            logger.warning("Chromium CDP provisioning failed: %s", exc)
 
     def keep_alive(self, timeout: int = 900) -> None:
         """Extend sandbox timeout."""
@@ -323,30 +394,37 @@ class SandboxManager:
             self._sandbox.set_timeout(timeout)
 
     def pause(self) -> str | None:
-        """Snapshot the sandbox state. Returns the sandbox_id so it can be resumed later.
+        """Pause the sandbox so it can be resumed later via ``connect``/``resume``.
 
-        Clears internal references so ``is_alive`` returns False after this call.
-        Returns None if no sandbox is running or if the E2B API call fails.
+        Current E2B Desktop SDK exposes ``Sandbox.pause()`` which returns the
+        sandbox id. That id is what ``Sandbox.connect(id)`` resumes.
         """
-        if self._sandbox is None:
+        if not self._sandbox:
             return None
         try:
-            sandbox_id: str = self._sandbox.sandbox_id
-            self._sandbox.pause()
+            sandbox_id = self._sandbox.pause()
             logger.info("Sandbox paused (id=%s)", sandbox_id)
-            return sandbox_id
-        except Exception as exc:
-            logger.warning("Failed to pause sandbox: %s", exc)
-            return None
-        finally:
             self._sandbox = None
             self._stream_url = None
+            return str(sandbox_id) if sandbox_id else None
+        except Exception as exc:
+            logger.warning("Sandbox pause failed: %s — destroying instead", exc)
+            try:
+                self.destroy()
+            except Exception:
+                self._sandbox = None
+                self._stream_url = None
+            return None
 
     def connect(self, sandbox_id: str) -> dict:
-        """Connect to an existing (running) sandbox. Returns {sandbox_id, stream_url}."""
+        """Connect to an existing (running or paused) sandbox.
+
+        E2B ``Sandbox.connect`` auto-resumes paused sandboxes.
+        Returns {sandbox_id, stream_url}.
+        """
         from e2b_desktop import Sandbox
-        
-        logger.info("Connecting to executing sandbox %s ...", sandbox_id)
+
+        logger.info("Connecting to sandbox %s ...", sandbox_id)
         self._sandbox = Sandbox.connect(
             sandbox_id,
             api_key=self._e2b_api_key or None,
@@ -354,6 +432,7 @@ class SandboxManager:
         )
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
+        self.ensure_chromium_cdp()
         logger.info("Sandbox connected -- stream URL: %s", self._stream_url)
         return {
             "sandbox_id": self._sandbox.sandbox_id,
@@ -361,25 +440,12 @@ class SandboxManager:
         }
 
     def resume(self, sandbox_id: str) -> dict:
-        """Resume a previously paused sandbox. Returns {sandbox_id, stream_url}.
+        """Resume a paused sandbox.
 
-        Raises if the E2B API call fails (e.g. snapshot expired after 24 hours).
+        E2B has no ``Sandbox.resume`` — ``Sandbox.connect`` resumes paused
+        sandboxes. This method is the session-layer alias for that path.
         """
-        from e2b_desktop import Sandbox
-
-        logger.info("Resuming sandbox %s ...", sandbox_id)
-        self._sandbox = Sandbox.resume(
-            sandbox_id,
-            api_key=self._e2b_api_key or None,
-            timeout=settings.sandbox_timeout_seconds,
-        )
-        self._sandbox.stream.start(require_auth=False)
-        self._stream_url = self._sandbox.stream.get_url()
-        logger.info("Sandbox resumed -- stream URL: %s", self._stream_url)
-        return {
-            "sandbox_id": self._sandbox.sandbox_id,
-            "stream_url": self._stream_url,
-        }
+        return self.connect(sandbox_id)
 
     def destroy(self) -> None:
         """Kill the sandbox."""
@@ -394,126 +460,6 @@ class SandboxManager:
                 self._stream_url = None
 
     # -- Screen --------------------------------------------------------------
-
-    def resize_screen(self, width: int, height: int) -> dict:
-        """Resize the sandbox virtual display to the given resolution via xrandr."""
-        self._require_sandbox()
-        mode_label = f"{width}x{height}"
-        cmd = (
-            f"export DISPLAY=:1; "
-            f"xrandr --newmode {mode_label} $(cvt {width} {height} 60 | grep Modeline | cut -d' ' -f3-) 2>/dev/null; "
-            f"xrandr --addmode Virtual-1 {mode_label} 2>/dev/null; "
-            f"xrandr --output Virtual-1 --mode {mode_label}"
-        )
-        result = self.run_command(cmd, timeout=15)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            return {"success": False, "error": result.get("stderr", "xrandr failed")}
-        return {"success": True, "width": width, "height": height}
-
-    def screenshot(self) -> bytes:
-        """Capture the screen as PNG bytes."""
-        self._require_sandbox()
-        try:
-            return bytes(self._sandbox.screenshot())
-        except Exception as e:
-            if "not found" in str(e).lower() or "timeout" in str(e).lower():
-                self._sandbox = None
-                raise SandboxDeadError("Sandbox timed out while taking screenshot.") from e
-            raise
-
-    def screenshot_base64(self) -> str:
-        """Capture the screen as a base64-encoded PNG string."""
-        return base64.b64encode(self.screenshot()).decode()
-
-    def screenshot_jpeg(self, quality: int = 85, max_dim: int = 1024) -> bytes:
-        """Capture the screen as resized JPEG bytes (smaller for Gemini)."""
-        png_bytes = self.screenshot()
-        img = Image.open(io.BytesIO(png_bytes))
-        img.thumbnail((max_dim, max_dim))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        return buf.getvalue()
-
-    def screenshot_jpeg_base64(self, quality: int = 85) -> str:
-        """Capture as base64-encoded JPEG."""
-        return base64.b64encode(self.screenshot_jpeg(quality)).decode()
-
-    def get_screen_size(self) -> tuple[int, int]:
-        """Return (width, height) of the sandbox screen."""
-        self._require_sandbox()
-        return self._sandbox.get_screen_size()
-
-    def get_cursor_position(self) -> tuple[int, int]:
-        """Return (x, y) cursor position."""
-        self._require_sandbox()
-        return self._sandbox.get_cursor_position()
-
-    # -- Mouse ---------------------------------------------------------------
-
-    def left_click(self, x: int, y: int) -> None:
-        """Left-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.left_click(x, y)
-
-    def right_click(self, x: int, y: int) -> None:
-        """Right-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.right_click(x, y)
-
-    def double_click(self, x: int, y: int) -> None:
-        """Double-click at screen coordinates."""
-        self._require_sandbox()
-        self._sandbox.double_click(x, y)
-
-    def move_mouse(self, x: int, y: int) -> None:
-        """Move mouse to coordinates without clicking."""
-        self._require_sandbox()
-        self._sandbox.move_mouse(x, y)
-
-    def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
-        """Drag from one point to another."""
-        self._require_sandbox()
-        self._sandbox.drag(fr=(from_x, from_y), to=(to_x, to_y))
-
-    def scroll(self, direction: str = "down", amount: int = 3) -> None:
-        """Scroll the screen. direction: 'up' or 'down'."""
-        self._require_sandbox()
-        self._sandbox.scroll(direction, amount)
-
-    # -- Keyboard ------------------------------------------------------------
-
-    def type_text(self, text: str) -> None:
-        """Type text at the current cursor position."""
-        self._require_sandbox()
-        self._sandbox.write(text, chunk_size=25, delay_in_ms=75)
-
-    def press_key(self, key: str) -> None:
-        """Press a key or key combination. Examples: 'enter', 'ctrl+c', 'alt+tab'."""
-        self._require_sandbox()
-        key_aliases = {
-            "return": "enter",
-            "esc": "escape",
-            "del": "delete",
-            "control": "ctrl",
-            "command": "meta",
-            "cmd": "meta",
-            "option": "alt",
-            "spacebar": "space",
-            "pgup": "pageup",
-            "pgdn": "pagedown",
-        }
-
-        def normalize(part: str) -> str:
-            lowered = part.strip().lower()
-            return key_aliases.get(lowered, lowered)
-
-        if "+" in key:
-            combo = [normalize(part) for part in key.split("+") if part.strip()]
-            self._sandbox.press(combo)
-        else:
-            self._sandbox.press(normalize(key))
-
-    # -- Terminal ------------------------------------------------------------
 
     def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
         """Run a shell command. Returns {stdout, stderr, exit_code}."""
@@ -549,138 +495,3 @@ class SandboxManager:
                 "stderr": stderr,
                 "exit_code": exit_code if exit_code is not None else -1,
             }
-
-    def ensure_directory(self, path: str) -> None:
-        """Create a directory and its parents inside the sandbox."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"mkdir -p {safe_path}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) == 0:
-            return
-
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "pathlib.Path(path).mkdir(parents=True, exist_ok=True)"
-        )
-        fallback = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(fallback.get("exit_code", -1)) == 0:
-            logger.warning(
-                "ensure_directory recovered via python fallback for %s after mkdir failed "
-                "(exit=%s, stderr=%s, stdout=%s)",
-                path,
-                result.get("exit_code"),
-                result.get("stderr") or "",
-                result.get("stdout") or "",
-            )
-            return
-
-        logger.error(
-            "ensure_directory failed for %s: mkdir exit=%s stderr=%s stdout=%s; "
-            "python fallback exit=%s stderr=%s stdout=%s",
-            path,
-            result.get("exit_code"),
-            result.get("stderr") or "",
-            result.get("stdout") or "",
-            fallback.get("exit_code"),
-            fallback.get("stderr") or "",
-            fallback.get("stdout") or "",
-        )
-        raise RuntimeError(
-            fallback.get("stderr")
-            or result.get("stderr")
-            or f"Failed to create directory {path}"
-        )
-
-    def write_text_file(self, path: str, content: str, *, append: bool = False) -> None:
-        """Write UTF-8 text into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        mode = "ab" if append else "wb"
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            f"target.open('{mode}').write(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def write_binary_file(self, path: str, content: bytes) -> None:
-        """Write binary content into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            "target.write_bytes(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
-
-    def read_binary_file(self, path: str) -> bytes:
-        """Read binary content from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib, sys; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "sys.stdout.write(base64.b64encode(pathlib.Path(path).read_bytes()).decode('ascii'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=60)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return base64.b64decode(str(result.get("stdout") or ""))
-
-    def read_text_file(self, path: str) -> str:
-        """Read UTF-8 text from a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "print(pathlib.Path(path).read_text(encoding='utf-8'))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to read file {path}")
-        return str(result.get("stdout") or "")
-
-    def path_exists(self, path: str) -> bool:
-        """Return True when the given sandbox path exists."""
-        safe_path = shlex.quote(path)
-        result = self.run_command(f"test -e {safe_path}", timeout=15)
-        return _coerce_exit_code(result.get("exit_code", -1)) == 0
-
-    def list_directory(self, path: str) -> list[dict[str, object]]:
-        """Return a shallow directory listing for the given sandbox path."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        script = (
-            "import base64, json, pathlib; "
-            f"path = pathlib.Path(base64.b64decode('{path_b64}').decode('utf-8')); "
-            "entries = []; "
-            "exists = path.exists(); "
-            "iterable = sorted(path.iterdir(), key=lambda item: item.name.lower()) if exists and path.is_dir() else []; "
-            "for item in iterable: "
-            " entries.append({'name': item.name, 'path': str(item), 'is_dir': item.is_dir(), 'size': item.stat().st_size if item.exists() else 0}); "
-            "print(json.dumps(entries))"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to list directory {path}")
-        raw = str(result.get("stdout") or "").strip()
-        if not raw:
-            return []
-        return list(json.loads(raw))
-
-    # -- Applications --------------------------------------------------------
-
-    def open_url(self, url: str) -> None:
-        """Open a URL in the default browser."""
-        self._require_sandbox()
-        self._sandbox.open(url)

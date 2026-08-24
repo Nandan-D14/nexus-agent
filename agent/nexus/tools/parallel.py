@@ -68,6 +68,7 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "create_drive_doc",
     "upload_drive_file",
     "github_create_issue",
+    "vyora_start_call",
     # Background tasks
     "request_background_task",
     "schedule_monitoring_task",
@@ -76,6 +77,7 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "show_workflow_panel",
     # Document generation
     "generate_pdf_report",
+    "publish_html_artifact",
     "save_as_artifact",
     # Web automation
     "tinyfish_web_agent",

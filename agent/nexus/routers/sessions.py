@@ -26,13 +26,22 @@ from nexus.models import (
     RunStep,
     SessionCreateRequest,
     SessionInfo,
+    SessionLastUsage,
     SessionResponse,
+    SessionTokenTotals,
     StatusMessage,
     TaskInfo,
+    TestLlmRequest,
+    LlmModelsResponse,
     UserSettingsResponse,
     UserSettingsUpdateRequest,
 )
-from nexus.runtime_config import build_byok_storage_update, build_public_user_settings, resolve_session_runtime_config, ensure_selected_gemini_provider_available
+from nexus.runtime_config import (
+    build_byok_storage_update,
+    build_public_user_settings,
+    resolve_session_runtime_config,
+    ensure_selected_gemini_provider_available,
+)
 from nexus.production_tasks import map_durable_status_to_history
 from nexus.usage import get_expected_usage_sources
 from nexus.sessions_helpers import (
@@ -40,7 +49,6 @@ from nexus.sessions_helpers import (
     _prepare_user_runtime,
     _serialize_context_packet,
     _serialize_handoff_summary,
-    _ensure_beta_access,
 )
 
 router = APIRouter()
@@ -55,6 +63,28 @@ def _build_resume_seed_context(stored_session) -> str:
         f"Digest: {digest}\n"
         "Load the stored compact session context automatically instead of asking the user to restate prior work."
     )
+
+def _serialize_token_totals(raw: dict[str, Any] | None) -> SessionTokenTotals | None:
+    if not isinstance(raw, dict):
+        return None
+    return SessionTokenTotals(
+        input=int(raw.get("input", 0) or 0),
+        output=int(raw.get("output", 0) or 0),
+        total=int(raw.get("total", 0) or 0),
+    )
+
+
+def _serialize_last_usage(raw: dict[str, Any] | None) -> SessionLastUsage | None:
+    if not isinstance(raw, dict):
+        return None
+    return SessionLastUsage(
+        model=str(raw.get("model") or ""),
+        source=str(raw.get("source") or ""),
+        input_tokens=int(raw.get("inputTokens", raw.get("input_tokens", 0)) or 0),
+        output_tokens=int(raw.get("outputTokens", raw.get("output_tokens", 0)) or 0),
+        total_tokens=int(raw.get("totalTokens", raw.get("total_tokens", 0)) or 0),
+    )
+
 
 def _build_session_info_from_stored(stored_session) -> SessionInfo:
     return SessionInfo(
@@ -80,6 +110,9 @@ def _build_session_info_from_stored(stored_session) -> SessionInfo:
         exact_workspace_resume_available=stored_session.exact_workspace_resume_available,
         continuation_mode=stored_session.continuation_mode,
         context_packet=_serialize_context_packet(stored_session.context_packet),
+        token_totals=_serialize_token_totals(stored_session.token_totals),
+        model_context_limit=int(settings.model_context_limit),
+        last_usage=_serialize_last_usage(getattr(stored_session, "last_usage", None)),
     )
 
 def _serialize_run(run) -> RunInfo | None:
@@ -210,7 +243,11 @@ async def _continue_existing_session_for_user(
             owner_id=user.uid,
             runtime_config=resolve_session_runtime_config(user_settings),
             created_at=stored_session.created_at,
-            resume_mode="continue_latest_workspace" if exact_workspace_resume_available else "fresh",
+            resume_mode=(
+                "continue_latest_workspace"
+                if exact_workspace_resume_available
+                else "continue_conversation"
+            ),
             seed_context="",
             initial_title=stored_session.title or "Continued session",
             artifact_count=stored_session.artifact_count,
@@ -354,6 +391,11 @@ async def get_session(session_id: str, user: AuthenticatedUser = Depends(require
             exact_workspace_resume_available=session.exact_workspace_resume_available,
             continuation_mode=session.continuation_mode or (stored_session.continuation_mode if stored_session else None),
             context_packet=_serialize_context_packet(stored_session.context_packet if stored_session else None),
+            token_totals=_serialize_token_totals(stored_session.token_totals if stored_session else None),
+            model_context_limit=int(settings.model_context_limit),
+            last_usage=_serialize_last_usage(
+                getattr(stored_session, "last_usage", None) if stored_session else None
+            ),
         )
 
     if not stored_session or stored_session.owner_id != user.uid:
@@ -381,9 +423,6 @@ async def refresh_ticket(session_id: str, user: AuthenticatedUser = Depends(requ
     """Generate a new WS authentication ticket for an existing session."""
     if not get_ticket_refresh_limiter().check(user.uid):
         raise HTTPException(status_code=429, detail="Too many ticket refresh requests. Please slow down.")
-    history_repository = get_history_repository()
-    user_settings = await history_repository.get_user_settings(user.uid)
-    _ensure_beta_access(user_settings)
     session_manager = get_session_manager()
     session = await session_manager.get_session(session_id)
     if not session or session.owner_id != user.uid:
@@ -492,9 +531,10 @@ async def list_history(
         "sessions": [
             {
                 "session_id": s.session_id,
-                "title": getattr(s, "title", "Session") + (" - " + getattr(s, "summary", "")[:50] if getattr(s, "summary", "") else ""),
+                "title": s.title or "Untitled session",
                 "status": s.status,
                 "created_at": s.created_at,
+                "updated_at": s.updated_at,
                 "ended_at": s.ended_at,
                 "message_count": s.message_count,
                 "summary": s.summary,
@@ -635,6 +675,8 @@ async def update_user_settings(
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
         candidate_settings = dict(current_settings or {})
@@ -644,7 +686,7 @@ async def update_user_settings(
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
 
-    for raw_key in ("e2bApiKey", "geminiApiKey"):
+    for raw_key in ("e2bApiKey", "geminiApiKey", "llmApiKey"):
         update_payload.pop(raw_key, None)
 
     if update_payload:
@@ -655,3 +697,66 @@ async def update_user_settings(
 
     updated_settings = await history_repository.get_user_settings(user.uid)
     return build_public_user_settings(updated_settings)
+
+
+@router.post("/api/v1/user/settings/test-llm")
+async def test_user_llm(
+    payload: TestLlmRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    history_repository = get_history_repository()
+    current_settings = await history_repository.get_user_settings(user.uid)
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        candidate = dict(current_settings or {})
+        if updates:
+            candidate["byok"] = build_byok_storage_update(current_settings, updates)
+        runtime = resolve_session_runtime_config(candidate)
+        from nexus.user_llm_router import probe_user_llm
+
+        model = await probe_user_llm(runtime)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"LLM connection failed: {type(exc).__name__}: {str(exc)[:300]}",
+        ) from exc
+    return {"ok": True, "model": model}
+
+
+@router.post("/api/v1/user/settings/llm-models", response_model=LlmModelsResponse)
+async def list_llm_models(
+    payload: TestLlmRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    history_repository = get_history_repository()
+    current_settings = await history_repository.get_user_settings(user.uid)
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        candidate = dict(current_settings or {})
+        if updates:
+            candidate["byok"] = build_byok_storage_update(current_settings, updates)
+        runtime = resolve_session_runtime_config(candidate)
+        from nexus.user_llm_router import list_user_llm_models
+
+        models = await list_user_llm_models(
+            api_key=runtime.llm_api_key,
+            api_base=runtime.llm_api_base,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not list models: {type(exc).__name__}: {str(exc)[:300]}",
+        ) from exc
+    return LlmModelsResponse(models=models, apiBase=runtime.llm_api_base)

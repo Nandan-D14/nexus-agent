@@ -22,10 +22,14 @@ from nexus.models import (
     StatusMessage,
     UpdateIntegrationConnectionRequest,
     UpsertGithubConnectionRequest,
+    UpsertOpenAIConnectionRequest,
+    UpsertSlackConnectionRequest,
     UpsertTavilyConnectionRequest,
     UpsertTinyfishConnectionRequest,
+    UpsertVyoraConnectionRequest,
 )
 from nexus.mcp_client import McpRemoteClient, discovered_tools_payload, slugify_tool_part
+from nexus.slack_oauth import SLACK_MCP_URL, persist_slack_bearer_token, slack_oauth_configured
 
 router = APIRouter()
 history_repository = get_history_repository()
@@ -74,6 +78,24 @@ def _validate_remote_mcp_url(url: str) -> str:
         raise HTTPException(status_code=400, detail="Remote MCP servers must use HTTPS.")
     return cleaned
 
+def _catalog_status(connection) -> str:
+    if connection and connection.enabled and connection.status == "connected":
+        return "connected"
+    return "available"
+
+
+def _github_auth_mode() -> str:
+    return (
+        "oauth"
+        if settings.github_oauth_client_id and settings.github_oauth_client_secret
+        else "token"
+    )
+
+
+def _slack_auth_mode() -> str:
+    return "oauth" if slack_oauth_configured() else "token"
+
+
 @router.get("/api/v1/integrations/catalog")
 async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_current_user)):
     user_settings = await history_repository.get_user_settings(user.uid)
@@ -84,6 +106,36 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
         and google_drive_connection.enabled
     )
     status = "connected" if google_connected else "needs_setup"
+    github_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "github")
+    )
+    exa_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "exa")
+    )
+    treg_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "treg")
+    )
+    linear_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "linear")
+    )
+    vercel_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "vercel")
+    )
+    cloudflare_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "cloudflare")
+    )
+    apify_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "apify")
+    )
+    slack_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "slack")
+    )
+    vyora_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "vyora")
+    )
+    openai_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, "openai")
+    )
     
     return {
         "catalog": [
@@ -120,7 +172,22 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
                 connector_type="native",
                 name="GitHub",
                 description="Search repos, read files, list issues, create issues, and summarize PRs.",
-                status="available",
+                status=github_status,
+                auth_mode=_github_auth_mode(),
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="linear",
+                connector_type="mcp_remote_http",
+                name="Linear",
+                description="Issues, projects, and comments through Linear MCP.",
+                status=linear_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="vercel",
+                connector_type="mcp_remote_http",
+                name="Vercel",
+                description="Projects, deployments, and logs through Vercel MCP.",
+                status=vercel_status,
             ).model_dump(mode="json"),
             IntegrationCatalogItem(
                 provider="tavily",
@@ -135,6 +202,56 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
                 name="Tinyfish",
                 description="Automate browser tasks on real websites using natural language goals.",
                 status="available",
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="exa",
+                connector_type="mcp_remote_http",
+                name="Exa",
+                description="Web search, page fetch, advanced filters, and multi-step Exa Agent research.",
+                status=exa_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="treg",
+                connector_type="mcp_remote_http",
+                name="Treg",
+                description="SEO, SERP, backlinks, enrichment, ads, and social APIs via Treg MCP.",
+                status=treg_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="cloudflare",
+                connector_type="mcp_remote_http",
+                name="Cloudflare",
+                description="Workers, DNS, and account tools through Cloudflare MCP.",
+                status=cloudflare_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="apify",
+                connector_type="mcp_remote_http",
+                name="Apify",
+                description="Actors, datasets, and crawls through Apify MCP.",
+                status=apify_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="slack",
+                connector_type="mcp_remote_http",
+                name="Slack",
+                description="Search, read, and post in Slack through Slack MCP.",
+                status=slack_status,
+                auth_mode=_slack_auth_mode(),
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="openai",
+                connector_type="native",
+                name="OpenAI",
+                description="Web search via the OpenAI Responses API.",
+                status=openai_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
+                provider="vyora",
+                connector_type="native",
+                name="Vyora",
+                description="List agents, numbers, and trigger AI voice calls.",
+                status=vyora_status,
             ).model_dump(mode="json"),
             IntegrationCatalogItem(
                 provider="mcp",
@@ -250,6 +367,31 @@ async def upsert_github_connection(
     )
     return _serialize_integration_connection(connection)
 
+@router.post("/api/v1/integrations/slack", response_model=IntegrationConnection)
+async def upsert_slack_connection(
+    payload: UpsertSlackConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    token = payload.token.strip()
+    test = await McpRemoteClient(url=SLACK_MCP_URL, bearer_token=token).discover()
+    status = "connected" if test.ok else "error"
+    connection = await persist_slack_bearer_token(
+        user.uid,
+        token,
+        tools=discovered_tools_payload(test.tools),
+        resources=test.resources,
+        status=status,
+        last_error=test.error or None,
+        latency_ms=test.latency_ms,
+        enabled=payload.enabled and test.ok,
+    )
+    if not test.ok:
+        raise HTTPException(
+            status_code=400,
+            detail=test.error or "Slack token was stored but MCP discovery failed.",
+        )
+    return _serialize_integration_connection(connection)
+
 @router.post("/api/v1/integrations/tavily", response_model=IntegrationConnection)
 async def upsert_tavily_connection(
     payload: UpsertTavilyConnectionRequest,
@@ -311,6 +453,64 @@ async def upsert_tinyfish_connection(
         status = "error"
         last_error = str(exc)[:500] or "Tinyfish API key test failed."
     connection = await history_repository.upsert_tinyfish_connection(
+        user.uid,
+        api_key=api_key,
+        enabled=payload.enabled and status == "connected",
+        status=status,
+        last_error=last_error,
+    )
+    return _serialize_integration_connection(connection)
+
+@router.post("/api/v1/integrations/vyora", response_model=IntegrationConnection)
+async def upsert_vyora_connection(
+    payload: UpsertVyoraConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    api_key = payload.api_key.strip()
+    status = "connected"
+    last_error = None
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers={"X-API-KEY": api_key, "Accept": "application/json"},
+        ) as client:
+            response = await client.get("https://api.vyora.ai/v1/agents")
+            if response.status_code >= 400:
+                status = "error"
+                last_error = f"Vyora API returned HTTP {response.status_code}."
+    except Exception as exc:
+        status = "error"
+        last_error = str(exc)[:500] or "Vyora API key test failed."
+    connection = await history_repository.upsert_vyora_connection(
+        user.uid,
+        api_key=api_key,
+        enabled=payload.enabled and status == "connected",
+        status=status,
+        last_error=last_error,
+    )
+    return _serialize_integration_connection(connection)
+
+@router.post("/api/v1/integrations/openai", response_model=IntegrationConnection)
+async def upsert_openai_connection(
+    payload: UpsertOpenAIConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    api_key = payload.api_key.strip()
+    status = "connected"
+    last_error = None
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        ) as client:
+            response = await client.get("https://api.openai.com/v1/models")
+            if response.status_code >= 400:
+                status = "error"
+                last_error = f"OpenAI API returned HTTP {response.status_code}."
+    except Exception as exc:
+        status = "error"
+        last_error = str(exc)[:500] or "OpenAI API key test failed."
+    connection = await history_repository.upsert_openai_connection(
         user.uid,
         api_key=api_key,
         enabled=payload.enabled and status == "connected",

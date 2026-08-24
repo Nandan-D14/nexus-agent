@@ -71,6 +71,7 @@ def _serialize_workflow_template(template) -> WorkflowTemplate:
             for field in template.input_fields
         ],
         source_artifacts=template.source_artifacts,
+        status="draft" if getattr(template, "status", "published") == "draft" else "published",
         created_at=template.created_at,
         updated_at=template.updated_at,
         last_used_at=template.last_used_at,
@@ -207,6 +208,33 @@ def _build_template_prompt(template, inputs: dict[str, str]) -> str:
     lines.append("Execute this workflow now using the saved process and the provided template inputs.")
     return "\n".join(part for part in lines if part is not None).strip()
 
+async def _create_blank_template_for_user(
+    *,
+    user: AuthenticatedUser,
+    payload: CreateWorkflowTemplateRequest,
+) -> WorkflowTemplate:
+    name = (payload.name or "").strip()[:80]
+    description = (payload.description or "").strip()[:240]
+    instructions = (payload.instructions or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name cannot be empty")
+    if not instructions:
+        raise HTTPException(status_code=400, detail="Template instructions cannot be empty")
+    history_repository = get_history_repository()
+    template = await history_repository.create_workflow_template(
+        owner_id=user.uid,
+        source_session_id=None,
+        source_run_id=None,
+        name=name,
+        description=description,
+        instructions=instructions,
+        input_fields=_normalize_template_input_fields(payload.input_fields),
+        source_artifacts=[],
+        status="draft" if payload.status == "draft" else "published",
+    )
+    return _serialize_workflow_template(template)
+
+
 async def _create_template_from_session_for_user(
     *,
     user: AuthenticatedUser,
@@ -215,17 +243,30 @@ async def _create_template_from_session_for_user(
 ) -> WorkflowTemplate:
     history_repository = get_history_repository()
     stored_session, run, steps, artifacts = await _prepare_template_source(user.uid, source_session_id)
-    defaults = _build_template_defaults(stored_session, run, steps, artifacts)
-    normalized_input_fields = _normalize_template_input_fields(payload.input_fields)
+    name = (payload.name or "").strip()[:80]
+    description = (payload.description or "").strip()[:240]
+    instructions = (payload.instructions or "").strip()
+    try:
+        defaults = _build_template_defaults(stored_session, run, steps, artifacts)
+    except HTTPException:
+        if not name or not instructions:
+            raise
+        defaults = {
+            "name": name,
+            "description": description,
+            "instructions": instructions,
+            "source_artifacts": [],
+        }
     template = await history_repository.create_workflow_template(
         owner_id=user.uid,
         source_session_id=source_session_id,
         source_run_id=run.run_id if run else None,
-        name=(payload.name or defaults["name"]).strip()[:80],
-        description=(payload.description or defaults["description"]).strip()[:240],
-        instructions=(payload.instructions or defaults["instructions"]).strip(),
-        input_fields=normalized_input_fields,
+        name=(name or defaults["name"]).strip()[:80],
+        description=(description or defaults["description"]).strip()[:240],
+        instructions=(instructions or defaults["instructions"]).strip(),
+        input_fields=_normalize_template_input_fields(payload.input_fields),
         source_artifacts=defaults["source_artifacts"],
+        status="draft" if payload.status == "draft" else "published",
     )
     return _serialize_workflow_template(template)
 
@@ -253,13 +294,13 @@ async def create_workflow_template(
     payload: CreateWorkflowTemplateRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
-    if not payload.source_session_id:
-        raise HTTPException(status_code=400, detail="source_session_id is required")
-    return await _create_template_from_session_for_user(
-        user=user,
-        source_session_id=payload.source_session_id,
-        payload=payload,
-    )
+    if payload.source_session_id:
+        return await _create_template_from_session_for_user(
+            user=user,
+            source_session_id=payload.source_session_id,
+            payload=payload,
+        )
+    return await _create_blank_template_for_user(user=user, payload=payload)
 
 @router.get("/api/v1/templates/{template_id}", response_model=WorkflowTemplate)
 async def get_workflow_template(
@@ -285,12 +326,23 @@ async def update_workflow_template(
         raise HTTPException(status_code=400, detail="Template name cannot be empty")
     if payload.instructions is not None and not instructions:
         raise HTTPException(status_code=400, detail="Template instructions cannot be empty")
+    status = payload.status if payload.status in {"draft", "published"} else None
     normalized_input_fields = (
         _normalize_template_input_fields(payload.input_fields)
         if payload.input_fields is not None
         else None
     )
     history_repository = get_history_repository()
+    current = await history_repository.get_workflow_template(user.uid, template_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Template not found")
+    merged_name = name if name is not None else current.name
+    merged_instructions = instructions if instructions is not None else current.instructions
+    if status == "published" and (not merged_name or not merged_instructions):
+        raise HTTPException(
+            status_code=400,
+            detail="A published template needs a name and instructions.",
+        )
     template = await history_repository.update_workflow_template(
         owner_id=user.uid,
         template_id=template_id,
@@ -298,6 +350,7 @@ async def update_workflow_template(
         description=description,
         instructions=instructions,
         input_fields=normalized_input_fields,
+        status=status,
     )
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -327,6 +380,11 @@ async def run_workflow_template(
     template = await history_repository.get_workflow_template(user.uid, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
+    if getattr(template, "status", "published") == "draft":
+        raise HTTPException(
+            status_code=400,
+            detail="Publish this template before running it.",
+        )
 
     initial_prompt = _build_template_prompt(template, (payload or RunWorkflowTemplateRequest()).inputs)
     user_settings = await _prepare_user_runtime(user)

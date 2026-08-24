@@ -8,6 +8,7 @@ from nexus.tools.computer import (
     left_click,
     right_click,
     double_click,
+    triple_click,
     type_text,
     press_key,
     scroll_screen,
@@ -18,6 +19,7 @@ from nexus.tools.screen import take_screenshot
 from nexus.tools.browser import open_browser
 from nexus.tools.bg_task import request_background_task
 from nexus.tools.monitor import schedule_monitoring_task
+from nexus.tools.skills import read_skill, read_skill_file
 from nexus.tools.workspace import (
     prepare_task_workspace,
     initialize_task_state,
@@ -34,6 +36,7 @@ from nexus.tools.docs import (
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    publish_html_artifact,
     save_as_artifact,
 )
 from nexus.tools.web import web_search, scrape_web_page
@@ -49,6 +52,13 @@ from nexus.tools.integrations import (
     github_summarize_pr,
     tavily_search,
     tinyfish_web_agent,
+    vyora_list_agents,
+    vyora_list_numbers,
+    vyora_start_call,
+    vyora_list_calls,
+    vyora_get_call,
+    openai_web_search,
+    render_ui,
     gmail_search,
     gmail_read,
     gmail_send,
@@ -58,6 +68,11 @@ from nexus.tools.integrations import (
     calendar_create,
 )
 from nexus.tools.ui_control import show_desktop_panel, show_workflow_panel
+from nexus.tools.templates import (
+    propose_workflow_template,
+    update_workflow_template,
+    publish_workflow_template,
+)
 
 ALL_TOOLS = [
     prepare_task_workspace,
@@ -69,12 +84,15 @@ ALL_TOOLS = [
     write_workspace_file,
     read_workspace_file,
     list_workspace_files,
+    read_skill,
+    read_skill_file,
     web_search,
     scrape_web_page,
     extract_pdf_text,
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    publish_html_artifact,
     save_as_artifact,
     search_drive,
     read_drive_file,
@@ -87,6 +105,13 @@ ALL_TOOLS = [
     github_summarize_pr,
     tavily_search,
     tinyfish_web_agent,
+    vyora_list_agents,
+    vyora_list_numbers,
+    vyora_start_call,
+    vyora_list_calls,
+    vyora_get_call,
+    openai_web_search,
+    render_ui,
     gmail_search,
     gmail_read,
     gmail_send,
@@ -100,6 +125,7 @@ ALL_TOOLS = [
     left_click,
     right_click,
     double_click,
+    triple_click,
     type_text,
     press_key,
     scroll_screen,
@@ -109,4 +135,7 @@ ALL_TOOLS = [
     schedule_monitoring_task,
     show_desktop_panel,
     show_workflow_panel,
+    propose_workflow_template,
+    update_workflow_template,
+    publish_workflow_template,
 ]

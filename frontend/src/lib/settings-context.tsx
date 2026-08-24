@@ -5,53 +5,106 @@
 
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
-import { fetchBetaStatus, type BetaStatusResponse } from "./beta-access";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import type { SettingsPage } from "@/components/application/settings/settings-modal";
 import { useAuth } from "./auth-context";
+import {
+  fetchUserSettings,
+  formatByokMissingMessage,
+  requiresByokSetup as settingsNeedByok,
+  type UserSettingsResponse,
+} from "./user-settings";
 
 type SettingsContextType = {
   isSettingsOpen: boolean;
   setIsSettingsOpen: (open: boolean) => void;
+  settingsDefaultPage: SettingsPage;
+  openSettings: (page?: SettingsPage) => void;
   requiresByokSetup: boolean;
-  refreshBetaStatus: () => Promise<void>;
-  isLoadingBetaStatus: boolean;
+  byokMissing: string[];
+  refreshByokStatus: () => Promise<UserSettingsResponse | null>;
+  applyByokFromSettings: (data: UserSettingsResponse) => void;
+  ensureByokReady: () => Promise<{ ok: boolean; message: string }>;
 };
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const { user, isLoading: isAuthLoading } = useAuth();
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [betaStatus, setBetaStatus] = useState<BetaStatusResponse | null>(null);
-  const [isLoadingBetaStatus, setIsLoadingBetaStatus] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpenState] = useState(false);
+  const [settingsDefaultPage, setSettingsDefaultPage] = useState<SettingsPage>("general");
+  const [byokState, setByokState] = useState<{
+    blocked: boolean;
+    missing: string[];
+  } | null>(null);
 
-  const refreshBetaStatus = async () => {
-    if (!user) return;
-    setIsLoadingBetaStatus(true);
-    try {
-      const status = await fetchBetaStatus();
-      setBetaStatus(status);
-    } catch (error) {
-      console.error("Failed to fetch beta status:", error);
-    } finally {
-      setIsLoadingBetaStatus(false);
+  const setIsSettingsOpen = useCallback((open: boolean) => {
+    if (open) {
+      setSettingsDefaultPage("general");
     }
-  };
+    setIsSettingsOpenState(open);
+  }, []);
+
+  const openSettings = useCallback((page: SettingsPage = "general") => {
+    setSettingsDefaultPage(page);
+    setIsSettingsOpenState(true);
+  }, []);
+
+  const applyByokFromSettings = useCallback((data: UserSettingsResponse) => {
+    setByokState({
+      blocked: settingsNeedByok(data),
+      missing: data.byok.missing ?? [],
+    });
+  }, []);
+
+  const refreshByokStatus = useCallback(async (): Promise<UserSettingsResponse | null> => {
+    if (!user) return null;
+    try {
+      const data = await fetchUserSettings();
+      applyByokFromSettings(data);
+      return data;
+    } catch (error) {
+      console.error("Failed to load API key status:", error);
+      return null;
+    }
+  }, [applyByokFromSettings, user]);
+
+  const requiresByokSetup = Boolean(byokState?.blocked);
+  const byokMissing = byokState?.missing ?? [];
+
+  const ensureByokReady = useCallback(async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const data = await fetchUserSettings();
+      applyByokFromSettings(data);
+      if (!settingsNeedByok(data)) {
+        return { ok: true, message: "" };
+      }
+      openSettings("api");
+      return { ok: false, message: formatByokMissingMessage(data.byok.missing) };
+    } catch (error) {
+      console.error("Failed to verify API keys:", error);
+      return { ok: true, message: "" };
+    }
+  }, [applyByokFromSettings, openSettings]);
 
   useEffect(() => {
     if (user && !isAuthLoading) {
-      refreshBetaStatus();
+      void refreshByokStatus();
     } else {
-      setBetaStatus(null);
+      setByokState(null);
     }
-  }, [user, isAuthLoading]);
+  }, [user, isAuthLoading, refreshByokStatus]);
 
   const value = {
     isSettingsOpen,
     setIsSettingsOpen,
-    requiresByokSetup: betaStatus?.requires_byok_setup ?? false,
-    refreshBetaStatus,
-    isLoadingBetaStatus,
+    settingsDefaultPage,
+    openSettings,
+    requiresByokSetup,
+    byokMissing,
+    refreshByokStatus,
+    applyByokFromSettings,
+    ensureByokReady,
   };
 
   return (

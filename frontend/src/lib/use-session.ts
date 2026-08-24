@@ -5,14 +5,14 @@
 
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { useToast } from "@/components/toast-provider";
 import { useSettings } from "./settings-context";
 
 import { authenticatedFetch, parseApiError, readApiError } from "./api-client";
-import { isBetaBlockedCode } from "./beta-access";
+import { invalidateSessionLists } from "./queries/invalidate";
 import type {
   ArchivedMessage,
   HistoryReuseMode,
@@ -25,11 +25,26 @@ import type {
   SessionInfo,
   WorkspaceResumeState,
 } from "./message-types";
+import type { DurableReplayEvent } from "./use-websocket";
 
 type CreateSessionOptions = {
   mode?: SessionCreateMode;
   sourceSessionId?: string;
 };
+
+export type DurableTaskEventsPage = {
+  events: DurableReplayEvent[];
+  last_seq: number;
+  has_more: boolean;
+};
+
+export type DurableTaskEventsResult = {
+  events: DurableReplayEvent[];
+  last_seq: number;
+};
+
+const DURABLE_EVENTS_PAGE_LIMIT = 200;
+const DURABLE_EVENTS_MAX_PAGES = 50;
 
 export interface UseSessionReturn {
   createSession: (options?: CreateSessionOptions) => Promise<SessionData | null>;
@@ -39,6 +54,13 @@ export interface UseSessionReturn {
   getSessionRun: (sessionId: string) => Promise<RunInfo | null>;
   getSessionRunSteps: (sessionId: string) => Promise<RunStep[]>;
   getSessionArtifacts: (sessionId: string) => Promise<RunArtifact[]>;
+  /** Fetch one page of durable task events. */
+  getDurableTaskEvents: (
+    taskId: string,
+    options?: { afterSeq?: number; limit?: number },
+  ) => Promise<DurableTaskEventsPage | null>;
+  /** Paginate durable task events from after_seq=0 until exhausted. */
+  listDurableTaskEvents: (taskId: string) => Promise<DurableTaskEventsResult | null>;
   getResumeWorkspace: () => Promise<WorkspaceResumeState | null>;
   listSessions: (limit?: number) => Promise<RecentSession[]>;
   reuseHistorySession: (sessionId: string, mode: HistoryReuseMode) => Promise<SessionData | null>;
@@ -49,9 +71,9 @@ export interface UseSessionReturn {
 }
 
 export function useSession(): UseSessionReturn {
-  const router = useRouter();
   const { toast } = useToast();
-  const { setIsSettingsOpen } = useSettings();
+  const { openSettings } = useSettings();
+  const queryClient = useQueryClient();
   const [isCreating, setIsCreating] = useState(false);
   const [isGetting, setIsGetting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -132,6 +154,81 @@ export function useSession(): UseSessionReturn {
     }
   }, []);
 
+  const getDurableTaskEvents = useCallback(
+    async (
+      taskId: string,
+      options?: { afterSeq?: number; limit?: number },
+    ): Promise<DurableTaskEventsPage | null> => {
+      if (!taskId.startsWith("task_")) {
+        return null;
+      }
+      const afterSeq = options?.afterSeq ?? 0;
+      const limit = options?.limit ?? DURABLE_EVENTS_PAGE_LIMIT;
+      try {
+        const res = await authenticatedFetch(
+          `/api/v1/tasks/${encodeURIComponent(taskId)}/events?after_seq=${afterSeq}&limit=${limit}`,
+        );
+        if (!res.ok) {
+          // Soft-fail: caller falls back to full history mapping.
+          console.warn(
+            "[useSession] Durable task events unavailable:",
+            await parseApiError(res).catch(() => res.statusText),
+          );
+          return null;
+        }
+        const body = (await res.json().catch(() => null)) as {
+          events?: DurableReplayEvent[];
+          last_seq?: number;
+          has_more?: boolean;
+        } | null;
+        const events = Array.isArray(body?.events) ? body.events : [];
+        const last_seq =
+          typeof body?.last_seq === "number" && Number.isFinite(body.last_seq)
+            ? body.last_seq
+            : afterSeq;
+        const has_more =
+          typeof body?.has_more === "boolean"
+            ? body.has_more
+            : events.length >= limit;
+        return { events, last_seq, has_more };
+      } catch (err) {
+        console.warn("[useSession] Durable task events fetch failed:", err);
+        return null;
+      }
+    },
+    [],
+  );
+
+  const listDurableTaskEvents = useCallback(
+    async (taskId: string): Promise<DurableTaskEventsResult | null> => {
+      if (!taskId.startsWith("task_")) {
+        return null;
+      }
+      const allEvents: DurableReplayEvent[] = [];
+      let afterSeq = 0;
+      let lastSeq = 0;
+
+      for (let page = 0; page < DURABLE_EVENTS_MAX_PAGES; page += 1) {
+        const result = await getDurableTaskEvents(taskId, {
+          afterSeq,
+          limit: DURABLE_EVENTS_PAGE_LIMIT,
+        });
+        if (!result) {
+          return allEvents.length > 0 ? { events: allEvents, last_seq: lastSeq } : null;
+        }
+        allEvents.push(...result.events);
+        lastSeq = Math.max(lastSeq, result.last_seq);
+        if (!result.has_more || result.events.length === 0) {
+          return { events: allEvents, last_seq: lastSeq };
+        }
+        afterSeq = result.last_seq;
+      }
+
+      return { events: allEvents, last_seq: lastSeq };
+    },
+    [getDurableTaskEvents],
+  );
+
   const listSessions = useCallback(async (limit: number = 20) => {
     setIsGetting(true);
     setGetError(null);
@@ -173,22 +270,18 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setCreateError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
-          setIsSettingsOpen(true);
+          openSettings("api");
           return null;
         }
         throw new Error(apiError.message);
       }
 
-      return (await res.json()) as SessionData;
+      const session = (await res.json()) as SessionData;
+      invalidateSessionLists(queryClient);
+      return session;
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to create session";
@@ -197,7 +290,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [router, toast]);
+  }, [openSettings, queryClient, toast]);
 
   const continueSession = useCallback(async (sessionId: string): Promise<SessionData | null> => {
     setIsCreating(true);
@@ -213,16 +306,10 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setCreateError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setCreateError(apiError.message);
           toast(apiError.message, "error");
-          setIsSettingsOpen(true);
+          openSettings("api");
           return null;
         }
         throw new Error(apiError.message);
@@ -237,7 +324,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [router, toast]);
+  }, [openSettings, toast]);
 
   const getSession = useCallback(async (sessionId: string) => {
     setIsGetting(true);
@@ -279,7 +366,7 @@ export function useSession(): UseSessionReturn {
       const body = (await res.json()) as {
         messages: Array<{
           id: string;
-          role: "user" | "agent" | "tool_call" | "tool_result";
+          role: "user" | "agent" | "tool_call" | "tool_result" | "thinking" | "agent_thinking";
           source?: string;
           text: string;
           createdAt?: string | null;
@@ -350,15 +437,9 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setReuseError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           toast(apiError.message, "error");
-          setIsSettingsOpen(true);
+          openSettings("api");
           return null;
         }
         throw new Error(apiError.message);
@@ -373,7 +454,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsCreating(false);
     }
-  }, [router, toast]);
+  }, [openSettings, toast]);
 
   const refreshTicket = useCallback(async (sessionId: string) => {
     setIsRefreshing(true);
@@ -389,16 +470,10 @@ export function useSession(): UseSessionReturn {
 
       if (!res.ok) {
         const apiError = await readApiError(res);
-        if (isBetaBlockedCode(apiError.code)) {
-          setRefreshError(apiError.message);
-          toast(apiError.message, "error");
-          router.push("/beta");
-          return null;
-        }
         if (apiError.code === "BYOK_REQUIRED") {
           setRefreshError(apiError.message);
           toast(apiError.message, "error");
-          setIsSettingsOpen(true);
+          openSettings("api");
           return null;
         }
         throw new Error(apiError.message);
@@ -414,7 +489,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsRefreshing(false);
     }
-  }, [router, toast]);
+  }, [openSettings, toast]);
 
   const destroySession = useCallback(async (sessionId: string) => {
     setIsDestroying(true);
@@ -432,6 +507,7 @@ export function useSession(): UseSessionReturn {
         throw new Error(await parseApiError(res));
       }
 
+      invalidateSessionLists(queryClient);
       return true;
     } catch (err) {
       const msg =
@@ -441,7 +517,7 @@ export function useSession(): UseSessionReturn {
     } finally {
       setIsDestroying(false);
     }
-  }, []);
+  }, [queryClient]);
 
   const result = {
     createSession,
@@ -451,6 +527,8 @@ export function useSession(): UseSessionReturn {
     getSessionRun,
     getSessionRunSteps,
     getSessionArtifacts,
+    getDurableTaskEvents,
+    listDurableTaskEvents,
     getResumeWorkspace,
     listSessions,
     reuseHistorySession,

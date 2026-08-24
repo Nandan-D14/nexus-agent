@@ -27,11 +27,15 @@ import {
   X,
 } from "lucide-react";
 import { WorkflowStep, WorkflowStepData, StepStatus, StepType } from "./workflow-step";
+import { GenerativeUICard } from "./generative-ui-card";
 import {
   classifyAgentTool,
   displayAgentToolName,
   providerLabel,
 } from "@/lib/agent-tool-classification";
+import { authenticatedFetch } from "@/lib/api-client";
+import { normalizeSearchResults } from "@/lib/search-result-utils";
+import { Download, Eye, LayoutGrid } from "lucide-react";
 
 export type WorkflowRun = {
   run_id: string;
@@ -104,6 +108,11 @@ export function AgentWorkflowPanel({
     : null;
   const selectedStep = pinnedStep ?? activeStep ?? run.steps[run.steps.length - 1];
   const outputText = buildOutputText(selectedStep);
+  const retryReason = stringValue(
+    selectedStep.metadata?.retry_reason,
+    selectedStep.metadata?.fallback_reason,
+  );
+  const errorCode = stringValue(selectedStep.metadata?.error_code);
 
   const copyOutput = async () => {
     if (!outputText || typeof navigator === "undefined") return;
@@ -244,6 +253,17 @@ export function AgentWorkflowPanel({
             </div>
 
             <div ref={outputRef} className="min-h-0 flex-1 overflow-auto p-4 custom-scrollbar">
+              {(selectedStep.status === "failed" || retryReason) && (
+                <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-[12px] leading-5 text-red-200">
+                  <div className="font-semibold">
+                    {selectedStep.status === "failed" ? "Failed step" : "Step retried"}
+                    {errorCode ? ` · ${errorCode}` : ""}
+                  </div>
+                  <div className="mt-0.5 text-red-200/80">
+                    {retryReason || selectedStep.error || selectedStep.detail || "The step did not complete."}
+                  </div>
+                </div>
+              )}
               <DynamicStepOutput step={selectedStep} outputText={outputText} />
             </div>
           </div>
@@ -261,6 +281,21 @@ function DynamicStepOutput({
   outputText: string;
 }) {
   const tool = toolName(step);
+
+  if (step.step_type === "generative_ui") {
+    const meta = step.metadata ?? {};
+    return (
+      <GenerativeUICard
+        title={stringValue(meta.title, step.title) ?? "Generated visual"}
+        componentType={stringValue(meta.component_type)}
+        component={meta.component}
+      />
+    );
+  }
+
+  if (tool === "publish_html_artifact" || step.step_type === "html_artifact") {
+    return <HtmlArtifactOutput step={step} outputText={outputText} />;
+  }
 
   if (tool === "run_command" || step.step_type === "terminal") {
     return <TerminalOutput step={step} outputText={outputText} />;
@@ -526,7 +561,7 @@ function IntegrationOutput({
             <span className="truncate text-[12px] font-medium text-zinc-300">{title}</span>
           </div>
           <span className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
-            {providerLabel(provider)}
+            {providerLabel(provider, tool)}
           </span>
         </div>
       </div>
@@ -585,6 +620,141 @@ function PlainOutput({ text }: { text: string }) {
   );
 }
 
+async function fetchFreshArtifactUrl(artifactId: string): Promise<string | null> {
+  try {
+    const res = await authenticatedFetch(
+      `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
+    );
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body.url === "string" ? body.url : null;
+  } catch {
+    return null;
+  }
+}
+
+function HtmlArtifactOutput({
+  step,
+  outputText,
+}: {
+  step: WorkflowStepData;
+  outputText: string;
+}) {
+  const meta = step.metadata ?? {};
+  const result = objectValue(meta.result);
+  const detail = objectValue(result?.detail);
+  const title =
+    stringValue(meta.title, result?.title, detail?.title, step.title) ?? "HTML artifact";
+  const artifactId = stringValue(meta.artifact_id, result?.artifact_id, detail?.artifact_id);
+  const initialUrl = stringValue(meta.url, result?.url, detail?.url);
+  const summary = stringValue(meta.output, result?.summary, outputText);
+
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(initialUrl ?? null);
+  const [loading, setLoading] = useState(false);
+
+  const openPreview = async () => {
+    if (previewOpen) {
+      setPreviewOpen(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      let url = previewUrl ?? initialUrl ?? null;
+      if (!url && artifactId) {
+        url = await fetchFreshArtifactUrl(artifactId);
+      }
+      if (url) {
+        setPreviewUrl(url);
+        setPreviewOpen(true);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openExternal = async () => {
+    setLoading(true);
+    try {
+      let url = previewUrl ?? initialUrl ?? null;
+      if (!url && artifactId) {
+        url = await fetchFreshArtifactUrl(artifactId);
+      }
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-amber-500/20 bg-gradient-to-br from-[#17140f] to-[#111113] shadow-lg">
+      <div className="flex items-start justify-between gap-3 border-b border-amber-500/10 px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <LayoutGrid className="h-4 w-4 shrink-0 text-amber-400" />
+            <span className="truncate text-sm font-medium text-zinc-100">{title}</span>
+          </div>
+          {summary && (
+            <p className="mt-1 text-[12px] leading-5 text-zinc-400">{summary}</p>
+          )}
+        </div>
+        <span className="shrink-0 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+          HTML
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+        <button
+          type="button"
+          onClick={() => void openPreview()}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-60"
+        >
+          {loading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Eye className="h-3.5 w-3.5" />
+          )}
+          {previewOpen ? "Hide preview" : "Open preview"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void openExternal()}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-60"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          Open in tab
+        </button>
+        {artifactId && (
+          <button
+            type="button"
+            onClick={() => void openExternal()}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-[12px] font-medium text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200 disabled:opacity-60"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Download
+          </button>
+        )}
+      </div>
+
+      {previewOpen && previewUrl && (
+        <div className="border-t border-zinc-800 bg-black/30 p-3">
+          <iframe
+            title={title}
+            src={previewUrl}
+            className="h-[min(70vh,560px)] w-full rounded-lg border border-zinc-800 bg-white"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function stepIcon(type: StepType, status: StepStatus) {
   if (status === "failed") return <X className="h-3.5 w-3.5 text-red-400" />;
   if (status === "completed") return <Check className="h-3.5 w-3.5 text-emerald-400" />;
@@ -597,6 +767,8 @@ function stepIcon(type: StepType, status: StepStatus) {
   if (type === "calendar") return <Calendar className="h-3.5 w-3.5 text-zinc-400" />;
   if (type === "tasks") return <ListTodo className="h-3.5 w-3.5 text-zinc-400" />;
   if (type === "mcp") return <Plug className="h-3.5 w-3.5 text-zinc-400" />;
+  if (type === "generative_ui") return <LayoutGrid className="h-3.5 w-3.5 text-violet-400" />;
+  if (type === "html_artifact") return <FileText className="h-3.5 w-3.5 text-amber-400" />;
   if (type === "observation" || type === "screenshot") return <Search className="h-3.5 w-3.5 text-zinc-400" />;
   return <Bot className="h-3.5 w-3.5 text-zinc-400" />;
 }
@@ -634,6 +806,8 @@ function buildOutputText(step: WorkflowStepData) {
     );
   }
   if (step.output && !blocks.includes(step.output.trim())) blocks.push(step.output.trim());
+  const retryReason = stringValue(meta.retry_reason, meta.fallback_reason);
+  if (retryReason) blocks.push(`Retry reason:\n${retryReason}`);
   if (step.error) blocks.push(`Error:\n${step.error.trim()}`);
 
   return Array.from(new Set(blocks.filter(Boolean))).join("\n\n");
@@ -680,16 +854,3 @@ function booleanValue(...values: unknown[]): boolean | undefined {
   return undefined;
 }
 
-function normalizeSearchResults(values: unknown[]) {
-  return values
-    .map((value) => {
-      const item = objectValue(value);
-      if (!item) return null;
-      return {
-        title: stringValue(item.title, item.name) ?? "",
-        url: stringValue(item.url, item.href, item.link) ?? "",
-        snippet: stringValue(item.snippet, item.body, item.description, item.summary) ?? "",
-      };
-    })
-    .filter((item): item is { title: string; url: string; snippet: string } => Boolean(item));
-}

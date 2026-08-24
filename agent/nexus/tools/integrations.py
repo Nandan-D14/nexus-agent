@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
+import logging
 import re
+from html import escape
 from typing import Any
 
 import httpx
 
+from nexus.config import settings
 from nexus.google_drive import decode_base64_upload, get_google_drive_client_from_context
 from nexus.google_services import (
     GmailClient,
@@ -18,8 +23,15 @@ from nexus.google_services import (
     CalendarClient,
     get_google_services_token_from_context,
 )
-from nexus.tools._context import get_history_repository, get_owner_id
+from nexus.tools._context import (
+    get_history_repository,
+    get_owner_id,
+    get_send_json,
+    get_session_id,
+)
 from nexus.tools.base import normalized_tool, tool_error, tool_success
+
+logger = logging.getLogger(__name__)
 
 
 _GOOGLE_NOT_CONNECTED = "Google services are not connected."
@@ -34,6 +46,63 @@ _GITHUB_NOT_CONNECTED = "GitHub is not connected for this user."
 def _slugify(value: str, *, fallback: str = "file") -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return cleaned or fallback
+
+
+def _decode_b64url(data: str) -> str:
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_gmail_body(payload: Any) -> str:
+    """Best-effort plain-text body from a Gmail message payload."""
+    if not isinstance(payload, dict):
+        return ""
+    mime = payload.get("mimeType", "")
+    body = payload.get("body") or {}
+    data = body.get("data") if isinstance(body, dict) else None
+    if mime == "text/plain" and data:
+        return _decode_b64url(data)
+    for part in payload.get("parts") or []:
+        text = _extract_gmail_body(part)
+        if text:
+            return text
+    if data:
+        return _decode_b64url(data)
+    return ""
+
+
+def _slim_gmail_message(message: Any, max_chars: int) -> dict[str, Any]:
+    """Trim a raw Gmail message to key headers + capped text body.
+
+    The raw Gmail API dict embeds the full base64 body and nested payload,
+    which can be hundreds of KB and floods the model context. Return a compact,
+    model-useful shape instead.
+    """
+    if not isinstance(message, dict):
+        return {"raw": str(message)[:max_chars]}
+    payload = message.get("payload") or {}
+    wanted = {"from", "to", "cc", "subject", "date"}
+    headers = {
+        h.get("name", ""): h.get("value", "")
+        for h in (payload.get("headers") or [])
+        if isinstance(h, dict) and str(h.get("name", "")).lower() in wanted
+    }
+    body = _extract_gmail_body(payload)
+    truncated = len(body) > max_chars
+    return {
+        "id": message.get("id"),
+        "threadId": message.get("threadId"),
+        "labelIds": message.get("labelIds"),
+        "snippet": message.get("snippet"),
+        "headers": headers,
+        "body": body[:max_chars],
+        "truncated": truncated,
+    }
 
 
 async def _github_token() -> str | None:
@@ -137,9 +206,10 @@ async def gmail_read(message_id: str) -> dict[str, Any]:
     client = GmailClient(token)
     try:
         message = await client.get_message(message_id)
+        slim = _slim_gmail_message(message, settings.gmail_read_max_chars)
         return tool_success(
             f"Read message {message_id}",
-            message=message,
+            message=slim,
         )
     except Exception as e:
         return tool_error(f"Gmail read failed: {e}")
@@ -711,4 +781,558 @@ async def tinyfish_web_agent(url: str, goal: str) -> dict[str, Any]:
         return tool_error(
             f"Tinyfish web agent failed: {exc}",
             suggested_alternatives=["open_browser"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Vyora voice calls
+# ---------------------------------------------------------------------------
+
+_VYORA_BASE = "https://api.vyora.ai"
+
+
+async def _native_api_key(connection_id: str) -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, connection_id)
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+async def _vyora_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    api_key = await _native_api_key("vyora")
+    if not api_key:
+        return tool_error("Vyora is not connected for this user.", error_code="AUTH_REQUIRED")
+    async with httpx.AsyncClient(
+        base_url=_VYORA_BASE,
+        timeout=30.0,
+        headers={"X-API-KEY": api_key, "Accept": "application/json"},
+    ) as client:
+        response = await client.request(method, path, **kwargs)
+        if response.status_code >= 400:
+            return tool_error(
+                f"Vyora API returned HTTP {response.status_code}.",
+                error_code=f"HTTP_{response.status_code}",
+                detail=response.text[:500],
+            )
+        return {"data": response.json() if response.content else {}}
+
+
+@normalized_tool
+async def vyora_list_agents(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """List Vyora voice agents in the connected workspace.
+
+    Args:
+        limit: Max agents to return (1-100).
+        offset: Number of agents to skip.
+
+    Returns:
+        NormalizedToolResult with agents and their variable names.
+    """
+    result = await _vyora_request(
+        "GET",
+        "/v1/agents",
+        params={"limit": max(1, min(limit, 100)), "offset": max(0, offset)},
+    )
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+    return tool_success(
+        f"Listed {len(agents)} Vyora agents",
+        agents=agents,
+        total=data.get("total"),
+        limit=data.get("limit"),
+        offset=data.get("offset"),
+    )
+
+
+@normalized_tool
+async def vyora_list_numbers() -> dict[str, Any]:
+    """List Vyora caller-line numbers. Use each id as from_number_id when starting a call.
+
+    Returns:
+        NormalizedToolResult with assigned numbers.
+    """
+    result = await _vyora_request("GET", "/v1/numbers")
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    numbers = data.get("numbers") if isinstance(data.get("numbers"), list) else []
+    return tool_success(f"Listed {len(numbers)} Vyora numbers", numbers=numbers)
+
+
+@normalized_tool
+async def vyora_start_call(
+    phone_number: str,
+    agent_id: str,
+    from_number_id: str,
+    custom_args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Trigger an outbound Vyora AI voice call. This is a write action.
+
+    Args:
+        phone_number: Recipient in E.164 format, e.g. +919876543210.
+        agent_id: Agent id from vyora_list_agents.
+        from_number_id: Caller-line id from vyora_list_numbers.
+        custom_args: Optional values for the agent's declared variables.
+
+    Returns:
+        NormalizedToolResult with call_id and status.
+    """
+    body: dict[str, Any] = {
+        "phone_number": phone_number,
+        "agent_id": agent_id,
+        "from_number_id": from_number_id,
+    }
+    if custom_args:
+        body["custom_args"] = custom_args
+    result = await _vyora_request("POST", "/v1/calls", json=body)
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    return tool_success(
+        f"Started Vyora call {data.get('call_id') or ''} to {phone_number}".strip(),
+        call_id=data.get("call_id"),
+        call_status=data.get("status"),
+        warnings=data.get("warnings"),
+    )
+
+
+@normalized_tool
+async def vyora_list_calls(limit: int = 20, offset: int = 0, status: str = "") -> dict[str, Any]:
+    """List recent Vyora calls, most recent first.
+
+    Args:
+        limit: Max calls to return (1-100).
+        offset: Number of calls to skip.
+        status: Optional filter such as completed, failed, ongoing, registered.
+
+    Returns:
+        NormalizedToolResult with calls.
+    """
+    params: dict[str, Any] = {"limit": max(1, min(limit, 100)), "offset": max(0, offset)}
+    if status.strip():
+        params["status"] = status.strip()
+    result = await _vyora_request("GET", "/v1/calls", params=params)
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    calls = data.get("calls") if isinstance(data.get("calls"), list) else []
+    return tool_success(
+        f"Listed {len(calls)} Vyora calls",
+        calls=calls,
+        total=data.get("total"),
+    )
+
+
+@normalized_tool
+async def vyora_get_call(call_id: str) -> dict[str, Any]:
+    """Get a Vyora call including transcript and analysis when available.
+
+    Args:
+        call_id: Call id returned by vyora_start_call or vyora_list_calls.
+
+    Returns:
+        NormalizedToolResult with the call record.
+    """
+    result = await _vyora_request("GET", f"/v1/calls/{call_id}")
+    if result.get("status") == "error":
+        return result
+    data = result["data"] if isinstance(result.get("data"), dict) else {}
+    return tool_success(
+        f"Fetched Vyora call {call_id}",
+        call=data,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses web search
+# ---------------------------------------------------------------------------
+
+@normalized_tool
+async def openai_web_search(query: str) -> dict[str, Any]:
+    """Search the live web using the connected OpenAI Responses API.
+
+    Args:
+        query: Search query.
+
+    Returns:
+        NormalizedToolResult with a synthesized search summary.
+    """
+    api_key = await _native_api_key("openai")
+    if not api_key:
+        return tool_error("OpenAI is not connected for this user.", error_code="AUTH_REQUIRED")
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4.1-mini",
+                    "tools": [{"type": "web_search"}],
+                    "input": query,
+                },
+            )
+            if response.status_code >= 400:
+                return tool_error(
+                    f"OpenAI API returned HTTP {response.status_code}.",
+                    error_code=f"HTTP_{response.status_code}",
+                    detail=response.text[:500],
+                    suggested_alternatives=["web_search", "tavily_search"],
+                )
+            data = response.json() if response.content else {}
+            text = ""
+            if isinstance(data, dict):
+                text = str(data.get("output_text") or "")
+                if not text:
+                    output = data.get("output")
+                    if isinstance(output, list):
+                        parts: list[str] = []
+                        for item in output:
+                            if not isinstance(item, dict):
+                                continue
+                            content = item.get("content")
+                            if not isinstance(content, list):
+                                continue
+                            for block in content:
+                                if isinstance(block, dict) and block.get("text"):
+                                    parts.append(str(block["text"]))
+                        text = "\n".join(parts)
+            return tool_success(
+                f"OpenAI web search for '{query}'",
+                query=query,
+                text=text,
+                response_id=data.get("id") if isinstance(data, dict) else None,
+            )
+    except Exception as exc:
+        return tool_error(
+            f"OpenAI web search failed: {exc}",
+            suggested_alternatives=["web_search", "tavily_search"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Thesys Generative UI (C1)
+# ---------------------------------------------------------------------------
+
+async def _thesys_api_key() -> str | None:
+    repo = get_history_repository()
+    owner_id = get_owner_id()
+    if repo is None or not owner_id:
+        return None
+    connection = await repo.get_integration_connection(owner_id, "thesys")
+    api_key = connection.private.get("apiKey") if connection else None
+    return api_key if isinstance(api_key, str) and api_key else None
+
+
+def _extract_c1_response_content(raw_content: Any) -> str:
+    """Normalize Thesys/OpenAI content shapes into a C1 response string."""
+    if isinstance(raw_content, str):
+        content = raw_content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:xml|html|c1|json)?\s*", "", content, flags=re.IGNORECASE)
+            content = re.sub(r"\s*```$", "", content).strip()
+        if content.startswith("{") or content.startswith("["):
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                return content
+            text = _extract_c1_response_content(parsed)
+            return text or content
+        return content
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for part in raw_content:
+            text = _extract_c1_response_content(part)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    if isinstance(raw_content, dict):
+        for key in ("c1Response", "c1_response", "response", "text", "content", "output_text", "value"):
+            value = raw_content.get(key)
+            text = _extract_c1_response_content(value)
+            if text:
+                return text
+        return json.dumps(raw_content, ensure_ascii=False)
+    return str(raw_content)
+
+
+# Props the Thesys SDK destructures and calls .map() on — they MUST be arrays.
+_C1_ARRAY_PROPS: frozenset[str] = frozenset({
+    "children",
+    "items", "cards", "tiles", "metrics", "infoItems", "actions",
+    "rows", "columns", "headers",
+    "slides", "pages", "paragraphs", "fields",
+    "data", "series", "labels", "datasets", "options", "points",
+    "sources", "followUpText",
+})
+
+
+def _coerce_to_array(prop: str, value: Any) -> list[Any]:
+    """Turn *value* into a list suitable for the given *prop* name."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        result: list[Any] = []
+        for item in value:
+            if isinstance(item, str) and prop == "sources":
+                result.append({"title": item})
+            else:
+                result.append(_sanitize_json_structure(item))
+        return result
+    if isinstance(value, dict):
+        return [_sanitize_json_structure(value)]
+    if isinstance(value, str):
+        if prop == "sources":
+            return [{"title": value}]
+        return [value]
+    return []
+
+
+def _sanitize_json_structure(data: Any) -> Any:
+    """Ensure every prop the Thesys SDK calls ``.map()`` on is actually an array."""
+    if isinstance(data, dict):
+        new_dict: dict[str, Any] = {}
+        for k, v in data.items():
+            if k in _C1_ARRAY_PROPS:
+                new_dict[k] = _coerce_to_array(k, v)
+            else:
+                new_dict[k] = _sanitize_json_structure(v)
+        return new_dict
+    if isinstance(data, list):
+        return [_sanitize_json_structure(item) for item in data]
+    return data
+
+
+def _sanitize_c1_response(c1_response: str) -> str:
+    """Patch common weak-model C1 mistakes that crash the SDK renderer."""
+    normalized = c1_response.strip()
+
+    def replace_content(match: re.Match) -> str:
+        tag_open, inner_json, tag_close = match.groups()
+        try:
+            parsed = json.loads(inner_json.strip())
+            sanitized_json = _sanitize_json_structure(parsed)
+            return f"{tag_open}{json.dumps(sanitized_json, ensure_ascii=False, separators=(',', ':'))}{tag_close}"
+        except Exception:
+            return match.group(0)
+
+    sanitized = re.sub(
+        r'(<content\b[^>]*>)(.*?)(</content>)',
+        replace_content,
+        normalized,
+        flags=re.DOTALL,
+    )
+
+    if sanitized.startswith("{") or sanitized.startswith("["):
+        try:
+            parsed = json.loads(sanitized)
+            sanitized_json = _sanitize_json_structure(parsed)
+            return json.dumps(sanitized_json, ensure_ascii=False, separators=(',', ':'))
+        except Exception:
+            pass
+
+    sanitized = re.sub(
+        r'("sources"\s*:\s*)(\{[^{}\[\]]*\})',
+        r"\1[\2]",
+        sanitized,
+    )
+    return sanitized
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = int(raw)
+    except ValueError:
+        return None
+    return max(1, min(seconds, 300))
+
+
+def _c1_custom_markdown(markdown: str) -> str:
+    return f"<custommarkdown>{escape(markdown, quote=True)}</custommarkdown>"
+
+
+async def _emit_generative_ui(
+    *,
+    component_type: str,
+    title: str,
+    c1_response: str,
+) -> None:
+    send_json = get_send_json()
+    if send_json:
+        await send_json({
+            "type": "generative_ui",
+            "component_type": component_type,
+            "title": title,
+            "component": c1_response,
+        })
+
+    repo = get_history_repository()
+    session_id = get_session_id()
+    if repo and session_id:
+        try:
+            await repo.append_message(
+                session_id=session_id,
+                owner_id=get_owner_id(),
+                role="tool_result",
+                source="generative_ui",
+                text=json.dumps({
+                    "component_type": component_type,
+                    "title": title,
+                    "component": c1_response,
+                }),
+            )
+        except Exception:
+            logger.warning("Failed to persist generative_ui component for session %s", session_id)
+
+
+async def _emit_thesys_rate_limit_card(
+    *,
+    component_type: str,
+    title: str,
+    retry_after: int | None,
+    detail: str = "",
+) -> None:
+    wait_text = f" Try again after about {retry_after} seconds." if retry_after else " Try again shortly."
+    c1_response = _c1_custom_markdown(
+        "### Thesys rate limit\n\n"
+        "Thesys returned HTTP 429, so live UI generation could not complete."
+        f"{wait_text}\n\n"
+        f"**Thesys API Response:**\n```json\n{detail}\n```\n\n"
+        "The app did call Thesys. No setup code was generated."
+    )
+    await _emit_generative_ui(
+        component_type=component_type,
+        title=title or "Thesys rate limit",
+        c1_response=c1_response,
+    )
+
+
+@normalized_tool
+async def render_ui(
+    component_type: str,
+    title: str,
+    data: str,
+    description: str = "",
+) -> dict[str, Any]:
+    """Generate an interactive Thesys C1 UI component (chart, table, form, dashboard, card, report) from data.
+
+    Use this when Thesys is connected and the user asks to visualize data, compare items,
+    create dashboards, or build interactive cards/forms. The component renders in the Workflow
+    panel. If Thesys is not connected, fall back to publish_html_artifact.
+
+    Args:
+        component_type: Type of component — "chart", "table", "form", "dashboard", "card", or "report".
+        title: A short descriptive title for the component.
+        data: JSON string containing the data to visualize or use in the component.
+        description: Optional additional context about what the component should show.
+
+    Returns:
+        NormalizedToolResult confirming the component was rendered.
+    """
+    api_key = await _thesys_api_key()
+    if not api_key:
+        return tool_error(
+            "Thesys is not connected. Use publish_html_artifact for the visual instead, "
+            "or ask the user to add their Thesys API key in the Connectors page.",
+            error_code="AUTH_REQUIRED",
+            suggested_alternatives=["publish_html_artifact"],
+        )
+
+    prompt = (
+        f"Create a {component_type} titled '{title}'.\n\n"
+        f"Data:\n{data}\n"
+    )
+    if description:
+        prompt += f"\nAdditional context: {description}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            request_kwargs = {
+                "headers": {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                "json": {
+                    "model": settings.thesys_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only valid Thesys C1 response markup. "
+                                "Do not wrap it in Markdown code fences, JSON, or setup code. "
+                                "Do not include citations or a sources prop."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                },
+            }
+            response = await client.post(
+                "https://api.thesys.dev/v1/visualize/chat/completions",
+                **request_kwargs,
+            )
+            if response.status_code == 429:
+                retry_after = _retry_after_seconds(response)
+                await asyncio.sleep(min(retry_after or 2, 60))
+                response = await client.post(
+                    "https://api.thesys.dev/v1/visualize/chat/completions",
+                    **request_kwargs,
+                )
+                if response.status_code == 429:
+                    retry_after = _retry_after_seconds(response) or retry_after
+                    await _emit_thesys_rate_limit_card(
+                        component_type=component_type,
+                        title=title,
+                        retry_after=retry_after,
+                        detail=response.text,
+                    )
+                    return tool_error(
+                        "Thesys API rate limited this request (HTTP 429).",
+                        error_code="HTTP_429",
+                        retry_after=retry_after,
+                        rendered_fallback=True,
+                    )
+            if response.status_code >= 400:
+                return tool_error(
+                    f"Thesys API returned HTTP {response.status_code}: {response.text}",
+                    error_code=f"HTTP_{response.status_code}",
+                )
+
+            result = response.json()
+            raw_content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            c1_response = _sanitize_c1_response(_extract_c1_response_content(raw_content))
+
+            if not c1_response.strip():
+                return tool_error(
+                    "Thesys C1 returned an empty response.",
+                    error_code="EMPTY_RESPONSE",
+                )
+
+            await _emit_generative_ui(
+                component_type=component_type,
+                title=title,
+                c1_response=c1_response,
+            )
+
+            return tool_success(
+                f"Rendered {component_type}: {title}",
+                component_type=component_type,
+                title=title,
+            )
+    except Exception as exc:
+        return tool_error(
+            f"Thesys render_ui failed: {exc}",
         )

@@ -5,17 +5,106 @@
 
 from __future__ import annotations
 
+import base64
+import inspect
 import logging
 import os
+import re
 import shlex
 import textwrap
 from typing import Any
 
 from nexus.tools.base import normalized_tool
-from nexus.tools._context import get_sandbox, get_session_id, get_run_id, get_history_repository, get_workspace_path
+from nexus.tools._context import (
+    get_artifact_callback,
+    get_history_repository,
+    get_run_id,
+    get_sandbox,
+    get_session_id,
+    get_workspace_path,
+)
 from nexus.storage import artifact_storage_metadata, upload_artifact_async
 
 logger = logging.getLogger(__name__)
+
+_HTML_DATA_URI_LIMIT_BYTES = 500_000
+
+# Prepended to sandbox generator scripts so missing packages self-heal
+# when boot-time provisioning was skipped or failed silently.
+_SANDBOX_DEPS_BOOTSTRAP = textwrap.dedent("""\
+    import importlib, subprocess, sys
+    for pkg, mod in [("python-docx", "docx"), ("openpyxl", "openpyxl"),
+                     ("weasyprint", "weasyprint"), ("fpdf2", "fpdf"),
+                     ("markdown2", "markdown2")]:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg],
+                           check=True, capture_output=True, timeout=240)
+""")
+
+
+def _safe_html_filename(value: str | None, *, fallback: str = "artifact.html") -> str:
+    cleaned = (value or fallback).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", cleaned).strip(" .-")
+    if not cleaned:
+        cleaned = fallback
+    if not cleaned.lower().endswith(".html"):
+        cleaned = f"{cleaned}.html"
+    return cleaned
+
+
+def _ensure_full_html_document(title: str, html_content: str) -> str:
+    body = html_content.strip()
+    if re.search(r"<!doctype\s+html|<html[\s>]", body, flags=re.IGNORECASE):
+        return body
+    safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"  <title>{safe_title}</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{body}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _html_preview_text(html_content: str) -> str:
+    compact = re.sub(r"<(script|style)[\s\S]*?</\1>", " ", html_content, flags=re.IGNORECASE)
+    compact = re.sub(r"<[^>]+>", " ", compact)
+    compact = " ".join(compact.split())
+    return compact[:240] if compact else "Interactive HTML artifact ready."
+
+
+def _artifact_payload(artifact) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "run_id": artifact.run_id,
+        "session_id": artifact.session_id,
+        "task_id": getattr(artifact, "task_id", None),
+        "kind": artifact.kind,
+        "title": artifact.title,
+        "preview": artifact.preview,
+        "created_at": artifact.created_at.isoformat() if getattr(artifact, "created_at", None) else None,
+        "source_step_id": artifact.source_step_id,
+        "path": artifact.path,
+        "url": artifact.url,
+        "metadata": artifact.metadata or {},
+    }
+
+
+async def _notify_artifact_created(artifact) -> None:
+    callback = get_artifact_callback()
+    if callback is None:
+        return
+    result = callback(_artifact_payload(artifact))
+    if inspect.isawaitable(result):
+        await result
 
 
 def _resolve_workspace_or_absolute_path(path: str) -> str:
@@ -197,7 +286,7 @@ async def generate_pdf_report(
     sandbox.write_text_file(md_temp, markdown_content)
 
     # Write the PDF generation script
-    pdf_script = textwrap.dedent(f"""\
+    pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib
 
 title = {repr(title)}
@@ -380,8 +469,13 @@ sys.exit(1)
                 "content_type": "application/pdf",
                 "size": payload.get("size", 0),
                 "engine": payload.get("engine", "unknown"),
+                "role": "deliverable",
             },
         )
+        # Emit the durable artifact to the UI directly. The orchestrator excludes
+        # self-persisting document tools from its reference-artifact path, so this
+        # is the single canonical artifact for this file (one id everywhere).
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -398,11 +492,104 @@ sys.exit(1)
         }
     except Exception as e:
         logger.exception("Failed to promote PDF to artifact")
+        # Durable persistence is required: a file only in the ephemeral sandbox
+        # is not a deliverable. Report failure instead of faking success.
         return {
-            "status": "success",
-            "summary": f"PDF generated at {filename} but failed to upload to storage: {e}",
+            "status": "error",
+            "summary": f"PDF generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }
+
+
+@normalized_tool
+async def publish_html_artifact(
+    title: str,
+    html: str,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Publish a self-contained HTML/CSS/JS artifact directly to the UI preview panel.
+
+    Use this for simple calculators, dashboards, interactive reports, charts, and
+    single-page tools that do not require a React/Next dev server.
+    """
+    session_id = get_session_id()
+    run_id = get_run_id()
+    history_repo = get_history_repository()
+    if history_repo is None:
+        return {
+            "status": "error",
+            "summary": "Artifact history repository is not available.",
+            "detail": None,
+            "error_code": "ARTIFACT_HISTORY_UNAVAILABLE",
+        }
+    clean_title = (title or "HTML Artifact").strip()[:160]
+    html_content = _ensure_full_html_document(clean_title, str(html or ""))
+    if len(html_content.strip()) < 20:
+        return {
+            "status": "error",
+            "summary": "HTML content is too short to publish.",
+            "detail": None,
+            "error_code": "INVALID_HTML_ARTIFACT",
+        }
+
+    output_filename = _safe_html_filename(filename or clean_title)
+    relative_path = f"outputs/{output_filename}"
+    content_bytes = html_content.encode("utf-8")
+    gcs_url = await upload_artifact_async(
+        session_id=session_id,
+        run_id=run_id,
+        relative_path=relative_path,
+        content=html_content,
+    )
+
+    url = gcs_url
+    if not url and len(content_bytes) <= _HTML_DATA_URI_LIMIT_BYTES:
+        encoded = base64.b64encode(content_bytes).decode("ascii")
+        url = f"data:text/html;charset=utf-8;base64,{encoded}"
+    if not url:
+        return {
+            "status": "error",
+            "summary": "Failed to store HTML artifact and it is too large for inline fallback.",
+            "detail": {"filename": output_filename, "size": len(content_bytes)},
+            "error_code": "HTML_ARTIFACT_STORAGE_FAILED",
+        }
+
+    metadata = {
+        **artifact_storage_metadata(session_id, run_id, relative_path),
+        "relative_path": relative_path,
+        "content_type": "text/html; charset=utf-8",
+        "size": len(content_bytes),
+        "render_mode": "iframe",
+        "artifact_role": "html_preview",
+        "role": "deliverable",
+        "storage": "gcs" if gcs_url else "data_uri",
+    }
+    artifact = await history_repo.create_artifact(
+        session_id=session_id,
+        run_id=run_id,
+        kind="html",
+        title=clean_title,
+        preview=_html_preview_text(html_content),
+        path=relative_path,
+        url=url,
+        metadata=metadata,
+    )
+    await _notify_artifact_created(artifact)
+
+    return {
+        "status": "success",
+        "summary": f"Published HTML artifact: {clean_title}",
+        "detail": {
+            "artifact_id": artifact.artifact_id,
+            "title": clean_title,
+            "filename": output_filename,
+            "path": relative_path,
+            "url": url,
+            "metadata": artifact.metadata or metadata,
+        },
+    }
+
 
 @normalized_tool(needs_sandbox=True)
 async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any]:
@@ -417,7 +604,17 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
     session_id = get_session_id()
     run_id = get_run_id()
     history_repo = get_history_repository()
-    
+
+    # Reject path traversal so a promoted artifact always maps to a stable,
+    # workspace-relative GCS blob (never escapes the run's namespace).
+    if ".." in (path or "").replace("\\", "/").split("/"):
+        return {
+            "status": "error",
+            "summary": f"Invalid path (traversal not allowed): {path}",
+            "detail": None,
+            "error_code": "INVALID_ARTIFACT_PATH",
+        }
+
     if not sandbox.path_exists(path):
         return {
             "status": "error",
@@ -430,6 +627,8 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
         kind = "image"
     elif path.endswith(".pdf"):
         kind = "pdf"
+    elif path.endswith((".html", ".htm")):
+        kind = "html"
     elif path.endswith((".csv", ".json")):
         kind = "data"
         
@@ -442,6 +641,14 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             content=content
         )
         
+        metadata = artifact_storage_metadata(session_id, run_id, path)
+        metadata["role"] = "deliverable"
+        if kind == "html":
+            metadata.update({
+                "content_type": "text/html; charset=utf-8",
+                "render_mode": "iframe",
+                "artifact_role": "html_preview",
+            })
         artifact = await history_repo.create_artifact(
             session_id=session_id,
             run_id=run_id,
@@ -450,9 +657,10 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             preview=f"Promoted {kind}: {path}",
             path=path,
             url=gcs_url,
-            metadata=artifact_storage_metadata(session_id, run_id, path),
+            metadata=metadata,
         )
-        
+        await _notify_artifact_created(artifact)
+
         return {
             "status": "success",
             "summary": f"Promoted {path} to artifact.",
@@ -511,7 +719,7 @@ async def generate_excel_report(
         "sheet_name": sheet_name,
     }))
 
-    xlsx_script = textwrap.dedent(f"""\
+    xlsx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -606,8 +814,10 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "size": payload.get("size", 0),
                 "row_count": len(rows),
+                "role": "deliverable",
             },
         )
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -623,9 +833,10 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
     except Exception as e:
         logger.exception("Failed to promote Excel to artifact")
         return {
-            "status": "success",
-            "summary": f"Excel generated at {filename} but failed to upload: {e}",
+            "status": "error",
+            "summary": f"Excel generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }
 
 
@@ -659,7 +870,7 @@ async def generate_docx_report(
     md_temp = f"/tmp/_docx_md_{run_id}.md"
     sandbox.write_text_file(md_temp, markdown_content)
 
-    docx_script = textwrap.dedent(f"""\
+    docx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib, re
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -748,6 +959,57 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
             content=content,
         )
 
+        # Generate the PDF sibling for preview
+        pdf_filename = filename[:-5] + ".pdf" if filename.endswith(".docx") else filename + ".pdf"
+        pdf_relative_path = f"outputs/{pdf_filename}"
+        pdf_output_path = f"{get_workspace_path().rstrip('/')}/{pdf_relative_path}"
+        pdf_gcs_url: str | None = None
+        try:
+            pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
+import json, os, sys, pathlib
+
+title = {repr(title)}
+md_path = {repr(md_temp)}
+out_path = {repr(pdf_output_path)}
+
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+md_text = pathlib.Path(md_path).read_text(encoding="utf-8")
+
+def try_weasyprint(md_text, title, out_path):
+    import markdown2
+    from weasyprint import HTML
+    html_body = markdown2.markdown(
+        md_text,
+        extras=["fenced-code-blocks", "tables", "break-on-newline",
+                "header-ids", "strike", "task_list"]
+    )
+    full_html = f\"\"\"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{{title}}</title></head>
+<body><h1>{{title}}</h1>{{html_body}}</body></html>\"\"\"
+    HTML(string=full_html).write_pdf(out_path)
+    return True
+
+try:
+    ok = try_weasyprint(md_text, title, out_path)
+    print(json.dumps({{"status": "success", "size": os.path.getsize(out_path)}}))
+except Exception as e:
+    print(json.dumps({{"status": "error", "message": str(e)}}))
+""")
+            pdf_script_path = f"/tmp/gen_docx_pdf_{run_id}.py"
+            sandbox.write_text_file(pdf_script_path, pdf_script)
+            pdf_res = sandbox.run_command(f"python3 {pdf_script_path}", timeout=120)
+            sandbox.run_command(f"rm -f {shlex.quote(pdf_script_path)}", timeout=10)
+            if pdf_res.get("exit_code") == 0:
+                pdf_content = sandbox.read_binary_file(pdf_output_path)
+                pdf_gcs_url = await upload_artifact_async(
+                    session_id=session_id,
+                    run_id=run_id,
+                    relative_path=pdf_relative_path,
+                    content=pdf_content,
+                )
+        except Exception:
+            logger.warning("Failed to generate PDF sibling for DOCX preview", exc_info=True)
+
         artifact = await history_repo.create_artifact(
             session_id=session_id,
             run_id=run_id,
@@ -760,24 +1022,30 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
                 **artifact_storage_metadata(session_id, run_id, output_relative_path),
                 "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "size": payload.get("size", 0),
+                "role": "deliverable",
+                **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
+                **({"preview_path": pdf_relative_path} if pdf_gcs_url else {}),
             },
         )
+        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
-            "summary": f"Generated Word document: {filename}",
-            "detail": {
-                "filename": filename,
-                "path": output_path,
-                "relative_path": output_relative_path,
-                "artifact_id": artifact.artifact_id,
-                "url": gcs_url,
-            },
-        }
+        "summary": f"Generated Word document: {filename}",
+        "detail": {
+            "filename": filename,
+            "path": output_path,
+            "relative_path": output_relative_path,
+            "artifact_id": artifact.artifact_id,
+            "url": gcs_url,
+            **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
+        },
+    }
     except Exception as e:
         logger.exception("Failed to promote DOCX to artifact")
         return {
-            "status": "success",
-            "summary": f"DOCX generated at {filename} but failed to upload: {e}",
+            "status": "error",
+            "summary": f"DOCX generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }

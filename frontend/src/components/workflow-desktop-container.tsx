@@ -9,13 +9,20 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText, LayoutGrid } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { WorkspacePanel } from "./workspace-panel";
+import { SandboxFilesPanel } from "./sandbox-files-panel";
+import { SandboxTerminalPane } from "./session/sandbox-terminal-pane";
+import { SandboxEditorPane } from "./session/sandbox-editor-pane";
+import { SessionCanvas } from "./session/session-canvas";
+import type { EditorSessionState, TerminalSessionState } from "@/lib/sandbox-session";
 import { RunArtifact } from "@/lib/message-types";
 import { Tabs, Tooltip } from "@heroui/react";
+import { useSessionCanvas } from "@/lib/session-canvas-context";
+import { isCanvasArtifact } from "@/lib/session-canvas";
 
-type Tab = "workflow" | "desktop" | "artifacts" | "workspace";
+export type Tab = "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "artifacts" | "files" | "workspace";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -39,6 +46,8 @@ type Props = {
   onStopAgent?: () => void;
   sessionId?: string | null;
   isFullscreen?: boolean;
+  terminalSession?: TerminalSessionState | null;
+  editorSession?: EditorSessionState | null;
 };
 
 export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
@@ -56,9 +65,15 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   onStopAgent,
   sessionId,
   isFullscreen,
+  terminalSession = null,
+  editorSession = null,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
   const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
+  const canvas = useSessionCanvas();
+  const canvasCount =
+    (canvas?.documents.length ?? 0) || artifacts.filter(isCanvasArtifact).length;
+  const showCanvasTab = canvasCount > 0 || activeTab === "canvas";
 
   useEffect(() => {
     if (!forcedTab) return;
@@ -70,6 +85,15 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
     }, 0);
     return () => window.clearTimeout(timeout);
   }, [forcedTab, onForcedTabAck, onTabChange]);
+
+  useEffect(() => {
+    if (autoRouteTab === "terminal" && terminalSession && !terminalSession.running) {
+      setAutoRouteTab(null);
+    }
+    if (autoRouteTab === "editor" && editorSession && !editorSession.running) {
+      setAutoRouteTab(null);
+    }
+  }, [autoRouteTab, terminalSession, editorSession]);
 
   useEffect(() => {
     if (!autoRouteTab) return;
@@ -88,9 +112,15 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   const agentReason =
     autoRouteTab === "desktop"
       ? "Desktop action detected"
-      : autoRouteTab === "workflow"
-        ? "Workflow activity detected"
-        : null;
+      : autoRouteTab === "terminal"
+        ? "Terminal activity detected"
+        : autoRouteTab === "editor"
+          ? "Editing file"
+          : autoRouteTab === "canvas"
+          ? "Document ready"
+          : autoRouteTab === "workflow"
+            ? "Workflow activity detected"
+            : null;
 
   return (
     <div className="h-full flex flex-col bg-[#0a0a0c] rounded-xl border border-zinc-800 overflow-hidden">
@@ -102,6 +132,27 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
         >
           <Tabs.ListContainer>
             <Tabs.List aria-label="Workspace Tabs" className="flex flex-row items-center gap-1">
+              {showCanvasTab ? (
+                <Tabs.Tab id="canvas" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                  <Tooltip delay={0} closeDelay={0}>
+                    <Tooltip.Trigger>
+                      <div className="relative flex items-center justify-center">
+                        <BookOpen className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                        {canvasCount > 0 && (
+                          <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
+                            {canvasCount}
+                          </span>
+                        )}
+                      </div>
+                    </Tooltip.Trigger>
+                    <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                      Canvas
+                    </Tooltip.Content>
+                  </Tooltip>
+                  <Tabs.Indicator className="bg-zinc-700/80" />
+                </Tabs.Tab>
+              ) : null}
+
               <Tabs.Tab id="workflow" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
@@ -144,6 +195,40 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
 
+              <Tabs.Tab id="terminal" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Terminal className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      {terminalSession?.running && (
+                        <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-cyan-500 rounded-full" />
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Terminal
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
+              <Tabs.Tab id="editor" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <FileCode className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      {editorSession?.running && (
+                        <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-amber-400 rounded-full" />
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Editor
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
               <Tabs.Tab id="artifacts" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
@@ -158,6 +243,20 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                   </Tooltip.Trigger>
                   <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
                     Artifacts
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
+              <Tabs.Tab id="files" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Folder className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Files
                   </Tooltip.Content>
                 </Tooltip>
                 <Tabs.Indicator className="bg-zinc-700/80" />
@@ -199,6 +298,19 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
       {/* Content Area */}
       <div className="flex-1 relative overflow-hidden bg-[#0a0a0c]">
         <AnimatePresence mode="wait">
+          {activeTab === "canvas" && (
+            <motion.div
+              key="canvas"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <SessionCanvas artifacts={artifacts} />
+            </motion.div>
+          )}
+
           {activeTab === "workflow" && (
             <motion.div
               key="workflow"
@@ -261,6 +373,32 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
             </motion.div>
           )}
 
+          {activeTab === "terminal" && (
+            <motion.div
+              key="terminal"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <SandboxTerminalPane session={terminalSession} />
+            </motion.div>
+          )}
+
+          {activeTab === "editor" && (
+            <motion.div
+              key="editor"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <SandboxEditorPane session={editorSession} />
+            </motion.div>
+          )}
+
           {activeTab === "artifacts" && (
             <motion.div
               key="artifacts"
@@ -271,6 +409,19 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               className="absolute inset-0"
             >
               <OutputsPanel artifacts={artifacts} />
+            </motion.div>
+          )}
+
+          {activeTab === "files" && (
+            <motion.div
+              key="files"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <SandboxFilesPanel sessionId={sessionId} active={activeTab === "files"} />
             </motion.div>
           )}
 

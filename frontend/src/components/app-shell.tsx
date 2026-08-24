@@ -5,48 +5,60 @@
 
 "use client";
 
-import { useAuth } from "@/lib/auth-context";
-import { useRouter, usePathname } from "next/navigation";
-import { AnimatePresence } from "framer-motion";
-import { SearchModal } from "./search-modal";
-import { SettingsModal } from "./settings-modal";
+import Image from "next/image";
+import { usePathname } from "next/navigation";
+import { SettingsModal } from "@/components/application/settings/settings-modal";
+import { isSessionWorkspacePath } from "@/lib/app-paths";
 import { useSettings } from "@/lib/settings-context";
+import { useLandingChrome } from "@/lib/landing-chrome-context";
+import { cx } from "@/utils/cx";
 import { SessionNavSidebar } from "./session-nav-sidebar";
-import { useState } from "react";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
-  const { isSettingsOpen, setIsSettingsOpen } = useSettings();
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const { isSettingsOpen, setIsSettingsOpen, settingsDefaultPage } = useSettings();
+  const { isLandingChrome } = useLandingChrome();
   const pathname = usePathname();
-
-  const isMobileViewport = () => typeof window !== "undefined" && window.innerWidth < 768;
-  const isSessionPage = pathname.includes("/session/");
+  const isSessionPage = isSessionWorkspacePath(pathname);
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden text-foreground">
-      {/* Unified Sidebar */}
-      <SessionNavSidebar />
+    <div
+      className={cx(
+        "relative flex h-screen overflow-hidden text-foreground",
+        isLandingChrome ? "bg-transparent" : "bg-white dark:bg-[#0d0d0d]",
+      )}
+    >
+      {isLandingChrome ? (
+        <Image
+          src="/session-new-bg.png"
+          alt=""
+          fill
+          priority
+          quality={100}
+          sizes="100vw"
+          className="pointer-events-none select-none object-cover object-center"
+        />
+      ) : null}
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 relative h-full overflow-hidden">
-        <main 
-          className={`flex-1 transition-all duration-300 ${isMobileViewport() ? "pt-14" : ""} ${
-            !isSessionPage ? "overflow-y-auto" : "flex flex-col min-h-0"
-          }`}
-        >
-          {children}
-        </main>
+      <div className="relative z-10 flex h-full min-w-0 flex-1">
+        <SessionNavSidebar />
+
+        <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+          <main
+            className={cx(
+              "flex-1 pt-16 transition-all duration-300 md:pt-0",
+              !isSessionPage ? "overflow-y-auto" : "flex min-h-0 flex-col",
+            )}
+          >
+            {children}
+          </main>
+        </div>
       </div>
 
-      <AnimatePresence>
-        {isSearchOpen && (
-          <SearchModal isOpen={true} onClose={() => setIsSearchOpen(false)} />
-        )}
-        {isSettingsOpen && (
-          <SettingsModal isOpen={true} onClose={() => setIsSettingsOpen(false)} />
-        )}
-      </AnimatePresence>
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        defaultPage={settingsDefaultPage}
+      />
     </div>
   );
 }

@@ -15,6 +15,8 @@ import time
 
 from PIL import Image
 
+from nexus.resilience import call_with_deadline
+
 logger = logging.getLogger(__name__)
 
 # Thread-local storage for the last screenshot image (base64 PNG).
@@ -90,8 +92,17 @@ def _vision_cache_doc_id(screenshot_hash: str, model_id: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
-def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
+def _vision_cache_timeout() -> float:
     try:
+        from nexus.config import settings
+
+        return max(float(settings.vision_cache_timeout_seconds), 0.5)
+    except Exception:
+        return 5.0
+
+
+def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
+    def _read() -> str | None:
         from nexus.firebase import get_firestore_client
 
         doc = (
@@ -108,6 +119,14 @@ def _get_persisted_analysis(session_id: str, doc_id: str) -> str | None:
         description = data.get("description")
         if isinstance(description, str) and description.strip():
             return description.strip()
+        return None
+
+    try:
+        return call_with_deadline(
+            _read,
+            timeout=_vision_cache_timeout(),
+            label="vision cache lookup",
+        )
     except Exception:
         logger.debug("Vision cache lookup failed", exc_info=True)
     return None
@@ -121,7 +140,7 @@ def _store_persisted_analysis(
     model_id: str,
     description: str,
 ) -> None:
-    try:
+    def _write() -> None:
         from nexus.firebase import get_firestore_client
 
         (
@@ -140,6 +159,13 @@ def _store_persisted_analysis(
                 },
                 merge=True,
             )
+        )
+
+    try:
+        call_with_deadline(
+            _write,
+            timeout=_vision_cache_timeout(),
+            label="vision cache write",
         )
     except Exception:
         logger.debug("Vision cache write failed", exc_info=True)
@@ -197,7 +223,6 @@ def take_screenshot() -> dict:
 
     try:
         from nexus.tools._context import get_runtime_config, get_sandbox, get_session_id
-        from nexus.runtime_config import build_genai_client
 
         sandbox = get_sandbox()
         runtime_config = get_runtime_config()
@@ -220,27 +245,24 @@ def take_screenshot() -> dict:
         img.save(buf, format="JPEG", quality=85)
         jpeg_bytes = buf.getvalue()
 
-        vision_prompt = (
-            "You are a compact screen analysis assistant for a desktop agent. "
-            "The screen resolution is 1324x968 and (0,0) is the top-left corner.\n\n"
-            "Return only these sections, in plain text, and keep the whole answer under 1200 characters:\n"
-            "STATE: one short sentence describing the current app/page.\n"
-            "FOCUS: one short sentence describing the selected or focused element.\n"
-            "ELEMENTS:\n"
-            "- up to 10 clickable or editable targets with approximate coordinates like Label @ (x, y)\n"
-            "TEXT:\n"
-            "- up to 8 important visible text snippets, errors, headings, or labels\n"
-            "NEXT_ACTION: one short sentence describing the best next click or action.\n"
-            "Do not include extra commentary."
+        task_context = (
+            f"Observe the screen after action: {last_action}"
+            if last_action
+            else "Observe the current desktop state."
         )
 
+        structured_observation: dict = {}
+        vision_error = ""
         try:
             cached_hash = getattr(_last_analysis, "hash", None)
             cached_description = getattr(_last_analysis, "description", None)
             cached_perceptual_hash = getattr(_last_analysis, "perceptual_hash", None)
             cached_time = float(getattr(_last_analysis, "captured_at", 0.0) or 0.0)
             cached_action_seq = int(getattr(_last_analysis, "action_seq", -1) or -1)
-            model_id = runtime_config.gemini_vision_model or "vision"
+            if runtime_config.user_llm_configured:
+                model_id = runtime_config.llm_vision_model or runtime_config.llm_model or "user-llm"
+            else:
+                model_id = runtime_config.qwen_vision_model or "qwen-vision"
             cache_doc_id = _vision_cache_doc_id(screenshot_hash, model_id)
             used_cache = False
             analysis_mode = "vision_full"
@@ -278,67 +300,34 @@ def take_screenshot() -> dict:
                     description = None
             else:
                 description = None
-            if description is None and runtime_config.gemini_available:
-                from google.genai import types
-                from google.genai.errors import ClientError
+            if description is None:
+                from nexus.vision_provider import create_vision_provider
 
-                client = build_genai_client(runtime_config)
-
-                # Build ordered list of models to try: primary first, then fallbacks
-                models_to_try = [
-                    runtime_config.gemini_vision_model,
-                    *[
-                        model
-                        for model in runtime_config.gemini_vision_fallback_models
-                        if model != runtime_config.gemini_vision_model
-                    ],
-                ]
-
-                last_error: Exception | None = None
-                for model in models_to_try:
-                    try:
-                        response = client.models.generate_content(
-                            model=model,
-                            contents=[
-                                types.Content(
-                                    role="user",
-                                    parts=[
-                                        types.Part(text=vision_prompt),
-                                        types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
-                                    ],
-                                )
-                            ],
-                        )
-                        description = _normalize_description(response.text or "")
-                        base_description = description
-                        model_id = model
-                        analysis_mode = "vision_full"
-                        delta = "changed"
-                        break  # success
-                    except ClientError as exc:
-                        last_error = exc
-                        status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-                        if status == 429 or "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                            logger.warning(
-                                "Vision model %s quota exhausted (429), trying next fallback.",
-                                model,
-                            )
-                            continue
-                        raise  # non-quota error — propagate
-
-                if description is None:
-                    logger.error(
-                        "All vision models exhausted quota. Last error: %s", last_error
-                    )
-                    description = (
-                        "STATE: Screenshot captured.\n"
-                        "FOCUS: Vision quota exhausted.\n"
-                        "ELEMENTS:\n"
-                        "- Use terminal inspection commands.\n"
-                        "TEXT:\n"
-                        "- Vision models are temporarily unavailable.\n"
-                        "NEXT_ACTION: Use a terminal command or continue with a smaller step."
-                    )
+                provider = create_vision_provider(
+                    runtime_config=runtime_config,
+                    primary_model=(
+                        (runtime_config.llm_vision_model or runtime_config.llm_model or None)
+                        if runtime_config.user_llm_configured
+                        else (runtime_config.qwen_vision_model or None)
+                    ),
+                    fallback_models=(
+                        None
+                        if runtime_config.user_llm_configured
+                        else (runtime_config.qwen_vision_fallback_models or None)
+                    ),
+                )
+                observation = provider.analyze(
+                    jpeg_bytes,
+                    width=img.width,
+                    height=img.height,
+                    task_context=task_context,
+                )
+                structured_observation = observation.to_dict()
+                description = _normalize_description(observation.to_description())
+                base_description = description
+                model_id = observation.model
+                analysis_mode = "vision_full"
+                delta = "changed"
                 if session_id:
                     _store_persisted_analysis(
                         session_id,
@@ -347,28 +336,46 @@ def take_screenshot() -> dict:
                         model_id=model_id,
                         description=description,
                     )
-            else:
-                description = (
-                    "STATE: Screenshot captured.\n"
-                    "FOCUS: Vision analysis unavailable.\n"
-                    "ELEMENTS:\n"
-                    "- Visual analysis is disabled for this session.\n"
-                    "TEXT:\n"
-                    "- No Gemini provider configured.\n"
-                    "NEXT_ACTION: Use a terminal command or continue with a simpler action."
-                )
-        except Exception:
-            logger.exception("Vision analysis failed for screenshot")
+            elif not structured_observation:
+                structured_observation = {
+                    "visible_state": description,
+                    "focus": "",
+                    "targets": [],
+                    "visible_text": [],
+                    "errors": [],
+                    "next_action": "Use a fresh observation if precise grounding is required.",
+                    "confidence": 0.5,
+                    "model": model_id,
+                }
+        except Exception as exc:
+            logger.exception("Qwen vision analysis failed for screenshot")
+            vision_error = str(exc)[:500] or type(exc).__name__
+            next_action = (
+                "Vision retries are already exhausted — do NOT call take_screenshot "
+                "again for this step. Continue the task using non-visual tools "
+                "(playwright_snapshot for DOM, bash/terminal output, file reads) "
+                "or ask the user if the screen is genuinely required."
+            )
             description = (
-                "STATE: Screenshot captured.\n"
-                "FOCUS: Vision analysis failed.\n"
+                "STATE: Screenshot captured, but visual analysis is unavailable.\n"
+                f"FOCUS: Vision analysis failed after all configured retries.\n"
                 "ELEMENTS:\n"
                 "- Visual summary unavailable.\n"
                 "TEXT:\n"
-                "- Try a simpler action or retry once.\n"
-                "NEXT_ACTION: Continue without another immediate screenshot."
+                f"- {vision_error}\n"
+                f"NEXT_ACTION: {next_action}"
             )
             base_description = description
+            structured_observation = {
+                "visible_state": "Screenshot captured but vision analysis failed.",
+                "focus": "",
+                "targets": [],
+                "visible_text": [],
+                "errors": [vision_error],
+                "next_action": next_action,
+                "confidence": 0.0,
+                "model": model_id,
+            }
 
         _last_analysis.hash = screenshot_hash
         _last_analysis.description = base_description or description
@@ -384,7 +391,9 @@ def take_screenshot() -> dict:
         clear_dirty()
 
         return {
+            "status": "error" if vision_error else "success",
             "description": description,
+            "observation": structured_observation,
             "cached": used_cache,
             "hash": screenshot_hash,
             "delta": delta,
@@ -392,11 +401,21 @@ def take_screenshot() -> dict:
             "model": model_id,
             "fresh_after_action": waited_for_settle,
             "last_action": last_action,
+            "error_code": "QWEN_VISION_UNAVAILABLE" if vision_error else "",
+            "error": vision_error,
         }
 
     except Exception as e:
         logger.error("take_screenshot failed: %s", e)
         return {
             "status": "error",
-            "description": f"STATE: Screenshot failed. NEXT_ACTION: Recover the sandbox before retrying. Error: {e}",
+            "error_code": "SCREENSHOT_UNAVAILABLE",
+            "error": str(e)[:500],
+            "description": (
+                "STATE: Screen capture failed after all configured retries.\n"
+                "NEXT_ACTION: Do NOT keep calling take_screenshot. Continue with "
+                "non-visual tools (playwright_snapshot, bash, file reads), or report "
+                "that the desktop is unreachable if the task cannot proceed without it.\n"
+                f"Error: {e}"
+            ),
         }

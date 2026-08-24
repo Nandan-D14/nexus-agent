@@ -18,6 +18,7 @@ _EXTERNAL_SIDE_EFFECT_TOOLS = {
     "calendar_create",
     "tasks_create",
     "github_create_issue",
+    "vyora_start_call",
     "upload_drive_file",
     "create_drive_doc",
 }
@@ -58,7 +59,15 @@ _SECRET_EXFIL_RE = re.compile(
     r"authorization|"
     r"bearer\s+[A-Za-z0-9._-]+|"
     r"\.config/rclone|"
-    r"userPrivate)"
+    r"userPrivate|"
+    r"\benv\b[\s\S]{0,80}\bgrep\b|"
+    r"\bprintenv\b)"
+)
+_UNBOUNDED_FIND_RE = re.compile(r"(?is)\bfind\s+/(?:\s|$|;)")
+_MCP_SIDE_EFFECT_RE = re.compile(
+    r"(?:^|_)(create|update|delete|remove|destroy|write|drop|deploy|"
+    r"send|upload|insert|execute|run|publish|post|put|patch)(?:_|$)",
+    re.IGNORECASE,
 )
 
 
@@ -89,12 +98,38 @@ def evaluate_tool_policy(
     mode = normalize_autonomy_mode(autonomy_mode)
     args = args or {}
 
+    if normalized_tool.startswith("mcp__"):
+        remote_name = normalized_tool.rsplit("__", 1)[-1]
+        if _MCP_SIDE_EFFECT_RE.search(remote_name):
+            return ToolPolicyDecision(
+                "require_approval",
+                "Remote MCP side effects require user confirmation.",
+                "high",
+            )
+        if mode == "manual":
+            return ToolPolicyDecision(
+                "require_approval",
+                "Manual mode requires approval for remote MCP connector calls.",
+                "medium",
+            )
+        return ToolPolicyDecision(
+            "allow",
+            "Read-only MCP call allowed in Auto Mode.",
+            "low",
+        )
+
     if normalized_tool == "run_command":
         command = str(args.get("command") or "")
         if _SECRET_EXFIL_RE.search(command):
             return ToolPolicyDecision(
                 "deny",
                 "Command appears to read or expose credentials/secrets.",
+                "blocked",
+            )
+        if _UNBOUNDED_FIND_RE.search(command):
+            return ToolPolicyDecision(
+                "deny",
+                "Unbounded filesystem walk (find /) is not allowed. Search a specific directory.",
                 "blocked",
             )
         if _DESTRUCTIVE_COMMAND_RE.search(command):
@@ -120,10 +155,22 @@ def evaluate_tool_policy(
         )
 
     if mode == "manual" and normalized_tool.startswith(("gmail_", "calendar_", "tasks_", "github_", "drive_")):
+        # Only gate connector calls that MODIFY data. Read-only connector reads
+        # (gmail_read, gmail_search, calendar_list, read_drive_file, github_read_*,
+        # etc.) are allowed without a per-call prompt so a batch of reads in one
+        # turn does not spam approvals. Mutating verbs still require approval.
+        # (Explicit mutating tools are already caught by _EXTERNAL_SIDE_EFFECT_TOOLS
+        # above; this regex covers any other mutating connector action.)
+        if _MCP_SIDE_EFFECT_RE.search(normalized_tool):
+            return ToolPolicyDecision(
+                "require_approval",
+                "Manual mode requires approval for connector actions that modify data.",
+                "medium",
+            )
         return ToolPolicyDecision(
-            "require_approval",
-            "Manual mode requires approval for connector actions.",
-            "medium",
+            "allow",
+            "Read-only connector call allowed.",
+            "low",
         )
 
     return ToolPolicyDecision("allow", "Allowed by current autonomy policy.", "low")

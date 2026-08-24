@@ -213,3 +213,57 @@ async def download_session_file(
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
+
+
+@router.get("/api/v1/sessions/{session_id}/files/tree")
+async def list_session_file_tree(
+    session_id: str,
+    relative_path: str | None = Query(default=None),
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    """Return a recursive listing of the live run workspace (or a subdirectory)."""
+    session_manager = get_session_manager()
+    session = await session_manager.get_session(session_id)
+    if not session or session.owner_id != user.uid:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    if not session.current_run_id:
+        raise HTTPException(status_code=400, detail="Session does not have an active run")
+    if not session.sandbox or not session.sandbox.is_alive:
+        raise HTTPException(
+            status_code=410,
+            detail="Sandbox container is not active. Workspace files cannot be listed.",
+        )
+
+    await session_manager.ensure_session_ready(session_id)
+    workspace_path = derive_workspace_path(session.id, session.current_run_id)
+    sub_path = ""
+    if relative_path:
+        sub_path = _safe_workspace_relative_path(
+            relative_path,
+            session_id=session.id,
+            run_id=session.current_run_id,
+        )
+    target_path = f"{workspace_path}/{sub_path}" if sub_path else workspace_path
+    try:
+        entries = session.sandbox.list_tree(target_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list workspace files: {exc}")
+
+    # When listing a subdirectory, prefix relative_path so download URLs stay workspace-relative.
+    if sub_path:
+        prefixed = []
+        for entry in entries:
+            rel = str(entry.get("relative_path") or "")
+            prefixed.append(
+                {
+                    **entry,
+                    "relative_path": f"{sub_path}/{rel}" if rel else sub_path,
+                }
+            )
+        entries = prefixed
+
+    return {
+        "workspace_path": workspace_path,
+        "relative_path": sub_path,
+        "entries": entries,
+    }

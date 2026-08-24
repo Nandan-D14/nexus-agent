@@ -40,10 +40,12 @@ class TokenUsageRecord:
 def get_agent_usage_source(
     runtime_config: SessionRuntimeConfig | None = None,
 ) -> tuple[str, str]:
-    if runtime_config is not None:
-        return "agent.gemini", runtime_config.gemini_agent_model
-
-    return "agent.gemini", settings.gemini_agent_model
+    model = (
+        runtime_config.qwen_planner_model
+        if runtime_config is not None and runtime_config.qwen_planner_model
+        else settings.planner_model
+    )
+    return ("agent.glm" if model.lower().startswith("glm-") else "agent.qwen", model)
 
 
 def get_expected_usage_sources() -> list[str]:

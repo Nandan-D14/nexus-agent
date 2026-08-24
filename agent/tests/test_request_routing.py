@@ -1,110 +1,94 @@
 # Copyright (c) 2026 Agentic Company. All rights reserved.
 # Proprietary and non-commercial use only.
 
+"""Routing tests after the full-agent-only migration.
+
+The fast path / mode router / artifact mini-agent were removed
+(``docs/FULL_AGENT_ONLY_MIGRATION_PLAN.md``). The routing shim now always
+returns ``needs_full_agent=True`` and every request goes through the planner.
+These tests pin that behavior so the planner never gets bypassed again by a
+regressed classifier.
+"""
+
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nexus.config import settings
 from nexus.orchestrator import NexusOrchestrator
-from nexus.routing import _ROUTING_PROMPT, build_current_lookup_queries, classify_request, extract_search_query
+from nexus.routing import (
+    classify_request,
+    classify_request_llm,
+    classify_request_simple,
+    extract_search_query,
+)
 
 
 class RequestRoutingTests(IsolatedAsyncioTestCase):
-    async def test_simple_question_uses_fast_answer(self) -> None:
-        decision = await classify_request("What is Python?")
+    async def test_every_request_goes_to_full_planner(self) -> None:
+        for text in [
+            "What is Python?",
+            "hi",
+            "do you have gmail?",
+            "search web for Gemini docs",
+            "what is today's IPL match?",
+            "summarize https://example.com/post and cite sources",
+            "Create a simple calculator",
+            "Build a Next.js calculator app",
+            "click the login button",
+            "fix it",
+            "",
+        ]:
+            with self.subTest(text=text):
+                decision = await classify_request(text)
+                self.assertTrue(
+                    decision.needs_full_agent,
+                    msg=f"fast path must not exist for {text!r}",
+                )
 
-        self.assertEqual(decision.mode, "ask")
-        self.assertFalse(decision.needs_full_agent)
+    async def test_llm_and_simple_agree_after_migration(self) -> None:
+        text = "research today's news from five sources"
+        simple = classify_request_simple(text)
+        llm = await classify_request_llm(text)
 
-    def test_llm_prompt_json_example_does_not_break_formatting(self) -> None:
-        prompt = _ROUTING_PROMPT.format(
-            text="hello",
-            has_connectors=False,
-            has_uploads=False,
+        self.assertEqual(simple.needs_full_agent, llm.needs_full_agent)
+        self.assertTrue(simple.needs_full_agent)
+
+    async def test_context_flags_still_force_full_agent(self) -> None:
+        decision = classify_request_simple(
+            "summarize my latest emails",
+            has_connectors=True,
         )
 
-        self.assertIn('"mode": "route_name"', prompt)
-
-    async def test_google_tool_capability_question_uses_capability_answer(self) -> None:
-        decision = await classify_request("do you have gmail and other tools?")
-
-        self.assertEqual(decision.mode, "capability")
-        self.assertFalse(decision.needs_full_agent)
-
-    async def test_simple_question_with_code_words_stays_fast(self) -> None:
-        decision = await classify_request("What is a code repository?")
-
-        self.assertEqual(decision.mode, "ask")
-        self.assertFalse(decision.needs_full_agent)
-
-    async def test_simple_web_search_skips_full_agent(self) -> None:
-        decision = await classify_request("search web for Gemini docs")
-
-        self.assertEqual(decision.mode, "search")
-        self.assertFalse(decision.needs_full_agent)
-        self.assertEqual(extract_search_query("search web for Gemini docs"), "Gemini docs")
-
-    async def test_current_sports_lookup_skips_full_agent(self) -> None:
-        decision = await classify_request("what is today's IPL match?")
-
-        self.assertEqual(decision.mode, "current")
-        self.assertFalse(decision.needs_full_agent)
-
-    async def test_current_news_lookup_skips_full_agent(self) -> None:
-        decision = await classify_request("latest AI news today")
-
-        self.assertEqual(decision.mode, "current")
-        self.assertFalse(decision.needs_full_agent)
-
-    async def test_research_news_stays_deep_agent(self) -> None:
-        decision = await classify_request("research today's news from five sources")
-
-        self.assertEqual(decision.mode, "deep")
         self.assertTrue(decision.needs_full_agent)
 
-    def test_current_ipl_queries_include_targeted_fallbacks(self) -> None:
-        queries = build_current_lookup_queries("today IPL match", date_label="2026-04-30")
-
-        self.assertIn("today IPL match", queries)
-        self.assertIn("today IPL match 2026-04-30", queries)
-        self.assertTrue(any("site:iplt20.com" in item for item in queries))
-
-    async def test_gui_request_uses_full_computer_flow(self) -> None:
-        decision = await classify_request("click the login button on the desktop")
-
-        self.assertEqual(decision.mode, "computer")
-        self.assertTrue(decision.needs_full_agent)
-
-    async def test_local_work_uses_full_agent_flow(self) -> None:
-        decision = await classify_request("fix the repo tests and update the code")
-
-        self.assertEqual(decision.mode, "work")
-        self.assertTrue(decision.needs_full_agent)
-
-    async def test_ambiguous_reference_asks_question_first(self) -> None:
-        decision = await classify_request("fix it")
-
-        self.assertEqual(decision.mode, "clarify")
-        self.assertFalse(decision.needs_full_agent)
-        self.assertIn("What exactly", decision.clarification)
+    def test_extract_search_query_trims_whitespace(self) -> None:
+        self.assertEqual(
+            extract_search_query("  search  web  for  Gemini  docs  "),
+            "search web for Gemini docs",
+        )
 
 
-class FastSearchRouteTests(IsolatedAsyncioTestCase):
-    async def test_fast_search_falls_back_when_no_results_parse(self) -> None:
+class TurnRunnerSelectionTests(TestCase):
+    def test_single_planner_runner_with_default_cap(self) -> None:
         orchestrator = NexusOrchestrator.__new__(NexusOrchestrator)
-        orchestrator.session = type("SessionStub", (), {"id": "session123"})()
-        orchestrator._send_json = AsyncMock()
-        orchestrator._send_agent_fast_response = AsyncMock()
-        orchestrator._fetch_fast_search_results = AsyncMock(return_value=[])
+        planner_runner = object()
+        orchestrator._runner = planner_runner
 
-        with patch("nexus.orchestrator.get_cached_value", return_value=None):
-            handled = await orchestrator._run_fast_search("search web for Gemini docs")
+        runner, turn_cap = orchestrator._select_turn_runner()
 
-        self.assertFalse(handled)
-        orchestrator._send_agent_fast_response.assert_not_awaited()
+        self.assertIs(runner, planner_runner)
+        self.assertEqual(turn_cap, settings.max_agent_turns)
+
+    def test_cached_context_is_bound_to_the_session_lifecycle_mode(self) -> None:
+        self.assertFalse(NexusOrchestrator._should_load_cached_context("fresh"))
+        self.assertTrue(
+            NexusOrchestrator._should_load_cached_context("continue_latest_workspace")
+        )
+        self.assertTrue(
+            NexusOrchestrator._should_load_cached_context("continue_conversation")
+        )

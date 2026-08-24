@@ -5,13 +5,13 @@
 
 "use client";
 
-import { useCallback, useEffect, useState, useRef, useMemo } from "react";
-import { Search, X, Clock, ArrowRight, MessageSquare, History, Loader2, Calendar } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Search, X, Clock, ArrowRight, History, Loader2, Calendar } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { useSession } from "@/lib/use-session";
-import { type RecentSession } from "@/lib/message-types";
+import { APP_HISTORY, sessionPath } from "@/lib/app-paths";
+import { useRecentSessionsQuery } from "@/lib/queries/sessions";
 
 type SearchModalProps = {
   isOpen: boolean;
@@ -20,12 +20,10 @@ type SearchModalProps = {
 
 export function SearchModal({ isOpen, onClose }: SearchModalProps) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<RecentSession[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
   const pathname = usePathname();
-  const { listSessions } = useSession();
+  const { data: sessions = [], isFetching } = useRecentSessionsQuery(50);
 
   useEffect(() => {
     if (isOpen) {
@@ -36,38 +34,22 @@ export function SearchModal({ isOpen, onClose }: SearchModalProps) {
 
   const handleClose = useCallback(() => {
     setQuery("");
-    setResults([]);
     onClose();
   }, [onClose]);
 
-  // Live search with debounce
-  useEffect(() => {
-    if (!query.trim()) {
-      setResults([]);
-      setIsLoading(false);
-      return;
-    }
+  const results = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return [];
+    return sessions
+      .filter(
+        (session) =>
+          session.title?.toLowerCase().includes(needle) ||
+          session.summary?.toLowerCase().includes(needle),
+      )
+      .slice(0, 8);
+  }, [query, sessions]);
 
-    const handler = setTimeout(async () => {
-      setIsLoading(true);
-      try {
-        // Fetch sessions and filter locally for now (assuming backend list is limited)
-        // In a real prod app, we'd use a dedicated search endpoint
-        const sessions = await listSessions(50);
-        const filtered = sessions.filter(s => 
-          (s.title?.toLowerCase().includes(query.toLowerCase())) ||
-          (s.summary?.toLowerCase().includes(query.toLowerCase()))
-        );
-        setResults(filtered.slice(0, 8));
-      } catch (err) {
-        console.error("Search failed", err);
-      } finally {
-        setIsLoading(false);
-      }
-    }, 300);
-
-    return () => clearTimeout(handler);
-  }, [query, listSessions]);
+  const isLoading = Boolean(query.trim()) && isFetching;
 
   // Handle escape key
   useEffect(() => {
@@ -81,7 +63,7 @@ export function SearchModal({ isOpen, onClose }: SearchModalProps) {
   if (!isOpen) return null;
 
   const navigateToSession = (sid: string) => {
-    router.push(`/session/${sid}`);
+    router.push(sessionPath(sid));
     handleClose();
   };
 
@@ -89,8 +71,8 @@ export function SearchModal({ isOpen, onClose }: SearchModalProps) {
     const trimmed = text.trim();
     if (!trimmed) return;
     
-    const target = `/history?q=${encodeURIComponent(trimmed)}`;
-    if (pathname === "/history") {
+    const target = `${APP_HISTORY}?q=${encodeURIComponent(trimmed)}`;
+    if (pathname === APP_HISTORY) {
       router.replace(target);
     } else {
       router.push(target);
@@ -184,7 +166,7 @@ export function SearchModal({ isOpen, onClose }: SearchModalProps) {
                   <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500 px-3 mt-6 mb-2">Quick Actions</p>
                   <div className="space-y-1">
                     <Link
-                      href="/history"
+                      href={APP_HISTORY}
                       onClick={handleClose}
                       className="flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-zinc-100 dark:hover:bg-zinc-800/50 text-zinc-600 dark:text-zinc-400 transition-colors group"
                     >

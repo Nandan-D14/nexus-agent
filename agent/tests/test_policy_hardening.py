@@ -42,3 +42,35 @@ def test_policy_requires_approval_for_production_deploy() -> None:
 
     assert decision.action == "require_approval"
     assert decision.risk == "high"
+
+
+def test_policy_denies_unbounded_find_root() -> None:
+    decision = evaluate_tool_policy(
+        "run_command",
+        {"command": "find / -name '*.env'"},
+        autonomy_mode="auto",
+    )
+
+    assert decision.action == "deny"
+    assert decision.risk == "blocked"
+
+
+def test_policy_denies_env_grep_for_keys() -> None:
+    decision = evaluate_tool_policy(
+        "run_command",
+        {"command": "env | grep -i key"},
+        autonomy_mode="auto",
+    )
+
+    assert decision.action == "deny"
+    assert decision.risk == "blocked"
+
+
+def test_policy_allows_workspace_listing() -> None:
+    decision = evaluate_tool_policy(
+        "run_command",
+        {"command": "ls /workspace"},
+        autonomy_mode="auto",
+    )
+
+    assert decision.action == "allow"

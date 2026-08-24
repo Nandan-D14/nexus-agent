@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="CoComputer logo">
+  <rect width="512" height="512" rx="110" ry="110" fill="#ffffff"/>
+  <rect x="8" y="8" width="496" height="496" rx="102" ry="102" fill="none" stroke="#ffffff" stroke-opacity="0.95"/>
+  <ellipse cx="256" cy="268" rx="182" ry="176" fill="#0a0a0a"/>
+  <rect x="160" y="162" width="68" height="132" rx="34" fill="url(#eye)"/>
+  <rect x="284" y="162" width="68" height="132" rx="34" fill="url(#eye)"/>
+  <defs>
+    <linearGradient id="eye" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e0faff"/>
+      <stop offset="35%" stop-color="#7deaff"/>
+      <stop offset="100%" stop-color="#00c8ff"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+</svg>

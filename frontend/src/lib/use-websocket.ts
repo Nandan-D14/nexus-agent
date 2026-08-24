@@ -40,24 +40,49 @@ export interface UseWebSocketReturn {
   onJsonMessageRef: React.MutableRefObject<
     ((msg: WsMessage) => void) | null
   >;
+  /**
+   * Seed the durable event cursor after load-time hydrate so reconnect replay
+   * starts after already-applied events and does not double-apply.
+   */
+  seedDurableCursor: (lastSeq: number) => void;
+  /**
+   * True once automatic reconnection has given up. The run may still be alive
+   * on the server, so the UI must surface this instead of waiting forever.
+   */
+  connectionLost: boolean;
+  /** Reset the reconnect budget and dial again (user-initiated retry). */
+  reconnect: () => void;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
+/** Replay blocks live frames, so it must never hang the stream indefinitely. */
+const REPLAY_TIMEOUT_MS = 10_000;
+const REPLAY_PAGE_LIMIT = 200;
+const REPLAY_MAX_PAGES = 50;
+/**
+ * How often the durable event log is polled over HTTP while the socket is down.
+ * A worker-owned run keeps writing events regardless of the socket, so this is
+ * what keeps background progress visible instead of freezing the view until the
+ * user manually reconnects.
+ */
+const DURABLE_POLL_INTERVAL_MS = 4_000;
 
-type DurableReplayEvent = {
+export type DurableReplayEvent = {
   event_id?: string;
   task_id?: string;
   run_id?: string | null;
   type?: string;
   payload?: Record<string, unknown>;
   seq?: number;
+  created_at?: string;
 };
 
 type DurableReplayResponse = {
   events?: DurableReplayEvent[];
   last_seq?: number;
+  has_more?: boolean;
 };
 
 function resolveWebSocketTarget(target: string): { url: string; protocols?: string[] } {
@@ -80,6 +105,9 @@ function isDurableTaskId(value: string | null | undefined): value is string {
 }
 
 function eventKey(message: WsMessage): string | null {
+  if ((message as { type?: string }).type === "agent_delta" || (message as { type?: string }).type === "agent_stream_chunk") {
+    return null;
+  }
   if (message.event_id) {
     return `event:${message.event_id}`;
   }
@@ -89,7 +117,7 @@ function eventKey(message: WsMessage): string | null {
   return null;
 }
 
-function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
+export function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
   if (!event.type) {
     return null;
   }
@@ -104,16 +132,29 @@ function replayEventToMessage(event: DurableReplayEvent): WsMessage | null {
   } as WsMessage;
 }
 
+export interface UseWebSocketOptions {
+  /** WS auth ticket. Consumed only at (re)connect time; rotating it does NOT
+   * tear down a healthy socket. */
+  ticket?: string | null;
+  /** Durable task id for event replay/dedupe after reconnect. */
+  durableTaskId?: string | null;
+}
+
+/** Max outbound frames buffered while the socket is not OPEN. */
+const MAX_OUTBOUND_BUFFER = 50;
+
 /**
  * React hook for WebSocket connection management.
  */
 export function useWebSocket(
   url: string | null,
-  durableTaskId?: string | null,
+  options: UseWebSocketOptions = {},
 ): UseWebSocketReturn {
+  const { ticket = null, durableTaskId = null } = options;
   const wsRef = useRef<WebSocket | null>(null);
   const [readyState, setReadyState] = useState<ReadyStateValue>(ReadyState.CLOSED);
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
+  const [connectionLost, setConnectionLost] = useState(false);
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
   const onBinaryMessageRef = useRef<((data: ArrayBuffer) => void) | null>(null);
@@ -125,10 +166,15 @@ export function useWebSocket(
   const connectRef = useRef<(target: string) => void>(() => {});
   /** Keeps the latest url so the reconnect closure always sees it. */
   const urlRef = useRef(url);
+  /** Latest ticket, read at connect time. Updated without reconnecting. */
+  const ticketRef = useRef<string | null>(ticket);
+  /** Outbound frames buffered while the socket is not OPEN; flushed on open. */
+  const pendingOutboundRef = useRef<Array<string | ArrayBuffer>>([]);
   const durableTaskIdRef = useRef<string | null>(
     isDurableTaskId(durableTaskId) ? durableTaskId : null,
   );
   const lastSeqRef = useRef(0);
+  const pendingSeedSeqRef = useRef<number | null>(null);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const replayInFlightRef = useRef(false);
   const replayBufferRef = useRef<WsMessage[]>([]);
@@ -139,6 +185,12 @@ export function useWebSocket(
   }, [url]);
 
   useEffect(() => {
+    // Rotating the ticket must NOT trigger a reconnect: store it in a ref so the
+    // next (re)connect picks up the fresh value, but the current socket stays up.
+    ticketRef.current = ticket;
+  }, [ticket]);
+
+  useEffect(() => {
     const nextTaskId = isDurableTaskId(durableTaskId) ? durableTaskId : null;
     if (durableTaskIdRef.current !== nextTaskId) {
       lastSeqRef.current = 0;
@@ -146,6 +198,12 @@ export function useWebSocket(
       replayBufferRef.current = [];
     }
     durableTaskIdRef.current = nextTaskId;
+    // Apply load-time hydrate seed after any task-id reset so reconnect does not
+    // replay events already folded into chatItems.
+    if (pendingSeedSeqRef.current != null) {
+      lastSeqRef.current = Math.max(lastSeqRef.current, pendingSeedSeqRef.current);
+      pendingSeedSeqRef.current = null;
+    }
   }, [durableTaskId]);
 
   const clearReconnectTimer = useCallback(() => {
@@ -168,8 +226,17 @@ export function useWebSocket(
       seenEventKeysRef.current.add(key);
     }
 
-    if (typeof message.seq === "number" && Number.isFinite(message.seq)) {
-      lastSeqRef.current = Math.max(lastSeqRef.current, message.seq);
+    const seq =
+      typeof message.seq === "number" && Number.isFinite(message.seq) ? message.seq : null;
+    if (seq !== null) {
+      // The cursor marks everything already folded into the view, either by the
+      // load-time hydrate or by an earlier frame. A server that re-attaches to a
+      // durable run streams its log from the beginning because it cannot know
+      // this cursor, so anything at or below it is a duplicate.
+      if (seq > 0 && seq <= lastSeqRef.current) {
+        return;
+      }
+      lastSeqRef.current = Math.max(lastSeqRef.current, seq);
     }
 
     onJsonMessageRef.current?.(message);
@@ -184,24 +251,58 @@ export function useWebSocket(
 
   const replayMissedEvents = useCallback(
     async (taskId: string, afterSeq: number) => {
-      const response = await authenticatedFetch(
-        `/api/v1/tasks/${encodeURIComponent(taskId)}/events?after_seq=${afterSeq}`,
-      );
-      if (!response.ok) {
-        return;
-      }
-      const body = (await response.json().catch(() => null)) as DurableReplayResponse | null;
-      const replayed = Array.isArray(body?.events) ? body.events : [];
-      replayed
-        .map(replayEventToMessage)
-        .filter((message): message is WsMessage => message !== null)
-        .forEach(dispatchJsonMessage);
-      if (typeof body?.last_seq === "number" && Number.isFinite(body.last_seq)) {
-        lastSeqRef.current = Math.max(lastSeqRef.current, body.last_seq);
+      let cursor = afterSeq;
+
+      for (let page = 0; page < REPLAY_MAX_PAGES; page += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REPLAY_TIMEOUT_MS);
+        let body: DurableReplayResponse | null = null;
+        try {
+          const response = await authenticatedFetch(
+            `/api/v1/tasks/${encodeURIComponent(taskId)}/events?after_seq=${cursor}&limit=${REPLAY_PAGE_LIMIT}`,
+            { signal: controller.signal },
+          );
+          if (!response.ok) {
+            return;
+          }
+          body = (await response.json().catch(() => null)) as DurableReplayResponse | null;
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const replayed = Array.isArray(body?.events) ? body.events : [];
+        replayed
+          .map(replayEventToMessage)
+          .filter((message): message is WsMessage => message !== null)
+          .forEach(dispatchJsonMessage);
+
+        const lastSeq =
+          typeof body?.last_seq === "number" && Number.isFinite(body.last_seq)
+            ? body.last_seq
+            : cursor;
+        lastSeqRef.current = Math.max(lastSeqRef.current, lastSeq);
+
+        const hasMore =
+          typeof body?.has_more === "boolean"
+            ? body.has_more
+            : replayed.length >= REPLAY_PAGE_LIMIT;
+        if (!hasMore || replayed.length === 0 || lastSeq <= cursor) {
+          return;
+        }
+        cursor = lastSeq;
       }
     },
     [dispatchJsonMessage],
   );
+
+  /** Surface a synthetic error to consumers via the same path as server
+   * messages (onJsonMessageRef) so the page's `case "error"` handler runs and
+   * the UI recovers instead of hanging on a "thinking" state. */
+  const surfaceError = useCallback((code: string, message: string) => {
+    const errorMsg = { type: "error", code, message } as WsMessage;
+    onJsonMessageRef.current?.(errorMsg);
+    setLastMessage(errorMsg);
+  }, []);
 
   const connect = useCallback((target: string) => {
     // Tear down any existing socket first.
@@ -214,10 +315,13 @@ export function useWebSocket(
       wsRef.current = null;
     }
 
-    const wsTarget = resolveWebSocketTarget(target);
-    const ws = wsTarget.protocols
-      ? new WebSocket(wsTarget.url, wsTarget.protocols)
-      : new WebSocket(wsTarget.url);
+    // Read the latest ticket at connect time (subprotocol handshake). Strip any
+    // stale ?ticket= from the url so a rotated ticket can never be sent stale.
+    const { url: cleanUrl } = resolveWebSocketTarget(target);
+    const currentTicket = ticketRef.current;
+    const ws = currentTicket
+      ? new WebSocket(cleanUrl, [currentTicket])
+      : new WebSocket(cleanUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     setReadyState(ReadyState.CONNECTING);
@@ -225,6 +329,21 @@ export function useWebSocket(
     ws.onopen = () => {
       reconnectAttempts.current = 0;
       setReadyState(ReadyState.OPEN);
+      setConnectionLost(false);
+
+      // Flush any frames queued while the socket was down (in order).
+      if (pendingOutboundRef.current.length > 0) {
+        const buffered = pendingOutboundRef.current;
+        pendingOutboundRef.current = [];
+        for (const frame of buffered) {
+          try {
+            ws.send(frame);
+          } catch (error) {
+            console.warn("[useWebSocket] Failed to flush buffered frame:", error);
+          }
+        }
+      }
+
       const shouldReplay = hasOpenedRef.current && durableTaskIdRef.current !== null;
       const replayTaskId = durableTaskIdRef.current;
       const replayAfterSeq = lastSeqRef.current;
@@ -257,6 +376,16 @@ export function useWebSocket(
     ws.onclose = (event) => {
       setReadyState(ReadyState.CLOSED);
 
+      const failBufferedSends = () => {
+        if (pendingOutboundRef.current.length > 0) {
+          pendingOutboundRef.current = [];
+          surfaceError(
+            "WS_SEND_FAILED",
+            "Your message could not be delivered. Please resend.",
+          );
+        }
+      };
+
       if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
         setLastMessage({
           type: "error",
@@ -264,6 +393,8 @@ export function useWebSocket(
           message: event.reason || "WebSocket connection was closed.",
         });
         reconnectAttempts.current = MAX_RECONNECT_ATTEMPTS;
+        setConnectionLost(true);
+        failBufferedSends();
         return;
       }
 
@@ -278,6 +409,15 @@ export function useWebSocket(
             connectRef.current(urlRef.current);
           }
         }, delay);
+      } else {
+        // Reconnect budget exhausted (or intentionally disconnected): stop
+        // holding queued frames hostage so the UI can surface a retry. The run
+        // usually keeps executing server-side, so flag the dead socket instead
+        // of leaving the page waiting on events that can no longer arrive.
+        if (urlRef.current !== null) {
+          setConnectionLost(true);
+        }
+        failBufferedSends();
       }
     };
 
@@ -301,7 +441,7 @@ export function useWebSocket(
         }
       }
     };
-  }, [dispatchJsonMessage, flushReplayBuffer, replayMissedEvents]);
+  }, [dispatchJsonMessage, flushReplayBuffer, replayMissedEvents, surfaceError]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -313,6 +453,7 @@ export function useWebSocket(
     hasOpenedRef.current = false;
     replayInFlightRef.current = false;
     replayBufferRef.current = [];
+    setConnectionLost(false);
 
     if (url) {
       queueMicrotask(() => connect(url));
@@ -336,12 +477,31 @@ export function useWebSocket(
   }, [clearReconnectTimer, connect, url]);
 
   const send = useCallback((data: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(data);
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(data);
+      return;
     }
-  }, []);
+    // Socket not OPEN (connecting / mid-reconnect). Buffer control/text frames
+    // and flush them on reconnect so a prompt sent during a ticket-rotation
+    // reconnect is not silently lost. Drop-oldest past the cap.
+    if (urlRef.current !== null) {
+      const buffer = pendingOutboundRef.current;
+      if (buffer.length >= MAX_OUTBOUND_BUFFER) {
+        buffer.shift();
+      }
+      buffer.push(data);
+    } else {
+      surfaceError(
+        "WS_SEND_FAILED",
+        "Not connected. Your message could not be delivered.",
+      );
+    }
+  }, [surfaceError]);
 
   const sendBinary = useCallback((data: ArrayBuffer) => {
+    // Audio is real-time and ephemeral -- never buffer stale PCM; just drop it
+    // when the socket is not OPEN. The mic stream resumes on reconnect.
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(data);
     }
@@ -354,7 +514,60 @@ export function useWebSocket(
     [send],
   );
 
+  const seedDurableCursor = useCallback((lastSeq: number) => {
+    const seq = Math.max(0, Number.isFinite(lastSeq) ? lastSeq : 0);
+    pendingSeedSeqRef.current = seq;
+    lastSeqRef.current = Math.max(lastSeqRef.current, seq);
+  }, []);
+
+  const reconnect = useCallback(() => {
+    if (!urlRef.current) {
+      return;
+    }
+    clearReconnectTimer();
+    reconnectAttempts.current = 0;
+    setConnectionLost(false);
+    connectRef.current(urlRef.current);
+  }, [clearReconnectTimer]);
+
   const isConnected = readyState === ReadyState.OPEN;
+
+  // Keep background progress flowing while the socket is not OPEN. A durable run
+  // is owned by a worker, so it keeps appending events; without this the view
+  // freezes at the last frame received until the socket comes back (or forever,
+  // once the reconnect budget is spent). Events are deduped by seq/event_id in
+  // `dispatchJsonMessage`, so overlap with the socket is harmless.
+  useEffect(() => {
+    if (isConnected || !url) {
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      const taskId = durableTaskIdRef.current;
+      if (cancelled || inFlight || !taskId) {
+        return;
+      }
+      inFlight = true;
+      try {
+        await replayMissedEvents(taskId, lastSeqRef.current);
+      } catch (error) {
+        // Offline/aborted polls are expected; the next tick retries.
+        console.debug("[useWebSocket] Durable poll failed:", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const interval = setInterval(() => void poll(), DURABLE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isConnected, replayMissedEvents, url]);
 
   return {
     send,
@@ -365,5 +578,8 @@ export function useWebSocket(
     readyState,
     onBinaryMessageRef,
     onJsonMessageRef,
+    seedDurableCursor,
+    connectionLost,
+    reconnect,
   };
 }

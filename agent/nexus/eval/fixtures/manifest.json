@@ -1,0 +1,34 @@
+{
+  "suite_version": "2026-07-11.1",
+  "fixtures": [
+    {
+      "fixture_id": "test-store",
+      "kind": "web",
+      "description": "Static storefront used by browser DOM filter/sort cases."
+    },
+    {
+      "fixture_id": "fixture-repository",
+      "kind": "git",
+      "description": "Pinned repository with a known failing test for terminal repair cases."
+    },
+    {
+      "fixture_id": "fixture-app",
+      "kind": "app",
+      "description": "Local app with installable dependencies and a deterministic test suite."
+    },
+    {
+      "fixture_id": "test-crm",
+      "kind": "connector",
+      "description": "Test CRM account for connector workflow cases."
+    },
+    {
+      "fixture_id": "milestone-brief",
+      "kind": "document",
+      "description": "Supplied milestone text for PDF/DOCX report generation."
+    }
+  ],
+  "notes": [
+    "Fixtures are provisioned in the staging environment before a live baseline.",
+    "This manifest is metadata only; it does not invent live eval scores."
+  ]
+}

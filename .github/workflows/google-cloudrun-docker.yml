@@ -58,14 +58,25 @@ jobs:
 
       - name: "Install backend dependencies"
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install ./agent
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cd agent
+          uv sync --locked --extra dev
+
+      - name: "Assert Google ADK 2.4.0"
+        run: |
+          cd agent
+          uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.4.0'"
 
       - name: "Compile backend"
-        run: python -m compileall agent/nexus
+        run: |
+          cd agent
+          uv run python -m compileall nexus
 
-      - name: "Backend smoke tests"
-        run: python -m unittest discover -s agent/tests -v
+      - name: "Backend production tests"
+        run: |
+          cd agent
+          uv run pytest tests/test_adk_compatibility.py tests/test_production_eval.py tests/test_durable_execution_hardening.py tests/test_agent_routing.py -q
 
   deploy:
     needs: validate
@@ -112,12 +123,28 @@ jobs:
           docker push "${AGENT_IMAGE}"
           echo "AGENT_IMAGE=${AGENT_IMAGE}" >> $GITHUB_ENV
 
+      - name: 'Ensure durable Cloud Tasks queue exists'
+        run: |-
+          gcloud tasks queues describe cocomputer-tasks \
+            --project="${{ env.PROJECT_ID }}" \
+            --location="${{ env.REGION }}" >/dev/null 2>&1 || \
+          gcloud tasks queues create cocomputer-tasks \
+            --project="${{ env.PROJECT_ID }}" \
+            --location="${{ env.REGION }}" \
+            --max-attempts=3 \
+            --min-backoff=10s \
+            --max-backoff=300s \
+            --max-concurrent-dispatches=10
+
       - name: 'Deploy Agent to Cloud Run'
         run: |-
           SECRET_FLAGS=(
             "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
+            "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
             "--set-secrets=JWT_SECRET=jwt-secret:latest"
             "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+            "--set-secrets=SLACK_CLIENT_SECRET=slack-client-secret:latest"
+            "--set-secrets=TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
           )
           if [[ -n "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" ]]; then
             SECRET_FLAGS+=("--set-secrets=BYOK_ENCRYPTION_KEY=${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}:latest")
@@ -125,19 +152,29 @@ jobs:
 
           AGENT_ENV_VARS=(
             "APP_ENV=production"
+            "MODEL_PROVIDER=qwen"
             "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
             "GOOGLE_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_REGION=${{ env.GEMINI_REGION }}"
             "GOOGLE_CLOUD_PROJECT=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_LOCATION=${{ env.GEMINI_REGION }}"
             "GOOGLE_GENAI_USE_VERTEXAI=true"
+            "TASK_WORKER_ENABLED=true"
+            "TASK_QUEUE_LOCAL_FALLBACK=false"
+            "GCP_TASKS_PROJECT_ID=${{ env.PROJECT_ID }}"
+            "GCP_TASKS_LOCATION=${{ env.REGION }}"
+            "GCP_TASKS_QUEUE=cocomputer-tasks"
+            "GCP_TASKS_WORKER_URL=${{ secrets.GCP_TASKS_WORKER_URL }}"
+            "DURABLE_SUBAGENTS_ENABLED=true"
+            "SUBAGENT_LEASE_SECONDS=600"
+            "SUBAGENT_HEARTBEAT_INTERVAL_SECONDS=120"
+            "SUBAGENT_MAX_MAILBOX_MESSAGES=32"
+            "SUBAGENT_PARENT_WAIT_SECONDS=300"
+            "GCP_TASKS_OIDC_SERVICE_ACCOUNT=${{ secrets.GCP_TASKS_OIDC_SERVICE_ACCOUNT }}"
             "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
-            "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'false' }}"
+            "SLACK_CLIENT_ID=${{ secrets.SLACK_CLIENT_ID }}"
+            "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'true' }}"
             "SHARED_ACCESS_CODE=${{ secrets.SHARED_ACCESS_CODE }}"
-            "BETA_ENFORCE_BYOK=${{ secrets.BETA_ENFORCE_BYOK || 'true' }}"
-            "BETA_ADMIN_EMAILS=${{ secrets.BETA_ADMIN_EMAILS }}"
-            "BETA_GOOGLE_SHEET_ID=${{ secrets.BETA_GOOGLE_SHEET_ID }}"
-            "BETA_GOOGLE_SHEET_NAME=${{ secrets.BETA_GOOGLE_SHEET_NAME || 'beta_applications' }}"
           )
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 

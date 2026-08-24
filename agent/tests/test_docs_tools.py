@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nexus.tools._context import (
+    set_artifact_callback,
     set_run_id,
     set_sandbox,
     set_session_id,
@@ -22,6 +23,7 @@ from nexus.tools.docs import (
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    publish_html_artifact,
 )
 
 
@@ -71,8 +73,23 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         self.mock_history_repo = AsyncMock()
         self.mock_artifact = MagicMock()
         self.mock_artifact.artifact_id = "artifact_abc"
+        self.mock_artifact.run_id = "run456"
+        self.mock_artifact.session_id = "session123"
+        self.mock_artifact.task_id = "session123"
+        self.mock_artifact.kind = "html"
+        self.mock_artifact.title = "Calculator"
+        self.mock_artifact.preview = "Interactive HTML artifact ready."
+        self.mock_artifact.created_at = None
+        self.mock_artifact.source_step_id = None
+        self.mock_artifact.path = "outputs/calculator.html"
+        self.mock_artifact.url = "https://gcs/url"
+        self.mock_artifact.metadata = {"render_mode": "iframe"}
         self.mock_history_repo.create_artifact.return_value = self.mock_artifact
         self.history_repo_token = set_history_repository(self.mock_history_repo)
+        self.artifact_events: list[dict] = []
+        self.artifact_callback_token = set_artifact_callback(
+            lambda payload: self.artifact_events.append(payload)
+        )
 
         # Patch GCS Uploads
         self.upload_patcher = patch("nexus.tools.docs.upload_artifact_async", return_value="https://gcs/url")
@@ -82,6 +99,7 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         self.upload_patcher.stop()
         for token in (
             self.history_repo_token,
+            self.artifact_callback_token,
             self.sandbox_token,
             self.workspace_token,
             self.run_token,
@@ -137,3 +155,23 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         # Verify docx generation was invoked
         commands = self.sandbox.commands_run
         self.assertTrue(any("python3 /tmp/gen_docx_" in cmd for cmd in commands))
+
+    async def test_publish_html_artifact_creates_preview_without_sandbox(self) -> None:
+        result = await publish_html_artifact(
+            title="Calculator",
+            html="<button>1 + 1</button><script>console.log('ready')</script>",
+            filename="calculator",
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["detail"]["artifact_id"], "artifact_abc")
+        self.mock_upload.assert_awaited()
+        upload_kwargs = self.mock_upload.await_args.kwargs
+        self.assertEqual(upload_kwargs["relative_path"], "outputs/calculator.html")
+        self.assertIn("<!doctype html>", upload_kwargs["content"].lower())
+        self.mock_history_repo.create_artifact.assert_awaited()
+        create_kwargs = self.mock_history_repo.create_artifact.await_args.kwargs
+        self.assertEqual(create_kwargs["kind"], "html")
+        self.assertEqual(create_kwargs["metadata"]["content_type"], "text/html; charset=utf-8")
+        self.assertEqual(create_kwargs["metadata"]["render_mode"], "iframe")
+        self.assertEqual(self.artifact_events[0]["kind"], "html")

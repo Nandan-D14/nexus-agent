@@ -12,7 +12,7 @@ import re
 from typing import Any, Literal
 
 from nexus.config import settings
-from nexus.storage import artifact_storage_metadata, upload_artifact
+from nexus.storage import artifact_storage_metadata, upload_artifact_async
 from nexus.task_state import (
     build_initial_task_state,
     infer_task_type,
@@ -38,6 +38,22 @@ def _tool_error(message: str) -> dict[str, Any]:
     return {"error": message}
 
 
+def _sanitize_workspace_error(exc: BaseException, fallback: str) -> str:
+    """Return a short tool error; never forward raw sandbox Python tracebacks."""
+    message = str(exc).strip()
+    if not message:
+        return fallback
+    lowered = message.lower()
+    if (
+        "traceback (most recent call last)" in lowered
+        or "filenotfounderror" in lowered
+        or "pathlib.py" in lowered
+        or message.count("\n") >= 2
+    ):
+        return fallback
+    return message
+
+
 async def _emit_todo_update(items: list[dict[str, str]]) -> None:
     send_json = get_send_json()
     if not send_json:
@@ -51,6 +67,39 @@ async def _emit_todo_update(items: list[dict[str, str]]) -> None:
             ],
         }
     )
+
+
+async def reconcile_todo_list_at_turn_end(*, mark_complete: bool) -> list[dict[str, str]]:
+    """Re-read todo.md, optionally mark remaining items done, and emit to the UI.
+
+    Called by the orchestrator at turn end so the To-dos panel never stays
+    stuck on stale pending/in_progress items after a verified success.
+    """
+    try:
+        workspace_path = get_active_workspace_path()
+        path = f"{workspace_path}/todo.md"
+        sandbox = get_sandbox()
+        if not sandbox.path_exists(path):
+            return []
+        items = _parse_todo_markdown(sandbox.read_text_file(path))
+        if not items:
+            return []
+        changed = False
+        if mark_complete:
+            for item in items:
+                if item.get("status") in {"pending", "in_progress"}:
+                    item["status"] = "done"
+                    changed = True
+        if changed:
+            formatted = _format_todo_items(items)
+            sandbox.write_text_file(path, formatted)
+            await upload_artifact_async(
+                get_session_id(), get_run_id(), "todo.md", formatted
+            )
+        await _emit_todo_update(items)
+        return items
+    except Exception:
+        return []
 
 
 async def _emit_task_state_update(state: dict[str, Any]) -> None:
@@ -181,11 +230,11 @@ def _load_task_state(workspace_path: str) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
+async def _save_task_state(workspace_path: str, state: dict[str, Any]) -> str:
     content = json.dumps(state, indent=2, sort_keys=True)
     path = _task_state_path(workspace_path)
     get_sandbox().write_text_file(path, content)
-    upload_artifact(get_session_id(), get_run_id(), "task_state.json", content)
+    await upload_artifact_async(get_session_id(), get_run_id(), "task_state.json", content)
     return path
 
 
@@ -196,8 +245,9 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
     """Create or reuse the per-run workspace scaffold inside the sandbox."""
     try:
         sandbox = get_sandbox()
-        workspace_path = derive_session_workspace_path(get_session_id())
-        set_workspace_path(workspace_path)
+        # Keep setup in the run-scoped directory that subsequent tools read.
+        # Direct calls without a bound run still fall back to the session root.
+        workspace_path = get_active_workspace_path()
 
         created = not sandbox.path_exists(workspace_path)
         sandbox.ensure_directory(workspace_path)
@@ -210,7 +260,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             absolute_path = f"{workspace_path}/{relative_name}"
             if not sandbox.path_exists(absolute_path):
                 sandbox.write_text_file(absolute_path, default_content)
-                upload_artifact(get_session_id(), get_run_id(), relative_name, default_content)
+                await upload_artifact_async(get_session_id(), get_run_id(), relative_name, default_content)
                 touched_files.append(relative_name)
                 continue
             if relative_name == "task.md" and task_summary.strip():
@@ -218,7 +268,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
                 updated = _append_task_summary(existing, task_summary)
                 if updated != existing:
                     sandbox.write_text_file(absolute_path, updated)
-                    upload_artifact(get_session_id(), get_run_id(), relative_name, updated)
+                    await upload_artifact_async(get_session_id(), get_run_id(), relative_name, updated)
                     touched_files.append(relative_name)
 
         state_path = _task_state_path(workspace_path)
@@ -230,7 +280,7 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             task_summary=task_summary,
             active_agent="nexus_orchestrator",
         )
-        _save_task_state(workspace_path, task_state)
+        await _save_task_state(workspace_path, task_state)
         if not existing_state:
             touched_files.append("task_state.json")
         await _emit_task_state_update(task_state)
@@ -250,7 +300,9 @@ async def prepare_task_workspace(task_summary: str) -> dict[str, Any]:
             "outputs_dir": f"{workspace_path}/outputs",
         }
     except Exception as exc:
-        return _tool_error(str(exc) or "Failed to prepare the task workspace.")
+        return _tool_error(
+            _sanitize_workspace_error(exc, "Failed to prepare the task workspace.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -290,11 +342,10 @@ async def initialize_task_state(
                 task_type=resolved_type,
                 active_agent=active_agent,
             )
-        path = _save_task_state(workspace_path, state)
+        path = await _save_task_state(workspace_path, state)
         await _emit_task_state_update(state)
         return tool_success(
-            f"Initialized task state: {resolved_type}",
-            task_state_file=path,
+            f"Initialized task state: {resolved_type}",            task_state_file=path,
             task_id=state["task_id"],
             task_type=state["task_type"],
             stage=state["stage"],
@@ -302,7 +353,9 @@ async def initialize_task_state(
             review_status=state["review_status"],
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to initialize task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to initialize task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -349,7 +402,7 @@ async def update_task_state(
             artifact_paths=artifact_paths,
             summary=summary,
         )
-        path = _save_task_state(workspace_path, updated)
+        path = await _save_task_state(workspace_path, updated)
         await _emit_task_state_update(updated)
         return tool_success(
             f"Task state updated: stage={updated.get('stage', 'intake')}, agent={updated.get('active_agent', '')}",
@@ -363,7 +416,9 @@ async def update_task_state(
             artifact_count=len(updated.get("artifact_paths") or []),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to update task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to update task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -388,7 +443,9 @@ async def read_task_state() -> dict[str, Any]:
             state=state,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to read task state.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to read task state.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -410,7 +467,7 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
         get_sandbox().write_text_file(path, content)
 
         # Mirror to GCS
-        upload_artifact(get_session_id(), get_run_id(), "todo.md", content)
+        await upload_artifact_async(get_session_id(), get_run_id(), "todo.md", content)
 
         # Sync to frontend
         todo_items = _parse_todo_markdown(content)
@@ -422,7 +479,9 @@ async def write_todo_list(items: list[str]) -> dict[str, Any]:
             item_count=len(todo_items),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to write the todo list.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to write the todo list.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -458,6 +517,12 @@ async def update_todo_item(
         workspace_path = get_active_workspace_path()
         path = f"{workspace_path}/todo.md"
         sandbox = get_sandbox()
+        if not sandbox.path_exists(path):
+            return tool_error(
+                "todo.md does not exist yet. Call write_todo_list or prepare_task_workspace first.",
+                error_code="NOT_FOUND",
+                suggested_alternatives=["write_todo_list", "prepare_task_workspace"],
+            )
         items = _parse_todo_markdown(sandbox.read_text_file(path))
         if item_index > len(items):
             return tool_error("item_index is out of range for the current todo list", error_code="INVALID_INPUT")
@@ -468,7 +533,7 @@ async def update_todo_item(
         sandbox.write_text_file(path, formatted)
 
         # Mirror to GCS
-        upload_artifact(get_session_id(), get_run_id(), "todo.md", formatted)
+        await upload_artifact_async(get_session_id(), get_run_id(), "todo.md", formatted)
 
         # Sync to frontend
         await _emit_todo_update(items)
@@ -481,7 +546,10 @@ async def update_todo_item(
             title=target["title"],
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to update the todo item.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to update the todo item."),
+            error_code="TOOL_EXCEPTION",
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -500,9 +568,23 @@ async def write_workspace_file(
     Returns:
         NormalizedToolResult with file path and bytes written.
     """
+    from nexus.tools.sandbox_events import clip_editor_content, emit_sandbox_event
+
+    content_text = content if isinstance(content, str) else str(content)
+    try:
+        normalized_for_event = _normalize_relative_path(relative_path)
+    except Exception:
+        normalized_for_event = (relative_path or "").strip()
+    await emit_sandbox_event({
+        "type": "sandbox_editor",
+        "phase": "start",
+        "path": normalized_for_event,
+        "action": "write",
+        "content": clip_editor_content(content_text),
+        "append": bool(append),
+    })
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
-        content_text = content if isinstance(content, str) else str(content)
         sandbox = get_sandbox()
         sandbox.write_text_file(absolute_path, content_text, append=append)
 
@@ -516,7 +598,7 @@ async def write_workspace_file(
             except Exception:
                 pass
 
-        gcs_url = upload_artifact(get_session_id(), get_run_id(), normalized_relative, full_content)
+        gcs_url = await upload_artifact_async(get_session_id(), get_run_id(), normalized_relative, full_content)
 
         preview = " ".join(content_text.split())
         if len(preview) > 240:
@@ -535,12 +617,22 @@ async def write_workspace_file(
         if normalized_relative.startswith("outputs/"):
             result_meta["output_path"] = gcs_url or absolute_path
 
+        await emit_sandbox_event({
+            "type": "sandbox_editor",
+            "phase": "result",
+            "path": normalized_relative,
+            "action": "write",
+            "append": bool(append),
+            "bytes_written": result_meta["bytes_written"],
+        })
         return tool_success(
             preview or f"Saved {normalized_relative}",
             **result_meta,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to write the workspace file.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to write the workspace file.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -553,18 +645,49 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
     Returns:
         NormalizedToolResult with file content.
     """
+    from nexus.tools.sandbox_events import clip_editor_content, emit_sandbox_event
+
+    try:
+        path_for_event = _normalize_relative_path(relative_path)
+    except Exception:
+        path_for_event = (relative_path or "").strip()
+    await emit_sandbox_event({
+        "type": "sandbox_editor",
+        "phase": "start",
+        "path": path_for_event,
+        "action": "read",
+    })
     try:
         workspace_path, absolute_path = _join_workspace_path(relative_path)
-        content = get_sandbox().read_text_file(absolute_path)
+        sandbox = get_sandbox()
+        if not sandbox.path_exists(absolute_path):
+            relative = _normalize_relative_path(relative_path)
+            return tool_error(
+                f"{relative} does not exist in the workspace. "
+                "Call list_workspace_files or prepare_task_workspace first.",
+                error_code="NOT_FOUND",
+                suggested_alternatives=["list_workspace_files", "prepare_task_workspace"],
+            )
+        content = sandbox.read_text_file(absolute_path)
+        normalized_relative = _normalize_relative_path(relative_path)
+        await emit_sandbox_event({
+            "type": "sandbox_editor",
+            "phase": "result",
+            "path": normalized_relative,
+            "action": "read",
+            "content": clip_editor_content(content),
+        })
         return tool_success(
-            f"Read {_normalize_relative_path(relative_path)} ({len(content)} chars)",
+            f"Read {normalized_relative} ({len(content)} chars)",
             workspace_path=workspace_path,
             workspace_file=absolute_path,
-            relative_path=_normalize_relative_path(relative_path),
+            relative_path=normalized_relative,
             content=content,
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to read the workspace file.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to read the workspace file.")
+        )
 
 
 @normalized_tool(needs_sandbox=True)
@@ -595,4 +718,38 @@ async def list_workspace_files(relative_path: str = "") -> dict[str, Any]:
             entry_count=len(entries),
         )
     except Exception as exc:
-        return tool_error(str(exc) or "Failed to list workspace files.")
+        return tool_error(
+            _sanitize_workspace_error(exc, "Failed to list workspace files.")
+        )
+
+
+async def save_source_artifact(relative_path: str, content: str) -> dict[str, Any]:
+    """Persist a source/output file without requiring a live sandbox.
+
+    Always uploads to GCS (VM-free) and mirrors into the sandbox workspace FS
+    only when a sandbox is already alive. This lets search/scrape tools save
+    their results without booting E2B on turns that would otherwise be VM-free.
+    """
+    normalized_relative = _normalize_relative_path(relative_path)
+    workspace_path = get_active_workspace_path()
+    absolute_path = f"{workspace_path}/{normalized_relative}"
+    gcs_url = await upload_artifact_async(
+        get_session_id(), get_run_id(), normalized_relative, content
+    )
+    mirrored = False
+    try:
+        sandbox = get_sandbox()
+        if getattr(sandbox, "is_alive", False):
+            sandbox.write_text_file(absolute_path, content)
+            mirrored = True
+    except Exception:
+        # Never fail a search/scrape because the optional FS mirror could not
+        # be written; the GCS copy is the source of truth.
+        pass
+    return {
+        "relative_path": normalized_relative,
+        "workspace_path": workspace_path,
+        "gcs_url": gcs_url,
+        "saved_path": gcs_url or absolute_path,
+        "mirrored_to_sandbox": mirrored,
+    }

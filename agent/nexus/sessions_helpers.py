@@ -12,8 +12,12 @@ from nexus.auth import AuthenticatedUser
 from nexus.config import settings
 from nexus.dependencies import get_history_repository
 from nexus.models import SessionResponse, HandoffSummary, ContextPacket
-from nexus.runtime_config import get_byok_status, build_byok_error_payload, ensure_selected_gemini_provider_available
-from nexus.beta_access import normalize_beta_profile, beta_access_enabled, beta_can_access_app, build_beta_error_payload
+from nexus.runtime_config import (
+    byok_enforced,
+    get_byok_status,
+    build_byok_error_payload,
+    ensure_selected_gemini_provider_available,
+)
 
 def _serialize_handoff_summary(summary: dict[str, Any] | None) -> HandoffSummary | None:
     if not isinstance(summary, dict):
@@ -67,25 +71,16 @@ def _build_session_response(
         continuation_mode=continuation_mode,
     )
 
-def _ensure_beta_access(user_settings: dict[str, Any] | None) -> None:
-    if not beta_access_enabled():
-        return
-    profile = normalize_beta_profile(user_settings)
-    if beta_can_access_app(profile):
-        return
-    raise HTTPException(status_code=403, detail=build_beta_error_payload(profile))
-
 async def _prepare_user_runtime(user: AuthenticatedUser) -> dict[str, Any]:
     history_repository = get_history_repository()
     await history_repository.upsert_user(user)
     user_settings = await history_repository.get_user_settings(user.uid)
-    _ensure_beta_access(user_settings)
     try:
         ensure_selected_gemini_provider_available(user_settings)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
-    if settings.require_byok or settings.beta_enforce_byok:
+    if byok_enforced():
         byok_status = get_byok_status(user_settings)
         if not byok_status.configured:
             raise HTTPException(

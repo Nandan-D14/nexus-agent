@@ -196,7 +196,11 @@ class SessionManager:
         self._redis: Optional[redis.Redis] = None
         if settings.redis_url:
             try:
-                self._redis = redis.from_url(settings.redis_url)
+                self._redis = redis.from_url(
+                    settings.redis_url,
+                    socket_timeout=2.0,
+                    socket_connect_timeout=2.0,
+                )
                 logger.info("SessionManager connected to Redis for distributed state.")
             except Exception:
                 logger.warning("Failed to connect to Redis for SessionManager; using local state only.")

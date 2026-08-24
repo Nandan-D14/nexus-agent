@@ -171,7 +171,7 @@ export function WorkspacePanel() {
             
             <div className="flex justify-between items-start mb-12 relative z-10">
               <div>
-                <h1 className="text-3xl font-bold text-white tracking-tight mb-2">Workspace</h1>
+                <h1 className="mb-2 font-serif text-3xl leading-none tracking-tight text-white sm:text-4xl">Workspace</h1>
                 <p className="text-sm text-zinc-400 font-medium">Your agent is monitoring 6 integrations</p>
               </div>
               <div className="flex gap-3">

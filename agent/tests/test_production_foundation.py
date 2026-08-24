@@ -138,6 +138,7 @@ def test_build_execution_payload_is_canonical_and_sanitized() -> None:
         session_id="session_1",
         input_text="do work",
         connector_ids=[" github ", "", "drive"],
+        tool_ids=[" terminal ", "", "web_research"],
         uploaded_files=[{"name": "a.txt"}, "bad"],  # type: ignore[list-item]
         runtime_config_snapshot={"gemini_provider": "apiKey"},
         autonomy_mode="auto",
@@ -147,6 +148,7 @@ def test_build_execution_payload_is_canonical_and_sanitized() -> None:
 
     assert payload["schema_version"] == 1
     assert payload["connector_ids"] == ["github", "drive"]
+    assert payload["tool_ids"] == ["terminal", "web_research"]
     assert payload["uploaded_files"] == [{"name": "a.txt"}]
     assert payload["runtime_config"] == {"gemini_provider": "apiKey"}
     assert payload["autonomy_mode"] == "auto"
@@ -276,6 +278,7 @@ async def test_task_worker_executes_claimed_run_through_orchestrator(monkeypatch
             "input_text": "do the work",
             "session_id": "session_1",
             "connector_ids": ["github"],
+            "tool_ids": ["terminal"],
             "uploaded_files": [{"name": "a.txt"}],
             "metadata": {"user_transcript_recorded": True},
         }
@@ -310,6 +313,7 @@ async def test_task_worker_executes_claimed_run_through_orchestrator(monkeypatch
     assert request.session_id == "session_1"
     assert request.input_text == "do the work"
     assert request.connector_ids == ["github"]
+    assert request.tool_ids == ["terminal"]
     assert request.uploaded_files == [{"name": "a.txt"}]
     assert request.emit_user_transcript is False
 
