@@ -24,3 +24,5 @@ from nexus.config import settings
 def _production_stack_test_defaults(monkeypatch):
     monkeypatch.setattr(settings, "task_worker_enabled", False)
     monkeypatch.setattr(settings, "memory_enabled", False)
+    if not settings.firebase_project_id:
+        monkeypatch.setattr(settings, "firebase_project_id", "test-project")

@@ -40,8 +40,18 @@ def _message(text: str, *, kind: str = "mailbox") -> dict[str, Any]:
 class FirestoreSubagentRepository:
     """Top-level records allow restart recovery without parent object state."""
 
-    def __init__(self, db=None) -> None:
-        self._db = db or get_firestore_client()
+    def __init__(self, db: Any = None) -> None:
+        self._custom_db = db
+
+    @property
+    def _db(self):
+        if self._custom_db is not None:
+            return self._custom_db
+        return get_firestore_client()
+
+    @_db.setter
+    def _db(self, value: Any) -> None:
+        self._custom_db = value
 
     def _ref(self, subagent_id: str):
         return self._db.collection("subagent_records").document(subagent_id)

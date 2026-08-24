@@ -29,9 +29,19 @@ class FirestoreSessionService(BaseSessionService):
     WebSocket reconnect.
     """
 
-    def __init__(self):
+    def __init__(self, db: Any = None):
         super().__init__()
-        self._db = get_firestore_client()
+        self._custom_db = db
+
+    @property
+    def _db(self):
+        if self._custom_db is not None:
+            return self._custom_db
+        return get_firestore_client()
+
+    @_db.setter
+    def _db(self, value: Any) -> None:
+        self._custom_db = value
 
     def _get_doc_ref(self, app_name: str, user_id: str, session_id: str):
         return self._db.collection("adk_sessions").document(f"{app_name}_{user_id}_{session_id}")

@@ -74,6 +74,8 @@ jobs:
           uv run python -m compileall nexus
 
       - name: "Backend production tests"
+        env:
+          FIREBASE_PROJECT_ID: "ci-project"
         run: |
           cd agent
           uv run pytest tests/test_adk_compatibility.py tests/test_production_eval.py tests/test_durable_execution_hardening.py tests/test_agent_routing.py -q
