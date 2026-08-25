@@ -181,8 +181,9 @@ jobs:
           )
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
-          # Unbind any existing secret references to allow string literal env vars
-          gcloud run deploy nexus-agent \
+          # Deploy agent container. If previous revisions have incompatible secret bindings,
+          # recreate the service cleanly to clear all legacy schema conflicts.
+          if ! gcloud run deploy nexus-agent \
             --project="${{ env.PROJECT_ID }}" \
             --region="${{ env.REGION }}" \
             --image="${{ env.AGENT_IMAGE }}" \
@@ -192,19 +193,24 @@ jobs:
             --timeout=3600 \
             --concurrency=10 \
             --allow-unauthenticated \
-            --remove-secrets=JWT_SECRET,TASK_WORKER_AUTH_TOKEN,E2B_API_KEY,GOOGLE_OAUTH_CLIENT_SECRET,SLACK_CLIENT_SECRET,QWEN_API_KEY,BYOK_ENCRYPTION_KEY \
-            --set-env-vars="${AGENT_ENV_VARS_CSV}" 2>/dev/null || \
-          gcloud run deploy nexus-agent \
-            --project="${{ env.PROJECT_ID }}" \
-            --region="${{ env.REGION }}" \
-            --image="${{ env.AGENT_IMAGE }}" \
-            --port=8000 \
-            --memory=1Gi \
-            --cpu=1 \
-            --timeout=3600 \
-            --concurrency=10 \
-            --allow-unauthenticated \
-            --set-env-vars="${AGENT_ENV_VARS_CSV}"
+            --set-env-vars="${AGENT_ENV_VARS_CSV}"; then
+            echo "Deployment failed due to existing revision schema conflict; deleting stale service and recreating fresh..."
+            gcloud run services delete nexus-agent \
+              --project="${{ env.PROJECT_ID }}" \
+              --region="${{ env.REGION }}" \
+              --quiet || true
+            gcloud run deploy nexus-agent \
+              --project="${{ env.PROJECT_ID }}" \
+              --region="${{ env.REGION }}" \
+              --image="${{ env.AGENT_IMAGE }}" \
+              --port=8000 \
+              --memory=1Gi \
+              --cpu=1 \
+              --timeout=3600 \
+              --concurrency=10 \
+              --allow-unauthenticated \
+              --set-env-vars="${AGENT_ENV_VARS_CSV}"
+          fi
 
           AGENT_URL="$(gcloud run services describe nexus-agent \
             --project="${{ env.PROJECT_ID }}" \
