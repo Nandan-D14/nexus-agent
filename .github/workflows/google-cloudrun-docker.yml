@@ -141,72 +141,21 @@ jobs:
 
       - name: 'Deploy Agent to Cloud Run'
         run: |-
-          gcloud services enable secretmanager.googleapis.com --project="${{ env.PROJECT_ID }}" 2>/dev/null || true
-
-          PROJECT_NUM="$(gcloud projects describe "${{ env.PROJECT_ID }}" --format='value(projectNumber)' 2>/dev/null || true)"
-          if [[ -n "$PROJECT_NUM" ]]; then
-            gcloud projects add-iam-policy-binding "${{ env.PROJECT_ID }}" \
-              --member="serviceAccount:${PROJECT_NUM}-compute@developer.gserviceaccount.com" \
-              --role="roles/secretmanager.secretAccessor" 2>/dev/null || true
-          fi
-
-          ensure_secret() {
-            local secret_name="$1"
-            local default_val="$2"
-            if ! gcloud secrets describe "${secret_name}" --project="${{ env.PROJECT_ID }}" >/dev/null 2>&1; then
-              gcloud secrets create "${secret_name}" \
-                --project="${{ env.PROJECT_ID }}" \
-                --replication-policy="automatic" 2>/dev/null || true
-              if [[ -n "${default_val}" ]]; then
-                echo -n "${default_val}" | gcloud secrets versions add "${secret_name}" \
-                  --project="${{ env.PROJECT_ID }}" \
-                  --data-file=- 2>/dev/null || true
-              fi
-            fi
-          }
-
           JWT_VAL="${{ secrets.JWT_SECRET }}"
           [[ -z "$JWT_VAL" ]] && JWT_VAL="$(openssl rand -hex 32)"
-          ensure_secret "jwt-secret" "$JWT_VAL"
 
           TOKEN_VAL="${{ secrets.TASK_WORKER_AUTH_TOKEN }}"
           [[ -z "$TOKEN_VAL" ]] && TOKEN_VAL="$(openssl rand -hex 32)"
-          ensure_secret "task-worker-auth-token" "$TOKEN_VAL"
-
-          if [[ -n "${{ secrets.E2B_API_KEY }}" ]]; then
-            ensure_secret "e2b-api-key" "${{ secrets.E2B_API_KEY }}"
-          fi
-          if [[ -n "${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" ]]; then
-            ensure_secret "google-oauth-client-secret" "${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
-          fi
-          if [[ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ]]; then
-            ensure_secret "slack-client-secret" "${{ secrets.SLACK_CLIENT_SECRET }}"
-          fi
-          if [[ -n "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" ]]; then
-            ensure_secret "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" "${{ secrets.BYOK_ENCRYPTION_KEY || '' }}"
-          fi
-
-          SECRET_FLAGS=()
-          add_secret_if_exists() {
-            local env_name="$1"
-            local secret_name="$2"
-            if gcloud secrets describe "${secret_name}" --project="${{ env.PROJECT_ID }}" >/dev/null 2>&1; then
-              SECRET_FLAGS+=("--set-secrets=${env_name}=${secret_name}:latest")
-            fi
-          }
-
-          add_secret_if_exists "JWT_SECRET" "jwt-secret"
-          add_secret_if_exists "TASK_WORKER_AUTH_TOKEN" "task-worker-auth-token"
-          add_secret_if_exists "E2B_API_KEY" "e2b-api-key"
-          add_secret_if_exists "GOOGLE_OAUTH_CLIENT_SECRET" "google-oauth-client-secret"
-          add_secret_if_exists "SLACK_CLIENT_SECRET" "slack-client-secret"
-          if [[ -n "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}" ]]; then
-            add_secret_if_exists "BYOK_ENCRYPTION_KEY" "${{ secrets.BYOK_ENCRYPTION_KEY_SECRET }}"
-          fi
 
           AGENT_ENV_VARS=(
             "APP_ENV=production"
             "MODEL_PROVIDER=bynara"
+            "JWT_SECRET=${JWT_VAL}"
+            "TASK_WORKER_AUTH_TOKEN=${TOKEN_VAL}"
+            "E2B_API_KEY=${{ secrets.E2B_API_KEY }}"
+            "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
+            "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}"
+            "BYOK_ENCRYPTION_KEY=${{ secrets.BYOK_ENCRYPTION_KEY }}"
             "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
             "GOOGLE_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_REGION=${{ env.GEMINI_REGION }}"
@@ -242,7 +191,7 @@ jobs:
             --timeout=3600 \
             --concurrency=10 \
             --allow-unauthenticated \
-            "${SECRET_FLAGS[@]}" \
+            --clear-secrets \
             --set-env-vars="${AGENT_ENV_VARS_CSV}"
 
           AGENT_URL="$(gcloud run services describe nexus-agent \
