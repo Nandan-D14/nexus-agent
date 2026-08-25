@@ -147,15 +147,18 @@ jobs:
           TOKEN_VAL="${{ secrets.TASK_WORKER_AUTH_TOKEN }}"
           [[ -z "$TOKEN_VAL" ]] && TOKEN_VAL="$(openssl rand -hex 32)"
 
+          BYOK_KEY="${{ secrets.BYOK_ENCRYPTION_KEY }}"
+          [[ -z "$BYOK_KEY" ]] && BYOK_KEY="$(openssl rand -base64 32)"
+
           AGENT_ENV_VARS=(
             "APP_ENV=production"
             "MODEL_PROVIDER=bynara"
             "JWT_SECRET=${JWT_VAL}"
             "TASK_WORKER_AUTH_TOKEN=${TOKEN_VAL}"
+            "BYOK_ENCRYPTION_KEY=${BYOK_KEY}"
             "E2B_API_KEY=${{ secrets.E2B_API_KEY }}"
             "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
             "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}"
-            "BYOK_ENCRYPTION_KEY=${{ secrets.BYOK_ENCRYPTION_KEY }}"
             "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
             "GOOGLE_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_REGION=${{ env.GEMINI_REGION }}"
@@ -163,7 +166,7 @@ jobs:
             "GOOGLE_CLOUD_LOCATION=${{ env.GEMINI_REGION }}"
             "GOOGLE_GENAI_USE_VERTEXAI=true"
             "TASK_WORKER_ENABLED=true"
-            "TASK_QUEUE_LOCAL_FALLBACK=false"
+            "TASK_QUEUE_LOCAL_FALLBACK=true"
             "GCP_TASKS_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GCP_TASKS_LOCATION=${{ env.REGION }}"
             "GCP_TASKS_QUEUE=cocomputer-tasks"

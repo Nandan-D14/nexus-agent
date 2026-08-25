@@ -47,8 +47,11 @@ def get_byok_fernet() -> Fernet:
         )
     try:
         return Fernet(key.encode("utf-8"))
-    except Exception as exc:  # pragma: no cover - depends on env config
-        raise RuntimeError("BYOK_ENCRYPTION_KEY is invalid") from exc
+    except Exception:
+        # If key is not valid 32-byte urlsafe base64, hash and derive a valid Fernet key
+        digest = hashlib.sha256(key.encode("utf-8")).digest()
+        derived = base64.urlsafe_b64encode(digest).decode("utf-8")
+        return Fernet(derived.encode("utf-8"))
 
 
 def encrypt_secret(value: str) -> str:
