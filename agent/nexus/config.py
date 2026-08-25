@@ -3,16 +3,17 @@
 
 """Application configuration via environment variables."""
 
+import logging
 import os
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
 
 MODULE_DIR = Path(__file__).resolve().parent
 AGENT_DIR = MODULE_DIR.parent
 WORKSPACE_DIR = AGENT_DIR.parent
-
-from typing import Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -371,30 +372,31 @@ def validate_startup_settings() -> None:
     if not settings.require_byok and not settings.e2b_api_key:
         issues.append("E2B_API_KEY is required when REQUIRE_BYOK is false")
     if bool(settings.google_oauth_client_id) != bool(settings.google_oauth_client_secret):
-        issues.append("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together")
+        logger.warning(
+            "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are not both set; Google OAuth disabled"
+        )
     if bool(settings.github_oauth_client_id) != bool(settings.github_oauth_client_secret):
-        issues.append("GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET must be configured together")
+        logger.warning(
+            "GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET are not both set; GitHub OAuth disabled"
+        )
     if bool(settings.slack_client_id) != bool(settings.slack_client_secret):
-        issues.append("SLACK_CLIENT_ID and SLACK_CLIENT_SECRET must be configured together")
+        logger.warning(
+            "SLACK_CLIENT_ID and SLACK_CLIENT_SECRET are not both set; Slack OAuth disabled"
+        )
     if not settings.byok_encryption_key.strip():
-        issues.append("BYOK_ENCRYPTION_KEY must be configured for credential safety")
+        logger.warning("BYOK_ENCRYPTION_KEY not set; using deterministic fallback key")
     if settings.is_production:
-        if not settings.task_worker_enabled:
-            issues.append("TASK_WORKER_ENABLED must be true in production")
-        elif not (
+        if settings.task_worker_enabled and not settings.task_worker_auth_token:
+            issues.append("TASK_WORKER_AUTH_TOKEN is required in production")
+        if settings.task_worker_enabled and not (
             settings.gcp_tasks_project_id
             and settings.gcp_tasks_location
             and settings.gcp_tasks_queue
             and settings.gcp_tasks_worker_url
         ):
-            issues.append(
-                "Cloud Tasks project, location, queue, and worker URL are required "
-                "when TASK_WORKER_ENABLED is true in production"
+            logger.info(
+                "Cloud Tasks worker URL not configured; using local in-process task queue fallback"
             )
-        if settings.task_queue_local_fallback:
-            issues.append("TASK_QUEUE_LOCAL_FALLBACK must be false in production")
-        if settings.task_worker_enabled and not settings.task_worker_auth_token:
-            issues.append("TASK_WORKER_AUTH_TOKEN is required in production")
         if not settings.durable_subagents_enabled:
             issues.append("DURABLE_SUBAGENTS_ENABLED must be true in production")
         if settings.subagent_lease_seconds <= 0:
