@@ -62,16 +62,18 @@ export async function fetchSkill(skillId: string): Promise<AgentSkill> {
 }
 
 export function useSkillsQuery() {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   return useQuery({
     queryKey: queryKeys.skills(),
     queryFn: fetchSkills,
-    enabled: Boolean(user),
+    enabled: Boolean(!authLoading && user),
+    staleTime: 30_000,
+    retry: 1,
   });
 }
 
 export function useSkillQuery(skillId: string) {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
   const placeholder = queryClient
     .getQueryData<AgentSkill[]>(queryKeys.skills())
@@ -80,8 +82,10 @@ export function useSkillQuery(skillId: string) {
   return useQuery({
     queryKey: queryKeys.skill(skillId),
     queryFn: () => fetchSkill(skillId),
-    enabled: Boolean(user && skillId),
-    placeholderData: placeholder,
+    enabled: Boolean(!authLoading && user && skillId),
+    placeholderData: placeholder as AgentSkill | undefined,
+    staleTime: 30_000,
+    retry: 1,
   });
 }
 

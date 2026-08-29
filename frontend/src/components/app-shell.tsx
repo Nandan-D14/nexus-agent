@@ -23,7 +23,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div
       className={cx(
-        "relative flex h-screen overflow-hidden text-foreground",
+        "relative flex h-screen min-h-screen overflow-hidden text-foreground supports-[height:100dvh]:h-[100dvh]",
         isLandingChrome ? "bg-transparent" : "bg-white dark:bg-[#0d0d0d]",
       )}
     >
@@ -45,8 +45,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
           <main
             className={cx(
-              "flex-1 pt-16 transition-all duration-300 md:pt-0",
-              !isSessionPage ? "overflow-y-auto" : "flex min-h-0 flex-col",
+              "flex-1 min-h-0 pt-16 transition-all duration-300 md:pt-0",
+              !isSessionPage ? "overflow-y-auto custom-scrollbar" : "flex min-h-0 flex-col",
             )}
           >
             {children}
