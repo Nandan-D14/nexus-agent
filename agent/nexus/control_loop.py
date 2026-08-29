@@ -51,6 +51,7 @@ ARTIFACT_TOOLS = frozenset(
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
+        "generate_pptx_report",
         "save_as_artifact",
     }
 )

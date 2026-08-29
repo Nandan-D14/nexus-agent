@@ -13,6 +13,15 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from nexus.auth import AuthenticatedUser, require_current_user
+from nexus.composio_mcp import (
+    COMPOSIO_CONNECTION_ID,
+    COMPOSIO_MCP_URL,
+    COMPOSIO_NAME,
+    COMPOSIO_PROVIDER,
+    COMPOSIO_UNAUTHORIZED_HINT,
+    composio_extra_headers,
+    mcp_error_is_unauthorized,
+)
 from nexus.config import settings
 from nexus.dependencies import get_history_repository
 from nexus.models import (
@@ -21,6 +30,7 @@ from nexus.models import (
     IntegrationConnection,
     StatusMessage,
     UpdateIntegrationConnectionRequest,
+    UpsertComposioConnectionRequest,
     UpsertGithubConnectionRequest,
     UpsertOpenAIConnectionRequest,
     UpsertSlackConnectionRequest,
@@ -135,6 +145,9 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
     )
     openai_status = _catalog_status(
         await history_repository.get_integration_connection(user.uid, "openai")
+    )
+    composio_status = _catalog_status(
+        await history_repository.get_integration_connection(user.uid, COMPOSIO_CONNECTION_ID)
     )
     
     return {
@@ -254,6 +267,13 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
                 status=vyora_status,
             ).model_dump(mode="json"),
             IntegrationCatalogItem(
+                provider="composio",
+                connector_type="mcp_remote_http",
+                name="Composio",
+                description="Connect 1000+ apps through Composio MCP.",
+                status=composio_status,
+            ).model_dump(mode="json"),
+            IntegrationCatalogItem(
                 provider="mcp",
                 connector_type="mcp_remote_http",
                 name="Remote MCP Server",
@@ -308,23 +328,62 @@ async def create_mcp_connection(
     )
     return _serialize_integration_connection(connection)
 
+
+@router.post("/api/v1/integrations/composio", response_model=IntegrationConnection)
+async def upsert_composio_connection(
+    payload: UpsertComposioConnectionRequest,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    extra_headers = composio_extra_headers(payload.consumer_api_key)
+    test = await McpRemoteClient(url=COMPOSIO_MCP_URL, headers=extra_headers).discover()
+    error = test.error or None
+    if not test.ok and mcp_error_is_unauthorized(test.error):
+        error = COMPOSIO_UNAUTHORIZED_HINT
+    status = "connected" if test.ok else "error"
+    connection = await history_repository.upsert_mcp_connection(
+        user.uid,
+        connection_id=COMPOSIO_CONNECTION_ID,
+        name=COMPOSIO_NAME,
+        url=COMPOSIO_MCP_URL,
+        bearer_token="",
+        extra_headers=extra_headers,
+        provider=COMPOSIO_PROVIDER,
+        enabled=payload.enabled and test.ok,
+        tools=discovered_tools_payload(test.tools),
+        resources=test.resources,
+        status=status,
+        last_error=error,
+        latency_ms=test.latency_ms,
+    )
+    if not test.ok:
+        raise HTTPException(status_code=400, detail=error or "Failed to connect Composio")
+    return _serialize_integration_connection(connection)
+
+
 @router.post("/api/v1/integrations/mcp/{connection_id}/test", response_model=IntegrationConnection)
 async def test_mcp_connection(
     connection_id: str,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
     connection = await history_repository.get_integration_connection(user.uid, connection_id)
-    if not connection or connection.provider != "mcp":
+    if not connection or connection.provider not in {"mcp", "composio"}:
         raise HTTPException(status_code=404, detail="MCP connection not found")
     url = _validate_remote_mcp_url(str(connection.private.get("url") or ""))
     token = str(connection.private.get("bearerToken") or "")
-    test = await McpRemoteClient(url=url, bearer_token=token).discover()
+    extra_headers = {
+        str(key): str(value)
+        for key, value in (connection.private.get("extraHeaders") or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    test = await McpRemoteClient(url=url, bearer_token=token, headers=extra_headers).discover()
     updated = await history_repository.upsert_mcp_connection(
         user.uid,
         connection_id=connection_id,
         name=connection.name,
         url=url,
-        bearer_token="",
+        bearer_token=token,
+        extra_headers=extra_headers,
+        provider=connection.provider,
         enabled=connection.enabled and test.ok,
         tools=discovered_tools_payload(test.tools),
         resources=test.resources,

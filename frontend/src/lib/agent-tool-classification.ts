@@ -110,6 +110,9 @@ export function displayAgentToolName(tool = ""): string {
     if (tool === "mcp__treg__balance") return "Treg Balance";
     if (tool === "mcp__treg__my_tools") return "Treg Tools";
     const [, server, remoteTool] = tool.split("__");
+    if (server === "composio") {
+      return `Composio${remoteTool ? `: ${formatToolPart(remoteTool)}` : ""}`;
+    }
     return `MCP: ${formatToolPart(server)}${remoteTool ? ` / ${formatToolPart(remoteTool)}` : ""}`;
   }
 
@@ -126,6 +129,11 @@ export function displayAgentToolName(tool = ""): string {
     desktop_worker: "Desktop Worker",
     render_ui: "Render C1 UI",
     publish_html_artifact: "Publish HTML",
+    generate_pdf_report: "Generate PDF",
+    generate_excel_report: "Generate Spreadsheet",
+    generate_docx_report: "Generate Document",
+    generate_pptx_report: "Generate Slides",
+    save_as_artifact: "Save Artifact",
     ask_user: "Ask User",
     propose_workflow_template: "Propose Template",
     update_workflow_template: "Update Template",
@@ -201,6 +209,11 @@ export function toolActionLabel(tool = ""): string {
   if (tool === "read_skill_file") return "Reading skill file";
   if (tool === "render_ui") return "Rendering C1 UI";
   if (tool === "publish_html_artifact") return "Publishing artifact";
+  if (tool === "generate_pdf_report") return "Generating PDF";
+  if (tool === "generate_excel_report") return "Generating spreadsheet";
+  if (tool === "generate_docx_report") return "Generating document";
+  if (tool === "generate_pptx_report") return "Generating slides";
+  if (tool === "save_as_artifact") return "Saving artifact";
   if (tool === "ask_user") return "Asking user";
   if (tool === "propose_workflow_template") return "Drafting template";
   if (tool === "update_workflow_template") return "Updating template";

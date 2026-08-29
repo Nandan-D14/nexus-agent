@@ -119,12 +119,14 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("generate_pdf_report", instruction)
         self.assertIn("generate_excel_report", instruction)
         self.assertIn("generate_docx_report", instruction)
+        self.assertIn("generate_pptx_report", instruction)
 
     def test_terminal_worker_surface_is_shell_and_files_only(self) -> None:
         tool_names = _tool_names(self.terminal)
         self.assertIn("run_command", tool_names)
         self.assertIn("generate_excel_report", tool_names)
         self.assertIn("generate_docx_report", tool_names)
+        self.assertIn("generate_pptx_report", tool_names)
         self.assertNotIn("take_screenshot", tool_names)
         self.assertNotIn("open_browser", tool_names)
 

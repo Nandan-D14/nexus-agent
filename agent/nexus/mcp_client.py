@@ -346,6 +346,11 @@ def build_mcp_adk_tools(
         if not url:
             continue
         bearer_token = str(connection.private.get("bearerToken") or "")
+        extra_headers = {
+            str(key).strip(): str(value).strip()
+            for key, value in (connection.private.get("extraHeaders") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
         auth_type = str(connection.private.get("authType") or "")
         owner_id = str(getattr(connection, "owner_id", "") or "")
         provider = str(getattr(connection, "provider", "") or "")
@@ -372,6 +377,7 @@ def build_mcp_adk_tools(
                 *,
                 _url: str = url,
                 _token: str = bearer_token,
+                _headers: dict[str, str] = extra_headers,
                 _tool_name: str = remote_tool_name,
                 _connection_id: str = connection.connection_id,
                 _connection_name: str = connection.name,
@@ -400,7 +406,7 @@ def build_mcp_adk_tools(
                             _provider,
                             resource=spec.mcp_origin if spec else "",
                         ) or _token
-                client = McpRemoteClient(url=_url, bearer_token=token)
+                client = McpRemoteClient(url=_url, bearer_token=token, headers=_headers)
                 try:
                     result = await client.call_tool(
                         tool_name=_tool_name,
@@ -434,7 +440,9 @@ def build_mcp_adk_tools(
                             )
                         if retry_token and retry_token != token:
                             try:
-                                retry_client = McpRemoteClient(url=_url, bearer_token=retry_token)
+                                retry_client = McpRemoteClient(
+                                    url=_url, bearer_token=retry_token, headers=_headers
+                                )
                                 result = await retry_client.call_tool(
                                     tool_name=_tool_name,
                                     arguments=arguments or {},

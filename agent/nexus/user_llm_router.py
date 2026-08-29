@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from google.adk.models.lite_llm import LiteLlm
 
@@ -25,6 +26,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# #region agent log
+def _dbg(hid: str, loc: str, msg: str, data: dict | None = None) -> None:
+    import json, time, urllib.request
+    payload = {"sessionId": "19cd7e", "hypothesisId": hid, "location": loc, "message": msg, "data": data or {}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}
+    try:
+        with open(r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-19cd7e.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Debug-Session-Id": "19cd7e"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.3).read()
+    except Exception:
+        pass
+# #endregion
+
 
 def _strip_openai_prefix(model: str) -> str:
     name = (model or "").strip()
@@ -37,13 +59,24 @@ class UserLlmClient:
     """Delegates completions to LiteLLM with per-session api_key and api_base."""
 
     def __init__(self, *, api_key: str, api_base: str) -> None:
-        self.api_key = api_key
-        self.api_base = api_base.rstrip("/")
+        self.api_key = (api_key or "").strip()
+        self.api_base = (api_base or "").rstrip("/")
+
+    def _auth_headers(self, existing: Any) -> dict[str, str]:
+        headers = dict(existing) if isinstance(existing, dict) else {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _call_kwargs(self, model: str, tools: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         normalized = apply_request_timeout(apply_tool_call_policy(dict(kwargs), tools))
+        # ADK's default LiteLLMClient has no credentials. Always pin key, base,
+        # openai-compat routing, and the Authorization header so Groq/OpenRouter/
+        # custom gateways cannot send an unauthenticated request.
         normalized["api_key"] = self.api_key
         normalized["api_base"] = self.api_base
+        normalized["custom_llm_provider"] = "openai"
+        normalized["extra_headers"] = self._auth_headers(normalized.get("extra_headers"))
         normalized["model"] = f"openai/{_strip_openai_prefix(model)}"
         return normalized
 
@@ -51,15 +84,49 @@ class UserLlmClient:
         import litellm
 
         call_kwargs = self._call_kwargs(model, tools, kwargs)
+        # #region agent log
+        try:
+            msg_chars = 0
+            for m in messages or []:
+                if isinstance(m, dict):
+                    c = m.get("content")
+                    msg_chars += len(c) if isinstance(c, str) else len(str(c or ""))
+                else:
+                    msg_chars += len(str(m))
+            tool_n = len(tools) if isinstance(tools, list) else (1 if tools else 0)
+            host = urlparse(self.api_base).netloc
+            _dbg("A", "user_llm_router.py:acompletion", "llm_call", {
+                "model": str(call_kwargs.get("model") or "")[:120],
+                "host": host,
+                "has_key": bool(self.api_key),
+                "msg_chars": msg_chars,
+                "est_tok": msg_chars // 4,
+                "tool_n": tool_n,
+            })
+        except Exception:
+            pass
+        # #endregion
         logger.info(
             "Routing request asynchronously to user LLM model: %s",
             _strip_openai_prefix(model),
         )
-        response = await litellm.acompletion(
-            messages=messages,
-            tools=tools,
-            **call_kwargs,
-        )
+        try:
+            response = await litellm.acompletion(
+                messages=messages,
+                tools=tools,
+                **call_kwargs,
+            )
+        except Exception as exc:
+            # #region agent log
+            err = str(exc)
+            _dbg("B", "user_llm_router.py:acompletion", "llm_error", {
+                "exc_type": type(exc).__name__,
+                "too_large": "too large" in err.lower() or "tpm" in err.lower(),
+                "auth": "authentication" in err.lower() or "missing authentication" in err.lower(),
+                "err_head": err[:240],
+            })
+            # #endregion
+            raise
         if not call_kwargs.get("stream"):
             repair_tool_call_ids(response)
         return response
@@ -93,11 +160,20 @@ def create_user_llm_model(
         raise RuntimeError("User LLM credentials are not configured for this session.")
     if not name:
         raise ValueError("User LLM model id is empty.")
-    model = LiteLlm(model=name)
-    model.llm_client = UserLlmClient(
-        api_key=runtime_config.llm_api_key,
-        api_base=runtime_config.llm_api_base,
+    key = (runtime_config.llm_api_key or "").strip()
+    base = (runtime_config.llm_api_base or "").rstrip("/")
+    openai_model = f"openai/{_strip_openai_prefix(name)}"
+    # Credentials go in LiteLlm extras (`_additional_args`) so ADK's default
+    # LiteLLMClient still authenticates. UserLlmClient must be assigned *after*
+    # init: Pydantic rejects it as a constructor `llm_client` value.
+    model = LiteLlm(
+        model=openai_model,
+        api_key=key,
+        api_base=base,
+        custom_llm_provider="openai",
+        extra_headers={"Authorization": f"Bearer {key}"},
     )
+    model.llm_client = UserLlmClient(api_key=key, api_base=base)
     return model
 
 
@@ -158,6 +234,32 @@ def _normalize_model_id(item: Any) -> str:
     return text
 
 
+def _models_request_headers(*, api_key: str, api_base: str) -> dict[str, str]:
+    """Provider-specific GET /models headers.
+
+    Sending Anthropic's ``anthropic-version`` to OpenRouter switches that API
+    into a 20-item Anthropic-style page with corrupted ids, so that header is
+    only attached for api.anthropic.com.
+    """
+    key = (api_key or "").strip()
+    host = (urlparse(api_base or "").netloc or api_base or "").lower()
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+    }
+    if "anthropic.com" in host:
+        headers["x-api-key"] = key
+        headers["anthropic-version"] = "2023-06-01"
+    if "openrouter.ai" in host:
+        from nexus.config import settings as app_settings
+
+        referer = str(getattr(app_settings, "frontend_url", "") or "").strip()
+        headers["HTTP-Referer"] = referer or "https://cocomputer.ai"
+        headers["X-Title"] = "CoComputer"
+    return headers
+
+
 def _next_models_url(payload: Any, current_url: str, api_base: str) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -186,20 +288,19 @@ async def list_user_llm_models(*, api_key: str, api_base: str) -> list[str]:
     if not key or not base:
         raise ValueError("API key and base URL are required to list models.")
 
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Accept": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-    }
+    headers = _models_request_headers(api_key=key, api_base=base)
     url = f"{base}/models"
     ids: list[str] = []
     seen: set[str] = set()
+    seen_urls: set[str] = set()
     last_error: Exception | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
             for _ in range(_MAX_MODEL_PAGES):
+                if url in seen_urls:
+                    break
+                seen_urls.add(url)
                 response = await client.get(url, headers=headers)
                 response.raise_for_status()
                 payload = response.json()
@@ -251,4 +352,9 @@ async def _list_models_via_openai_sdk(*, api_key: str, api_base: str) -> list[st
     return ids
 
 
-__all__ = ["UserLlmClient", "create_user_llm_model", "list_user_llm_models", "probe_user_llm"]
+__all__ = [
+    "UserLlmClient",
+    "create_user_llm_model",
+    "list_user_llm_models",
+    "probe_user_llm",
+]

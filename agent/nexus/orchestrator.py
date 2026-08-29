@@ -101,7 +101,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 # Nudge sent when the model gathered evidence but produced no closing text and
 # completion verification returned a retryable MISSING_FINAL_RESPONSE.
 _FINAL_SYNTHESIS_NUDGE = (
@@ -346,7 +345,14 @@ class NexusOrchestrator:
             logger.info("No Google credentials — voice disabled, text input works")
 
         await self._ensure_adk_session()
-        await self._subagent_supervisor.recover_for_run()
+        try:
+            await self._subagent_supervisor.recover_for_run()
+        except Exception:
+            logger.warning(
+                "Subagent recovery failed during initialize for session %s",
+                self.session.id,
+                exc_info=True,
+            )
 
         # Only explicit continuation modes may hydrate durable context. A fresh
         # session must never inherit a previous task's errors or instructions.
@@ -507,7 +513,14 @@ class NexusOrchestrator:
             logger.warning("Failed to load integration tools for session %s", self.session.id, exc_info=True)
             self._integration_tools = []
 
-        self._rebuild_runner()
+        try:
+            self._rebuild_runner()
+        except Exception:
+            logger.warning(
+                "Failed to rebuild planner runner for session %s; keeping the existing runner",
+                self.session.id,
+                exc_info=True,
+            )
         if self._integration_tools:
             logger.info(
                 "Loaded %d MCP integration tools for session %s",
@@ -1166,7 +1179,18 @@ class NexusOrchestrator:
         msg = str(exc).lower()
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
+    def _is_request_too_large_error(self, exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            "request too large" in msg
+            or "please reduce your message size" in msg
+            or ("tokens per minute" in msg and "requested" in msg)
+            or ("tpm" in msg and "requested" in msg and "limit" in msg)
+        )
+
     def _should_fallback_task_model(self, exc: BaseException, task_model: str) -> bool:
+        if self._is_request_too_large_error(exc):
+            return False
         return self._is_rate_limit_error(exc)
 
     def _task_model_candidates(self) -> tuple[str, ...]:
@@ -1250,6 +1274,9 @@ class NexusOrchestrator:
                 except Exception as exc:
                     if getattr(self, "_stop_requested", False):
                         raise _AgentStopped() from exc
+                    is_rl = self._is_rate_limit_error(exc)
+                    too_large = self._is_request_too_large_error(exc)
+
                     if not self._should_fallback_task_model(exc, task_model):
                         logger.error(
                             "Agent turn failed with unexpected error for session %s",
@@ -1739,6 +1766,7 @@ class NexusOrchestrator:
         """Create/resume sandbox only when a user action actually needs it."""
         sandbox = getattr(self.session, "sandbox", None)
         stream_url = getattr(self.session, "stream_url", None)
+
 
         if sandbox is None:
             logger.warning("No sandbox attached for session %s while preparing %s", self.session.id, reason)
@@ -4167,6 +4195,7 @@ class NexusOrchestrator:
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
+        "generate_pptx_report",
         "save_as_artifact",
     })
 

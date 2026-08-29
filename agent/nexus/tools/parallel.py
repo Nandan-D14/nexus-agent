@@ -77,6 +77,9 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "show_workflow_panel",
     # Document generation
     "generate_pdf_report",
+    "generate_excel_report",
+    "generate_docx_report",
+    "generate_pptx_report",
     "publish_html_artifact",
     "save_as_artifact",
     # Web automation

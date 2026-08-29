@@ -36,6 +36,7 @@ from nexus.tools.docs import (
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    generate_pptx_report,
     publish_html_artifact,
     save_as_artifact,
 )
@@ -92,6 +93,7 @@ ALL_TOOLS = [
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    generate_pptx_report,
     publish_html_artifact,
     save_as_artifact,
     search_drive,

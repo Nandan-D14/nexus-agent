@@ -311,6 +311,35 @@ class TaskModelFallbackTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.usage_records, [])
         self.assertEqual(result.error, "item_index must be at least 1")
 
+    async def test_request_too_large_does_not_retry(self) -> None:
+        config = _runtime_config(provider="apiKey", primary="qwen-primary")
+        session = _session(config)
+        ws = SimpleNamespace(send_json=AsyncMock())
+        run_calls: list[int] = []
+
+        async def fake_run_agent_turn(**kwargs):
+            run_calls.append(1)
+            raise RuntimeError(
+                "RateLimitError: Request too large for model qwen/qwen3.8-27b "
+                "on tokens per minute (TPM): Limit 8000, Requested 17286, "
+                "please reduce your message size and try again."
+            )
+
+        with (
+            patch.object(orchestrator_module, "create_planner_agent", return_value=MagicMock(name="agent")),
+            patch.object(orchestrator_module, "create_runner", return_value=(MagicMock(), MagicMock())),
+            patch.object(orchestrator_module, "run_agent_turn", side_effect=fake_run_agent_turn),
+        ):
+            orchestrator = orchestrator_module.NexusOrchestrator(session=session, ws=ws)
+            orchestrator._RATE_LIMIT_MAX_RETRIES = 4
+            orchestrator._RATE_LIMIT_BASE_WAIT = 0
+            orchestrator._adk_session_id = "adk-session"
+            result = await orchestrator._run_agent_with_retry("make two files")
+
+        self.assertEqual(run_calls, [1])
+        self.assertIsNone(result.response)
+        self.assertIn("too large", (result.error or "").lower())
+
 
 class WebsocketSendLockTests(IsolatedAsyncioTestCase):
     async def test_send_json_serializes_concurrent_writes(self) -> None:

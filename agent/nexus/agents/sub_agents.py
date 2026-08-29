@@ -65,6 +65,7 @@ from nexus.tools.docs import (
     generate_docx_report,
     generate_excel_report,
     generate_pdf_report,
+    generate_pptx_report,
     publish_html_artifact,
     save_as_artifact,
 )
@@ -367,7 +368,7 @@ Do:
 - shell commands, repo/file/log/config inspection, installs, scripts, process checks
 - file creation and edits in the workspace, data exports
 - reading uploaded PDFs with extract_pdf_text (never cat PDFs or base64 dumps)
-- generating documents with generate_pdf_report and promoting files with save_as_artifact
+- generating documents with generate_pdf_report, generate_excel_report, generate_docx_report, or generate_pptx_report, and promoting files with save_as_artifact
 
 Workflow:
 1. Read the brief. If a workspace file list or task state is referenced, read it first.
@@ -459,11 +460,12 @@ def create_terminal_worker(
             generate_pdf_report,
             generate_excel_report,
             generate_docx_report,
+            generate_pptx_report,
             save_as_artifact,
             read_skill,
             read_skill_file,
         ]),
-        before_model_callback=make_context_trimmer(),
+        before_model_callback=make_context_trimmer(runtime_config),
     )
 
 
@@ -505,7 +507,7 @@ def create_desktop_worker(
             read_skill,
             read_skill_file,
         ]),
-        before_model_callback=make_context_trimmer(),
+        before_model_callback=make_context_trimmer(runtime_config),
     )
 
 

@@ -17,6 +17,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { useSignInGate } from "@/components/auth/sign-in-gate";
 import { APP_DASHBOARD } from "@/lib/app-paths";
 import { SiteNav } from "@/components/marketing/site-nav";
 import { SiteFooter } from "@/components/marketing/site-footer";
@@ -142,7 +143,8 @@ function FAQItem({ question, answer }: { question: string; answer: string }) {
 }
 
 export default function PricingPage() {
-  const { user, signInWithGoogle } = useAuth();
+  const { user } = useAuth();
+  const { requestSignIn } = useSignInGate();
   const [annual, setAnnual] = useState(false);
   const mounted = useSyncExternalStore(
     () => () => {},
@@ -163,7 +165,7 @@ export default function PricingPage() {
         variant="pricing"
         user={user}
         onSignIn={() => {
-          void signInWithGoogle().catch(() => {});
+          requestSignIn({ redirectTo: APP_DASHBOARD });
         }}
       />
 
@@ -438,11 +440,13 @@ export default function PricingPage() {
                 {mounted ? (
                   <>
                     <button
-                      onClick={() =>
-                        user
-                          ? (window.location.href = APP_DASHBOARD)
-                          : signInWithGoogle()
-                      }
+                      onClick={() => {
+                        if (user) {
+                          window.location.href = APP_DASHBOARD;
+                          return;
+                        }
+                        requestSignIn({ redirectTo: APP_DASHBOARD });
+                      }}
                       className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
                     >
                       {user ? "Go to Dashboard" : "Start Free"}

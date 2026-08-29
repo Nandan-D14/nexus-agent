@@ -364,7 +364,7 @@ class SandboxManager:
         if settings.sandbox_template_id:
             logger.info("Skipping runtime provisioning; using pre-baked template %s", settings.sandbox_template_id)
         else:
-            libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+            libs = ["weasyprint", "openpyxl", "python-docx", "python-pptx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
             cmd = f"pip install {' '.join(libs)}"
             try:
                 logger.info("Provisioning sandbox with libraries: %s", libs)
@@ -375,7 +375,7 @@ class SandboxManager:
             # Surface silent degradation: boot-time pip can fail without raising,
             # or packages may still be missing after a partial install.
             verify = self.run_command(
-                'python3 -c "import docx, openpyxl, fpdf, markdown2"',
+                'python3 -c "import docx, openpyxl, pptx, fpdf, markdown2"',
                 timeout=60,
             )
             if verify.get("exit_code") != 0:

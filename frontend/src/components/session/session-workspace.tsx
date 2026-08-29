@@ -90,6 +90,7 @@ import {
   mergeChatItemsByTimestamp,
   upsertTemplateDraftItem,
 } from "@/lib/session-utils";
+import { withSchedulingConnectors } from "@/lib/scheduling-intent";
 import { isDeliverableArtifact } from "@/lib/artifact-url";
 import { sessionPath } from "@/lib/app-paths";
 import { useWebSocket, replayEventToMessage } from "@/lib/use-websocket";
@@ -255,8 +256,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const shouldConnectWs =
     !isNewSession &&
     viewMode === "live" &&
-    Boolean(sessionData?.ws_ticket) &&
-    hasActivatedSession;
+    Boolean(sessionData?.ws_ticket);
   const durableTaskId =
     sessionData?.task_id && sessionData.task_id.startsWith("task_")
       ? sessionData.task_id
@@ -306,7 +306,6 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     ticket: sessionData?.ws_ticket ?? null,
     durableTaskId,
   });
-
   useEffect(() => {
     const id = "connection-lost";
     if (viewMode === "live" && connectionLost) {
@@ -856,7 +855,6 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "error":
         const errDetail = msg.detail || msg.message || "Agent error occurred";
         setPageError(errDetail);
-        toast(errDetail, "error");
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -1867,7 +1865,12 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
     const payload: PendingTurnInput = {
       text,
-      connectorIds: selectedConnectorIds,
+      connectorIds: withSchedulingConnectors(
+        text,
+        selectedConnectorIds,
+        selectedToolIds,
+        availableConnectors,
+      ),
       toolIds: selectedToolIds,
       uploadedFiles,
     };
@@ -1886,7 +1889,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     sendTextOrQueue(payload);
     setTextInput("");
     setUploadedFiles([]);
-  }, [createThreadFromPrompt, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
+  }, [availableConnectors, createThreadFromPrompt, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
 
   useEffect(() => {
     workspaceTabRef.current = workspaceTab;
@@ -1945,7 +1948,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         toast(byok.message, "info");
         return;
       }
-      const payload: PendingTurnInput = { text };
+      const payload: PendingTurnInput = {
+        text,
+        connectorIds: withSchedulingConnectors(text, selectedConnectorIds, selectedToolIds, availableConnectors),
+        toolIds: selectedToolIds,
+      };
       if (isNewSession) {
         void createThreadFromAction({ type: "demo", payload });
         return;
@@ -1956,7 +1963,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       }
       sendTextOrQueue(payload);
     },
-    [continueCurrentThread, createThreadFromAction, ensureByokReady, isNewSession, sendTextOrQueue, toast, viewMode],
+    [availableConnectors, continueCurrentThread, createThreadFromAction, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, toast, viewMode],
   );
 
   const handlePermissionRespond = useCallback(

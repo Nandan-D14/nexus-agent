@@ -37,9 +37,9 @@ const ACCENTS: Record<string, ArtifactAccent> = {
 function artifactFamily(artifact: ArtifactLike): keyof typeof ACCENTS {
   if (isPdfArtifact(artifact)) return "pdf";
   if (artifact.kind === "image" || artifact.kind === "screenshot") return "image";
-  if (isHtmlArtifact(artifact)) return "html";
-  if (artifact.kind === "spreadsheet") return "spreadsheet";
+  if (artifact.kind === "spreadsheet" || artifact.kind === "csv") return "spreadsheet";
   if (artifact.kind === "presentation") return "presentation";
+  if (isHtmlArtifact(artifact)) return "html";
   if (artifact.kind === "document") return "document";
   if (artifact.kind === "data" || artifact.kind === "csv" || artifact.kind === "json") {
     return "data";

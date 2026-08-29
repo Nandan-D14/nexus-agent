@@ -155,6 +155,7 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
    - PDF                      → terminal_worker with a brief that says "call generate_pdf_report(title=..., markdown_content=..., filename=...)". Include the full markdown body in the brief. Do not draft PDF bytes or base64 inline.
    - XLSX                     → terminal_worker with a brief that says "call generate_excel_report(...)".
    - DOCX                     → terminal_worker with a brief that says "call generate_docx_report(...)".
+   - PPTX                     → terminal_worker with a brief that says "call generate_pptx_report(title=..., slides=[{title, bullets}], filename=...)".
    - promote existing file    → terminal_worker with a brief that says "call save_as_artifact(path, title)".
    - code changes / repo work → terminal_worker with a scoped brief (files, commands, expected outcome).
    - GUI / browser action     → desktop_worker with a scoped brief (URL, elements, verification).
@@ -174,7 +175,7 @@ d. scrape_web_page                                   — capture important sourc
 e. search_sources                                    — retrieve cited chunks from saved sources/.
 f. publish_html_artifact / render_ui                 — HTML deliverables (no sandbox).
 g. run_command(command=...)                          — ONE shell command in the sandbox. Use this for a single check (ls, pwd, models list, a test, a script). The sandbox is already the machine — do not hunt for API keys, .env files, or credentials.
-h. terminal_worker(request=...)                      — batched shell, repo work, scripts, PDF/XLSX/DOCX generation, save_as_artifact, extract_pdf_text on uploads. Prefer this when several dependent commands belong together.
+h. terminal_worker(request=...)                      — batched shell, repo work, scripts, PDF/XLSX/DOCX/PPTX generation, save_as_artifact, extract_pdf_text on uploads. Prefer this when several dependent commands belong together.
 i. desktop_worker(request=...)                       — GUI/browser: clicks, forms, logins, screenshots, Playwright.
 j. invoke_subagent + get_subagent_result / await_subagents — independent parallel background work (research fan-out, bulk drafting).
 k. request_background_task                           — user-visible long-running work needing durable resume.
@@ -385,7 +386,7 @@ def create_planner_agent(
         ),
         instruction=instruction,
         tools=[*gate_tools(direct_tools), *worker_tools],
-        before_model_callback=make_context_trimmer(),
+        before_model_callback=make_context_trimmer(runtime_config),
     )
 
 

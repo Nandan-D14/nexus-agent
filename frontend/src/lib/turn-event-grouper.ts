@@ -517,10 +517,21 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           ts: event.ts,
         };
       }
+      const message = String(event.message || "Failed");
+      const code = typeof event.code === "string" ? event.code : undefined;
+      const lastStep = currentTask.steps[currentTask.steps.length - 1];
+      if (
+        lastStep &&
+        lastStep.kind === "error" &&
+        lastStep.message === message &&
+        lastStep.code === code
+      ) {
+        continue;
+      }
       currentTask.steps.push({
         kind: "error",
-        message: String(event.message || "Failed"),
-        code: typeof event.code === "string" ? event.code : undefined,
+        message,
+        code,
         ts: event.ts,
       });
       continue;

@@ -283,25 +283,6 @@
   }
 }
 
-@keyframes logo-marquee {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-50%);
-  }
-}
-
-.logo-marquee {
-  animation: logo-marquee 32s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .logo-marquee {
-    animation: none;
-  }
-}
-
 @keyframes mesh-flow {
   0% { background-position: 0% 50%; }
   50% { background-position: 100% 50%; }

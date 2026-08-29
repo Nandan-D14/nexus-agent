@@ -83,6 +83,7 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
         }
     ),
     "openai": frozenset({"openai_web_search"}),
+    "composio": frozenset(),
     "thesys": frozenset({"render_ui"}),
     # Legacy "system" connector from the frontend — maps to core sandbox caps.
     "system": frozenset(
@@ -130,6 +131,7 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
+        "generate_pptx_report",
         "save_as_artifact",
         "propose_workflow_template",
         "update_workflow_template",

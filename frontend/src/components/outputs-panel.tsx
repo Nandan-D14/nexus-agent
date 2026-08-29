@@ -80,7 +80,8 @@ export function OutputsPanel({
   // Prefetch URLs for anything that renders a thumbnail on its card.
   useEffect(() => {
     deliverables.forEach((artifact) => {
-      if (previewKind(artifact) === "none") return;
+      const kind = previewKind(artifact);
+      if (kind === "none" || kind === "sheet") return;
       if (freshUrls[artifact.artifact_id] || fetchedIds.current.has(artifact.artifact_id)) {
         return;
       }

@@ -88,14 +88,24 @@ class CalendarClient(GoogleServiceClient):
         description: str = "",
         location: str = "",
         calendar_id: str = "primary",
+        time_zone: str = "UTC",
+        attendees: list[str] | None = None,
     ) -> dict[str, Any]:
-        body = {
+        zone = (time_zone or "UTC").strip() or "UTC"
+        body: dict[str, Any] = {
             "summary": summary,
             "description": description,
             "location": location,
-            "start": {"dateTime": start_time},
-            "end": {"dateTime": end_time},
+            "start": {"dateTime": start_time, "timeZone": zone},
+            "end": {"dateTime": end_time, "timeZone": zone},
         }
+        emails = [
+            email.strip()
+            for email in (attendees or [])
+            if isinstance(email, str) and email.strip()
+        ]
+        if emails:
+            body["attendees"] = [{"email": email} for email in emails]
         return await self._request("POST", f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events", json_body=body)
 
 

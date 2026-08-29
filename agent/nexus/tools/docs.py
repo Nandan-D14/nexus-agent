@@ -34,8 +34,8 @@ _HTML_DATA_URI_LIMIT_BYTES = 500_000
 _SANDBOX_DEPS_BOOTSTRAP = textwrap.dedent("""\
     import importlib, subprocess, sys
     for pkg, mod in [("python-docx", "docx"), ("openpyxl", "openpyxl"),
-                     ("weasyprint", "weasyprint"), ("fpdf2", "fpdf"),
-                     ("markdown2", "markdown2")]:
+                     ("python-pptx", "pptx"), ("weasyprint", "weasyprint"),
+                     ("fpdf2", "fpdf"), ("markdown2", "markdown2")]:
         try:
             importlib.import_module(mod)
         except ImportError:
@@ -79,6 +79,29 @@ def _html_preview_text(html_content: str) -> str:
     compact = re.sub(r"<[^>]+>", " ", compact)
     compact = " ".join(compact.split())
     return compact[:240] if compact else "Interactive HTML artifact ready."
+
+
+def _normalize_slides(slides: list[Any] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in slides or []:
+        if isinstance(item, str):
+            title = item.strip()
+            if title:
+                normalized.append({"title": title, "bullets": []})
+            continue
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("heading") or "").strip()
+        raw_bullets = item.get("bullets") or item.get("points") or item.get("body") or []
+        if isinstance(raw_bullets, str):
+            bullets = [line.strip() for line in raw_bullets.splitlines() if line.strip()]
+        elif isinstance(raw_bullets, list):
+            bullets = [str(part).strip() for part in raw_bullets if str(part).strip()]
+        else:
+            bullets = []
+        if title or bullets:
+            normalized.append({"title": title or "Slide", "bullets": bullets})
+    return normalized
 
 
 def _artifact_payload(artifact) -> dict[str, Any]:
@@ -629,7 +652,13 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
         kind = "pdf"
     elif path.endswith((".html", ".htm")):
         kind = "html"
-    elif path.endswith((".csv", ".json")):
+    elif path.endswith((".xlsx", ".xls", ".csv")):
+        kind = "spreadsheet"
+    elif path.endswith((".pptx", ".ppt")):
+        kind = "presentation"
+    elif path.endswith(".docx"):
+        kind = "document"
+    elif path.endswith(".json"):
         kind = "data"
         
     try:
@@ -1046,6 +1075,215 @@ except Exception as e:
         return {
             "status": "error",
             "summary": f"DOCX generated but could not be persisted to durable storage: {e}",
+            "detail": {"filename": filename, "path": output_path},
+            "error_code": "ARTIFACT_PERSISTENCE_FAILED",
+        }
+
+
+@normalized_tool(needs_sandbox=True)
+async def generate_pptx_report(
+    title: str,
+    slides: list[dict[str, Any]] | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Generate a PowerPoint (.pptx) deck and an HTML preview sibling.
+
+    Args:
+        title: Deck title used on the first slide when needed.
+        slides: Slides as objects with ``title`` and ``bullets`` (list of strings).
+        filename: Optional desired filename (e.g. 'pitch.pptx').
+    """
+    sandbox = get_sandbox()
+    session_id = get_session_id()
+    run_id = get_run_id()
+    history_repo = get_history_repository()
+
+    normalized = _normalize_slides(slides)
+    if not normalized:
+        return {
+            "status": "error",
+            "summary": "Provide at least one slide with a title or bullets.",
+            "detail": None,
+            "error_code": "INVALID_SLIDES",
+        }
+
+    if not filename:
+        filename = f"deck_{run_id[:8]}.pptx"
+    if not filename.endswith(".pptx"):
+        filename += ".pptx"
+    filename = os.path.basename(filename)
+    output_relative_path = f"outputs/{filename}"
+    output_path = f"{get_workspace_path().rstrip('/')}/{output_relative_path}"
+    html_filename = filename[:-5] + ".html"
+    html_relative_path = f"outputs/{html_filename}"
+    html_output_path = f"{get_workspace_path().rstrip('/')}/{html_relative_path}"
+
+    import json as _json
+    data_path = f"/tmp/_pptx_data_{run_id}.json"
+    sandbox.write_text_file(data_path, _json.dumps({
+        "title": title,
+        "slides": normalized,
+    }))
+
+    pptx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
+import html as html_lib
+import json, os
+from pptx import Presentation
+from pptx.util import Inches, Pt
+
+data = json.loads(open({repr(data_path)}, encoding="utf-8").read())
+out_path = {repr(output_path)}
+html_path = {repr(html_output_path)}
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+slides = data.get("slides") or []
+prs = Presentation()
+prs.slide_width = Inches(13.333)
+prs.slide_height = Inches(7.5)
+layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+for item in slides:
+    slide = prs.slides.add_slide(layout)
+    title_text = str(item.get("title") or "Slide")
+    try:
+        slide.shapes.title.text = title_text
+    except Exception:
+        box = slide.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(12), Inches(1))
+        box.text_frame.paragraphs[0].text = title_text
+    bullets = [str(b) for b in (item.get("bullets") or []) if str(b).strip()]
+    body = None
+    title_shape = getattr(slide.shapes, "title", None)
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        if title_shape is not None and shape == title_shape:
+            continue
+        body = shape.text_frame
+        break
+    if body is None:
+        body_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(11.6), Inches(5))
+        body = body_box.text_frame
+    body.clear()
+    if not bullets:
+        body.paragraphs[0].text = ""
+    for idx, bullet in enumerate(bullets):
+        paragraph = body.paragraphs[0] if idx == 0 else body.add_paragraph()
+        paragraph.text = bullet
+        paragraph.level = 0
+        paragraph.font.size = Pt(20)
+prs.save(out_path)
+
+sections = []
+for item in slides:
+    heading = html_lib.escape(str(item.get("title") or "Slide"))
+    items = "".join(
+        f"<li>{{html_lib.escape(str(b))}}</li>" for b in (item.get("bullets") or []) if str(b).strip()
+    )
+    list_html = f"<ul>{{items}}</ul>" if items else ""
+    sections.append(f'<section class="slide"><h1>{{heading}}</h1>{{list_html}}</section>')
+deck_title = html_lib.escape(str(data.get("title") or "Slides"))
+html_doc = (
+    "<!DOCTYPE html><html lang=\\"en\\"><head><meta charset=\\"utf-8\\">"
+    "<meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1\\">"
+    f"<title>{{deck_title}}</title>"
+    "<style>body{{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:#0f172a;color:#f8fafc}}"
+    ".slide{{min-height:100vh;padding:56px 72px;box-sizing:border-box;border-bottom:1px solid #1e293b;"
+    "display:flex;flex-direction:column;justify-content:center}}"
+    "h1{{font-size:2.25rem;margin:0 0 1.25rem;letter-spacing:-0.02em}}"
+    "ul{{margin:0;padding-left:1.25rem;font-size:1.2rem;line-height:1.6}}"
+    "li{{margin:0.35rem 0}}</style></head><body>"
+    + "".join(sections)
+    + "</body></html>"
+)
+open(html_path, "w", encoding="utf-8").write(html_doc)
+print(json.dumps({{
+    "status": "success",
+    "path": out_path,
+    "html_path": html_path,
+    "size": os.path.getsize(out_path),
+    "html_size": os.path.getsize(html_path),
+    "slide_count": len(slides),
+}}))
+""")
+
+    script_path = f"/tmp/gen_pptx_{run_id}.py"
+    sandbox.write_text_file(script_path, pptx_script)
+
+    res = sandbox.run_command(f"python3 {script_path}", timeout=60)
+    sandbox.run_command(f"rm -f {shlex.quote(script_path)} {shlex.quote(data_path)}", timeout=10)
+
+    if res.get("exit_code") != 0:
+        return {
+            "status": "error",
+            "summary": f"PPTX generation failed: {res.get('stderr') or res.get('stdout')}",
+            "detail": res,
+        }
+
+    try:
+        import json as _json2
+        payload = _json2.loads(str(res.get("stdout") or "").strip())
+    except Exception:
+        payload = {}
+
+    try:
+        content = sandbox.read_binary_file(output_path)
+        gcs_url = await upload_artifact_async(
+            session_id=session_id,
+            run_id=run_id,
+            relative_path=output_relative_path,
+            content=content,
+        )
+
+        html_gcs_url: str | None = None
+        try:
+            html_content = sandbox.read_binary_file(html_output_path)
+            html_gcs_url = await upload_artifact_async(
+                session_id=session_id,
+                run_id=run_id,
+                relative_path=html_relative_path,
+                content=html_content,
+            )
+        except Exception:
+            logger.warning("Failed to upload HTML sibling for PPTX preview", exc_info=True)
+
+        artifact = await history_repo.create_artifact(
+            session_id=session_id,
+            run_id=run_id,
+            kind="presentation",
+            title=title or filename,
+            preview=f"Generated slide deck: {filename} ({len(normalized)} slides)",
+            path=output_path,
+            url=gcs_url,
+            metadata={
+                **artifact_storage_metadata(session_id, run_id, output_relative_path),
+                "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "size": payload.get("size", 0),
+                "slide_count": len(normalized),
+                "role": "deliverable",
+                **({"preview_url": html_gcs_url} if html_gcs_url else {}),
+                **({"preview_path": html_relative_path} if html_gcs_url else {}),
+                **({"preview_content_type": "text/html; charset=utf-8"} if html_gcs_url else {}),
+                **({"render_mode": "iframe"} if html_gcs_url else {}),
+            },
+        )
+        await _notify_artifact_created(artifact)
+
+        return {
+            "status": "success",
+            "summary": f"Generated slide deck: {filename} ({len(normalized)} slides)",
+            "detail": {
+                "filename": filename,
+                "path": output_path,
+                "relative_path": output_relative_path,
+                "artifact_id": artifact.artifact_id,
+                "url": gcs_url,
+                **({"preview_url": html_gcs_url} if html_gcs_url else {}),
+            },
+        }
+    except Exception as e:
+        logger.exception("Failed to promote PPTX to artifact")
+        return {
+            "status": "error",
+            "summary": f"PPTX generated but could not be persisted to durable storage: {e}",
             "detail": {"filename": filename, "path": output_path},
             "error_code": "ARTIFACT_PERSISTENCE_FAILED",
         }

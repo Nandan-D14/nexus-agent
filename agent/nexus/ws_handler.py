@@ -25,7 +25,6 @@ from nexus.session import Session, SessionManager
 
 logger = logging.getLogger(__name__)
 
-
 class DurableEnqueueError(RuntimeError):
     """Raised when a durable run was persisted but the queue rejected it.
 
@@ -807,6 +806,7 @@ async def handle_websocket(
     5. Clean up on disconnect
     """
     await ws.accept(subprotocol=subprotocol)
+
     send_lock = asyncio.Lock()
     setattr(ws, "_cocomputer_send_lock", send_lock)
 
@@ -846,6 +846,7 @@ async def handle_websocket(
     try:
         # Initialize voice + agent connections
         await orchestrator.initialize(lazy_sandbox=True)
+
 
         # Start background task: Gemini Live → frontend
         voice_task = asyncio.create_task(orchestrator.run_voice_receive_loop())
@@ -1219,11 +1220,21 @@ async def handle_websocket(
                 await voice_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # A failed voice loop must not become "Server error. Please
+                # reconnect." on the way out — that frame has no event id, so
+                # the client appends a new chat row on every reconnect.
+                logger.debug(
+                    "Voice receive loop ended with an error during WS cleanup for session %s",
+                    session.id,
+                    exc_info=True,
+                )
             if _bg_tasks:
                 await asyncio.gather(*_bg_tasks, return_exceptions=True)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("WebSocket handler error for session %s", session.id)
+
         try:
             await _safe_send_json({
                 "type": "error",

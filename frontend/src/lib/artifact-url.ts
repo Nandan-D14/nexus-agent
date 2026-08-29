@@ -76,29 +76,69 @@ export function isOfficeArtifact(artifact: Pick<RunArtifact, "kind" | "metadata"
   );
 }
 
+const SHEET_EXT = /\.(xlsx|xlsm|xls|csv)$/i;
+
+export function isSpreadsheetArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (artifact.kind === "spreadsheet" || artifact.kind === "csv") return true;
+  const path = (artifact.path || "").replace(/\\/g, "/");
+  const name = `${path.split("/").pop() || ""} ${artifact.title || ""}`;
+  if (SHEET_EXT.test(path) || SHEET_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return (
+    contentType.includes("spreadsheetml") ||
+    contentType.includes("ms-excel") ||
+    contentType === "text/csv" ||
+    contentType === "application/csv" ||
+    contentType.startsWith("text/csv")
+  );
+}
+
+function officeSiblingPreviewKind(
+  artifact: Pick<RunArtifact, "metadata">,
+): "html" | "pdf" | "none" {
+  const previewUrl = artifact.metadata?.preview_url;
+  if (typeof previewUrl !== "string" || !previewUrl) return "none";
+  const previewType = String(artifact.metadata?.preview_content_type ?? "").toLowerCase();
+  const previewPath = String(artifact.metadata?.preview_path ?? "").toLowerCase();
+  if (
+    artifact.metadata?.render_mode === "iframe" ||
+    previewType.includes("html") ||
+    previewPath.endsWith(".html") ||
+    previewPath.endsWith(".htm")
+  ) {
+    return "html";
+  }
+  return "pdf";
+}
+
 /** How an artifact renders inside the document viewer. */
-export type PreviewKind = "pdf" | "image" | "html" | "none";
+export type PreviewKind = "pdf" | "image" | "html" | "sheet" | "none";
+
+type PreviewArtifact = Pick<RunArtifact, "kind" | "metadata" | "path" | "title">;
 
 /**
  * Single source of truth for viewer rendering, card thumbnails, and previewability.
- * Office files render through the PDF sibling emitted alongside them; without one
- * there is no reliable in-browser renderer, so they fall back to download-only.
+ * Spreadsheets parse in-browser. Office files otherwise use an HTML or PDF sibling
+ * when `preview_url` is set; without one they fall back to download-only.
  */
-export function previewKind(artifact: Pick<RunArtifact, "kind" | "metadata">): PreviewKind {
+export function previewKind(artifact: PreviewArtifact): PreviewKind {
   if (artifact.kind === "image" || artifact.kind === "screenshot") return "image";
   if (isPdfArtifact(artifact)) return "pdf";
+  if (isSpreadsheetArtifact(artifact)) return "sheet";
   if (isHtmlArtifact(artifact)) return "html";
-  if (isOfficeArtifact(artifact)) return artifact.metadata?.preview_url ? "pdf" : "none";
+  if (isOfficeArtifact(artifact)) return officeSiblingPreviewKind(artifact);
   return "none";
 }
 
-export function canInlinePreview(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
+export function canInlinePreview(artifact: PreviewArtifact): boolean {
   return previewKind(artifact) !== "none";
 }
 
 export function getPreviewUrl(artifact: RunArtifact): string | null {
-  // Office: use the PDF sibling for preview when present
-  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact)) {
+  // Office: use the HTML/PDF sibling for preview when present
+  if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact) && !isSpreadsheetArtifact(artifact)) {
     const previewUrl = artifact.metadata?.preview_url;
     if (typeof previewUrl === "string" && previewUrl) return previewUrl;
   }
@@ -216,6 +256,13 @@ export function durableInlineUrl(url: string | null | undefined): string | null 
   return null;
 }
 
+function usableInlineSrc(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (url.startsWith("data:")) return toBlobUrlIfDataUri(url);
+  if (url.startsWith("blob:") || url.startsWith("http")) return url;
+  return null;
+}
+
 /**
  * Resolve a working preview/download URL.
  * Prefer the authenticated download API for GCS-backed artifacts.
@@ -234,8 +281,9 @@ export async function resolveArtifactUrl(
   ) {
     if (forPreview) {
       const preview = getPreviewUrl(artifact);
-      if (preview && preview !== artifact.url && preview.startsWith("http")) {
-        return preview;
+      if (preview && preview !== artifact.url) {
+        const src = usableInlineSrc(preview);
+        if (src) return src;
       }
     }
     return artifact.url;
@@ -245,16 +293,12 @@ export async function resolveArtifactUrl(
     return toBlobUrlIfDataUri(artifact.url);
   }
 
-  // Office artifacts: use the PDF preview sibling when available
+  // Office artifacts: use the HTML/PDF preview sibling when available
   if (forPreview) {
     const officePreview = getPreviewUrl(artifact);
     if (officePreview && officePreview !== artifact.url) {
-      if (officePreview.startsWith("data:")) {
-        return toBlobUrlIfDataUri(officePreview);
-      }
-      if (officePreview.startsWith("http")) {
-        return officePreview;
-      }
+      const src = usableInlineSrc(officePreview);
+      if (src) return src;
     }
   }
 
@@ -327,6 +371,7 @@ export const DOC_ARTIFACT_TOOLS = new Set([
   "generate_pdf_report",
   "generate_docx_report",
   "generate_excel_report",
+  "generate_pptx_report",
   "save_as_artifact",
   "publish_html_artifact",
 ]);
@@ -360,9 +405,16 @@ export function artifactFromToolResult(
           ? "document"
           : tool === "generate_excel_report"
             ? "spreadsheet"
-            : tool === "publish_html_artifact"
-              ? "html"
-              : "file";
+            : tool === "generate_pptx_report"
+              ? "presentation"
+              : tool === "publish_html_artifact"
+                ? "html"
+                : "file";
+
+    const previewUrl =
+      typeof detail.preview_url === "string" && detail.preview_url
+        ? detail.preview_url
+        : undefined;
 
     return {
       artifact_id: artifactId,
@@ -385,9 +437,22 @@ export function artifactFromToolResult(
               ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               : kind === "spreadsheet"
                 ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                : kind === "html"
-                  ? "text/html"
-                  : "application/octet-stream",
+                : kind === "presentation"
+                  ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                  : kind === "html"
+                    ? "text/html"
+                    : "application/octet-stream",
+        ...(previewUrl
+          ? {
+              preview_url: previewUrl,
+              ...(kind === "presentation"
+                ? {
+                    preview_content_type: "text/html; charset=utf-8",
+                    render_mode: "iframe",
+                  }
+                : {}),
+            }
+          : {}),
       },
     };
   } catch {

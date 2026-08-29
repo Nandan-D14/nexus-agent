@@ -12,7 +12,16 @@ import {
   initializeApp,
   type FirebaseApp,
 } from "firebase/app";
-import { connectAuthEmulator, getAuth } from "firebase/auth";
+import {
+  connectAuthEmulator,
+  getAuth,
+  initializeAuth,
+  indexedDBLocalPersistence,
+  browserLocalPersistence,
+  inMemoryPersistence,
+  browserPopupRedirectResolver,
+  type Auth,
+} from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 
 const requiredEnvVars = {
@@ -35,7 +44,7 @@ if (missingVars.length > 0) {
   );
 }
 
-const firebaseConfig = requiredEnvVars;;
+const firebaseConfig = requiredEnvVars;
 
 const emulatorFlag =
   process.env.NEXT_PUBLIC_USE_FIREBASE_EMULATORS === "true";
@@ -43,7 +52,25 @@ const emulatorFlag =
 const app: FirebaseApp =
   getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-export const auth = getAuth(app);
+function initAuth(firebaseApp: FirebaseApp): Auth {
+  if (typeof window === "undefined") {
+    return getAuth(firebaseApp);
+  }
+  try {
+    return initializeAuth(firebaseApp, {
+      persistence: [
+        indexedDBLocalPersistence,
+        browserLocalPersistence,
+        inMemoryPersistence,
+      ],
+      popupRedirectResolver: browserPopupRedirectResolver,
+    });
+  } catch {
+    return getAuth(firebaseApp);
+  }
+}
+
+export const auth = initAuth(app);
 export const db = getFirestore(app);
 
 const recoverableFirestoreErrorCodes = new Set([

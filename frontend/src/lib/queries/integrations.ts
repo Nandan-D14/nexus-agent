@@ -145,6 +145,23 @@ export function useConnectTavilyMutation() {
   });
 }
 
+export function useConnectComposioMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (consumerApiKey: string) => {
+      await apiJson("/api/v1/integrations/composio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          consumer_api_key: consumerApiKey.trim() || null,
+          enabled: true,
+        }),
+      });
+    },
+    onSuccess: () => invalidateIntegrations(queryClient),
+  });
+}
+
 export function useConnectTinyfishMutation() {
   const queryClient = useQueryClient();
   return useMutation({

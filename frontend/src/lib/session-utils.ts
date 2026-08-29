@@ -916,7 +916,17 @@ export function reduceWorkingLogMessage(
     case "agent_stream_end":
       return { chatItems: prevChatItems };
 
-    case "error":
+    case "error": {
+      const last = prevChatItems[prevChatItems.length - 1];
+      if (
+        last &&
+        last.kind === "event" &&
+        last.type === "error" &&
+        last.message === msg.message &&
+        last.code === msg.code
+      ) {
+        return { chatItems: prevChatItems };
+      }
       return {
         chatItems: [
           ...prevChatItems,
@@ -930,6 +940,7 @@ export function reduceWorkingLogMessage(
           },
         ],
       };
+    }
 
     // Skipped on purpose (history / REST / ephemeral / page-owned side effects):
     // transcript, generative_ui, template_draft, artifact_created, run_status, step_*,

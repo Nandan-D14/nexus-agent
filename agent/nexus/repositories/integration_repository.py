@@ -40,6 +40,8 @@ class IntegrationRepository(FirestoreRepoBase):
         status: str = "needs_setup",
         last_error: str | None = None,
         latency_ms: int | None = None,
+        provider: str = "mcp",
+        extra_headers: dict[str, str] | None = None,
     ) -> StoredIntegrationConnection:
         return await asyncio.to_thread(
             self._upsert_mcp_connection_sync,
@@ -54,6 +56,8 @@ class IntegrationRepository(FirestoreRepoBase):
             status,
             last_error,
             latency_ms,
+            provider,
+            extra_headers,
         )
 
     async def upsert_exa_connection(
@@ -455,18 +459,31 @@ class IntegrationRepository(FirestoreRepoBase):
         status: str,
         last_error: str | None,
         latency_ms: int | None,
+        provider: str = "mcp",
+        extra_headers: dict[str, str] | None = None,
     ) -> StoredIntegrationConnection:
         now = utcnow()
         existing = self._integration_private_ref(uid, connection_id).get()
         existing_data = existing.to_dict() if existing.exists else {}
+        cleaned_headers = {
+            str(key).strip(): str(value).strip()
+            for key, value in (extra_headers or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        if bearer_token:
+            auth_type = "bearer"
+        elif cleaned_headers:
+            auth_type = "headers"
+        else:
+            auth_type = existing_data.get("authType", "none") if extra_headers is None else "none"
         private_payload = {
             **existing_data,
             "ownerId": uid,
             "connectorType": "mcp_remote_http",
-            "provider": "mcp",
+            "provider": (provider or "mcp").strip() or "mcp",
             "name": name.strip()[:80] or "MCP Server",
             "url": url,
-            "authType": "bearer" if bearer_token else existing_data.get("authType", "none"),
+            "authType": auth_type,
             "enabled": enabled,
             "tools": tools or [],
             "resources": resources or [],
@@ -477,6 +494,8 @@ class IntegrationRepository(FirestoreRepoBase):
         }
         if bearer_token:
             private_payload["bearerToken"] = bearer_token
+        if extra_headers is not None:
+            private_payload["extraHeaders"] = cleaned_headers
         if latency_ms is not None:
             private_payload["latencyMs"] = latency_ms
         if not existing_data.get("createdAt"):

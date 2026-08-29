@@ -14,6 +14,7 @@ import {
   resolveArtifactUrl,
 } from "@/lib/artifact-url";
 import { ArtifactIcon } from "./artifact-icon";
+import { SpreadsheetPreview } from "./spreadsheet-preview";
 
 type Props = {
   artifact: RunArtifact;
@@ -38,6 +39,13 @@ export function ArtifactPreview({
   const title = artifact.title || artifact.kind.replace(/_/g, " ");
 
   useEffect(() => {
+    if (kind === "sheet") {
+      setUrl(null);
+      setLoading(false);
+      setError(null);
+      onUrlChangeRef.current?.(null);
+      return;
+    }
     if (initialUrl) {
       setUrl(initialUrl);
       setLoading(false);
@@ -86,7 +94,9 @@ export function ArtifactPreview({
 
   return (
     <div className={className ?? "relative min-h-0 flex-1 bg-[#0e0e10]"}>
-      {loading ? (
+      {kind === "sheet" ? (
+        <SpreadsheetPreview artifact={artifact} />
+      ) : loading ? (
         <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-400">
           <Loader2 className="h-4 w-4 animate-spin" />
           Loading preview…

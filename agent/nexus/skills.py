@@ -125,7 +125,14 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Documents",
         "description": "Create slide decks, outlines, and presentation content.",
         "trigger": "Use for PPTX, slide plans, pitch decks, and visual summaries.",
-        "instructions": "Keep slides scannable and organize content into strong sections.",
+        "instructions": (
+            "Keep slides scannable and organize content into strong sections.\n"
+            "1. Confirm audience, filename, and slide count before generating.\n"
+            "2. Outline each slide as a title plus short bullets.\n"
+            "3. Call generate_pptx_report(title, slides=[{title, bullets}], filename) "
+            "instead of inventing PPTX bytes. The tool also emits an HTML preview for Canvas.\n"
+            "4. Save extra supporting files with save_as_artifact if needed."
+        ),
         "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker", "writer"],
     },
     {
@@ -168,7 +175,13 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "category": "Productivity",
         "description": "Work with Gmail, Calendar, Tasks, and Drive when connected.",
         "trigger": "Use for email search/send, calendar events, tasks, and Drive files.",
-        "instructions": "Confirm recipients, dates, and irreversible sends before acting.",
+        "instructions": (
+            "Use native tools when Google is connected: gmail_search/gmail_read/gmail_send, "
+            "calendar_list/calendar_create (include time_zone and optional attendees), "
+            "and tasks_list/tasks_create. Do not open Gmail or Calendar in the browser "
+            "or ask the user to sign in when those tools are available. Confirm recipients, "
+            "dates, and irreversible sends; creates require user approval."
+        ),
         "agent_scope": ["nexus_planner", "desktop_worker", "terminal_worker"],
     },
     {

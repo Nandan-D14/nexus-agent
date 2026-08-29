@@ -56,6 +56,12 @@ export interface UseWebSocketReturn {
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
+/**
+ * Only forgive reconnect attempts after the socket has stayed open this long.
+ * Resetting the budget in `onopen` turns "accept then crash" into an infinite
+ * 1s reconnect loop that paints the same error into chat on every try.
+ */
+const STABLE_CONNECTION_MS = 2500;
 const NON_RETRYABLE_CLOSE_CODES = new Set([4001, 4004, 4403, 4429]);
 /** Replay blocks live frames, so it must never hang the stream indefinitely. */
 const REPLAY_TIMEOUT_MS = 10_000;
@@ -163,6 +169,7 @@ export function useWebSocket(
 
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stableTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectRef = useRef<(target: string) => void>(() => {});
   /** Keeps the latest url so the reconnect closure always sees it. */
   const urlRef = useRef(url);
@@ -210,6 +217,13 @@ export function useWebSocket(
     if (reconnectTimer.current !== null) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
+    }
+  }, []);
+
+  const clearStableTimer = useCallback(() => {
+    if (stableTimer.current !== null) {
+      clearTimeout(stableTimer.current);
+      stableTimer.current = null;
     }
   }, []);
 
@@ -306,6 +320,7 @@ export function useWebSocket(
 
   const connect = useCallback((target: string) => {
     // Tear down any existing socket first.
+    clearStableTimer();
     if (wsRef.current) {
       wsRef.current.onopen = null;
       wsRef.current.onclose = null;
@@ -327,9 +342,13 @@ export function useWebSocket(
     setReadyState(ReadyState.CONNECTING);
 
     ws.onopen = () => {
-      reconnectAttempts.current = 0;
       setReadyState(ReadyState.OPEN);
       setConnectionLost(false);
+      clearStableTimer();
+      stableTimer.current = setTimeout(() => {
+        reconnectAttempts.current = 0;
+        stableTimer.current = null;
+      }, STABLE_CONNECTION_MS);
 
       // Flush any frames queued while the socket was down (in order).
       if (pendingOutboundRef.current.length > 0) {
@@ -374,8 +393,8 @@ export function useWebSocket(
     };
 
     ws.onclose = (event) => {
+      clearStableTimer();
       setReadyState(ReadyState.CLOSED);
-
       const failBufferedSends = () => {
         if (pendingOutboundRef.current.length > 0) {
           pendingOutboundRef.current = [];
@@ -441,7 +460,7 @@ export function useWebSocket(
         }
       }
     };
-  }, [dispatchJsonMessage, flushReplayBuffer, replayMissedEvents, surfaceError]);
+  }, [clearStableTimer, dispatchJsonMessage, flushReplayBuffer, replayMissedEvents, surfaceError]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -449,6 +468,7 @@ export function useWebSocket(
 
   useEffect(() => {
     clearReconnectTimer();
+    clearStableTimer();
     reconnectAttempts.current = 0;
     hasOpenedRef.current = false;
     replayInFlightRef.current = false;
@@ -468,13 +488,14 @@ export function useWebSocket(
 
     return () => {
       clearReconnectTimer();
+      clearStableTimer();
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [clearReconnectTimer, connect, url]);
+  }, [clearReconnectTimer, clearStableTimer, connect, url]);
 
   const send = useCallback((data: string) => {
     const ws = wsRef.current;

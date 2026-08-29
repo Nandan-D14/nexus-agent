@@ -37,7 +37,7 @@ const CANVAS_KINDS = new Set([
   "plan",
 ]);
 
-const CANVAS_FILE_EXT = /\.(md|markdown|html|pdf|docx|xlsx|pptx|txt)$/i;
+const CANVAS_FILE_EXT = /\.(md|markdown|html|pdf|docx|xlsx|xls|csv|pptx|txt)$/i;
 const TEXT_FILE_EXT = /\.(md|markdown|txt)$/i;
 const OUTPUT_DOC_EXT = /\.(md|markdown|html|txt)$/i;
 

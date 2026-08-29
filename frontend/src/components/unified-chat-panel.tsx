@@ -20,6 +20,7 @@ import {
   resolveSearchResults,
   type SearchCiteRef,
 } from "@/lib/search-result-utils";
+import { CocomputerMark } from "@/components/brand/cocomputer-logo";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -382,11 +383,9 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="flex items-center gap-3 py-2 mt-2"
+                className="flex items-center gap-2 py-2 mt-2"
               >
-                <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center shadow-md shadow-blue-600/20">
-                  <MessageSquare className="w-3.5 h-3.5 text-white" />
-                </div>
+                <CocomputerMark size={16} className="size-4 rounded-md" />
                 <motion.div
                   key={phase}
                   initial={{ opacity: 0, x: 5 }}
@@ -787,6 +786,7 @@ function buildSummary(task: TaskGroup): string {
   }
 
   const hasHandoff = task.steps.some((s) => s.kind === "delegation");
+  const errorCount = task.steps.filter((s) => s.kind === "error").length;
   const parts: string[] = [];
   if (hasThinking) parts.push("Thought");
   if (hasHandoff) parts.push("Handoff");
@@ -798,6 +798,7 @@ function buildSummary(task: TaskGroup): string {
   if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
   if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
   if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
+  if (errorCount > 0) parts.push(errorCount === 1 ? "Error" : `${errorCount} errors`);
   if (parts.length === 0) parts.push("Working");
 
   return parts.join(", ");

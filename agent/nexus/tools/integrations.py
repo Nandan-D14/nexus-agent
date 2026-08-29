@@ -332,6 +332,8 @@ async def calendar_create(
     end_time: str,
     description: str = "",
     location: str = "",
+    time_zone: str = "UTC",
+    attendees: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a new event in the user's primary Google Calendar.
 
@@ -341,6 +343,9 @@ async def calendar_create(
         end_time: End time in RFC 3339 format.
         description: Optional detailed description.
         location: Optional physical or virtual location.
+        time_zone: IANA time zone for start/end (default UTC). Required when
+            start_time/end_time are naive local datetimes.
+        attendees: Optional guest email addresses.
 
     Returns:
         NormalizedToolResult with the created event.
@@ -350,7 +355,15 @@ async def calendar_create(
         return tool_error(_GOOGLE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
     client = CalendarClient(token)
     try:
-        event = await client.create_event(summary, start_time, end_time, description, location)
+        event = await client.create_event(
+            summary,
+            start_time,
+            end_time,
+            description,
+            location,
+            time_zone=time_zone,
+            attendees=attendees,
+        )
         return tool_success(
             f"Created event: {summary} ({start_time} - {end_time})",
             event=event,

@@ -212,6 +212,27 @@ class UserLlmRuntimeTests(TestCase):
         self.assertEqual(model.llm_client.api_base, "https://api.openai.com/v1")
         self.assertEqual(model_name_for_role("planner", runtime), "gpt-4.1")
         self.assertEqual(model_candidates("planner", runtime), ("gpt-4.1",))
+        self.assertEqual(model.model, "openai/gpt-4.1")
+        self.assertEqual(model._additional_args.get("api_key"), "sk-user")
+        self.assertEqual(model._additional_args.get("api_base"), "https://api.openai.com/v1")
+        self.assertEqual(
+            (model._additional_args.get("extra_headers") or {}).get("Authorization"),
+            "Bearer sk-user",
+        )
+
+    def test_user_llm_client_always_sends_authorization_header(self) -> None:
+        client = UserLlmClient(api_key="sk-user", api_base="https://api.groq.com/openai/v1")
+        kwargs = client._call_kwargs("qwen/qwen3-32b", tools=None, kwargs={})
+        self.assertEqual(kwargs["api_key"], "sk-user")
+        self.assertEqual(kwargs["api_base"], "https://api.groq.com/openai/v1")
+        self.assertEqual(kwargs["custom_llm_provider"], "openai")
+        self.assertEqual(kwargs["model"], "openai/qwen/qwen3-32b")
+        self.assertEqual(kwargs["extra_headers"]["Authorization"], "Bearer sk-user")
+
+    def test_selected_provider_without_key_does_not_fall_back_to_bynara(self) -> None:
+        runtime = _user_runtime(llm_api_key="", llm_provider="groq")
+        with self.assertRaisesRegex(RuntimeError, "API key was not loaded"):
+            create_model("planner", runtime)
 
     def test_visual_role_uses_vision_model(self) -> None:
         runtime = _user_runtime(llm_vision_model="gpt-4o")
@@ -306,8 +327,10 @@ class ListUserLlmModelsTests(IsolatedAsyncioTestCase):
                 return False
 
             async def get(self, url: str, headers: object = None) -> FakeResponse:
+                captured["headers"] = dict(headers or {})
                 return FakeResponse()
 
+        captured: dict[str, object] = {}
         with patch("httpx.AsyncClient", FakeClient):
             from nexus.user_llm_router import list_user_llm_models
 
@@ -316,6 +339,82 @@ class ListUserLlmModelsTests(IsolatedAsyncioTestCase):
                 api_base="https://generativelanguage.googleapis.com/v1beta/openai",
             )
         self.assertEqual(ids, ["gemini-2.5-flash", "gemini-2.5-pro"])
+        self.assertNotIn("anthropic-version", captured["headers"])
+
+    async def test_openrouter_models_request_omits_anthropic_version(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, object]:
+                return {"data": [{"id": "openai/gpt-4.1-mini"}, {"id": "anthropic/claude-sonnet-4"}]}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class FakeClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                return None
+
+            async def __aenter__(self) -> "FakeClient":
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+            async def get(self, url: str, headers: object = None) -> FakeResponse:
+                captured["headers"] = dict(headers or {})
+                return FakeResponse()
+
+        captured: dict[str, object] = {}
+        with patch("httpx.AsyncClient", FakeClient):
+            from nexus.user_llm_router import list_user_llm_models
+
+            ids = await list_user_llm_models(
+                api_key="sk-or-v1-test",
+                api_base="https://openrouter.ai/api/v1",
+            )
+        headers = captured["headers"]
+        self.assertNotIn("anthropic-version", headers)
+        self.assertEqual(headers.get("HTTP-Referer"), "http://localhost:3000")
+        self.assertEqual(headers.get("X-Title"), "CoComputer")
+        self.assertIn("openai/gpt-4.1-mini", ids)
+
+    async def test_anthropic_models_request_sends_version_header(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, object]:
+                return {"data": [{"id": "claude-sonnet-4-5"}]}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class FakeClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                return None
+
+            async def __aenter__(self) -> "FakeClient":
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+            async def get(self, url: str, headers: object = None) -> FakeResponse:
+                captured["headers"] = dict(headers or {})
+                return FakeResponse()
+
+        captured: dict[str, object] = {}
+        with patch("httpx.AsyncClient", FakeClient):
+            from nexus.user_llm_router import list_user_llm_models
+
+            ids = await list_user_llm_models(
+                api_key="sk-ant-test",
+                api_base="https://api.anthropic.com/v1",
+            )
+        headers = captured["headers"]
+        self.assertEqual(headers.get("anthropic-version"), "2023-06-01")
+        self.assertEqual(headers.get("x-api-key"), "sk-ant-test")
+        self.assertEqual(ids, ["claude-sonnet-4-5"])
 
 
 class FlattenByokFirestoreTests(TestCase):

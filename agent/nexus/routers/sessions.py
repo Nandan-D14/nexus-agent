@@ -42,6 +42,7 @@ from nexus.runtime_config import (
     resolve_session_runtime_config,
     ensure_selected_gemini_provider_available,
 )
+from nexus.llm_providers import get_provider
 from nexus.production_tasks import map_durable_status_to_history
 from nexus.usage import get_expected_usage_sources
 from nexus.sessions_helpers import (
@@ -748,6 +749,9 @@ async def list_llm_models(
             api_key=runtime.llm_api_key,
             api_base=runtime.llm_api_base,
         )
+        spec = get_provider(runtime.llm_provider)
+        if spec and spec.recommended_models:
+            models = list(dict.fromkeys([*spec.recommended_models, *models]))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:

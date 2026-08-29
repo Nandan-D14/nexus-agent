@@ -509,3 +509,32 @@ async def test_disconnect_mid_turn_can_replay_durable_events(monkeypatch) -> Non
             "seq": 1,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_error_on_cleanup_does_not_send_ws_error(monkeypatch) -> None:
+    FakeOrchestrator.active_on_disconnect = False
+    session = SimpleNamespace(id="session-123", owner_id="firebase-uid")
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+
+    class VoiceBoomOrchestrator(FakeOrchestrator):
+        async def run_voice_receive_loop(self) -> None:
+            raise RuntimeError("voice boom")
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", VoiceBoomOrchestrator)
+
+    ws = FakeWebSocket()
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    error_frames = [
+        call.args[0]
+        for call in ws.send_json.await_args_list
+        if isinstance(call.args[0], dict) and call.args[0].get("code") == "WS_ERROR"
+    ]
+    assert error_frames == []

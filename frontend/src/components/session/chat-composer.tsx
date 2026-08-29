@@ -31,8 +31,11 @@ import { ToolPickerPanel } from "./tool-picker";
 import type { SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 import { useSkillsQuery, type AgentSkill } from "@/lib/queries/skills";
+import { APP_CONNECTORS } from "@/lib/app-paths";
+import { googleSuiteConnected, looksLikeSchedulingPrompt } from "@/lib/scheduling-intent";
 import { builtInPaletteItems, type ToolPaletteItem } from "@/lib/tool-catalog";
 import { cx } from "@/utils/cx";
+import Link from "next/link";
 
 type Props = {
   textInput: string;
@@ -183,6 +186,8 @@ export function ChatComposer({
   const isBusy = phase === "thinking" || phase === "acting";
   const sendActive = hasText && !enhancing && !isLoading && !isUploadingFile;
   const showEnhancePill = hasText && !enhancing && !isBusy;
+  const showGoogleScheduleCta =
+    looksLikeSchedulingPrompt(textInput) && !googleSuiteConnected(availableConnectors);
 
   const allTools: ToolPaletteItem[] = [
     ...builtInPaletteItems(),
@@ -886,6 +891,16 @@ export function ChatComposer({
           </div>
         </div>
       )}
+
+      {showGoogleScheduleCta ? (
+        <p className="px-4 pt-2 text-xs leading-5 text-zinc-500">
+          Connect Google Calendar in{" "}
+          <Link href={APP_CONNECTORS} className="font-medium text-indigo-500 hover:underline">
+            Connectors
+          </Link>{" "}
+          so the agent can create the event or task.
+        </p>
+      ) : null}
 
       {/* Attachments */}
       {uploadedFiles.length > 0 && (

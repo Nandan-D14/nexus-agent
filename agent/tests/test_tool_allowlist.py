@@ -50,6 +50,7 @@ def test_connector_map_covers_native_providers():
         "cloudflare",
         "apify",
         "slack",
+        "composio",
         "vyora",
         "openai",
     }
@@ -95,6 +96,21 @@ def test_mcp_tools_resolved_by_connection_id():
     assert "mcp__demo__search" in allowlist
     assert is_tool_allowed("mcp__demo__search", allowlist) is True
     assert is_tool_allowed("other_tool", allowlist) is False
+
+
+def test_composio_connector_matches_mcp_tools_by_connection_id():
+    async def mcp_tool() -> dict:
+        return {"status": "ok"}
+
+    mcp_tool.__name__ = "mcp__composio__search_tools"
+    setattr(mcp_tool, "_connection_id", "composio")
+
+    allowlist = resolve_tool_allowlist([], ["composio"], mcp_tools=[mcp_tool])
+    assert CONNECTOR_TOOLS["composio"] == frozenset()
+    assert allowlist is not None
+    assert "mcp__composio__search_tools" in allowlist
+    assert is_tool_allowed("mcp__composio__search_tools", allowlist, connection_id="composio") is True
+    assert is_tool_allowed("calendar_create", allowlist) is False
 
 
 def test_gateway_blocks_unselected_tool():
