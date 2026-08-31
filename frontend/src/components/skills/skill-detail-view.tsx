@@ -91,7 +91,7 @@ function viewerEntries(skill: AgentSkill): { path: string; content: string }[] {
 function FilePreview({ path, content }: { path: string; content: string }) {
   if (!content.trim()) {
     return (
-      <p className="text-sm text-zinc-500">
+      <p className="text-sm text-text-tertiary">
         This file is listed on the skill but its contents are not stored. Export the skill to
         download the package.
       </p>
@@ -107,7 +107,7 @@ function FilePreview({ path, content }: { path: string; content: string }) {
       const yamlBlock = frontmatterRaw ? `\`\`\`yaml\n${frontmatterRaw}\n\`\`\`` : "";
       const combined = [yamlBlock, bodyRaw].filter(Boolean).join("\n\n");
       return (
-        <div className="dark text-zinc-200">
+        <div className="text-text-primary">
           <ChatMarkdown content={combined} />
         </div>
       );
@@ -119,7 +119,7 @@ function FilePreview({ path, content }: { path: string; content: string }) {
       ? `\`\`\`${langFromPath(path)}\n${content}\n\`\`\``
       : `\`\`\`\n${content}\n\`\`\``;
   return (
-    <div className="dark text-zinc-200">
+    <div className="text-text-primary">
       <ChatMarkdown content={markdown} />
     </div>
   );
@@ -180,8 +180,8 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
     return (
       <div className="mx-auto max-w-5xl space-y-8 p-6 pb-16 md:p-12">
         <div className="flex min-h-[40vh] flex-col items-center justify-center gap-3 p-8">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-500" />
-          <p className="text-sm text-zinc-500">Loading skill context…</p>
+          <Loader2 className="h-6 w-6 animate-spin text-text-tertiary" />
+          <p className="text-sm text-text-tertiary">Loading skill context…</p>
         </div>
       </div>
     );
@@ -190,18 +190,18 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
   if (!skill) {
     return (
       <div className="mx-auto max-w-3xl space-y-4 p-6 md:p-12">
-        <Link href={APP_SKILLS} className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-white">
+        <Link href={APP_SKILLS} className="inline-flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary">
           <ArrowLeft className="h-4 w-4" />
           Back to skills
         </Link>
-        <p className="text-sm text-zinc-400">
+        <p className="text-sm text-text-secondary">
           {error instanceof Error ? error.message : "This skill could not be found."}
         </p>
         {error ? (
           <button
             type="button"
             onClick={() => void refetch()}
-            className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500"
+            className="rounded-lg border border-border-button-default px-4 py-2 text-sm text-text-primary hover:border-border-button-hover"
           >
             Retry
           </button>
@@ -217,22 +217,22 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
     <div className="mx-auto max-w-5xl space-y-8 p-6 pb-16 md:p-12">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-4">
-          <Link href={APP_SKILLS} className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-white">
+          <Link href={APP_SKILLS} className="inline-flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary">
             <ArrowLeft className="h-4 w-4" />
             Back to skills
           </Link>
           <div className="flex items-start gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-zinc-800 text-zinc-400">
+            <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-card-border bg-background-secondary-default text-text-secondary">
               <Icon className="h-5 w-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="font-serif text-3xl leading-none tracking-tight text-white">{skill.name}</h1>
-                <span className={`mt-1 h-2 w-2 rounded-full ${skill.enabled ? "bg-emerald-500" : "bg-zinc-700"}`} />
+                <h1 className="font-serif text-3xl leading-none tracking-tight text-text-primary">{skill.name}</h1>
+                <span className={`mt-1 h-2 w-2 rounded-full ${skill.enabled ? "bg-emerald-500" : "bg-background-tertiary-default"}`} />
               </div>
-              <p className="mt-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+              <p className="mt-1 text-[11px] font-medium uppercase tracking-wider text-text-tertiary">
                 {skill.category}
-                <span className="text-zinc-600">
+                <span className="text-text-tertiary">
                   {" "}
                   · {skill.source === "built_in" ? "System" : "User"}
                   {skill.format === "agent_skill" ? " · Agent Skill" : ""}
@@ -247,7 +247,7 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
             onClick={() => {
               void downloadSkillExport(skill.skill_id).catch(() => setActionError("Failed to export skill"));
             }}
-            className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-200 hover:border-zinc-500"
+            className="inline-flex items-center gap-2 rounded-lg border border-border-button-default px-3 py-2 text-sm font-medium text-text-primary hover:border-border-button-hover"
             aria-label={`Export ${skill.name}`}
           >
             <Download className="h-4 w-4" />
@@ -258,7 +258,7 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
               type="button"
               onClick={() => void deleteSkill()}
               disabled={saving}
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm font-medium text-zinc-400 hover:border-red-500/40 hover:text-red-400"
+              className="inline-flex items-center gap-2 rounded-lg border border-border-button-default px-3 py-2 text-sm font-medium text-text-secondary hover:border-red-500/40 hover:text-red-400"
             >
               <Trash2 className="h-4 w-4" />
               Delete
@@ -270,8 +270,8 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
             disabled={saving}
             className={`rounded-md px-3 py-2 text-xs font-semibold transition-all ${
               skill.enabled
-                ? "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                : "bg-zinc-100 text-black hover:bg-white"
+                ? "bg-background-secondary-default text-text-primary hover:bg-background-secondary-hover"
+                : "bg-foreground text-background"
             }`}
           >
             {saving ? "..." : skill.enabled ? "Disable" : "Enable"}
@@ -285,33 +285,33 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
         </div>
       ) : null}
 
-      <div className="space-y-3 text-sm leading-relaxed text-zinc-400">
+      <div className="space-y-3 text-sm leading-relaxed text-text-secondary">
         {skill.trigger ? (
           <p>
-            <span className="font-medium text-zinc-500">Trigger: </span>
+            <span className="font-medium text-text-tertiary">Trigger: </span>
             {skill.trigger}
           </p>
         ) : null}
         {skill.description ? <p>{skill.description}</p> : null}
         <div className="flex flex-wrap gap-2 pt-1">
           {skill.sandbox_path ? (
-            <span className="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-xs text-zinc-400">
+            <span className="inline-flex items-center rounded-md border border-card-border bg-background-secondary-default px-2.5 py-1 font-mono text-xs text-text-secondary">
               {skill.sandbox_path}
             </span>
           ) : null}
           {skill.allowed_tools ? (
-            <span className="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-400">
+            <span className="inline-flex items-center rounded-md border border-card-border bg-background-secondary-default px-2.5 py-1 text-xs text-text-secondary">
               Tools: {skill.allowed_tools}
             </span>
           ) : null}
           {skill.compatibility ? (
-            <span className="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-400">
+            <span className="inline-flex items-center rounded-md border border-card-border bg-background-secondary-default px-2.5 py-1 text-xs text-text-secondary">
               {skill.compatibility}
             </span>
           ) : null}
         </div>
         {skill.license ? (
-          <p className="text-xs text-zinc-500">License: {skill.license}</p>
+          <p className="text-xs text-text-tertiary">License: {skill.license}</p>
         ) : null}
       </div>
 
@@ -319,7 +319,7 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
       <div className={showRail ? "grid min-w-0 gap-6 md:grid-cols-[200px_minmax(0,1fr)]" : "min-w-0"}>
         {showRail ? (
           <nav className="flex flex-col gap-1 self-start md:sticky md:top-6" aria-label="Skill files">
-            <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+            <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-widest text-text-tertiary">
               Files · {entries.length}
             </p>
             {entries.map((entry) => (
@@ -332,8 +332,8 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
                 }}
                 className={`rounded-lg px-3 py-2 text-left font-mono text-xs transition-colors ${
                   activePath === entry.path
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+                    ? "bg-background-secondary-hover text-text-primary"
+                    : "text-text-tertiary hover:bg-background-secondary-default hover:text-text-primary"
                 }`}
               >
                 {entry.path}
@@ -347,11 +347,11 @@ export function SkillDetailView({ skillId }: SkillDetailViewProps) {
             <section
               key={entry.path}
               id={`skill-file-${entry.path}`}
-              className="min-w-0 overflow-hidden scroll-mt-6 rounded-xl border border-zinc-800 bg-[#161618]"
+              className="min-w-0 overflow-hidden scroll-mt-6 rounded-xl border border-card-border bg-background-secondary-default"
             >
-              <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/40 px-5 py-3">
-                <p className="font-mono text-[11px] uppercase tracking-wider text-zinc-400">{entry.path}</p>
-                <span className="text-[11px] text-zinc-600">{entry.content.length} chars</span>
+              <div className="flex items-center justify-between border-b border-separator-border bg-background-tertiary-default/40 px-5 py-3">
+                <p className="font-mono text-[11px] uppercase tracking-wider text-text-secondary">{entry.path}</p>
+                <span className="text-[11px] text-text-tertiary">{entry.content.length} chars</span>
               </div>
               <div className="min-w-0 p-5 md:p-6">
                 <FilePreview path={entry.path} content={entry.content} />

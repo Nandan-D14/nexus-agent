@@ -25,27 +25,6 @@ from nexus.config import settings
 
 logger = logging.getLogger(__name__)
 
-# #region agent log
-def _dbg(hid: str, loc: str, msg: str, data: dict | None = None) -> None:
-    import json, time, urllib.request
-    payload = {"sessionId": "19cd7e", "hypothesisId": hid, "location": loc, "message": msg, "data": data or {}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}
-    try:
-        with open(r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-19cd7e.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-Debug-Session-Id": "19cd7e"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=0.3).read()
-    except Exception:
-        pass
-# #endregion
-
 _TRIM_NOTE = (
     "[earlier turns trimmed to fit the model context window; full history is "
     "preserved in the durable session store]"
@@ -253,25 +232,6 @@ def make_context_trimmer(runtime_config: Any | None = None):
         tools = getattr(cfg, "tools", None) if cfg else None
         tool_list = list(tools) if isinstance(tools, list) else []
         tool_tok = _estimate_tokens_for_tools(tool_list)
-        groq = _is_groq_runtime(runtime_config)
-        skip_history = (not settings.enforce_context_budget) or (
-            len(contents) <= 1 and not groq and (sys_tok + content_tok + tool_tok) <= budget
-        )
-        # #region agent log
-        _dbg("A", "context_window.py:before_model", "trimmer_budget", {
-            "n_contents": len(contents),
-            "sys_tok": sys_tok,
-            "content_tok": content_tok,
-            "tool_tok": tool_tok,
-            "sum_tok": sys_tok + content_tok + tool_tok,
-            "limit": limit,
-            "budget": budget,
-            "tool_n": len(tool_list),
-            "groq": groq,
-            "enforce": bool(settings.enforce_context_budget),
-            "skip_short": skip_history,
-        })
-        # #endregion
         if not settings.enforce_context_budget:
             return None
 
@@ -286,14 +246,6 @@ def make_context_trimmer(runtime_config: Any | None = None):
                     len(dropped_tools),
                     len(pruned),
                 )
-                # #region agent log
-                _dbg("A", "context_window.py:before_model", "tools_pruned", {
-                    "dropped_n": len(dropped_tools),
-                    "dropped": dropped_tools[:20],
-                    "kept_n": len(pruned),
-                    "tool_budget": tool_budget,
-                })
-                # #endregion
 
         if len(contents) <= 1:
             return None

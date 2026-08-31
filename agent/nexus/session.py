@@ -170,7 +170,7 @@ class Session:
     continuation_mode: str | None = None
     sandbox_id: str = ""
     stream_url: str = ""
-    status: str = "idle"  # idle | creating | ready | active | error | destroyed
+    status: str = "idle"  # idle | creating | ready | active | paused | error | destroyed
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     activation_lock: asyncio.Lock = field(
@@ -334,12 +334,16 @@ class SessionManager:
         self.cancel_idle_pause(session_id)
 
         async with session.activation_lock:
+            stale_client = False
             if session.sandbox.is_alive and session.stream_url:
-                if session.status not in {"ready", "active"}:
-                    session.status = "ready"
-                    session.touch()
-                    await self._sync_session(session, status="ready")
-                return session
+                if session.sandbox.extend_timeout():
+                    if session.status not in {"ready", "active"}:
+                        session.status = "ready"
+                        session.touch()
+                        await self._sync_session(session, status="ready")
+                    return session
+                session.stream_url = ""
+                stale_client = True
 
             session.status = "creating"
             session.touch()
@@ -348,9 +352,17 @@ class SessionManager:
             try:
                 loop = asyncio.get_running_loop()
 
-                # Try to resume a previously paused sandbox
+                # Resume a paused VM for this session, or a persisted workspace
+                # sandbox when the user explicitly continued the latest workspace.
+                # Do not reconnect an id we just probed as dead.
                 paused_id: str | None = None
-                if self.history_repository and session.resume_mode == "continue_latest_workspace":
+                if not stale_client and session.sandbox_id:
+                    paused_id = session.sandbox_id
+                if (
+                    not paused_id
+                    and self.history_repository
+                    and session.resume_mode == "continue_latest_workspace"
+                ):
                     try:
                         paused_id = await self.history_repository.get_persistent_sandbox(session.owner_id)
                     except Exception:
@@ -393,17 +405,10 @@ class SessionManager:
             session.touch()
             await self._sync_session(session, status="ready")
 
-            # Rehydrate workspace files from GCS on resume (best-effort, non-fatal).
-            # Covers the case where the E2B snapshot expired (>24h) — all files
-            # are restored from permanent GCS storage so the agent can continue.
-            if self.history_repository and session.resume_mode in {
-                "continue_latest_workspace",
-                "continue_conversation",
-            }:
-                await _rehydrate_workspace_from_gcs(session, self.history_repository)
-
-            # Mount Google Drive if user has a refresh token configured
+            # Restore workspace files from GCS (best-effort). Covers E2B snapshot
+            # expiry and in-session VM timeout — artifacts live in GCS.
             if self.history_repository:
+                await _rehydrate_workspace_from_gcs(session, self.history_repository)
                 await _maybe_mount_gdrive(session, self.history_repository)
 
             logger.info(
@@ -509,6 +514,59 @@ class SessionManager:
                 except Exception:
                     logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
+    async def pause_idle_sandbox(self, session_id: str) -> None:
+        """Pause or kill the VM but keep the Session so the same chat can resume."""
+        scheduled_pause = self._idle_pause_tasks.pop(session_id, None)
+        current_task = asyncio.current_task()
+        if scheduled_pause and scheduled_pause is not current_task and not scheduled_pause.done():
+            scheduled_pause.cancel()
+
+        session = self._local_sessions.get(session_id)
+        if session is None:
+            return
+
+        paused_id: str | None = None
+        if session.sandbox.is_alive:
+            loop = asyncio.get_event_loop()
+            if self.history_repository:
+                paused_id = await loop.run_in_executor(None, session.sandbox.pause)
+                if paused_id:
+                    try:
+                        await self.history_repository.save_paused_sandbox(
+                            session.owner_id, paused_id, session.id
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to persist paused sandbox for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+            if not paused_id:
+                await loop.run_in_executor(None, session.sandbox.destroy)
+
+        session.status = "paused"
+        session.stream_url = ""
+        if paused_id:
+            session.sandbox_id = paused_id
+        session.touch()
+        await self._sync_session(session, status="paused")
+        if self.history_repository:
+            try:
+                await self.history_repository.refresh_session_handoff(
+                    session.id,
+                    owner_id=session.owner_id,
+                    resume_state="paused",
+                    workspace_owner_session_id=session.id if paused_id else None,
+                    can_continue_workspace=bool(paused_id),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to refresh handoff summary for paused session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        logger.info("Idle sandbox paused for session %s (kept in-memory)", session_id)
+
     async def activate_session(self, session_id: str) -> Session:
         self.cancel_idle_pause(session_id)
         session = await self.ensure_session_ready(session_id)
@@ -535,7 +593,7 @@ class SessionManager:
         try:
             await asyncio.sleep(delay_seconds)
             session = self._local_sessions.get(session_id)
-            if not session or session.status in {"destroyed", "ended", "error"}:
+            if not session or session.status in {"destroyed", "ended", "error", "paused"}:
                 return
             if not session.sandbox.is_alive:
                 return
@@ -543,7 +601,7 @@ class SessionManager:
             if idle_for < delay_seconds:
                 return
             logger.info("Pausing idle sandbox after reconnect grace for session %s", session_id)
-            await self.destroy_session(session_id, status="ended")
+            await self.pause_idle_sandbox(session_id)
         except asyncio.CancelledError:
             raise
         except Exception:

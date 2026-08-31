@@ -12,6 +12,7 @@ import type { RunArtifact } from "@/lib/message-types";
 import { authenticatedFetch } from "@/lib/api-client";
 
 const DOWNLOAD_TIMEOUT_MS = 8000;
+const CONTENT_TIMEOUT_MS = 20000;
 const SANDBOX_TIMEOUT_MS = 5000;
 
 export function isPdfArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
@@ -77,13 +78,38 @@ export function isOfficeArtifact(artifact: Pick<RunArtifact, "kind" | "metadata"
 }
 
 const SHEET_EXT = /\.(xlsx|xlsm|xls|csv)$/i;
+const CSV_EXT = /\.csv$/i;
+const MARKDOWN_EXT = /\.(md|markdown)$/i;
+const TEXT_EXT = /\.txt$/i;
+const PPT_EXT = /\.(pptx|ppt)$/i;
+
+function artifactFileName(
+  artifact: Pick<RunArtifact, "path" | "title">,
+): string {
+  const path = (artifact.path || "").replace(/\\/g, "/");
+  return `${path.split("/").pop() || ""} ${artifact.title || ""}`;
+}
+
+export function isCsvArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (artifact.kind === "csv") return true;
+  const name = artifactFileName(artifact);
+  if (CSV_EXT.test(artifact.path || "") || CSV_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return (
+    contentType === "text/csv" ||
+    contentType === "application/csv" ||
+    contentType.startsWith("text/csv")
+  );
+}
 
 export function isSpreadsheetArtifact(
   artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
 ): boolean {
   if (artifact.kind === "spreadsheet" || artifact.kind === "csv") return true;
   const path = (artifact.path || "").replace(/\\/g, "/");
-  const name = `${path.split("/").pop() || ""} ${artifact.title || ""}`;
+  const name = artifactFileName(artifact);
   if (SHEET_EXT.test(path) || SHEET_EXT.test(name)) return true;
   const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
   return (
@@ -93,6 +119,35 @@ export function isSpreadsheetArtifact(
     contentType === "application/csv" ||
     contentType.startsWith("text/csv")
   );
+}
+
+export function isPresentationArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (artifact.kind === "presentation") return true;
+  const name = artifactFileName(artifact);
+  if (PPT_EXT.test(artifact.path || "") || PPT_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return contentType.includes("presentationml") || contentType.includes("ms-powerpoint");
+}
+
+export function isMarkdownArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (artifact.kind === "markdown") return true;
+  const name = artifactFileName(artifact);
+  if (MARKDOWN_EXT.test(artifact.path || "") || MARKDOWN_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return contentType.includes("markdown");
+}
+
+export function isPlainTextArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  const name = artifactFileName(artifact);
+  if (TEXT_EXT.test(artifact.path || "") || TEXT_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return contentType === "text/plain" || contentType.startsWith("text/plain");
 }
 
 function officeSiblingPreviewKind(
@@ -114,7 +169,7 @@ function officeSiblingPreviewKind(
 }
 
 /** How an artifact renders inside the document viewer. */
-export type PreviewKind = "pdf" | "image" | "html" | "sheet" | "none";
+export type PreviewKind = "pdf" | "image" | "html" | "sheet" | "markdown" | "none";
 
 type PreviewArtifact = Pick<RunArtifact, "kind" | "metadata" | "path" | "title">;
 
@@ -127,6 +182,7 @@ export function previewKind(artifact: PreviewArtifact): PreviewKind {
   if (artifact.kind === "image" || artifact.kind === "screenshot") return "image";
   if (isPdfArtifact(artifact)) return "pdf";
   if (isSpreadsheetArtifact(artifact)) return "sheet";
+  if (isMarkdownArtifact(artifact) || isPlainTextArtifact(artifact)) return "markdown";
   if (isHtmlArtifact(artifact)) return "html";
   if (isOfficeArtifact(artifact)) return officeSiblingPreviewKind(artifact);
   return "none";
@@ -175,6 +231,25 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function fetchArtifactContentBlobUrl(artifactId: string): Promise<string | null> {
+  const res = await fetchWithTimeout(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+    CONTENT_TIMEOUT_MS,
+  );
+  if (!res?.ok) return null;
+  try {
+    const blob = await res.blob();
+    if (!blob.size) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+function isGcsUrl(url: string | null | undefined): boolean {
+  return Boolean(url && url.includes("storage.googleapis.com"));
 }
 
 /**
@@ -302,8 +377,11 @@ export async function resolveArtifactUrl(
     }
   }
 
+  const contentUrl = await fetchArtifactContentBlobUrl(artifact.artifact_id);
+  if (contentUrl) return contentUrl;
+
   const fresh = await fetchFreshArtifactUrl(artifact.artifact_id);
-  if (fresh) {
+  if (fresh && !isGcsUrl(fresh)) {
     return toBlobUrlIfDataUri(fresh);
   }
 

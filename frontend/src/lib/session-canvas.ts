@@ -41,8 +41,8 @@ const CANVAS_FILE_EXT = /\.(md|markdown|html|pdf|docx|xlsx|xls|csv|pptx|txt)$/i;
 const TEXT_FILE_EXT = /\.(md|markdown|txt)$/i;
 const OUTPUT_DOC_EXT = /\.(md|markdown|html|txt)$/i;
 
-/** Skip tiny notes; this surface is for reports, research, and similar deliverables. */
-const MIN_CANVAS_FILE_CHARS = 400;
+/** Skip short conversational notes; this surface is for full reports, research, and structured deliverables. */
+const MIN_CANVAS_FILE_CHARS = 1000;
 
 function artifactName(artifact: Pick<RunArtifact, "title" | "path">): string {
   return `${artifact.title || ""} ${artifact.path || ""}`.replace(/\\/g, "/");

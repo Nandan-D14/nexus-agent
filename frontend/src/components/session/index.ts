@@ -7,4 +7,5 @@ export * from "./session-header";
 export * from "./session-landing-view";
 export * from "./session-context-usage";
 export * from "./chat-composer";
+export * from "./composer-plus-menu";
 export * from "./tool-picker";

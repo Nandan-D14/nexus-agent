@@ -6,11 +6,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, ExternalLink, Loader2 } from "lucide-react";
-import { ChatMarkdown } from "@/components/chat-markdown";
+import { Download, ExternalLink, Loader2, Maximize2 } from "lucide-react";
 import { TodoList } from "@/components/todo-list";
 import { ArtifactPreview } from "@/components/artifacts/artifact-preview";
 import { ArtifactIconTile, artifactBadge } from "@/components/artifacts/artifact-icon";
+import { DocumentViewerModal } from "@/components/artifacts/document-viewer-modal";
+import { MarkdownPreview } from "@/components/artifacts/markdown-preview";
 import {
   downloadArtifactFile,
   previewKind,
@@ -31,7 +32,7 @@ import { cn } from "@/lib/utils";
 const KIND_ORDER: SessionCanvasKind[] = ["document", "file", "plan"];
 
 const ICON_BUTTON =
-  "flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50";
+  "flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-background-secondary-hover hover:text-text-primary disabled:opacity-50";
 
 type Props = {
   artifacts?: RunArtifact[];
@@ -87,7 +88,7 @@ function TextCanvasBody({ doc }: { doc: SessionCanvasDocument }) {
     resolveArtifactUrl(artifact, false)
       .then(async (url) => {
         if (cancelled) return;
-        if (!url) {
+        if (!url || url.includes("storage.googleapis.com")) {
           setText(artifact.preview || "");
           return;
         }
@@ -112,7 +113,7 @@ function TextCanvasBody({ doc }: { doc: SessionCanvasDocument }) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-400">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
         <Loader2 className="h-4 w-4 animate-spin" />
         Loading document…
       </div>
@@ -135,13 +136,7 @@ function TextCanvasBody({ doc }: { doc: SessionCanvasDocument }) {
     );
   }
 
-  return (
-    <div className="h-full overflow-y-auto custom-scrollbar px-8 py-6">
-      <div className="mx-auto max-w-3xl">
-        <ChatMarkdown content={text} />
-      </div>
-    </div>
-  );
+  return <MarkdownPreview content={text} />;
 }
 
 function CanvasBody({
@@ -160,12 +155,12 @@ function CanvasBody({
       <ArtifactPreview
         artifact={doc.artifact}
         onUrlChange={onUrlChange}
-        className="relative h-full min-h-0 flex-1 bg-[#0e0e10]"
+        className="relative h-full min-h-0 flex-1 bg-background-full"
       />
     );
   }
   return (
-    <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+    <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-secondary">
       This document has no preview yet.
     </div>
   );
@@ -218,17 +213,17 @@ export function SessionCanvas({ artifacts = [] }: Props) {
 
   if (!active) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+      <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-secondary">
         Reports and documents the agent creates will open here.
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a0a0c]">
-      <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-2.5">
+    <div className="flex h-full min-h-0 flex-col bg-background-full">
+      <div className="flex shrink-0 items-center gap-3 border-b border-separator-border px-4 py-2.5">
         {presentKinds.length > 0 ? (
-          <div className="flex shrink-0 items-center gap-1 rounded-lg bg-zinc-900/80 p-0.5">
+          <div className="flex shrink-0 items-center gap-1 rounded-lg bg-background-secondary-default p-0.5">
             {presentKinds.map((kind) => (
               <button
                 key={kind}
@@ -237,8 +232,8 @@ export function SessionCanvas({ artifacts = [] }: Props) {
                 className={cn(
                   "rounded-md px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide transition-colors",
                   active.kind === kind
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-200",
+                    ? "bg-background-primary-default text-text-primary shadow-sm"
+                    : "text-text-secondary hover:text-text-primary",
                 )}
               >
                 {canvasKindLabel(kind)}
@@ -255,15 +250,20 @@ export function SessionCanvas({ artifacts = [] }: Props) {
           />
         ) : null}
 
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold text-zinc-100" title={active.title}>
+        <button
+          type="button"
+          onClick={() => canvas?.openViewer()}
+          className="min-w-0 flex-1 text-left"
+          title="Open preview"
+        >
+          <div className="truncate text-[13px] font-semibold text-text-primary" title={active.title}>
             {active.title}
           </div>
-          <div className="truncate text-[11px] text-zinc-500">
+          <div className="truncate text-[11px] text-text-secondary">
             {active.artifact ? artifactBadge(active.artifact) : canvasKindLabel(active.kind)}
             {active.path ? ` · ${active.path}` : ""}
           </div>
-        </div>
+        </button>
 
         <div className="flex shrink-0 items-center gap-1">
           {previewUrl ? (
@@ -292,19 +292,49 @@ export function SessionCanvas({ artifacts = [] }: Props) {
               )}
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => canvas?.openViewer()}
+            className={ICON_BUTTON}
+            title="Open popup preview"
+          >
+            <Maximize2 className="h-4 w-4" />
+          </button>
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="relative min-h-0 flex-1">
+        <div className="relative h-full min-h-0 flex-1">
           <CanvasBody doc={active} onUrlChange={setPreviewUrl} />
         </div>
         {active.kind === "plan" && canvas && canvas.todoItems.length > 0 ? (
-          <div className="shrink-0 border-t border-zinc-800 bg-[#111113] px-4 py-3">
+          <div className="shrink-0 border-t border-separator-border bg-background-secondary-default px-4 py-3">
             <TodoList items={canvas.todoItems} defaultExpanded />
           </div>
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** Always-mounted overlay so chat cards can open the popup even before the Document tab is visible. */
+export function SessionCanvasViewer() {
+  const canvas = useSessionCanvas();
+  const active = useMemo(() => {
+    if (!canvas || canvas.documents.length === 0) return null;
+    return canvas.documents.find((doc) => doc.id === canvas.activeId) ?? canvas.documents[canvas.documents.length - 1];
+  }, [canvas]);
+
+  if (!canvas) return null;
+
+  return (
+    <DocumentViewerModal
+      artifact={canvas.viewerOpen ? active?.artifact ?? null : null}
+      markdown={
+        canvas.viewerOpen && !active?.artifact ? active?.markdown || null : null
+      }
+      title={active?.title}
+      onClose={canvas.closeViewer}
+    />
   );
 }

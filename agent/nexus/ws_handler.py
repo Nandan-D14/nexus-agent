@@ -1193,7 +1193,7 @@ async def handle_websocket(
                         if orchestrator.has_active_agent_turn() or _has_active_bg_task():
                             _touch_session()
                             try:
-                                session.sandbox.extend_timeout(900)
+                                session.sandbox.extend_timeout()
                             except Exception:
                                 pass
 

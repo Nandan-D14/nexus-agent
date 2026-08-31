@@ -300,7 +300,7 @@ class Settings(BaseSettings):
     default_plan_price_usd: int = 5
     default_credit_limit: int = 4_000
     default_credit_unit_usd: float = 0.001
-    default_credit_reset_version: str = "starter_4k_reset_20260322"
+    default_credit_reset_version: str = "starter_4k_reset_20260831"
 
     # Internal token safety cap (telemetry/debug only, not the user-facing plan allowance)
     default_token_limit: int = 100_000

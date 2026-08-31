@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { Loader2 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
-import { resolveArtifactUrl } from "@/lib/artifact-url";
+import { isCsvArtifact, resolveArtifactUrl } from "@/lib/artifact-url";
 import { cn } from "@/lib/utils";
 
 const ROW_CAP = 2000;
@@ -21,29 +21,40 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+function looksLikeHeaderRow(row: string[] | undefined): boolean {
+  if (!row || row.length === 0) return false;
+  const filled = row.filter((cell) => cell.trim().length > 0);
+  if (filled.length === 0) return false;
+  const numeric = filled.filter((cell) => /^-?\d+(\.\d+)?$/.test(cell.trim()));
+  return numeric.length / filled.length < 0.5;
+}
+
 export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
+  const csv = isCsvArtifact(artifact);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [activeSheet, setActiveSheet] = useState("");
   const [tables, setTables] = useState<Record<string, string[][]>>({});
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setSelected(null);
     resolveArtifactUrl(artifact, { forPreview: false })
       .then(async (url) => {
         if (cancelled) return;
-        if (!url) throw new Error("missing url");
+        if (!url || url.includes("storage.googleapis.com")) throw new Error("missing url");
         const res = await fetch(url);
         if (!res.ok) throw new Error("fetch failed");
         const buffer = await res.arrayBuffer();
         const workbook = XLSX.read(buffer, { type: "array" });
         const parsed: Record<string, string[][]> = {};
         let anyTruncated = false;
-        const names = workbook.SheetNames.length > 0 ? workbook.SheetNames : ["Sheet1"];
+        const names = workbook.SheetNames.length > 0 ? workbook.SheetNames : [csv ? "CSV" : "Sheet1"];
         for (const name of names) {
           const sheet = workbook.Sheets[name];
           const rows = sheet
@@ -67,7 +78,7 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
         if (cancelled) return;
         setTables(parsed);
         setSheetNames(names);
-        setActiveSheet(names[0] ?? "Sheet1");
+        setActiveSheet(names[0] ?? (csv ? "CSV" : "Sheet1"));
         setTruncated(anyTruncated);
       })
       .catch(() => {
@@ -79,7 +90,7 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
     return () => {
       cancelled = true;
     };
-  }, [artifact]);
+  }, [artifact, csv]);
 
   const rows = tables[activeSheet] ?? [];
   const colCount = useMemo(
@@ -90,41 +101,88 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
     () => Array.from({ length: colCount }, (_, index) => XLSX.utils.encode_col(index)),
     [colCount],
   );
+  const headerRow = looksLikeHeaderRow(rows[0]);
+  const selectedAddress = selected
+    ? `${columns[selected.col] ?? "A"}${selected.row + 1}`
+    : "A1";
+  const selectedValue =
+    selected != null ? (rows[selected.row]?.[selected.col] ?? "") : "";
+  const accent = csv ? "teal" : "emerald";
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-400">
+      <div className="flex h-full items-center justify-center gap-2 bg-[#1e1e20] text-sm text-zinc-400">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Loading spreadsheet…
+        Loading {csv ? "CSV" : "spreadsheet"}…
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-sm text-red-400">
+      <div className="flex h-full items-center justify-center bg-[#1e1e20] px-6 text-center text-sm text-red-400">
         {error}
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#f4f4f5]">
+    <div className="flex h-full min-h-0 flex-col bg-[#f3f3f3] text-zinc-800">
+      <div
+        className={cn(
+          "flex shrink-0 items-center gap-3 border-b px-3 py-1.5",
+          csv
+            ? "border-teal-800/40 bg-[#0f766e] text-white"
+            : "border-emerald-900/40 bg-[#217346] text-white",
+        )}
+      >
+        <span className="rounded bg-white/15 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide">
+          {csv ? "CSV" : "XLSX"}
+        </span>
+        <span className="truncate text-[12px] font-medium">
+          {artifact.title || (csv ? "Spreadsheet" : "Workbook")}
+        </span>
+        <span className="ml-auto hidden text-[11px] text-white/70 sm:inline">
+          {rows.length.toLocaleString()} rows · {colCount} columns
+        </span>
+      </div>
+
       {truncated ? (
-        <p className="shrink-0 border-b border-zinc-200 bg-amber-50 px-4 py-2 text-[12px] text-amber-900">
+        <p className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-[12px] text-amber-900">
           Showing the first {ROW_CAP.toLocaleString()} rows. Download the file to see
           everything.
         </p>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
+
+      <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 bg-white px-2 py-1.5">
+        <div
+          className={cn(
+            "w-14 shrink-0 rounded border bg-zinc-50 px-1.5 py-1 text-center font-mono text-[11px] font-semibold text-zinc-600",
+            accent === "teal" ? "border-teal-200" : "border-emerald-200",
+          )}
+        >
+          {selectedAddress}
+        </div>
+        <div className="min-w-0 flex-1 truncate rounded border border-zinc-200 bg-white px-2 py-1 text-[12px] text-zinc-700">
+          {selectedValue || (
+            <span className="text-zinc-400">Select a cell to inspect its value</span>
+          )}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar bg-white">
         <table className="min-w-full border-collapse text-left text-[12px] tabular-nums">
           <thead className="sticky top-0 z-10">
             <tr>
-              <th className="sticky left-0 z-20 w-10 min-w-10 border-b border-r border-zinc-200 bg-zinc-100 px-1 py-1.5 text-center text-[10px] font-medium text-zinc-400" />
-              {columns.map((label) => (
+              <th className="sticky left-0 z-20 w-10 min-w-10 border-b border-r border-zinc-200 bg-[#eef0f2] px-1 py-1.5 text-center text-[10px] font-medium text-zinc-400" />
+              {columns.map((label, colIndex) => (
                 <th
                   key={label}
-                  className="min-w-[5.5rem] border-b border-r border-zinc-200 bg-zinc-100 px-2 py-1.5 text-center text-[10px] font-medium text-zinc-500"
+                  className={cn(
+                    "min-w-[6.5rem] border-b border-r border-zinc-200 bg-[#eef0f2] px-2 py-1.5 text-center text-[10px] font-semibold tracking-wide text-zinc-500",
+                    selected?.col === colIndex &&
+                      (csv ? "bg-teal-50 text-teal-800" : "bg-emerald-50 text-emerald-800"),
+                  )}
                 >
                   {label}
                 </th>
@@ -136,49 +194,95 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
               <tr>
                 <td
                   colSpan={colCount + 1}
-                  className="px-4 py-10 text-center text-sm text-zinc-500"
+                  className="px-4 py-16 text-center text-sm text-zinc-500"
                 >
                   This sheet is empty.
                 </td>
               </tr>
             ) : (
-              rows.map((row, rowIndex) => (
-                <tr key={rowIndex} className="bg-white even:bg-zinc-50">
-                  <th className="sticky left-0 z-10 w-10 min-w-10 border-b border-r border-zinc-200 bg-zinc-100 px-1 py-1 text-center text-[10px] font-medium text-zinc-400">
-                    {rowIndex + 1}
-                  </th>
-                  {columns.map((_, colIndex) => (
-                    <td
-                      key={colIndex}
-                      className="max-w-[20rem] truncate border-b border-r border-zinc-200 px-2 py-1 text-zinc-800"
-                      title={row[colIndex] || undefined}
+              rows.map((row, rowIndex) => {
+                const isHeader = headerRow && rowIndex === 0;
+                return (
+                  <tr
+                    key={rowIndex}
+                    className={cn(
+                      isHeader ? "bg-[#f7f8f9]" : "bg-white even:bg-[#fafafa]",
+                    )}
+                  >
+                    <th
+                      className={cn(
+                        "sticky left-0 z-10 w-10 min-w-10 border-b border-r border-zinc-200 bg-[#eef0f2] px-1 py-1 text-center text-[10px] font-medium text-zinc-400",
+                        selected?.row === rowIndex &&
+                          (csv ? "bg-teal-50 text-teal-800" : "bg-emerald-50 text-emerald-800"),
+                      )}
                     >
-                      {row[colIndex] ?? ""}
-                    </td>
-                  ))}
-                </tr>
-              ))
+                      {rowIndex + 1}
+                    </th>
+                    {columns.map((_, colIndex) => {
+                      const active =
+                        selected?.row === rowIndex && selected?.col === colIndex;
+                      return (
+                        <td
+                          key={colIndex}
+                          onClick={() => setSelected({ row: rowIndex, col: colIndex })}
+                          className={cn(
+                            "max-w-[22rem] cursor-cell truncate border-b border-r border-zinc-200 px-2 py-1 text-zinc-800",
+                            isHeader && "font-semibold text-zinc-900",
+                            active &&
+                              (csv
+                                ? "bg-teal-50 ring-1 ring-inset ring-teal-500"
+                                : "bg-emerald-50 ring-1 ring-inset ring-emerald-600"),
+                          )}
+                          title={row[colIndex] || undefined}
+                        >
+                          {row[colIndex] ?? ""}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
       </div>
+
       {sheetNames.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-t border-zinc-200 bg-zinc-100 px-2 py-1.5">
-          {sheetNames.map((name) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => setActiveSheet(name)}
-              className={cn(
-                "shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium",
-                name === activeSheet
-                  ? "bg-white text-zinc-900 shadow-sm"
-                  : "text-zinc-500 hover:bg-white/70 hover:text-zinc-800",
-              )}
-            >
-              {name}
-            </button>
-          ))}
+        <div className="flex shrink-0 items-end gap-0 overflow-x-auto border-t border-zinc-200 bg-[#f3f3f3] px-1 pt-1">
+          {sheetNames.map((name) => {
+            const active = name === activeSheet;
+            return (
+              <button
+                key={name}
+                type="button"
+                onClick={() => {
+                  setActiveSheet(name);
+                  setSelected(null);
+                }}
+                className={cn(
+                  "relative -mb-px shrink-0 rounded-t-md border border-b-0 px-3 py-1.5 text-[12px] font-medium",
+                  active
+                    ? csv
+                      ? "border-zinc-300 bg-white text-teal-800"
+                      : "border-zinc-300 bg-white text-emerald-800"
+                    : "border-transparent text-zinc-500 hover:bg-white/70 hover:text-zinc-800",
+                )}
+              >
+                {name}
+                {active ? (
+                  <span
+                    className={cn(
+                      "absolute inset-x-0 -bottom-px h-0.5",
+                      csv ? "bg-teal-600" : "bg-emerald-600",
+                    )}
+                  />
+                ) : null}
+              </button>
+            );
+          })}
+          <div className="ml-auto hidden px-3 py-1.5 text-[11px] text-zinc-400 sm:block">
+            Ready
+          </div>
         </div>
       ) : null}
     </div>

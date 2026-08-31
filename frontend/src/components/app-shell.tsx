@@ -24,7 +24,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div
       className={cx(
         "relative flex h-screen min-h-screen overflow-hidden text-foreground supports-[height:100dvh]:h-[100dvh]",
-        isLandingChrome ? "bg-transparent" : "bg-white dark:bg-[#0d0d0d]",
+        isLandingChrome ? "bg-transparent" : "bg-background-full",
       )}
     >
       {isLandingChrome ? (

@@ -384,6 +384,7 @@ Rules:
 - Never run destructive commands.
 - On a tool error, read the message and suggested_alternatives, fix your arguments, retry.
   Return a clear failure summary only after real attempts.
+- If a tool says the sandbox is restarting, or returns SANDBOX_RECONNECT_FAILED, retry the same command. Do not return status=blocked with invented codes such as SANDBOX_NOT_RUNNING. Do not tell the planner to start a new session — recovery stays in this session.
 - If the task needs GUI interaction or a browser, say so in your summary instead of improvising.
 - Keep output small: exact paths, exit codes, short excerpts — not full logs."""
 

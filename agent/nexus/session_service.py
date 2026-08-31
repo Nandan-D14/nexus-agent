@@ -22,28 +22,6 @@ from nexus.firebase import get_firestore_client
 
 logger = logging.getLogger(__name__)
 
-# #region agent log
-def _dbg(hid: str, loc: str, msg: str, data: dict | None = None) -> None:
-    import json, urllib.request
-    payload = {"sessionId": "19cd7e", "hypothesisId": hid, "location": loc, "message": msg, "data": data or {}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}
-    try:
-        with open(r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-19cd7e.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-Debug-Session-Id": "19cd7e"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=0.3).read()
-    except Exception:
-        pass
-# #endregion
-
-
 _REMOVED_PART_KEYS = {
     "audioTranscription",
     "audio_transcription",
@@ -91,23 +69,6 @@ def _validate_adk_session(data: dict[str, Any]) -> Session:
     payload = _sanitize_adk_value(copy.deepcopy(data))
     if not isinstance(payload, dict):
         raise TypeError("ADK session payload must be an object")
-    events = payload.get("events") if isinstance(payload.get("events"), list) else []
-    raw_events = data.get("events") if isinstance(data.get("events"), list) else []
-    # #region agent log
-    _dbg("F", "session_service.py:_validate_adk_session", "validate_session", {
-        "event_n": len(events),
-        "had_audio_transcription": any(
-            isinstance(event, dict)
-            and isinstance(event.get("content"), dict)
-            and any(
-                isinstance(part, dict) and "audioTranscription" in part
-                for part in (event.get("content") or {}).get("parts") or []
-            )
-            for event in raw_events
-            if isinstance(event, dict)
-        ),
-    })
-    # #endregion
     last_error: ValidationError | None = None
     for _ in range(16):
         try:
@@ -115,20 +76,12 @@ def _validate_adk_session(data: dict[str, Any]) -> Session:
         except ValidationError as exc:
             last_error = exc
             stripped = False
-            extras: list[str] = []
             for err in exc.errors():
                 if err.get("type") != "extra_forbidden":
                     continue
                 loc = tuple(err.get("loc") or ())
-                extras.append(".".join(str(part) for part in loc))
                 if _delete_path(payload, loc):
                     stripped = True
-            if extras:
-                # #region agent log
-                _dbg("F", "session_service.py:_validate_adk_session", "stripped_extra", {
-                    "extras": extras[:8],
-                })
-                # #endregion
             if not stripped:
                 raise
     if last_error is not None:

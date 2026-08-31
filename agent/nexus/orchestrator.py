@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -1729,6 +1730,10 @@ class NexusOrchestrator:
                     "Sandbox reconnected for session %s without a prepared workspace root",
                     self.session.id,
                 )
+            if self.history_repository:
+                from nexus.session import _rehydrate_workspace_from_gcs
+
+                await _rehydrate_workspace_from_gcs(self.session, self.history_repository)
             await self._send_json({"type": "sandbox_status", "status": "ready"})
             await self._send_json({"type": "vnc_url", "url": self.session.stream_url})
             await self._send_json({
@@ -1767,23 +1772,39 @@ class NexusOrchestrator:
         sandbox = getattr(self.session, "sandbox", None)
         stream_url = getattr(self.session, "stream_url", None)
 
-
         if sandbox is None:
             logger.warning("No sandbox attached for session %s while preparing %s", self.session.id, reason)
             return False
         if sandbox.is_alive and stream_url:
-            if not getattr(self, "_sandbox_ready_reported", False):
-                await self._send_json({"type": "sandbox_status", "status": "ready"})
-                await self._send_json({"type": "vnc_url", "url": stream_url})
-                self._sandbox_ready_reported = True
-            return True
+            if sandbox.extend_timeout():
+                if not getattr(self, "_sandbox_ready_reported", False):
+                    await self._send_json({"type": "sandbox_status", "status": "ready"})
+                    await self._send_json({"type": "vnc_url", "url": stream_url})
+                    self._sandbox_ready_reported = True
+                return True
+            self.session.stream_url = ""
 
         await self._send_json({"type": "sandbox_status", "status": "connecting", "reason": reason})
         try:
             ensure_callback = getattr(self, "_ensure_sandbox_ready_callback", None)
+            alive = False
             if ensure_callback:
-                await ensure_callback()
-            elif not await self._reconnect_sandbox():
+                try:
+                    await ensure_callback()
+                    alive = bool(
+                        getattr(self.session.sandbox, "is_alive", False)
+                        and (
+                            getattr(self.session, "stream_url", None)
+                            or getattr(self.session.sandbox, "stream_url", None)
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "Sandbox activate callback failed for session %s; reconnecting in-place",
+                        self.session.id,
+                        exc_info=True,
+                    )
+            if not alive and not await self._reconnect_sandbox():
                 return False
 
             set_sandbox(self.session.sandbox)
@@ -2214,7 +2235,7 @@ class NexusOrchestrator:
         sandbox = getattr(self.session, "sandbox", None)
         if sandbox is not None and getattr(sandbox, "is_alive", False):
             try:
-                sandbox.extend_timeout(900)
+                sandbox.extend_timeout()
             except Exception:
                 logger.debug("Could not extend sandbox timeout", exc_info=True)
 
@@ -3817,8 +3838,34 @@ class NexusOrchestrator:
                 exc_info=True,
             )
 
+    def _is_heavy_deliverable_report(self, text: str) -> bool:
+        """Determines if the response is a substantial report/deliverable that belongs on Canvas.
+
+        Conversational chat, short Q&A, and quick summaries stay in chat.
+        Multi-section structured documents, research synthesis memos, and heavy deliverables
+        (>= 1200 chars with Markdown headings/sections) are saved to outputs/final.md for Canvas view.
+        """
+        cleaned = text.strip()
+        if not cleaned:
+            return False
+        active_agent = str(getattr(self, "_active_agent", "") or "").lower()
+        if "research" in active_agent or "writer" in active_agent:
+            return True
+        if len(cleaned) < 1200:
+            return False
+        has_headings = bool(re.search(r"(?m)^#{1,3}\s+\S+", cleaned))
+        has_heavy_sections = cleaned.count("\n\n") >= 4 or cleaned.count("\n- ") >= 6
+        return has_headings or has_heavy_sections
+
     async def _save_final_response(self, text: str) -> None:
         if not text.strip() or not self._current_run_id:
+            return
+        if not self._is_heavy_deliverable_report(text):
+            logger.debug(
+                "Skipping outputs/final.md for conversational response (%d chars) in session %s",
+                len(text),
+                self.session.id,
+            )
             return
         try:
             self._bind_workspace_context()

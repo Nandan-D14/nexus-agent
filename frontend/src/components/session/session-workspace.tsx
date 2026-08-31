@@ -107,10 +107,12 @@ import {
 } from "@/lib/session-canvas";
 
 import { SessionHeader } from "@/components/session/session-header";
+import { SessionCanvasViewer } from "@/components/session/session-canvas";
 import { CREATE_TEMPLATE_PROMPT } from "@/lib/workflow-template-utils";
 import type { SessionContextUsageState } from "@/components/session/session-context-usage";
 import { SessionLandingView } from "@/components/session/session-landing-view";
 import { ChatComposer } from "@/components/session/chat-composer";
+import { useResizableSplit } from "@/lib/use-resizable-split";
 
 import type { AgentVisualAction } from "@/components/desktop-panel";
 
@@ -140,6 +142,7 @@ const WorkflowDesktopContainer = dynamic(
 
 /** Run states a durable worker may still be actively progressing through. */
 const EXECUTING_RUN_STATUSES = new Set(["queued", "running", "cancelling"]);
+const RECONNECTING_STATUS = "Reconnecting to the running task...";
 
 function isRunStillExecuting(runStatus: string | null | undefined): boolean {
   return typeof runStatus === "string" && EXECUTING_RUN_STATUSES.has(runStatus);
@@ -193,6 +196,23 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const [workspaceTab, setWorkspaceTab] = useState<Tab>("workflow");
   const workspaceTabRef = useRef<Tab>("workflow");
   const canvasApiRef = useRef<SessionCanvasApi | null>(null);
+  const {
+    percent: splitPercent,
+    isDragging: isSplitDragging,
+    containerRef: splitContainerRef,
+    leftPaneRef: splitLeftPaneRef,
+    startDragging: startSplitDragging,
+    resetToDefault: resetSplitToDefault,
+  } = useResizableSplit({
+    defaultPercent: 38,
+    minLeftPx: 360,
+    minRightPx: 420,
+    collapseRightThresholdPx: 100,
+    onCollapseRight: () => {
+      setIsDesktopVisible(false);
+      setIsDesktopFullscreen(false);
+    },
+  });
   const [terminalSession, setTerminalSession] = useState<TerminalSessionState | null>(null);
   const [editorSession, setEditorSession] = useState<EditorSessionState | null>(null);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
@@ -1402,13 +1422,13 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         }
 
         // A run still executing on a worker (we just refreshed away from it) can
-        // only be re-attached over the socket, and the socket is gated on
-        // activation. Sandbox-free turns have no stream_url, so activate on the
-        // run state too and show the work as live.
-        if (isRunStillExecuting(info.run_status)) {
+        // only be re-attached over the socket. Prefer the dedicated run doc over
+        // the session summary, which can stay "running" after the turn finished.
+        const liveRunStatus = run?.status || info.run_status;
+        if (isRunStillExecuting(liveRunStatus)) {
           setHasActivatedSession(true);
           setPhase("acting");
-          setAgentStatus("Reconnecting to the running task...");
+          setAgentStatus(RECONNECTING_STATUS);
         }
       }
     }
@@ -1434,6 +1454,12 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     sessionId,
     user,
   ]);
+
+  useEffect(() => {
+    if (!isConnected || viewMode !== "live") return;
+    if (agentStatus !== RECONNECTING_STATUS) return;
+    setAgentStatus("");
+  }, [agentStatus, isConnected, viewMode]);
 
   useEffect(() => {
     if (!isConnected || viewMode !== "live") {
@@ -2240,16 +2266,24 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
             />
 
             {/* ─── Main content: Desktop + Chat ─── */}
-            <div className="flex-1 flex overflow-hidden min-h-0">
+            <div
+              ref={splitContainerRef}
+              className="flex-1 flex overflow-hidden min-h-0 relative"
+            >
               {/* Left/Middle: Chat Sidebar */}
               <div
-                className={`overflow-hidden flex flex-col transition-all duration-300 ease-in-out ${
+                ref={splitLeftPaneRef}
+                style={{
+                  width:
+                    isDesktopVisible && !isDesktopFullscreen
+                      ? `${splitPercent}%`
+                      : undefined,
+                }}
+                className={`overflow-hidden flex flex-col ${
                   isDesktopVisible && isDesktopFullscreen
                     ? "hidden"
                     : isDesktopVisible
-                      ? workspaceTab === "canvas"
-                        ? "flex-1 min-w-[320px] max-w-[440px] border-r border-zinc-200 dark:border-white/5"
-                        : "flex-1 min-w-[380px] max-w-4xl border-r border-zinc-200 dark:border-white/5"
+                      ? "min-w-[360px] max-w-[65%]"
                       : "flex-1 min-w-0"
                 }`}
               >
@@ -2260,21 +2294,21 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                   {viewMode === "archived" && chatItems.length === 0 ? (
                     <div className="flex h-full flex-col min-h-0">
                       <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col items-center justify-center p-8 text-center bg-transparent">
-                        <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                        <p className="text-lg font-medium text-text-primary">
                           Previous chat
                         </p>
-                        <p className="mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-500">
+                        <p className="mt-2 max-w-md text-sm text-text-secondary">
                           Send a message or open desktop to continue.
                         </p>
                         {(sessionInfo?.handoff_summary?.preview || sessionInfo?.summary) && (
-                          <p className="mt-6 max-w-lg rounded-2xl bg-[#f4f4f5] dark:bg-[#1a1a1c] px-5 py-4 text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                          <p className="mt-6 max-w-lg rounded-2xl bg-background-secondary-default px-5 py-4 text-[15px] leading-relaxed text-text-primary">
                             {sessionInfo.handoff_summary?.preview || sessionInfo.summary}
                           </p>
                         )}
                       </div>
                       {canShowComposer ? (
                         <div className="shrink-0 px-6 pb-4 pt-1">
-                          <div className="mx-auto w-full max-w-3xl relative rounded-[24px] border border-border-button-white bg-background-secondary-default p-2 shadow-sidebar">
+                          <div className="mx-auto w-full max-w-3xl">
                             <TodoList items={todoItems} />
                             <ChatComposer
                               inputRef={inputRef}
@@ -2318,7 +2352,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                       onTemplateDraftChange={handleTemplateDraftChange}
                       footer={
                         canShowComposer ? (
-                          <div className="rounded-[24px] border border-border-button-white bg-background-secondary-default p-2 shadow-sidebar">
+                          <div className="w-full">
                             <TodoList items={todoItems} />
                             <ChatComposer
                               inputRef={inputRef}
@@ -2355,11 +2389,24 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                 </div>
               </div>
 
+              {/* Gutter / Resize Divider */}
+              {isDesktopVisible && !isDesktopFullscreen && (
+                <div
+                  onPointerDown={startSplitDragging}
+                  onDoubleClick={resetSplitToDefault}
+                  className="group relative flex w-1.5 shrink-0 -mx-[3px] z-30 cursor-col-resize items-center justify-center bg-transparent"
+                  title="Drag to resize, double-click to reset"
+                >
+                  {/* Subtle 1px Divider Line */}
+                  <div className="h-full w-[1px] bg-card-border group-hover:bg-zinc-400 dark:group-hover:bg-zinc-300 transition-colors" />
+                </div>
+              )}
+
               {/* Right: Desktop panel */}
               {isDesktopVisible ? (
-                <div className="flex-[2] min-w-0 flex overflow-hidden transition-all duration-300 ease-in-out">
-                  <div className="flex-1 flex flex-col overflow-hidden p-0 bg-zinc-50 dark:bg-[#151515]">
-                    <div className="w-full h-full xl:max-w-7xl mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800/80 shadow-2xl relative">
+                <div className="flex-1 min-w-[420px] flex overflow-hidden">
+                  <div className="flex-1 flex flex-col overflow-hidden p-0 bg-background">
+                    <div className="w-full h-full overflow-hidden relative">
                       <WorkflowDesktopContainer
                         workflowRun={workflowRun}
                         streamUrl={streamUrl}
@@ -2381,10 +2428,16 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                   </div>
                 </div>
               ) : null}
+
+              {/* Global overlay while dragging to prevent iframes/Monaco from capturing mouse events */}
+              {isSplitDragging && (
+                <div className="fixed inset-0 z-[100] cursor-col-resize select-none bg-transparent" />
+              )}
             </div>
 
             {/* ─── Footer ─── */}
             {/* <StatusBar phase={phase} isConnected={viewMode === "live" && isConnected} tokenQuota={tokenQuota} /> */}
+            <SessionCanvasViewer />
           </SessionCanvasProvider>
             )}
             </div>

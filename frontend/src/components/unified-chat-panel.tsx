@@ -346,10 +346,10 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   }, [isBusy, turns]);
 
   return (
-    <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
+    <div className="relative h-full bg-background-full transition-colors">
       <div
         ref={scrollRef}
-        className={`overflow-y-auto h-full custom-scrollbar flex flex-col px-6 pt-8 ${
+        className={`overflow-y-auto h-full custom-scrollbar flex flex-col px-2 pt-8 ${
           footer ? "pb-0" : "pb-8"
         }`}
       >
@@ -400,7 +400,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
       </div>
 
       {footer ? (
-        <div className="absolute inset-x-0 bottom-0 z-20 bg-[#0d0d0d] px-6 pt-1 pb-3">
+        <div className="absolute inset-x-0 bottom-0 z-20 bg-background-full px-2 pt-1 pb-2">
           <AnimatePresence>
             {userScrolledUp && (
               <motion.button
@@ -408,7 +408,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
                 onClick={scrollToBottom}
-                className="mx-auto mb-2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                className="mx-auto mb-2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background-primary-default border border-card-border shadow-lg text-[12px] font-medium text-text-secondary hover:text-text-primary transition-colors"
               >
                 <ChevronDown className="w-3.5 h-3.5" />
                 Scroll to bottom
@@ -427,7 +427,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}
             onClick={scrollToBottom}
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background-primary-default border border-card-border shadow-lg text-[12px] font-medium text-text-secondary hover:text-text-primary transition-colors"
           >
             <ChevronDown className="w-3.5 h-3.5" />
             Scroll to bottom
@@ -496,12 +496,7 @@ function TurnBlock({
   }, [eventSegments, turn.agentMessages, turn.permissions, turn.questions]);
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="flex flex-col gap-5 w-full"
-    >
+    <div className="flex flex-col gap-5 w-full">
       {turn.userMessage && (
         <UserMessageCard text={turn.userMessage.text} />
       )}
@@ -521,8 +516,7 @@ function TurnBlock({
 
         if (item.kind === "generative_ui") {
           return (
-            <motion.div
-              layout
+            <div
               key={`genui-${item.data.ts}-${idx}`}
               className="w-full py-1"
             >
@@ -531,7 +525,7 @@ function TurnBlock({
                 componentType={item.data.component_type}
                 component={item.data.component}
               />
-            </motion.div>
+            </div>
           );
         }
 
@@ -540,8 +534,7 @@ function TurnBlock({
             ? item.data.input_fields
             : [];
           return (
-            <motion.div
-              layout
+            <div
               key={`template-draft-${item.data.template_id}`}
               className="w-full py-1"
             >
@@ -568,7 +561,7 @@ function TurnBlock({
                   })
                 }
               />
-            </motion.div>
+            </div>
           );
         }
 
@@ -577,13 +570,12 @@ function TurnBlock({
           const artifact = coerceRunArtifact(raw);
           if (!artifact) return null;
           return (
-            <motion.div
-              layout
+            <div
               key={`artifact-${artifact.artifact_id}-${idx}`}
               className="w-full max-w-xl py-1"
             >
               <ArtifactAttachmentCard artifact={artifact} compact />
-            </motion.div>
+            </div>
           );
         }
 
@@ -591,13 +583,12 @@ function TurnBlock({
           const doc = coerceCanvasDocument(item.data.document);
           if (!doc) return null;
           return (
-            <motion.div
-              layout
+            <div
               key={`canvas-doc-${doc.id}-${idx}`}
               className="w-full max-w-xl py-1"
             >
               <CanvasDocumentHandleCard document={doc} />
-            </motion.div>
+            </div>
           );
         }
 
@@ -617,7 +608,7 @@ function TurnBlock({
 
         if (item.kind === "permission") {
           return (
-            <motion.div layout key={`perm-${idx}`} className="py-1">
+            <div key={`perm-${idx}`} className="py-1">
               <PermissionCard
                 taskId={item.data.task_id}
                 approvalId={item.data.approval_id}
@@ -630,13 +621,13 @@ function TurnBlock({
                 timedOut={item.data.decision === "timed_out"}
                 onRespond={onPermissionRespond}
               />
-            </motion.div>
+            </div>
           );
         }
 
         if (item.kind === "user_question") {
           return (
-            <motion.div layout key={`question-${item.data.question_id}`} className="py-1">
+            <div key={`question-${item.data.question_id}`} className="py-1">
               <AgentQuestionCard
                 questionId={item.data.question_id}
                 question={item.data.question}
@@ -648,13 +639,13 @@ function TurnBlock({
                 issuedAt={item.data.ts}
                 onRespond={onQuestionRespond}
               />
-            </motion.div>
+            </div>
           );
         }
 
         return null;
       })}
-    </motion.div>
+    </div>
   );
 }
 
@@ -725,7 +716,7 @@ function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocumen
 function UserMessageCard({ text }: { text: string }) {
   return (
     <div className="flex w-full justify-end py-1">
-      <div className="max-w-[80%] rounded-2xl bg-zinc-100 dark:bg-[#1a1a1e] px-5 py-3 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 border border-zinc-200/80 dark:border-zinc-800/60">
+      <div className="max-w-[80%] rounded-2xl bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary border border-card-border">
         {text}
       </div>
     </div>
@@ -746,11 +737,11 @@ function AgentMessageCard({
   extraSources?: SearchCiteRef[];
 }) {
   return (
-    <motion.div layout className="flex flex-col items-start w-full">
+    <div className="flex flex-col items-start w-full">
       <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
         <StreamingText text={text} isStreaming={stream} extraSources={extraSources} />
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -900,13 +891,7 @@ function ThoughtAccordion({
   );
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-      className="w-full flex flex-col gap-3"
-    >
+    <div className="w-full flex flex-col gap-3">
       {displayRows.map((row) => {
         if (row.kind === "reasoning") {
           return (
@@ -976,7 +961,7 @@ function ThoughtAccordion({
           </AnimatePresence>
         </>
       ) : null}
-    </motion.div>
+    </div>
   );
 }
 

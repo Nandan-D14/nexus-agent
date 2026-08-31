@@ -26,27 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# #region agent log
-def _dbg(hid: str, loc: str, msg: str, data: dict | None = None) -> None:
-    import json, time, urllib.request
-    payload = {"sessionId": "19cd7e", "hypothesisId": hid, "location": loc, "message": msg, "data": data or {}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}
-    try:
-        with open(r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-19cd7e.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-Debug-Session-Id": "19cd7e"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=0.3).read()
-    except Exception:
-        pass
-# #endregion
-
 
 def _strip_openai_prefix(model: str) -> str:
     name = (model or "").strip()
@@ -84,49 +63,15 @@ class UserLlmClient:
         import litellm
 
         call_kwargs = self._call_kwargs(model, tools, kwargs)
-        # #region agent log
-        try:
-            msg_chars = 0
-            for m in messages or []:
-                if isinstance(m, dict):
-                    c = m.get("content")
-                    msg_chars += len(c) if isinstance(c, str) else len(str(c or ""))
-                else:
-                    msg_chars += len(str(m))
-            tool_n = len(tools) if isinstance(tools, list) else (1 if tools else 0)
-            host = urlparse(self.api_base).netloc
-            _dbg("A", "user_llm_router.py:acompletion", "llm_call", {
-                "model": str(call_kwargs.get("model") or "")[:120],
-                "host": host,
-                "has_key": bool(self.api_key),
-                "msg_chars": msg_chars,
-                "est_tok": msg_chars // 4,
-                "tool_n": tool_n,
-            })
-        except Exception:
-            pass
-        # #endregion
         logger.info(
             "Routing request asynchronously to user LLM model: %s",
             _strip_openai_prefix(model),
         )
-        try:
-            response = await litellm.acompletion(
-                messages=messages,
-                tools=tools,
-                **call_kwargs,
-            )
-        except Exception as exc:
-            # #region agent log
-            err = str(exc)
-            _dbg("B", "user_llm_router.py:acompletion", "llm_error", {
-                "exc_type": type(exc).__name__,
-                "too_large": "too large" in err.lower() or "tpm" in err.lower(),
-                "auth": "authentication" in err.lower() or "missing authentication" in err.lower(),
-                "err_head": err[:240],
-            })
-            # #endregion
-            raise
+        response = await litellm.acompletion(
+            messages=messages,
+            tools=tools,
+            **call_kwargs,
+        )
         if not call_kwargs.get("stream"):
             repair_tool_call_ids(response)
         return response

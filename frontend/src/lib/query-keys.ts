@@ -17,6 +17,7 @@ export const queryKeys = {
   },
   skills: () => ["skills"] as const,
   skill: (skillId: string) => ["skills", skillId] as const,
+  skillsCatalog: (source: string) => ["skills", "catalog", source] as const,
   templates: () => ["templates"] as const,
   dashboard: {
     stats: () => ["dashboard", "stats"] as const,

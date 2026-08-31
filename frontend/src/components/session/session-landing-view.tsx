@@ -70,7 +70,7 @@ export function SessionLandingView({
   landingInputRef,
 }: Props) {
   return (
-    <div className="relative flex flex-1 flex-col items-center overflow-hidden p-6 pt-[22vh]">
+    <div className="relative flex flex-1 flex-col items-center overflow-x-hidden p-6 pt-[22vh]">
       <div className="relative z-10 flex w-full max-w-3xl flex-col items-center gap-6">
         <div className="relative py-2 text-center">
           <motion.div

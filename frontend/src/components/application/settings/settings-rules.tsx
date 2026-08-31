@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/base/buttons/button";
+import { InputPlusMenu } from "@/components/base/input-plus-menu";
 import { fetchUserSettings, patchAppSettings, readAppSettings } from "@/lib/user-settings";
 import { APP_TEMPLATES } from "@/lib/app-paths";
 import { SettingsCard, SettingsSectionLabel } from "./settings-rows";
@@ -56,14 +57,23 @@ export function SettingsRules({ onSaved }: { onSaved?: () => void } = {}) {
       <div className="flex w-full flex-col gap-2">
         <SettingsSectionLabel>Standing instructions</SettingsSectionLabel>
         <SettingsCard className="p-3 pl-3">
-          <textarea
-            aria-label="Standing instructions"
-            value={rules}
-            disabled={loading}
-            onChange={(event) => setRules(event.target.value)}
-            placeholder="Always prefer concise answers. Ask before sending email."
-            className="min-h-[140px] w-full resize-y rounded-xl border border-border-button-default bg-background-primary-default px-3 py-2 text-body-regular text-text-primary outline-none placeholder:text-text-tertiary focus-visible:ring-2 focus-visible:ring-border-focus-ring"
-          />
+          <div className="relative">
+            <textarea
+              aria-label="Standing instructions"
+              value={rules}
+              disabled={loading}
+              onChange={(event) => setRules(event.target.value)}
+              placeholder="Always prefer concise answers. Ask before sending email."
+              className="min-h-[140px] w-full resize-y rounded-xl border border-border-button-default bg-background-primary-default px-3 pb-10 pt-2 text-body-regular text-text-primary outline-none placeholder:text-text-tertiary focus-visible:ring-2 focus-visible:ring-border-focus-ring"
+            />
+            <div className="absolute bottom-2 left-2">
+              <InputPlusMenu
+                showUpload={false}
+                showVoice={false}
+                onInsertText={(text) => setRules((prev) => prev + text)}
+              />
+            </div>
+          </div>
         </SettingsCard>
       </div>
 

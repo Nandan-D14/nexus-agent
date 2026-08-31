@@ -8,6 +8,8 @@
 import { useState } from "react";
 import { Check, Pencil } from "lucide-react";
 
+import { InputPlusMenu } from "@/components/base/input-plus-menu";
+
 import { useToast } from "@/components/toast-provider";
 import type { WorkflowTemplateInputField } from "@/lib/message-types";
 import { useUpdateTemplateMutation } from "@/lib/queries/templates";
@@ -151,13 +153,22 @@ export function TemplateDraftCard({ value, onChange }: Props) {
             className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm outline-none focus:border-cyan-500 dark:border-white/10 dark:bg-[#151518] dark:text-zinc-100"
             placeholder="Description"
           />
-          <textarea
-            value={instructions}
-            onChange={(event) => setInstructions(event.target.value)}
-            rows={8}
-            className="w-full rounded-3xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm leading-6 outline-none focus:border-cyan-500 dark:border-white/10 dark:bg-[#151518] dark:text-zinc-100"
-            placeholder="Instructions"
-          />
+          <div className="relative">
+            <textarea
+              value={instructions}
+              onChange={(event) => setInstructions(event.target.value)}
+              rows={8}
+              className="w-full rounded-3xl border border-zinc-200 bg-zinc-50 px-4 pb-10 pt-3 text-sm leading-6 outline-none focus:border-cyan-500 dark:border-white/10 dark:bg-[#151518] dark:text-zinc-100"
+              placeholder="Instructions"
+            />
+            <div className="absolute bottom-2 left-2">
+              <InputPlusMenu
+                showUpload={false}
+                showVoice={false}
+                onInsertText={(text) => setInstructions((prev) => prev + text)}
+              />
+            </div>
+          </div>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Input fields</p>

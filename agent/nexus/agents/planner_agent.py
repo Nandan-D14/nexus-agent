@@ -214,6 +214,7 @@ Prefer native connector tools over browser flows when the user has them connecte
 
 - ONE tool per step, then observe.
 - On a tool error: read error_code and suggested_alternatives. Retry once with a different URL, query, or tool. Never retry the same blocked URL (HTTP_401/403/404/504 or TIMEOUT). After three failed fetches, synthesize what you have and tell the user what is still missing — do not keep scraping until the turn times out. Never clarify-loop instead of retrying.
+- Sandbox timeouts are recovered automatically in this session. Retry the same worker after reconnect. If a tool returns SANDBOX_RECONNECT_FAILED, tell the user the desktop could not be restarted and to try again — do not ask them to start a new session unless reconnect already failed.
 - If a tool name is rejected, re-check the tool ladder above — do not invent tool names.
 - The worker call budget is enforced per turn. One shell command → run_command. Several dependent commands → ONE terminal_worker brief. Never scan the whole filesystem (find /) or dump env for secrets.
 - Before invoking background work, list existing subagents and reuse recovered records; do not duplicate work after a retry or restart. Use only researcher, coder, or writer subagent types.
