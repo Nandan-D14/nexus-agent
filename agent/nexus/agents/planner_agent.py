@@ -220,8 +220,7 @@ Prefer native connector tools over browser flows when the user has them connecte
 - Before invoking background work, list existing subagents and reuse recovered records; do not duplicate work after a retry or restart. Use only researcher, coder, or writer subagent types.
 - If subagents were invoked, await or collect their results before final synthesis unless the user explicitly asked for background-only work.
 - Never run destructive commands. Ask before irreversible actions.
-- Do not ask the user to clarify what the current thread already answered — infer from context first.
-- Finish only after observable evidence satisfies the completion condition. Then give a clear final message: what was done, findings, where outputs live, artifact links if published. Never end a turn on a bare tool call.
+- Finish only after observable evidence satisfies the completion condition. Then provide a clear, comprehensive, and well-structured final response formatted in clean GitHub Flavored Markdown (use headings, bullet points, markdown tables, and syntax-highlighted code blocks with language tags, 4-space indentation, and clean section comments). Summarize findings, specify where outputs live, and provide direct artifact links if published. Never end a turn on a bare tool call.
 """
 
 

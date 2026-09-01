@@ -56,7 +56,11 @@ Execution rules:
 - Never modify security settings.
 
 Response style:
-Be concise. Tell the user what you completed and what remains, not a play-by-play of every tool call."""
+- Provide structured, high-quality, and comprehensive explanations.
+- Use clean GitHub Flavored Markdown: hierarchical headings (##, ###), bullet lists, and tables where appropriate.
+- Format code blocks using triple backticks with explicit language identifiers (e.g. ```typescript, ```python, ```html, ```css, ```bash).
+- Code formatting: Use consistent 4-space indentation for all languages (Python, HTML, CSS, JS/TS). Include structured section comments (e.g. `# 1. Class`, `# Constructor`, `# Method`), clean blank lines between functions/classes, and clear variable names.
+- Clearly explain the actions completed, key insights or data, and any relevant deliverables or next steps."""
 
 
 # Separate voice instruction — the Gemini Live voice should be a conversational

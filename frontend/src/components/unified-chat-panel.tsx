@@ -43,6 +43,8 @@ import {
   Sparkles,
   Layers,
   Wrench,
+  Check,
+  Clipboard,
 } from "lucide-react";
 import {
   classifyAgentTool,
@@ -714,10 +716,41 @@ function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocumen
 /* ------------------------------------------------------------------ */
 
 function UserMessageCard({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // clipboard error
+    }
+  };
+
   return (
-    <div className="flex w-full justify-end py-1">
-      <div className="max-w-[80%] rounded-2xl bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary border border-card-border">
-        {text}
+    <div className="group/user-msg relative flex w-full justify-end py-1">
+      <div className="relative flex items-center gap-2 max-w-[85%]">
+        {/* Copy button on hover */}
+        <button
+          type="button"
+          aria-label={copied ? "Copied" : "Copy prompt"}
+          title={copied ? "Copied" : "Copy prompt"}
+          onClick={() => void handleCopy()}
+          className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background-primary-default text-text-tertiary opacity-0 shadow-sm transition-all duration-150 group-hover/user-msg:opacity-100 hover:border-border-button-hover hover:bg-background-secondary-hover hover:text-text-primary focus-visible:opacity-100"
+        >
+          {copied ? (
+            <Check className="size-3.5 text-emerald-500" aria-hidden />
+          ) : (
+            <Clipboard className="size-3.5" aria-hidden />
+          )}
+        </button>
+
+        {/* Message Bubble */}
+        <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
+          {text}
+        </div>
       </div>
     </div>
   );
