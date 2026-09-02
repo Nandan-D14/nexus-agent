@@ -117,6 +117,15 @@ export type ArtifactCreatedSegment = {
   ts: number;
 };
 
+export type AppPreviewSegment = {
+  kind: "app_preview";
+  url: string;
+  port?: number;
+  title: string;
+  workspacePath?: string;
+  ts: number;
+};
+
 export type CanvasDocumentSegment = {
   kind: "canvas_document";
   document: Record<string, unknown>;
@@ -139,6 +148,7 @@ export type TurnEventSegment =
   | { kind: "task_group"; data: TaskGroup; ts: number }
   | GenerativeUiSegment
   | ArtifactCreatedSegment
+  | AppPreviewSegment
   | CanvasDocumentSegment
   | TemplateDraftSegment;
 
@@ -198,6 +208,28 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         segments.push({
           kind: "artifact_created",
           artifact,
+          ts: event.ts,
+        });
+      }
+      continue;
+    }
+
+    if (event.type === "app_preview") {
+      finalizeTask();
+      const url = typeof event.url === "string" ? event.url.trim() : "";
+      if (url) {
+        segments.push({
+          kind: "app_preview",
+          url,
+          port: typeof event.port === "number" ? event.port : undefined,
+          title:
+            typeof event.title === "string" && event.title.trim()
+              ? event.title
+              : "App preview",
+          workspacePath:
+            typeof event.workspace_path === "string"
+              ? event.workspace_path
+              : undefined,
           ts: event.ts,
         });
       }

@@ -27,17 +27,23 @@ from nexus.usage import (
 logger = logging.getLogger(__name__)
 
 
-# Instruction used when the model finished a turn on tool calls without ever
-# emitting a closing answer. It is nudged to synthesize from what it already
-# gathered instead of calling more tools.
+# Instruction used when the model finished a turn with no user-visible answer
+# (tool-only, or reasoning-only thinking parts). Keep working if the user asked
+# to create/build something; otherwise write the reply now.
 _FINAL_SYNTHESIS_INSTRUCTION = (
-    "You have gathered enough information from the previous tool results. "
-    "Do NOT call any tools. Using only the information already collected, "
-    "write the final answer or summary for the user now."
+    "The previous turn produced no user-visible reply (reasoning-only or empty). "
+    "Continue the user's last request now. If the latest user text is a short "
+    "confirmation like 'continue', 'create it', or 'do it', finish the previous "
+    "substantial request in this conversation — do not treat the confirmation "
+    "as the whole task. If they asked to create, build, or publish something "
+    "that is not done, use tools to do the work "
+    "(write_workspace_file, terminal_worker, publish_app_preview, github_push). "
+    "Then write a short status to the user. Never finish with empty text or "
+    "internal reasoning only."
 )
-# Small, bounded turn cap for the forced synthesis pass so a stray tool call
-# cannot re-open an unbounded loop.
-_SYNTHESIS_TURN_CAP = 2
+# Bound the forced continuation so a stray loop cannot run forever. 20 tool
+# rounds is enough to resume a create/build after a reasoning-only stall.
+_SYNTHESIS_TURN_CAP = 20
 
 
 @dataclass
@@ -107,6 +113,7 @@ async def run_agent_turn(
     runtime_config: SessionRuntimeConfig,
     event_callback=None,
     max_turns: int | None = None,
+    synthesis_instruction: str | None = None,
 ) -> AgentTurnResult:
     """Execute one planner turn and return its final text and usage."""
     adk_session = await session_service.get_session(
@@ -245,22 +252,21 @@ async def run_agent_turn(
     ):
         final_response = last_text
 
-    # Forced final synthesis: the model ran tools but produced no closing text.
+    # Forced final synthesis: empty answer after tools OR after a reasoning-only
+    # turn with no user-visible text (thinking models often emit thought parts
+    # and then stop, which used to skip this pass and fail the turn).
     forced_synthesis_used = False
-    if (
-        settings.force_final_synthesis
-        and not (final_response and final_response.strip())
-        and (turn_count > 0 or function_response_count > 0)
-    ):
+    if settings.force_final_synthesis and not (final_response and final_response.strip()):
         forced_synthesis_used = True
         logger.warning(
             "No final text after %d tool round(s); forcing synthesis turn for session %s",
             turn_count,
             session_id,
         )
+        instruction = (synthesis_instruction or "").strip() or _FINAL_SYNTHESIS_INSTRUCTION
         synthesis_message = types.Content(
             role="user",
-            parts=[types.Part(text=_FINAL_SYNTHESIS_INSTRUCTION)],
+            parts=[types.Part(text=instruction)],
         )
         synth_final, synth_last, _, _, _ = await _consume(
             synthesis_message,

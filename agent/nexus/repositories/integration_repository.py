@@ -606,6 +606,9 @@ class IntegrationRepository(FirestoreRepoBase):
                 {"name": "github_list_issues", "description": "List repository issues."},
                 {"name": "github_create_issue", "description": "Create a repository issue."},
                 {"name": "github_summarize_pr", "description": "Fetch PR metadata and changed files."},
+                {"name": "github_clone_repo", "description": "Clone a repository into the workspace."},
+                {"name": "github_create_repo", "description": "Create a GitHub repository."},
+                {"name": "github_push", "description": "Commit and push using the connected GitHub account."},
             ],
             "resources": [],
             "status": status,
@@ -831,7 +834,10 @@ class IntegrationRepository(FirestoreRepoBase):
                 "name": "Google Calendar",
                 "tools": [
                     {"name": "calendar_list", "description": "List Google Calendar events."},
+                    {"name": "calendar_get", "description": "Read a Google Calendar event."},
                     {"name": "calendar_create", "description": "Create a Google Calendar event."},
+                    {"name": "calendar_update", "description": "Update a Google Calendar event."},
+                    {"name": "calendar_delete", "description": "Delete a Google Calendar event."},
                 ],
             },
             "google_tasks": {

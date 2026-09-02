@@ -65,7 +65,7 @@ const GROUPS: ConnectorGroup[] = [
       {
         provider: "github",
         name: "GitHub",
-        capability: "Search repos, read files, open issues, summarize PRs.",
+        capability: "Search, clone, create repos, push, issues, and PRs.",
       },
       {
         provider: "vercel",

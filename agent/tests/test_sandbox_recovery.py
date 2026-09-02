@@ -19,6 +19,7 @@ from nexus.sandbox import (
     SandboxDeadError,
     SandboxManager,
     is_dead_sandbox_error,
+    is_valid_sandbox_id,
 )
 from nexus.session import Session, SessionManager
 from nexus.tools.base import normalized_tool
@@ -50,6 +51,22 @@ def test_extend_timeout_failure_marks_dead() -> None:
     assert manager.extend_timeout() is False
     assert manager.is_alive is False
     assert manager.stream_url is None
+
+
+def test_pause_keeps_real_sandbox_id_when_sdk_returns_bool() -> None:
+    manager = SandboxManager()
+    client = MagicMock()
+    client.sandbox_id = "iyu3ebm8aqm5x7mim2hkf"
+    client.pause.return_value = True
+    manager._sandbox = client
+    manager._stream_url = "http://vnc"
+
+    paused = manager.pause()
+
+    assert paused == "iyu3ebm8aqm5x7mim2hkf"
+    assert manager.is_alive is False
+    assert not is_valid_sandbox_id("True")
+    assert not is_valid_sandbox_id(True)
 
 
 def test_run_command_404_raises_sandbox_dead_error() -> None:
@@ -115,6 +132,24 @@ async def test_ensure_session_ready_creates_after_stale_probe() -> None:
     sandbox.resume.assert_not_called()
     assert ready.sandbox_id == "new-id"
     assert ready.stream_url == "http://new-vnc"
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_ready_skips_invalid_paused_sandbox_id() -> None:
+    sandbox = MagicMock()
+    sandbox.is_alive = False
+    sandbox.create.return_value = {"sandbox_id": "new-id", "stream_url": "http://new-vnc"}
+
+    manager = SessionManager()
+    session = _session_with_sandbox(sandbox)
+    session.sandbox_id = "True"
+    manager._local_sessions[session.id] = session
+
+    ready = await manager.ensure_session_ready(session.id)
+
+    sandbox.resume.assert_not_called()
+    sandbox.create.assert_called_once()
+    assert ready.sandbox_id == "new-id"
 
 
 @pytest.mark.asyncio

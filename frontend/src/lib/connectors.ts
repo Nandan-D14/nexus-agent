@@ -173,6 +173,10 @@ export function providerLogo(provider: string): string | null {
       return "/connectors/mcp.svg";
     case "composio":
       return "/connectors/composio.svg";
+    case "stripe":
+      return "/connectors/stripe.svg";
+    case "insights":
+      return "/connectors/insights.svg";
     default:
       return null;
   }
@@ -369,14 +373,14 @@ const CONNECTOR_DETAILS: Record<string, ConnectorDetail> = {
     connectHint: "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks.",
   },
   google_calendar: {
-    summary: "List and create calendar events so the agent can schedule and summarize your day.",
+    summary: "List, create, update, and delete calendar events so the agent can schedule and manage your day.",
     capabilities: [
-      "List upcoming events",
-      "Create events with title, time, timezone, and optional guests",
-      "Ask in chat: “Create a 30-minute event tomorrow at 3pm titled Design Review.”",
+      "List and read upcoming events",
+      "Create, reschedule, edit, and cancel events with title, time, timezone, and optional guests",
+      "Ask in chat: “Move Design Review to 10am” or “Cancel tomorrow’s standup.”",
     ],
     connectHint:
-      "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks. Creating an event always shows an approval card in chat.",
+      "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks. Creating, updating, or deleting an event always shows an approval card in chat.",
   },
   google_tasks: {
     summary: "Manage Google Tasks lists and to-dos from the agent loop.",
@@ -389,13 +393,15 @@ const CONNECTOR_DETAILS: Record<string, ConnectorDetail> = {
       "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks. Creating a task always shows an approval card in chat.",
   },
   github: {
-    summary: "Search repos, read files, list issues, and summarize pull requests from GitHub.",
+    summary: "Search repos, read files, clone, create repositories, and push with git using your connected GitHub account.",
     capabilities: [
       "Search repositories and read files",
+      "Clone a repo into the workspace",
+      "Create a GitHub repository and push local code",
       "List and create issues",
       "Summarize pull requests",
     ],
-    connectHint: "Connects with GitHub OAuth when configured, or a personal access token.",
+    connectHint: "Connects with GitHub OAuth, the same popup flow as Google. A personal access token is optional fallback. Clone and push use the sandbox git CLI with your connected token.",
   },
   exa: {
     summary:

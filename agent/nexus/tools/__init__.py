@@ -38,6 +38,7 @@ from nexus.tools.docs import (
     generate_docx_report,
     generate_pptx_report,
     publish_html_artifact,
+    publish_app_preview,
     save_as_artifact,
 )
 from nexus.tools.web import web_search, scrape_web_page
@@ -51,6 +52,9 @@ from nexus.tools.integrations import (
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    github_clone_repo,
+    github_create_repo,
+    github_push,
     tavily_search,
     tinyfish_web_agent,
     vyora_list_agents,
@@ -66,7 +70,10 @@ from nexus.tools.integrations import (
     tasks_list,
     tasks_create,
     calendar_list,
+    calendar_get,
     calendar_create,
+    calendar_update,
+    calendar_delete,
 )
 from nexus.tools.ui_control import show_desktop_panel, show_workflow_panel
 from nexus.tools.templates import (
@@ -95,6 +102,7 @@ ALL_TOOLS = [
     generate_docx_report,
     generate_pptx_report,
     publish_html_artifact,
+    publish_app_preview,
     save_as_artifact,
     search_drive,
     read_drive_file,
@@ -105,6 +113,9 @@ ALL_TOOLS = [
     github_list_issues,
     github_create_issue,
     github_summarize_pr,
+    github_clone_repo,
+    github_create_repo,
+    github_push,
     tavily_search,
     tinyfish_web_agent,
     vyora_list_agents,
@@ -120,7 +131,10 @@ ALL_TOOLS = [
     tasks_list,
     tasks_create,
     calendar_list,
+    calendar_get,
     calendar_create,
+    calendar_update,
+    calendar_delete,
     take_screenshot,
     run_command,
     move_mouse,

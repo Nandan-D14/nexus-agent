@@ -14,7 +14,7 @@ import shlex
 import textwrap
 from typing import Any
 
-from nexus.tools.base import normalized_tool
+from nexus.tools.base import normalized_tool, tool_error, tool_success
 from nexus.tools._context import (
     get_artifact_callback,
     get_history_repository,
@@ -23,6 +23,7 @@ from nexus.tools._context import (
     get_session_id,
     get_workspace_path,
 )
+from nexus.tools.sandbox_events import emit_sandbox_event
 from nexus.storage import artifact_storage_metadata, upload_artifact_async
 
 logger = logging.getLogger(__name__)
@@ -612,6 +613,77 @@ async def publish_html_artifact(
             "metadata": artifact.metadata or metadata,
         },
     }
+
+
+@normalized_tool(needs_sandbox=True)
+async def publish_app_preview(port: int, title: str | None = None) -> dict[str, Any]:
+    """Publish a live HTTPS preview URL for an app already listening in the sandbox.
+
+    Use after starting a Vite/Next/Flask (or similar) server bound to 0.0.0.0.
+    Simple single-file HTML should use publish_html_artifact instead.
+
+    Args:
+        port: TCP port the app is listening on inside the sandbox (e.g. 5173).
+        title: Optional label shown in the Preview tab.
+    """
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        return tool_error("port must be an integer.", error_code="INVALID_INPUT")
+    if port_number < 1 or port_number > 65535:
+        return tool_error("port must be between 1 and 65535.", error_code="INVALID_INPUT")
+
+    sandbox = get_sandbox()
+    if sandbox is None or not sandbox.is_alive:
+        return tool_error(
+            "Sandbox is not running. Start the app in this session, then retry.",
+            error_code="SANDBOX_NOT_RUNNING",
+            retryable=True,
+        )
+    if not sandbox.probe_listening_port(port_number):
+        return tool_error(
+            f"Nothing is listening on 127.0.0.1:{port_number}. "
+            "Start the server bound to 0.0.0.0 on that port (for example "
+            "`npm run dev -- --host 0.0.0.0 --port 5173`), then call this tool again.",
+            error_code="PORT_NOT_LISTENING",
+            suggested_alternatives=["run_command", "terminal_worker"],
+        )
+
+    try:
+        url = sandbox.get_preview_url(port_number)
+    except Exception as exc:
+        return tool_error(
+            f"Could not resolve a public preview URL for port {port_number}: {exc}",
+            error_code="PREVIEW_URL_FAILED",
+            retryable=True,
+        )
+
+    clean_title = (title or "App preview").strip()[:160] or "App preview"
+    try:
+        workspace_path = get_workspace_path()
+    except RuntimeError:
+        workspace_path = ""
+
+    await emit_sandbox_event(
+        {
+            "type": "app_preview",
+            "url": url,
+            "port": port_number,
+            "title": clean_title,
+            "workspace_path": workspace_path,
+        }
+    )
+
+    return tool_success(
+        f"Live preview ready: {url}",
+        detail={
+            "url": url,
+            "port": port_number,
+            "title": clean_title,
+            "workspace_path": workspace_path,
+            "note": "This URL stays live only while the sandbox is running.",
+        },
+    )
 
 
 @normalized_tool(needs_sandbox=True)

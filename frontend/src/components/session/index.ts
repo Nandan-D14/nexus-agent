@@ -5,6 +5,7 @@
 
 export * from "./session-header";
 export * from "./session-landing-view";
+export * from "./landing-prompt-starters";
 export * from "./session-context-usage";
 export * from "./chat-composer";
 export * from "./composer-plus-menu";

@@ -27,6 +27,7 @@ import {
   ChevronDown,
   ChevronRight,
   Eye,
+  ExternalLink,
   Terminal as TerminalIcon,
   Globe,
   Mail,
@@ -57,6 +58,7 @@ import {
   groupTurnEvents,
   type GenerativeUiSegment,
   type ArtifactCreatedSegment,
+  type AppPreviewSegment,
   type CanvasDocumentSegment,
   type TemplateDraftSegment,
   type TaskGroup,
@@ -72,14 +74,16 @@ import {
   DOC_ARTIFACT_TOOLS,
   artifactFromToolResult,
 } from "@/lib/artifact-url";
-import type { RunArtifact } from "@/lib/message-types";
+import type { RunArtifact, UploadedInputFile } from "@/lib/message-types";
+import { userVisibleCaption } from "@/lib/session-utils";
+import { UploadedFilePreviewList } from "@/components/session/message-attachments";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
 type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number }
+  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[] }
   | { kind: "event"; type: string; ts: number; [key: string]: unknown }
   | {
       kind: "permission";
@@ -122,6 +126,12 @@ type Props = {
   ) => void;
   onQuestionRespond?: (questionId: string, answer: string) => void;
   onTemplateDraftChange?: (patch: TemplateDraftCardValue) => void;
+  onAppPreviewOpen?: (preview: {
+    url: string;
+    title?: string;
+    port?: number;
+    workspace_path?: string;
+  }) => void;
   /** Sticky dock rendered inside the chat scroll column (e.g. todos + composer). */
   footer?: ReactNode;
 };
@@ -238,6 +248,7 @@ type TimelineItem =
   | { kind: "taskGroup"; data: TaskGroup; ts: number }
   | { kind: "generative_ui"; data: GenerativeUiSegment; ts: number }
   | { kind: "artifact_created"; data: ArtifactCreatedSegment; ts: number }
+  | { kind: "app_preview"; data: AppPreviewSegment; ts: number }
   | { kind: "canvas_document"; data: CanvasDocumentSegment; ts: number }
   | { kind: "template_draft"; data: TemplateDraftSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
@@ -256,6 +267,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   onPermissionRespond,
   onQuestionRespond,
   onTemplateDraftChange,
+  onAppPreviewOpen,
   footer,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -373,6 +385,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   onPermissionRespond={onPermissionRespond}
                   onQuestionRespond={onQuestionRespond}
                   onTemplateDraftChange={onTemplateDraftChange}
+                  onAppPreviewOpen={onAppPreviewOpen}
                 />
               );
             })}
@@ -451,6 +464,7 @@ function TurnBlock({
   onPermissionRespond,
   onQuestionRespond,
   onTemplateDraftChange,
+  onAppPreviewOpen,
 }: {
   turn: Turn;
   isWorking: boolean;
@@ -458,6 +472,7 @@ function TurnBlock({
   onPermissionRespond: Props["onPermissionRespond"];
   onQuestionRespond?: Props["onQuestionRespond"];
   onTemplateDraftChange?: Props["onTemplateDraftChange"];
+  onAppPreviewOpen?: Props["onAppPreviewOpen"];
 }) {
   // Build an interleaved timeline from event segments + messages + cards
   const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
@@ -477,6 +492,8 @@ function TurnBlock({
         items.push({ kind: "generative_ui", data: seg, ts: seg.ts });
       } else if (seg.kind === "artifact_created") {
         items.push({ kind: "artifact_created", data: seg, ts: seg.ts });
+      } else if (seg.kind === "app_preview") {
+        items.push({ kind: "app_preview", data: seg, ts: seg.ts });
       } else if (seg.kind === "canvas_document") {
         items.push({ kind: "canvas_document", data: seg, ts: seg.ts });
       } else if (seg.kind === "template_draft") {
@@ -500,7 +517,10 @@ function TurnBlock({
   return (
     <div className="flex flex-col gap-5 w-full">
       {turn.userMessage && (
-        <UserMessageCard text={turn.userMessage.text} />
+        <UserMessageCard
+          text={turn.userMessage.text}
+          attachments={turn.userMessage.attachments}
+        />
       )}
 
       {timeline.map((item, idx) => {
@@ -577,6 +597,20 @@ function TurnBlock({
               className="w-full max-w-xl py-1"
             >
               <ArtifactAttachmentCard artifact={artifact} compact />
+            </div>
+          );
+        }
+
+        if (item.kind === "app_preview") {
+          return (
+            <div
+              key={`app-preview-${item.data.url}-${idx}`}
+              className="w-full max-w-xl py-1"
+            >
+              <AppPreviewChatCard
+                preview={item.data}
+                onOpen={onAppPreviewOpen}
+              />
             </div>
           );
         }
@@ -715,13 +749,21 @@ function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocumen
 /*  User Message                                                       */
 /* ------------------------------------------------------------------ */
 
-function UserMessageCard({ text }: { text: string }) {
+function UserMessageCard({
+  text,
+  attachments = [],
+}: {
+  text: string;
+  attachments?: UploadedInputFile[];
+}) {
+  const caption = userVisibleCaption(text);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
-    if (!text) return;
+    const copyText = caption || attachments.map((file) => file.name).filter(Boolean).join(", ");
+    if (!copyText) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(copyText);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
@@ -729,28 +771,38 @@ function UserMessageCard({ text }: { text: string }) {
     }
   };
 
+  if (!caption && attachments.length === 0) {
+    return null;
+  }
+
   return (
     <div className="group/user-msg relative flex w-full justify-end py-1">
-      <div className="relative flex items-center gap-2 max-w-[85%]">
-        {/* Copy button on hover */}
-        <button
-          type="button"
-          aria-label={copied ? "Copied" : "Copy prompt"}
-          title={copied ? "Copied" : "Copy prompt"}
-          onClick={() => void handleCopy()}
-          className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background-primary-default text-text-tertiary opacity-0 shadow-sm transition-all duration-150 group-hover/user-msg:opacity-100 hover:border-border-button-hover hover:bg-background-secondary-hover hover:text-text-primary focus-visible:opacity-100"
-        >
-          {copied ? (
-            <Check className="size-3.5 text-emerald-500" aria-hidden />
-          ) : (
-            <Clipboard className="size-3.5" aria-hidden />
-          )}
-        </button>
+      <div className="flex max-w-[85%] flex-col items-end gap-2">
+        {attachments.length > 0 ? (
+          <UploadedFilePreviewList files={attachments} align="end" />
+        ) : null}
 
-        {/* Message Bubble */}
-        <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
-          {text}
-        </div>
+        {caption ? (
+          <div className="relative flex items-center gap-2">
+            <button
+              type="button"
+              aria-label={copied ? "Copied" : "Copy prompt"}
+              title={copied ? "Copied" : "Copy prompt"}
+              onClick={() => void handleCopy()}
+              className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background-primary-default text-text-tertiary opacity-0 shadow-sm transition-all duration-150 group-hover/user-msg:opacity-100 hover:border-border-button-hover hover:bg-background-secondary-hover hover:text-text-primary focus-visible:opacity-100"
+            >
+              {copied ? (
+                <Check className="size-3.5 text-emerald-500" aria-hidden />
+              ) : (
+                <Clipboard className="size-3.5" aria-hidden />
+              )}
+            </button>
+
+            <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
+              {caption}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1421,6 +1473,41 @@ function ScreenshotCard({
         )}
       </div>
     </div>
+  );
+}
+
+function AppPreviewChatCard({
+  preview,
+  onOpen,
+}: {
+  preview: AppPreviewSegment;
+  onOpen?: Props["onAppPreviewOpen"];
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        onOpen?.({
+          url: preview.url,
+          title: preview.title,
+          port: preview.port,
+          workspace_path: preview.workspacePath,
+        })
+      }
+      className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900"
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-950 text-emerald-400">
+        <Globe className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-zinc-100">App preview</div>
+        <div className="truncate font-mono text-[11px] text-zinc-500">
+          {preview.title}
+          {preview.port ? ` · :${preview.port}` : ""}
+        </div>
+      </div>
+      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+    </button>
   );
 }
 

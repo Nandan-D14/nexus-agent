@@ -152,6 +152,7 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
    - none / prose only        → reply directly, no tool.
    - markdown text            → reply directly; optional write_workspace_file for a durable note.
    - HTML                     → publish_html_artifact(title, html, filename). Or render_ui(...) when Thesys is connected (fall back to publish_html_artifact on AUTH_REQUIRED).
+   - live web app             → write the project under the active workspace (the Files tab is the source of truth), start the server bound to 0.0.0.0, then publish_app_preview(port, title). Do not tell the user to look at the desktop.
    - PDF                      → terminal_worker with a brief that says "call generate_pdf_report(title=..., markdown_content=..., filename=...)". Include the full markdown body in the brief. Do not draft PDF bytes or base64 inline.
    - XLSX                     → terminal_worker with a brief that says "call generate_excel_report(...)".
    - DOCX                     → terminal_worker with a brief that says "call generate_docx_report(...)".
@@ -173,7 +174,7 @@ b. answer directly (no tool)                         — triage step 1 said no t
 c. mcp__exa__web_search_exa / tavily_search / web_search — discovery of live evidence (prefer Exa MCP when connected; web_search auto-prefers Tavily when connected).
 d. scrape_web_page                                   — capture important sources fully.
 e. search_sources                                    — retrieve cited chunks from saved sources/.
-f. publish_html_artifact / render_ui                 — HTML deliverables (no sandbox).
+f. publish_html_artifact / render_ui / publish_app_preview — HTML artifacts, or a live Vite/Next/Flask preview URL.
 g. run_command(command=...)                          — ONE shell command in the sandbox. Use this for a single check (ls, pwd, models list, a test, a script). The sandbox is already the machine — do not hunt for API keys, .env files, or credentials.
 h. terminal_worker(request=...)                      — batched shell, repo work, scripts, PDF/XLSX/DOCX/PPTX generation, save_as_artifact, extract_pdf_text on uploads. Prefer this when several dependent commands belong together.
 i. desktop_worker(request=...)                       — GUI/browser: clicks, forms, logins, screenshots, Playwright.
@@ -208,7 +209,7 @@ After every result, consume its evidence, artifacts, remaining_work, and retryab
 
 # Connectors
 
-Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file, github_*, Exa MCP search/fetch (mcp__exa__*), tavily_search, tinyfish_web_agent, Treg MCP (mcp__treg__*) for SEO/SERP/backlinks/enrichment/ads — not for ordinary web search. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop.
+Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file, github_* (including github_clone_repo, github_create_repo, github_push for clone/create/push — never put tokens in run_command), Exa MCP search/fetch (mcp__exa__*), tavily_search, tinyfish_web_agent, Treg MCP (mcp__treg__*) for SEO/SERP/backlinks/enrichment/ads — not for ordinary web search. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop.
 
 # Rules
 
@@ -220,7 +221,8 @@ Prefer native connector tools over browser flows when the user has them connecte
 - Before invoking background work, list existing subagents and reuse recovered records; do not duplicate work after a retry or restart. Use only researcher, coder, or writer subagent types.
 - If subagents were invoked, await or collect their results before final synthesis unless the user explicitly asked for background-only work.
 - Never run destructive commands. Ask before irreversible actions.
-- Finish only after observable evidence satisfies the completion condition. Then provide a clear, comprehensive, and well-structured final response formatted in clean GitHub Flavored Markdown (use headings, bullet points, markdown tables, and syntax-highlighted code blocks with language tags, 4-space indentation, and clean section comments). Summarize findings, specify where outputs live, and provide direct artifact links if published. Never end a turn on a bare tool call.
+- Finish only after observable evidence satisfies the completion condition. Then provide a clear, comprehensive, and well-structured final response formatted in clean GitHub Flavored Markdown (use headings, bullet points, markdown tables, and syntax-highlighted code blocks with language tags, 4-space indentation, and clean section comments). Summarize findings, specify where outputs live, and provide direct artifact links if published. Never end a turn on a bare tool call. Never end a turn with only internal reasoning and no user-visible text — if you read a skill to build something, keep using tools until the deliverable exists, then say so.
+- If the user says continue, create it, or do it, that is confirmation to finish the previous substantial request — not a new task. Keep using tools until the deliverable exists, then say so.
 """
 
 
@@ -281,7 +283,7 @@ def create_planner_agent(
     from nexus.model_select import create_model
     from nexus.tools.ask_user import ask_user
     from nexus.tools.bg_task import request_background_task
-    from nexus.tools.docs import publish_html_artifact
+    from nexus.tools.docs import publish_app_preview, publish_html_artifact
     from nexus.tools.integrations import render_ui, tavily_search
     from nexus.tools.memory import recall_facts, remember_fact
     from nexus.tools.retrieval import search_sources
@@ -332,6 +334,7 @@ def create_planner_agent(
         tavily_search,
         search_sources,
         publish_html_artifact,
+        publish_app_preview,
         render_ui,
         read_skill,
         read_skill_file,

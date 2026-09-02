@@ -102,13 +102,89 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Nudge sent when the model gathered evidence but produced no closing text and
-# completion verification returned a retryable MISSING_FINAL_RESPONSE.
+# Nudge sent when the model produced no user-visible closing text.
+# Allow tools: "create it" after a skill read still needs file/worker work.
 _FINAL_SYNTHESIS_NUDGE = (
-    "You have already gathered the information needed. Do NOT call any tools. "
-    "Write the final answer or summary for the user now, using only what has "
-    "already been collected."
+    "You ended without a user-visible reply. Continue the user's last request now. "
+    "If they asked to create, build, or publish something, use tools to do it "
+    "(prepare_task_workspace if needed, write_workspace_file, terminal_worker, "
+    "publish_app_preview). Then write a short status. Never finish empty or with "
+    "reasoning-only output."
 )
+
+# Short confirmations that are not a new task. "continue" / "create it" must
+# resume the last substantial user request, not be verified as the whole job.
+_SHORT_FOLLOWUP_RE = re.compile(
+    r"^(?:"
+    r"ok(?:ay|ie)?|yes|yep|yeah|sure|please|"
+    r"go(?:\s+ahead)?|proceed|continue|retry|resume|"
+    r"(?:keep|carry)\s+on|(?:keep|carry)\s+going|"
+    r"try\s+again|do\s+it|do\s+that|do\s+this|"
+    r"create\s+it|build\s+it|make\s+it|"
+    r"go\s+on|next|again"
+    r")(?:\s*[.!,])*$",
+    re.IGNORECASE,
+)
+_CREATE_OR_BUILD_RE = re.compile(
+    r"\b(create|build|make|landing|vite|react|website|webpage|prototype|app)\b",
+    re.IGNORECASE,
+)
+
+
+def is_short_followup(text: str) -> bool:
+    """Return True when *text* is a confirmation, not a new request."""
+    return bool(_SHORT_FOLLOWUP_RE.match(str(text or "").strip()))
+
+
+def looks_like_create_or_build(text: str) -> bool:
+    """Return True when the outstanding task still needs files or a preview."""
+    return bool(_CREATE_OR_BUILD_RE.search(str(text or "")))
+
+
+def outstanding_user_task(messages: list[dict[str, Any]] | None, current: str) -> str:
+    """Reconstruct the real task from prior user messages when *current* is short."""
+    current_text = str(current or "").strip()
+    substantial: list[str] = []
+    seen: set[str] = set()
+    for msg in reversed(messages or []):
+        if str(msg.get("role") or "").lower() != "user":
+            continue
+        text = str(msg.get("text") or "").strip()
+        if not text or is_short_followup(text):
+            continue
+        if text.startswith("[SYSTEM") or text.startswith("[CONTINUE TASK]"):
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        substantial.append(text)
+        if len(substantial) >= 3:
+            break
+    if not substantial:
+        return current_text
+    substantial.reverse()
+    combined = "\n\n".join(substantial)
+    if len(combined) > 2500:
+        combined = combined[-2500:].lstrip()
+    return combined
+
+
+def format_continue_task(goal: str, confirmation: str) -> str:
+    """Model-only brief that turns a short confirmation into the real task."""
+    return (
+        "[CONTINUE TASK]\n"
+        f"The user said {confirmation.strip()!r}. That is confirmation to keep "
+        "going — not a new task.\n"
+        "Finish this outstanding request now using tools:\n"
+        f"{goal.strip()}\n"
+        "If this is a website, landing page, or React/Vite app, write the files "
+        "in the workspace, run the dev server bound to 0.0.0.0, and call "
+        "publish_app_preview.\n"
+        "Then reply with a short status and the preview URL.\n"
+        "Do not stop after thinking. Do not finish empty.\n"
+        "[END CONTINUE TASK]"
+    )
 
 # Pending background children are not an advisory caveat: delivering
 # agent_complete would mark the durable run finished and skip the worker's
@@ -272,6 +348,7 @@ class NexusOrchestrator:
         self._prior_context_fallback: str | None = None
         self._seed_context: str = session.seed_context.strip()
         self._last_user_message: str = ""
+        self._outstanding_task: str = ""
         self._turn_screenshot_count: int = 0
         self._turn_tool_summaries: list[str] = []
         self._budget_stop_requested: bool = False
@@ -489,6 +566,8 @@ class NexusOrchestrator:
             return
         try:
             user_settings = await self.history_repository.get_user_settings(self.session.owner_id)
+            if (user_settings or {}).get("googleDriveRefreshToken"):
+                await self.history_repository.upsert_google_connections(self.session.owner_id)
             connections = await self.history_repository.list_enabled_integration_connections(
                 self.session.owner_id
             )
@@ -542,7 +621,10 @@ class NexusOrchestrator:
         if any(p.startswith("google") or p in {"gmail"} for p in providers):
             from nexus.tools.integrations import (
                 calendar_create,
+                calendar_delete,
+                calendar_get,
                 calendar_list,
+                calendar_update,
                 create_drive_doc,
                 gmail_read,
                 gmail_search,
@@ -557,12 +639,16 @@ class NexusOrchestrator:
             tools.extend([
                 search_drive, read_drive_file, create_drive_doc, upload_drive_file,
                 gmail_search, gmail_read, gmail_send,
-                tasks_list, tasks_create, calendar_list, calendar_create,
+                tasks_list, tasks_create,
+                calendar_list, calendar_get, calendar_create, calendar_update, calendar_delete,
             ])
         if "github" in providers:
             from nexus.tools.integrations import (
+                github_clone_repo,
                 github_create_issue,
+                github_create_repo,
                 github_list_issues,
+                github_push,
                 github_read_file,
                 github_search_repos,
                 github_summarize_pr,
@@ -571,6 +657,7 @@ class NexusOrchestrator:
             tools.extend([
                 github_search_repos, github_read_file, github_list_issues,
                 github_create_issue, github_summarize_pr,
+                github_clone_repo, github_create_repo, github_push,
             ])
         if "vyora" in providers:
             from nexus.tools.integrations import (
@@ -730,11 +817,43 @@ class NexusOrchestrator:
             text = directive_prompt + text
 
         if emit_user_transcript:
-            await self._persist_message(role="user", source="typed", text=original_request)
+            await self._persist_message(
+                role="user",
+                source="typed",
+                text=original_request,
+                attachments=uploaded_files,
+            )
 
         model_text = text
         if resume_context:
             model_text = f"{text}\n\n{resume_context}"
+
+        completion_request = original_request
+        goal = original_request.strip()
+        if is_short_followup(original_request):
+            messages: list[dict[str, Any]] = []
+            repo = getattr(self, "history_repository", None)
+            session = getattr(self, "session", None)
+            session_id = getattr(session, "id", None)
+            if repo is not None and session_id:
+                try:
+                    messages = await repo.get_session_messages(session_id)
+                except Exception:
+                    logger.debug(
+                        "Could not load session messages to expand a short follow-up",
+                        exc_info=True,
+                    )
+                    messages = []
+            goal = outstanding_user_task(messages, original_request)
+            if is_short_followup(goal):
+                seed = str(getattr(self, "_seed_context", "") or "").strip()
+                if seed:
+                    goal = seed
+            if goal and not is_short_followup(goal):
+                model_text = f"{format_continue_task(goal, original_request)}\n\n{model_text}"
+                completion_request = goal
+        self._outstanding_task = goal
+
         await self._run_agent_tracked(
             await self._build_turn_input(
                 model_text,
@@ -743,7 +862,7 @@ class NexusOrchestrator:
                 uploaded_files=uploaded_files,
             ),
             source="typed",
-            completion_request=original_request,
+            completion_request=completion_request,
             connector_ids=connector_ids,
             tool_ids=tool_ids,
         )
@@ -1269,6 +1388,7 @@ class NexusOrchestrator:
                         runtime_config=self.runtime_config,
                         event_callback=self._on_agent_event,
                         max_turns=turn_cap,
+                        synthesis_instruction=self._final_synthesis_instruction(),
                     )
                 except _AgentStopped:
                     raise
@@ -2199,6 +2319,10 @@ class NexusOrchestrator:
     ) -> dict[str, Any]:
         """Run an ADK agent turn and stream events to frontend."""
         self.session.touch()
+        if not str(getattr(self, "_outstanding_task", "") or "").strip():
+            self._outstanding_task = str(
+                completion_request if completion_request is not None else message or ""
+            ).strip()
 
         if not self._ws_connected:
             logger.info("WebSocket disconnected before agent turn started for session %s", self.session.id)
@@ -2326,7 +2450,9 @@ class NexusOrchestrator:
                     settings.max_final_synthesis_retries,
                     self.session.id,
                 )
-                retry_result = await self._run_agent_with_retry(_FINAL_SYNTHESIS_NUDGE)
+                retry_result = await self._run_agent_with_retry(
+                    self._final_synthesis_nudge()
+                )
                 for usage in retry_result.usage_records:
                     await self._persist_token_usage(usage)
                 if retry_result.error:
@@ -2338,22 +2464,32 @@ class NexusOrchestrator:
                     final_response=final_response,
                 )
 
-            # Last resort: synthesize a grounded partial summary from observed
-            # tool evidence instead of returning an empty failure to the user.
+            # Last resort: a research turn can use gathered tool notes. A
+            # create/build turn must not ship an apology as the product.
             if (
                 not completion_verification.verified
                 and completion_verification.error_code == "MISSING_FINAL_RESPONSE"
                 and settings.synthesize_fallback_summary_from_ledger
             ):
-                fallback_summary = self._build_ledger_fallback_summary()
+                request_text = (
+                    completion_request if completion_request is not None else message
+                )
+                goal = str(getattr(self, "_outstanding_task", "") or request_text)
+                ledger_summary = self._build_ledger_fallback_summary()
+                if ledger_summary and not looks_like_create_or_build(goal):
+                    fallback_summary = ledger_summary
+                else:
+                    fallback_summary = self._build_stalled_continuation_notice(
+                        request_text
+                    )
                 if fallback_summary:
                     logger.warning(
-                        "Using ledger fallback summary for session %s",
+                        "Using continuation fallback for session %s",
                         self.session.id,
                     )
                     final_response = fallback_summary
                     completion_verification = await self._verify_turn_completion(
-                        request=completion_request if completion_request is not None else message,
+                        request=request_text,
                         final_response=final_response,
                     )
 
@@ -2437,6 +2573,14 @@ class NexusOrchestrator:
                     failure_summary += "\nRemaining: " + "; ".join(
                         completion_verification.remaining_work[:4]
                     )
+                # #region agent log
+                try:
+                    import json as _dbg_json
+                    from pathlib import Path as _DbgPath
+                    _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:completion_fail","message":"emitting completion error","data":{"status":completion_verification.status,"error_code":completion_verification.error_code,"soft_veto":False,"summary":completion_verification.summary[:240]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+                except Exception:
+                    pass
+                # #endregion
                 await self._reconcile_todos_at_turn_end(mark_complete=False)
                 await self._send_json({
                     "type": "transcript",
@@ -2723,7 +2867,7 @@ class NexusOrchestrator:
                 step_type = "tool_call"
                 if tool_name == "gmail_send":
                     step_type = "gmail"
-                elif tool_name == "calendar_create":
+                elif str(tool_name).startswith("calendar_"):
                     step_type = "calendar"
                 elif tool_name == "tasks_create":
                     step_type = "tasks"
@@ -3461,21 +3605,43 @@ class NexusOrchestrator:
                 exc_info=True,
             )
 
+    def _final_synthesis_instruction(self) -> str:
+        goal = str(getattr(self, "_outstanding_task", "") or "").strip()
+        if goal and not is_short_followup(goal):
+            return (
+                f"{_FINAL_SYNTHESIS_NUDGE}\n\n"
+                f"Outstanding request:\n{goal}\n"
+                "If this is a website, landing page, or React/Vite app, write the "
+                "files, bind the server to 0.0.0.0, call publish_app_preview, then "
+                "write a short status."
+            )
+        return _FINAL_SYNTHESIS_NUDGE
+
+    def _final_synthesis_nudge(self) -> str:
+        goal = str(getattr(self, "_outstanding_task", "") or "").strip()
+        if goal and not is_short_followup(goal):
+            return f"{format_continue_task(goal, 'continue')}\n\n{_FINAL_SYNTHESIS_NUDGE}"
+        return _FINAL_SYNTHESIS_NUDGE
+
+    def _build_stalled_continuation_notice(self, message: str) -> str:
+        goal = self._clip_text(
+            str(getattr(self, "_outstanding_task", "") or message or self._last_user_message),
+            400,
+        )
+        if looks_like_create_or_build(goal):
+            return (
+                "I started this turn but did not finish building the deliverable. "
+                f"The outstanding task is still: {goal} "
+                "Send continue and I will keep writing files and publishing the preview."
+            )
+        return (
+            "I started this turn but did not produce a usable answer. "
+            f"The outstanding task is still: {goal} "
+            "Send continue and I will keep going."
+        )
+
     def _build_missing_final_response_summary(self, message: str) -> str:
-        findings = self._turn_tool_summaries[:6]
-        lines = [
-            "Tool work completed, but the model did not produce a final answer.",
-        ]
-        task = self._clip_text(message or self._last_user_message, 240)
-        if task:
-            lines.append(f"Task: {task}")
-        if findings:
-            lines.append("Findings so far:")
-            lines.extend(f"- {item}" for item in findings)
-            lines.append("Ask me to continue if you want a deeper synthesis.")
-        else:
-            lines.append("No usable tool summary was returned, so I cannot safely claim a result.")
-        return "\n".join(lines)
+        return self._build_stalled_continuation_notice(message)
 
     async def _record_tool_memory(
         self,
@@ -3544,9 +3710,19 @@ class NexusOrchestrator:
         except Exception:
             logger.exception("Failed to persist tool memory for session %s", self.session.id)
 
-    async def _persist_message(self, *, role: str, source: str, text: str) -> None:
+    async def _persist_message(
+        self,
+        *,
+        role: str,
+        source: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> None:
         history_repository = getattr(self, "history_repository", None)
-        if not history_repository or not text.strip():
+        if not history_repository:
+            return
+        stripped = text.strip()
+        if not stripped and not attachments:
             return
         try:
             await history_repository.append_message(
@@ -3554,7 +3730,8 @@ class NexusOrchestrator:
                 owner_id=getattr(self.session, "owner_id", ""),
                 role=role,
                 source=source,
-                text=text.strip(),
+                text=stripped,
+                attachments=attachments,
             )
         except Exception:
             logger.exception("Failed to persist %s message for session %s", role, self.session.id)
@@ -4239,6 +4416,7 @@ class NexusOrchestrator:
     # generated file yields exactly one artifact id.
     _SELF_PERSISTING_ARTIFACT_TOOLS = frozenset({
         "publish_html_artifact",
+        "publish_app_preview",
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",

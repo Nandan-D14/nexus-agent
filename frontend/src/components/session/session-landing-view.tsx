@@ -5,8 +5,10 @@
 
 "use client";
 
+import { useCallback } from "react";
 import { motion } from "framer-motion";
 import { ChatComposer } from "./chat-composer";
+import { LandingPromptStarters } from "./landing-prompt-starters";
 import type { SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 
@@ -26,6 +28,7 @@ type Props = {
   isLoading: boolean;
   isUploadingFile: boolean;
   onStopAgent: () => void;
+  agentRunning?: boolean;
   availableConnectors: SessionConnector[];
   selectedConnectorIds: string[];
   onToggleConnector: (id: string) => void;
@@ -56,6 +59,7 @@ export function SessionLandingView({
   isLoading,
   isUploadingFile,
   onStopAgent,
+  agentRunning = false,
   availableConnectors,
   selectedConnectorIds,
   onToggleConnector,
@@ -69,8 +73,26 @@ export function SessionLandingView({
   error,
   landingInputRef,
 }: Props) {
+  const insertPrompt = useCallback(
+    (prompt: string) => {
+      onChangeText(prompt);
+      const editor = landingInputRef?.current;
+      if (!editor) return;
+      editor.textContent = prompt;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      editor.focus();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    },
+    [landingInputRef, onChangeText],
+  );
+
   return (
-    <div className="relative flex flex-1 flex-col items-center overflow-x-hidden p-6 pt-[22vh]">
+    <div className="relative flex flex-1 flex-col items-center overflow-x-hidden overflow-y-auto p-6 pt-[14vh] pb-10 md:pt-[18vh]">
       <div className="relative z-10 flex w-full max-w-3xl flex-col items-center gap-6">
         <div className="relative py-2 text-center">
           <motion.div
@@ -111,7 +133,7 @@ export function SessionLandingView({
           </motion.p>
         </div>
 
-        <div className="mx-auto mt-2 w-full max-w-3xl px-4">
+        <div className="mx-auto mt-2 flex w-full max-w-3xl flex-col gap-4 px-4">
           <ChatComposer
             isLanding
             inputRef={landingInputRef}
@@ -129,6 +151,7 @@ export function SessionLandingView({
             isLoading={isLoading}
             isUploadingFile={isUploadingFile}
             onStopAgent={onStopAgent}
+            agentRunning={agentRunning}
             onShowDesktop={onShowDesktop}
             availableConnectors={availableConnectors}
             selectedConnectorIds={selectedConnectorIds}
@@ -140,6 +163,7 @@ export function SessionLandingView({
             connectorsLoading={connectorsLoading}
             onRefreshTools={onRefreshTools}
           />
+          <LandingPromptStarters onInsertPrompt={insertPrompt} />
         </div>
       </div>
     </div>

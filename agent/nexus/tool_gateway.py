@@ -395,6 +395,14 @@ async def _await_durable_approval(
             )
             return consumed is not None
         await asyncio.sleep(APPROVAL_POLL_SECONDS)
+    # #region agent log
+    try:
+        import json as _dbg_json
+        from pathlib import Path as _DbgPath
+        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"tool_gateway.py:_await_durable_approval","message":"approval timed out","data":{"tool":tool_name,"task_id":task_id,"approval_id":getattr(approval,"approval_id",None)},"timestamp":int(__import__("time").time()*1000)})+"\n")
+    except Exception:
+        pass
+    # #endregion
     return "pending"
 
 
@@ -494,10 +502,26 @@ def gated_tool(func: Callable) -> Callable:
             autonomy_mode=_resolve_autonomy_mode(),
         )
         _log_decision(tool_name, decision, args_view)
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"tool_gateway.py:gated_tool","message":"policy decision","data":{"tool":tool_name,"action":decision.action,"risk":decision.risk,"reason":decision.reason,"autonomy":_resolve_autonomy_mode()},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         if decision.action == "deny":
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
             approved = await _await_approval(tool_name, decision, args_view)
+            # #region agent log
+            try:
+                import json as _dbg_json
+                from pathlib import Path as _DbgPath
+                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"tool_gateway.py:require_approval","message":"approval outcome","data":{"tool":tool_name,"approved":repr(approved),"approved_type":type(approved).__name__},"timestamp":int(__import__("time").time()*1000)})+"\n")
+            except Exception:
+                pass
+            # #endregion
             if approved is True:
                 warning = _check_verification_warning(tool_name)
                 if warning:

@@ -177,10 +177,11 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "trigger": "Use for email search/send, calendar events, tasks, and Drive files.",
         "instructions": (
             "Use native tools when Google is connected: gmail_search/gmail_read/gmail_send, "
-            "calendar_list/calendar_create (include time_zone and optional attendees), "
+            "calendar_list/calendar_get/calendar_create/calendar_update/calendar_delete "
+            "(include time_zone and optional attendees; list with time_min/time_max for a day), "
             "and tasks_list/tasks_create. Do not open Gmail or Calendar in the browser "
             "or ask the user to sign in when those tools are available. Confirm recipients, "
-            "dates, and irreversible sends; creates require user approval."
+            "dates, and irreversible sends; creates, updates, and deletes require user approval."
         ),
         "agent_scope": ["nexus_planner", "desktop_worker", "terminal_worker"],
     },

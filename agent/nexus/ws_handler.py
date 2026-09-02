@@ -701,6 +701,7 @@ async def _try_start_durable_text_run(
                 role="user",
                 source="typed",
                 text=text,
+                attachments=uploaded_files,
             )
         except Exception:
             logger.warning(
@@ -780,6 +781,14 @@ async def _try_start_durable_text_run(
             "queue": enqueue.__dict__,
         }
     )
+    # #region agent log
+    try:
+        import json as _dbg_json
+        from pathlib import Path as _DbgPath
+        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"ws_handler.py:run_queued","message":"durable run queued","data":{"task_id":task.task_id,"run_id":run.run_id,"provider":getattr(enqueue,"provider",None),"queued":getattr(enqueue,"queued",None)},"timestamp":int(__import__("time").time()*1000)})+"\n")
+    except Exception:
+        pass
+    # #endregion
     logger.info(
         "Durable run queued for session %s task %s run %s via %s",
         session.id,

@@ -48,6 +48,7 @@ VISUAL_VERIFIERS = frozenset(
 ARTIFACT_TOOLS = frozenset(
     {
         "publish_html_artifact",
+        "publish_app_preview",
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
@@ -674,6 +675,14 @@ def verify_completion(
 
     failures = ledger.latest_unresolved_failures()
     if failures:
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"control_loop.py:verify_completion","message":"unresolved failures block completion","data":{"tools":[{"tool":f.tool,"status":f.status,"error_code":f.error_code,"retryable":f.retryable,"remaining":f.remaining_work[:2]} for f in failures[:6]]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         blocked = next(
             (
                 failure

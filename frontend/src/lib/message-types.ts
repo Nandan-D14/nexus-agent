@@ -87,6 +87,13 @@ export type WsMessage = WsEventMeta & (
   | { type: "step_completed"; step: RunStep }
   | { type: "step_failed"; step: RunStep }
   | { type: "artifact_created"; artifact: RunArtifact }
+  | {
+      type: "app_preview";
+      url: string;
+      port?: number;
+      title?: string;
+      workspace_path?: string;
+    }
   | { type: "agent_thinking"; content: string }
   | {
       type: "agent_tool_call";
@@ -303,7 +310,7 @@ export type WsMessage = WsEventMeta & (
     }
   | { type: "error"; code: string; message: string; detail?: string }
   | { type: "pong" }
-  | { type: "ui_action"; action: "switch_tab"; target: "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "artifacts" | "files" | "workspace"; reason?: string }
+  | { type: "ui_action"; action: "switch_tab"; target: "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "preview" | "artifacts" | "files" | "workspace"; reason?: string }
   | { type: "sandbox_terminal"; phase: "start" | "result"; command?: string; cwd?: string; stdout?: string; stderr?: string; exit_code?: number }
   | { type: "sandbox_editor"; phase: "start" | "result"; path?: string; action?: "write" | "read" | "list"; content?: string; append?: boolean; bytes_written?: number }
   | { type: "agent_delta"; delta: string; seq?: number; run_id?: string }
@@ -528,6 +535,8 @@ export type UploadedInputFile = {
   drive_file_id?: string | null;
   drive_web_view_link?: string | null;
   drive_folder_path?: string | null;
+  previewUrl?: string | null;
+  uploading?: boolean;
 };
 
 export type WorkflowTemplateInputField = {
@@ -570,6 +579,7 @@ export type ArchivedMessage = {
   source?: string;
   turn_index: number;
   created_at: string | null;
+  attachments?: UploadedInputFile[];
 };
 
 // ── Backward-compatible aliases ────────────────────────────────────
@@ -612,7 +622,7 @@ export type SessionPhase = "idle" | "listening" | "thinking" | "acting" | "done"
 // ── Unified chat item (used by the unified chat panel) ─────────────
 
 export type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number }
+  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[] }
   | { kind: "event"; event: { type: string; timestamp: number; [key: string]: unknown } }
   | { kind: "permission"; request: PermissionRequestMessage; ts: number }
   | { kind: "delegation"; from: string; to: string; ts: number }

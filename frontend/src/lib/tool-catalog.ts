@@ -27,7 +27,7 @@ export const TOOL_CAPABILITIES = [
     id: "artifacts",
     label: "Artifacts",
     description: "Publish HTML apps and rendered UI",
-    tools: ["publish_html_artifact", "render_ui"],
+    tools: ["publish_html_artifact", "publish_app_preview", "render_ui"],
   },
   {
     id: "memory",

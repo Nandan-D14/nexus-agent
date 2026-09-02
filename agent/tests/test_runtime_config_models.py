@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -147,3 +147,18 @@ class RuntimeConfigModelSelectionTests(TestCase):
         self.assertEqual(status.missing, ())
         self.assertEqual(config.gemini_provider, "apiKey")
         self.assertEqual(config.gemini_api_key, "gemini-key")
+
+
+class RuntimeConfigSnapshotTests(TestCase):
+    def test_runtime_config_snapshot_without_qwen_api_key(self) -> None:
+        config = MagicMock()
+        config.gemini_agent_fallback_models = ()
+        config.gemini_vision_fallback_models = ()
+        config.qwen_planner_fallback_models = ()
+        config.qwen_worker_fallback_models = ()
+        config.qwen_visual_fallback_models = ()
+        config.qwen_micro_fallback_models = ()
+        config.qwen_vision_fallback_models = ()
+        snapshot = runtime_config_module.runtime_config_snapshot(config)
+        self.assertIn("qwen_api_key_set", snapshot)
+        self.assertIsInstance(snapshot["qwen_api_key_set"], bool)

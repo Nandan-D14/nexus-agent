@@ -51,6 +51,14 @@ class TaskWorker:
             worker_id=self.worker_id,
             claim_token=claim_token,
         )
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"task_worker.py:claim","message":"claim_run result","data":{"task_id":task_id,"run_id":run_id,"claimed":bool(claimed),"worker_id":self.worker_id},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         if not claimed:
             # A skipped claim produces no events at all, so the UI would wait on
             # a run that will never execute. Record why it was rejected and, when

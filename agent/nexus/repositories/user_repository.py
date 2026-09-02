@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -17,16 +20,40 @@ from nexus.billing import build_quota_payload
 from nexus.config import settings
 from nexus.history_models import utcnow
 
+_SETTINGS_CACHE_TTL_SECONDS = 30.0
+_settings_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_settings_cache_lock = threading.Lock()
+
+
+def clear_user_settings_cache(uid: str | None = None) -> None:
+    with _settings_cache_lock:
+        if uid is None:
+            _settings_cache.clear()
+            return
+        _settings_cache.pop(uid, None)
+
 
 class UserRepository(FirestoreRepoBase):
     async def upsert_user(self, user: AuthenticatedUser) -> None:
         await asyncio.to_thread(self._upsert_user_sync, user)
+        clear_user_settings_cache(user.uid)
 
     async def get_user_settings(self, uid: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._get_user_settings_sync, uid)
+        now = time.monotonic()
+        with _settings_cache_lock:
+            cached = _settings_cache.get(uid)
+            if cached and now - cached[0] < _SETTINGS_CACHE_TTL_SECONDS:
+                return copy.deepcopy(cached[1])
+        data = await asyncio.to_thread(self._get_user_settings_sync, uid)
+        with _settings_cache_lock:
+            _settings_cache[uid] = (time.monotonic(), data)
+        return copy.deepcopy(data)
 
     async def update_user_settings(self, uid: str, updates: dict[str, Any]) -> None:
-        return await asyncio.to_thread(self._update_user_settings_sync, uid, updates)
+        try:
+            await asyncio.to_thread(self._update_user_settings_sync, uid, updates)
+        finally:
+            clear_user_settings_cache(uid)
 
     async def get_user_quota(self, uid: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._get_user_quota_sync, uid)

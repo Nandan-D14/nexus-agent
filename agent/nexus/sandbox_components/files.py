@@ -9,10 +9,91 @@ import json
 import logging
 import shlex
 
-from nexus.sandbox import _coerce_exit_code
+from nexus.sandbox import SandboxDeadError, _coerce_exit_code
 from nexus.sandbox_components.base import SandboxComponent
 
 logger = logging.getLogger("nexus.sandbox")
+
+TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+TEXT_PREVIEW_EXTENSIONS = frozenset(
+    {
+        "py",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "mjs",
+        "cjs",
+        "json",
+        "md",
+        "mdx",
+        "html",
+        "htm",
+        "css",
+        "scss",
+        "sass",
+        "less",
+        "sh",
+        "bash",
+        "zsh",
+        "yml",
+        "yaml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "txt",
+        "xml",
+        "svg",
+        "csv",
+        "sql",
+        "go",
+        "rs",
+        "java",
+        "kt",
+        "rb",
+        "php",
+        "c",
+        "h",
+        "cpp",
+        "hpp",
+        "cs",
+        "swift",
+        "vue",
+        "svelte",
+        "graphql",
+        "prisma",
+    }
+)
+_TEXT_PREVIEW_BASENAMES = frozenset(
+    {
+        "dockerfile",
+        "makefile",
+        "readme",
+        "license",
+        "procfile",
+        "gemfile",
+        "rakefile",
+    }
+)
+
+
+def is_previewable_text_file(name: str, size: int | None = None) -> bool:
+    """Return True when a workspace file is safe to open as text in the editor."""
+    if size is not None and (size < 0 or size > TEXT_PREVIEW_MAX_BYTES):
+        return False
+    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not base:
+        return False
+    lowered = base.lower()
+    if lowered in _TEXT_PREVIEW_BASENAMES:
+        return True
+    if base.startswith(".") and "." not in base[1:]:
+        return True
+    if "." not in base:
+        return False
+    ext = base.rsplit(".", 1)[-1].lower()
+    return ext in TEXT_PREVIEW_EXTENSIONS
 
 
 def raise_sandbox_io_error(path: str, stderr: str | None, *, action: str) -> None:
@@ -76,23 +157,42 @@ class SandboxFiles(SandboxComponent):
 
     def write_text_file(self, path: str, content: str, *, append: bool = False) -> None:
         """Write UTF-8 text into a sandbox file."""
-        path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
-        data_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        mode = "ab" if append else "wb"
-        script = (
-            "import base64, pathlib; "
-            f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            f"data = base64.b64decode('{data_b64}'); "
-            "target = pathlib.Path(path); "
-            "target.parent.mkdir(parents=True, exist_ok=True); "
-            f"target.open('{mode}').write(data)"
-        )
-        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
-        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
-            raise RuntimeError(result.get("stderr") or f"Failed to write file {path}")
+        payload = content.encode("utf-8")
+        if append:
+            try:
+                payload = self.read_binary_file(path) + payload
+            except FileNotFoundError:
+                pass
+        self.write_binary_file(path, payload)
 
     def write_binary_file(self, path: str, content: bytes) -> None:
-        """Write binary content into a sandbox file."""
+        """Write binary content into a sandbox file via the E2B files API."""
+        self._require_sandbox()
+        files = getattr(self._sandbox, "files", None)
+        write = getattr(files, "write", None) if files is not None else None
+        if not callable(write):
+            self._write_binary_file_via_python(path, content)
+            return
+        try:
+            write(path, content, request_timeout=120)
+            return
+        except SandboxDeadError:
+            raise
+        except Exception as exc:
+            self._raise_if_dead(exc)
+            logger.warning(
+                "E2B files.write failed for %s (%d bytes): %s",
+                path,
+                len(content),
+                exc,
+            )
+            if len(content) <= 32 * 1024:
+                self._write_binary_file_via_python(path, content)
+                return
+            raise RuntimeError(f"Failed to write file {path}") from exc
+
+    def _write_binary_file_via_python(self, path: str, content: bytes) -> None:
+        """Fallback writer for tiny files when the E2B files API is unavailable."""
         path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
         data_b64 = base64.b64encode(content).decode("ascii")
         script = (
@@ -213,3 +313,19 @@ print(json.dumps(entries))
         if not raw:
             return []
         return list(json.loads(raw))
+
+    def archive_tree(self, path: str) -> bytes:
+        """Create a gzip tar of ``path``, skipping bulky dependency dirs."""
+        dest = "/tmp/cocomputer-workspace.tgz"
+        quoted_root = shlex.quote(path)
+        quoted_dest = shlex.quote(dest)
+        command = (
+            f"tar -C {quoted_root} "
+            "--exclude=node_modules --exclude=.git --exclude=.venv --exclude=venv "
+            "--exclude=__pycache__ --exclude=.next --exclude=dist --exclude=build "
+            f"-czf {quoted_dest} ."
+        )
+        result = self.run_command(command, timeout=120)
+        if _coerce_exit_code(result.get("exit_code", -1)) != 0:
+            raise RuntimeError(result.get("stderr") or f"Failed to archive {path}")
+        return self.read_binary_file(dest)

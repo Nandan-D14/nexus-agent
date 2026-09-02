@@ -17,6 +17,11 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { authenticatedFetch, readApiError } from "@/lib/api-client";
+import {
+  isPreviewableTextFile,
+  TEXT_PREVIEW_MAX_BYTES,
+} from "@/lib/sandbox-file-preview";
+import type { EditorSessionState } from "@/lib/sandbox-session";
 
 export type SandboxFileEntry = {
   name: string;
@@ -42,6 +47,8 @@ type TreeNode = {
 type Props = {
   sessionId: string | null | undefined;
   active?: boolean;
+  refreshKey?: number;
+  onOpenFile?: (state: EditorSessionState) => void;
 };
 
 function formatBytes(size: number): string {
@@ -138,17 +145,23 @@ function TreeRow({
   expanded,
   onToggle,
   downloadingPath,
+  openingPath,
   onDownload,
+  onOpen,
 }: {
   node: TreeNode;
   depth: number;
   expanded: Set<string>;
   onToggle: (path: string) => void;
   downloadingPath: string | null;
+  openingPath: string | null;
   onDownload: (path: string, name: string) => void;
+  onOpen: (node: TreeNode) => void;
 }) {
   const isOpen = expanded.has(node.relative_path);
   const isDownloading = downloadingPath === node.relative_path;
+  const isOpening = openingPath === node.relative_path;
+  const previewable = !node.is_dir && isPreviewableTextFile(node.name, node.size);
 
   return (
     <div>
@@ -176,22 +189,28 @@ function TreeRow({
           </button>
         ) : (
           <>
-            <span className="inline-flex w-3.5 shrink-0" />
-            <File className="h-4 w-4 shrink-0 text-zinc-500" />
-            <span className="min-w-0 flex-1 truncate">{node.name}</span>
-            {node.size > 0 && (
-              <span className="shrink-0 text-[10px] text-zinc-600">
-                {formatBytes(node.size)}
-              </span>
-            )}
+            <button
+              type="button"
+              onClick={() => onOpen(node)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            >
+              <span className="inline-flex w-3.5 shrink-0" />
+              <File className="h-4 w-4 shrink-0 text-zinc-500" />
+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
+              {node.size > 0 && (
+                <span className="shrink-0 text-[10px] text-zinc-600">
+                  {formatBytes(node.size)}
+                </span>
+              )}
+            </button>
             <button
               type="button"
               onClick={() => onDownload(node.relative_path, node.name)}
-              disabled={isDownloading}
+              disabled={isDownloading || isOpening}
               className="shrink-0 rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-zinc-200 group-hover:opacity-100 disabled:opacity-50"
               aria-label={`Download ${node.name}`}
             >
-              {isDownloading ? (
+              {isDownloading || (isOpening && !previewable) ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Download className="h-3.5 w-3.5" />
@@ -209,19 +228,28 @@ function TreeRow({
             expanded={expanded}
             onToggle={onToggle}
             downloadingPath={downloadingPath}
+            openingPath={openingPath}
             onDownload={onDownload}
+            onOpen={onOpen}
           />
         ))}
     </div>
   );
 }
 
-export function SandboxFilesPanel({ sessionId, active = true }: Props) {
+export function SandboxFilesPanel({
+  sessionId,
+  active = true,
+  refreshKey = 0,
+  onOpenFile,
+}: Props) {
   const [entries, setEntries] = useState<SandboxFileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  const [openingPath, setOpeningPath] = useState<string | null>(null);
+  const [zipping, setZipping] = useState(false);
 
   const tree = useMemo(() => buildTree(entries), [entries]);
 
@@ -250,14 +278,14 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
       const body = (await res.json()) as TreeResponse;
       const next = Array.isArray(body.entries) ? body.entries : [];
       setEntries(next);
-      // Expand top-level directories by default
-      setExpanded(
-        new Set(
+      setExpanded((prev) => {
+        if (prev.size > 0) return prev;
+        return new Set(
           next
             .filter((e) => e.is_dir && !e.relative_path.includes("/"))
             .map((e) => e.relative_path),
-        ),
-      );
+        );
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to list workspace files");
       setEntries([]);
@@ -269,7 +297,7 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
   useEffect(() => {
     if (!active) return;
     void loadTree();
-  }, [active, loadTree]);
+  }, [active, loadTree, refreshKey]);
 
   const onToggle = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -311,6 +339,75 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
     [sessionId],
   );
 
+  const onOpen = useCallback(
+    async (node: TreeNode) => {
+      if (node.is_dir || !sessionId) return;
+      if (!isPreviewableTextFile(node.name, node.size) || !onOpenFile) {
+        await onDownload(node.relative_path, node.name);
+        return;
+      }
+      setOpeningPath(node.relative_path);
+      try {
+        const res = await authenticatedFetch(
+          `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/download?relative_path=${encodeURIComponent(node.relative_path)}`,
+        );
+        if (!res.ok) {
+          const apiError = await readApiError(res);
+          setError(apiError.message || "Failed to open file");
+          return;
+        }
+        const buffer = await res.arrayBuffer();
+        if (buffer.byteLength > TEXT_PREVIEW_MAX_BYTES) {
+          await onDownload(node.relative_path, node.name);
+          return;
+        }
+        const content = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+        onOpenFile({
+          path: node.relative_path,
+          action: "read",
+          content,
+          append: false,
+          bytesWritten: buffer.byteLength,
+          running: false,
+          ts: Date.now(),
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to open file");
+      } finally {
+        setOpeningPath(null);
+      }
+    },
+    [onDownload, onOpenFile, sessionId],
+  );
+
+  const onDownloadZip = useCallback(async () => {
+    if (!sessionId) return;
+    setZipping(true);
+    try {
+      const res = await authenticatedFetch(
+        `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/zip`,
+      );
+      if (!res.ok) {
+        const apiError = await readApiError(res);
+        setError(apiError.message || "Failed to download workspace zip");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "workspace.tgz";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to download workspace zip");
+    } finally {
+      setZipping(false);
+    }
+  }, [sessionId]);
+
   const fileCount = entries.filter((e) => !e.is_dir).length;
 
   return (
@@ -325,6 +422,16 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
             </span>
           )}
         </div>
+        <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => void onDownloadZip()}
+          disabled={zipping || loading || !sessionId || entries.length === 0}
+          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-40"
+        >
+          {zipping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+          Zip
+        </button>
         <button
           type="button"
           onClick={() => void loadTree()}
@@ -334,6 +441,7 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
           <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
           Refresh
         </button>
+        </div>
       </div>
 
       <div className="custom-scrollbar flex-1 overflow-y-auto px-2 py-2">
@@ -353,6 +461,9 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
             <div className="flex w-full max-w-md flex-col items-center gap-3 rounded-xl border border-dashed border-zinc-800 bg-white/5 px-4 py-8 text-center text-sm text-zinc-500">
               <Folder className="h-8 w-8 opacity-20" />
               <p>No files in the run workspace yet.</p>
+              <p className="text-xs text-zinc-600">
+                Apps the agent builds live here so you can open the source.
+              </p>
             </div>
           </div>
         ) : (
@@ -365,7 +476,9 @@ export function SandboxFilesPanel({ sessionId, active = true }: Props) {
                 expanded={expanded}
                 onToggle={onToggle}
                 downloadingPath={downloadingPath}
+                openingPath={openingPath}
                 onDownload={onDownload}
+                onOpen={onOpen}
               />
             ))}
           </div>

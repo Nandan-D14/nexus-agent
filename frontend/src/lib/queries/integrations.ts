@@ -44,6 +44,44 @@ export function useIntegrationsConnectionsQuery() {
   });
 }
 
+export type CalendarEvent = {
+  id: string;
+  summary: string;
+  start: string;
+  end: string;
+  htmlLink: string;
+  status: string;
+};
+
+export type CalendarEventsRange = {
+  maxResults?: number;
+  timeMin?: string;
+  timeMax?: string;
+};
+
+export async function fetchCalendarEvents(
+  options: CalendarEventsRange = {},
+): Promise<CalendarEvent[]> {
+  const maxResults = options.maxResults ?? 10;
+  const params = new URLSearchParams({ max_results: String(maxResults) });
+  if (options.timeMin) params.set("time_min", options.timeMin);
+  if (options.timeMax) params.set("time_max", options.timeMax);
+  const body = await apiJson<{ events?: CalendarEvent[] }>(
+    `/api/v1/calendar/events?${params.toString()}`,
+  );
+  return body.events ?? [];
+}
+
+export function useCalendarEventsQuery(enabled: boolean, options: CalendarEventsRange = {}) {
+  const { user } = useAuth();
+  return useQuery({
+    queryKey: queryKeys.calendar.events(options),
+    queryFn: () => fetchCalendarEvents(options),
+    enabled: Boolean(user) && enabled,
+    retry: false,
+  });
+}
+
 export function useToggleIntegrationMutation() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -67,7 +105,9 @@ export function useDeleteIntegrationMutation() {
     mutationFn: async (connection: IntegrationConnection) => {
       const path = isGoogleProvider(connection.provider)
         ? "/api/v1/auth/google"
-        : `/api/v1/integrations/${encodeURIComponent(connection.connection_id)}`;
+        : connection.provider === "github"
+          ? "/api/v1/auth/github"
+          : `/api/v1/integrations/${encodeURIComponent(connection.connection_id)}`;
       await apiJson(path, { method: "DELETE" });
     },
     onSuccess: () => invalidateIntegrations(queryClient),

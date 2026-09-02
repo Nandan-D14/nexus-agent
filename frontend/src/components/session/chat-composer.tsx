@@ -21,13 +21,12 @@ import {
   Loader2,
   MessageCircle,
   Mic,
-  Paperclip,
   Smile,
   Square,
-  X,
 } from "lucide-react";
 import { ComposerPlusMenu, COMPOSER_MENU_SURFACE } from "./composer-plus-menu";
-import type { SessionConnector } from "@/lib/session-utils";
+import { UploadedFilePreviewList } from "./message-attachments";
+import { hasPendingComposerUpload, type SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 import { useSkillsQuery, type AgentSkill } from "@/lib/queries/skills";
 import { APP_CONNECTORS } from "@/lib/app-paths";
@@ -65,6 +64,8 @@ type Props = {
   isLanding?: boolean;
   inputRef?: React.RefObject<HTMLDivElement | null>;
   onEnhance?: (prompt: string, signal?: AbortSignal) => Promise<string>;
+  /** True only while this tab has a live run actually executing. */
+  agentRunning?: boolean;
 };
 
 type Phase = "idle" | "enhancing" | "enhanced";
@@ -124,7 +125,6 @@ export function ChatComposer({
   onToggleMic,
   isRecording,
   voiceStatus,
-  phase,
   isLoading,
   isUploadingFile,
   onStopAgent,
@@ -138,6 +138,7 @@ export function ChatComposer({
   onRefreshTools,
   inputRef: externalInputRef,
   onEnhance = mockEnhance,
+  agentRunning = false,
 }: Props) {
   const localEditorRef = useRef<HTMLDivElement>(null);
   const editorRef = externalInputRef || localEditorRef;
@@ -182,8 +183,10 @@ export function ChatComposer({
 
   const hasText = textInput.trim().length > 0;
   const enhancing = enhancePhase === "enhancing";
-  const isBusy = phase === "thinking" || phase === "acting";
-  const sendActive = hasText && !enhancing && !isLoading && !isUploadingFile;
+  const isBusy = agentRunning;
+  const filesUploading = hasPendingComposerUpload(uploadedFiles, isUploadingFile);
+  const hasReadyFiles = uploadedFiles.some((file) => !file.uploading);
+  const sendActive = (hasText || hasReadyFiles) && !enhancing && !isLoading && !filesUploading;
   const showGoogleScheduleCta =
     looksLikeSchedulingPrompt(textInput) && !googleSuiteConnected(availableConnectors);
 
@@ -833,25 +836,9 @@ export function ChatComposer({
       ) : null}
 
       {/* Attachments */}
-      {uploadedFiles.length > 0 && (
-        <div className="mb-1 flex flex-wrap gap-2 px-3 pt-2">
-          {uploadedFiles.map((file) => (
-            <span
-              key={file.path}
-              className="inline-flex items-center gap-2 rounded-full border border-border-button-default bg-background-secondary-default px-3 py-1 text-xs text-text-primary"
-            >
-              <Paperclip className="h-3.5 w-3.5" />
-              <span className="max-w-44 truncate">{file.name}</span>
-              <button
-                type="button"
-                onClick={() => onRemoveFile(file.path)}
-                className="text-text-tertiary transition-colors hover:text-text-primary"
-                aria-label={`Remove ${file.name}`}
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </span>
-          ))}
+      {(uploadedFiles.length > 0 || isUploadingFile) && (
+        <div className="mb-1 px-3 pt-2">
+          <UploadedFilePreviewList files={uploadedFiles} onRemove={onRemoveFile} />
         </div>
       )}
 
@@ -1051,10 +1038,16 @@ export function ChatComposer({
                   ? "bg-foreground text-background"
                   : "cursor-not-allowed bg-foreground/40 text-background/70",
             )}
-            title={isBusy ? "Stop" : "Send"}
-            aria-label={isBusy ? "Stop" : "Send"}
+            title={isBusy ? "Stop" : filesUploading ? "Uploading..." : "Send"}
+            aria-label={isBusy ? "Stop" : filesUploading ? "Uploading" : "Send"}
           >
-            {isBusy ? <Square fill="currentColor" className="h-3 w-3" /> : <ArrowUp strokeWidth={3} className="h-4 w-4" />}
+            {isBusy ? (
+              <Square fill="currentColor" className="h-3 w-3" />
+            ) : filesUploading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ArrowUp strokeWidth={3} className="h-4 w-4" />
+            )}
           </button>
         </div>
       </div>

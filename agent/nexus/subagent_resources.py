@@ -47,6 +47,7 @@ WORKSPACE_MUTATION_TOOLS: frozenset[str] = frozenset(
         "generate_docx_report",
         "generate_pptx_report",
         "publish_html_artifact",
+        "publish_app_preview",
         "save_as_artifact",
     }
 )

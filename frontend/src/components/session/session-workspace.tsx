@@ -55,7 +55,7 @@ import type {
   UploadedInputFile,
   WsMessage,
 } from "@/lib/message-types";
-import { authenticatedFetch, parseApiError } from "@/lib/api-client";
+import { authenticatedFetch, isFirestoreQuotaCoolingDown, isQuotaExceededError, parseApiError } from "@/lib/api-client";
 import { useMicrophone } from "@/lib/use-microphone";
 import { useSession } from "@/lib/use-session";
 import { useSettings } from "@/lib/settings-context";
@@ -65,7 +65,8 @@ import {
   displayAgentToolName,
   surfaceForAgentTool,
 } from "@/lib/agent-tool-classification";
-import type { EditorSessionState, TerminalSessionState } from "@/lib/sandbox-session";
+import type { AppPreviewState, EditorSessionState, TerminalSessionState } from "@/lib/sandbox-session";
+import { parseAppPreviewPayload } from "@/lib/sandbox-session";
 import type { Tab } from "@/components/workflow-desktop-container";
 
 import {
@@ -80,6 +81,7 @@ import {
   displayStepTitle,
   upsertRunArtifact,
   normalizePendingTurnInput,
+  uploadedFilesForTransport,
   upsertRunStep,
   upsertArtifact,
   mapStoredMessagesToChatItems,
@@ -112,6 +114,7 @@ import { CREATE_TEMPLATE_PROMPT } from "@/lib/workflow-template-utils";
 import type { SessionContextUsageState } from "@/components/session/session-context-usage";
 import { SessionLandingView } from "@/components/session/session-landing-view";
 import { ChatComposer } from "@/components/session/chat-composer";
+import { isImageUploadedFile } from "@/components/session/message-attachments";
 import { useResizableSplit } from "@/lib/use-resizable-split";
 
 import type { AgentVisualAction } from "@/components/desktop-panel";
@@ -130,7 +133,7 @@ const CONNECTORS_TTL_MS = 60_000;
  */
 const AGENT_STALL_TIMEOUT_MS = 180_000;
 const AGENT_STALL_POLL_MS = 5_000;
-const LIVE_WORK_TABS = new Set<Tab>(["desktop", "terminal", "editor"]);
+const LIVE_WORK_TABS = new Set<Tab>(["desktop", "terminal", "editor", "preview"]);
 
 const WorkflowDesktopContainer = dynamic(
   () =>
@@ -215,12 +218,15 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   });
   const [terminalSession, setTerminalSession] = useState<TerminalSessionState | null>(null);
   const [editorSession, setEditorSession] = useState<EditorSessionState | null>(null);
+  const [appPreview, setAppPreview] = useState<AppPreviewState | null>(null);
+  const [filesRefreshKey, setFilesRefreshKey] = useState(0);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
   const [genUiSteps, setGenUiSteps] = useState<WorkflowStepData[]>([]);
   const [viewMode, setViewMode] = useState<"live" | "archived">("live");
   const [pageError, setPageError] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<SessionPhase>("idle");
+  const [turnInFlight, setTurnInFlight] = useState(false);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [textInput, setTextInput] = useState("");
   const [availableConnectors, setAvailableConnectors] = useState<SessionConnector[]>([SYSTEM_CONNECTOR]);
@@ -262,6 +268,14 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   // Text of a user bubble rendered before the server echoed it back, so the
   // echo can be recognised and dropped instead of duplicating the message.
   const optimisticUserTextRef = useRef<string | null>(null);
+  const reconnectPendingRef = useRef(false);
+  const liveWorkConfirmedRef = useRef(false);
+  const turnInFlightRef = useRef(false);
+
+  const markTurnInFlight = (busy: boolean) => {
+    turnInFlightRef.current = busy;
+    setTurnInFlight(busy);
+  };
   // Guards against a double-submit creating two threads from one click.
   const createThreadInFlightRef = useRef(false);
   // Wall clock of the last frame received from the backend. Drives the stall
@@ -357,7 +371,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       const isFirstLoad = connectorsFetchedAtRef.current === 0;
       const isFresh =
         !isFirstLoad && Date.now() - connectorsFetchedAtRef.current < CONNECTORS_TTL_MS;
-      if (!options?.force && isFresh) return;
+      if (!options?.force && (isFresh || isFirestoreQuotaCoolingDown())) return;
       // Coalesce concurrent callers (menu open racing the mount fetch).
       if (connectorsInFlightRef.current) return connectorsInFlightRef.current;
 
@@ -382,7 +396,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           );
           connectorsFetchedAtRef.current = Date.now();
         } catch (error) {
-          console.warn("[session] Failed to load connectors", error);
+          if (!isQuotaExceededError(error)) {
+            console.warn("[session] Failed to load connectors", error);
+          }
           if (isFirstLoad) {
             setAvailableConnectors([SYSTEM_CONNECTOR]);
             setSelectedConnectorIds((prev) =>
@@ -432,6 +448,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     autoResumeTriggeredRef.current = false;
+    markTurnInFlight(false);
+    reconnectPendingRef.current = false;
+    liveWorkConfirmedRef.current = false;
     // Drop an action armed for a session we have navigated away from.
     if (armedActionRef.current && armedActionRef.current.sessionId !== sessionId) {
       armedActionRef.current = null;
@@ -441,11 +460,62 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
     const ts = Date.now();
+    // #region agent log
+    if (
+      msg.type === "run_queued" ||
+      msg.type === "run_busy" ||
+      msg.type === "worker_claimed" ||
+      msg.type === "worker_finished" ||
+      msg.type === "worker_failed" ||
+      msg.type === "enqueue_rejected" ||
+      msg.type === "error" ||
+      msg.type === "verification_result" ||
+      msg.type === "permission_request" ||
+      msg.type === "agent_complete"
+    ) {
+      fetch("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "2a93a8",
+        },
+        body: JSON.stringify({
+          sessionId: "2a93a8",
+          hypothesisId: "E",
+          location: "session-workspace.tsx:handleLastMessage",
+          message: "ws frame",
+          data: {
+            type: msg.type,
+            code: (msg as { code?: string }).code,
+            status: (msg as { status?: string }).status,
+            error: (msg as { error?: string }).error,
+            message: (msg as { message?: string }).message,
+            phase,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    }
+    // #endregion
     // "pong" is a keepalive the client itself triggers, so it must not count as
     // agent progress — otherwise the stall watchdog would never fire.
     if (msg.type !== "pong") {
       lastServerActivityRef.current = ts;
     }
+
+    const beginTurn = () => {
+      // Ignore "still working" frames unless this tab already started a turn.
+      // Re-attach and replayed history otherwise leave the stop button stuck
+      // on idle sessions.
+      if (!turnInFlightRef.current) {
+        return;
+      }
+      liveWorkConfirmedRef.current = true;
+      markTurnInFlight(true);
+    };
+    const endTurn = () => {
+      markTurnInFlight(false);
+    };
 
     const applyWorkingLogChat = () => {
       setChatItems((prev) => {
@@ -463,6 +533,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           ...prev,
           { kind: "event", type: msg.type, status: msg.status, ts },
         ]);
+        if (msg.status === "error") {
+          setAppPreview((prev) => (prev ? { ...prev, expired: true } : prev));
+        }
         break;
 
       case "run_status":
@@ -470,6 +543,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         // Safety net: reset phase when the run reaches a terminal state,
         // even if agent_complete was never sent (e.g. crash, disconnect, quota).
         if (msg.run?.status === "completed" || msg.run?.status === "failed" || msg.run?.status === "cancelled") {
+          endTurn();
           setPhase("done");
           setAgentStatus("");
           setAgentAction(null);
@@ -489,6 +563,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "step_started":
       case "step_completed":
       case "step_failed":
+        if (msg.type === "step_started") {
+          beginTurn();
+        }
         setRunSteps((prev) => upsertRunStep(prev, msg.step));
         setRunInfo((prev) =>
           prev
@@ -589,7 +666,30 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
               }
             : prev,
         );
+        setFilesRefreshKey((key) => key + 1);
         break;
+
+      case "app_preview": {
+        const preview = parseAppPreviewPayload(msg, ts);
+        if (!preview) break;
+        setAppPreview(preview);
+        setIsDesktopVisible(true);
+        setForcedTab("preview");
+        setFilesRefreshKey((key) => key + 1);
+        setChatItems((prev) => [
+          ...prev,
+          {
+            kind: "event",
+            type: "app_preview",
+            url: preview.url,
+            port: preview.port ?? undefined,
+            title: preview.title,
+            workspace_path: preview.workspacePath,
+            ts,
+          },
+        ]);
+        break;
+      }
 
       case "vnc_url":
         setStreamUrl(msg.url);
@@ -600,6 +700,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "agent_stream_chunk": {
         const chunk = (msg as unknown as { delta?: string; chunk?: string }).delta ?? (msg as unknown as { chunk?: string }).chunk ?? "";
         if (!chunk) break;
+        beginTurn();
         setPhase("thinking");
         setChatItems((prev) => {
           const lastIdx = prev.length - 1;
@@ -615,6 +716,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       }
 
       case "agent_stream_end":
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -642,6 +744,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           });
           setPhase("done");
           setAgentAction(null);
+          endTurn();
           break;
         }
         setChatItems((prev) => [
@@ -651,6 +754,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         break;
 
       case "agent_thinking":
+        beginTurn();
         setPhase("thinking");
         setAgentStatus("Thinking...");
         applyWorkingLogChat();
@@ -659,6 +763,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "agent_tool_call": {
         const surface = surfaceForAgentTool(msg.tool);
         const args = msg.args && typeof msg.args === "object" ? msg.args : {};
+        beginTurn();
         setPhase("acting");
         setAgentStatus(`Running ${displayAgentToolName(msg.tool)}...`);
         if (surface === "desktop") {
@@ -714,7 +819,10 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
             ts,
           }));
         }
-        if (surface === "desktop" || surface === "terminal" || surface === "editor") {
+        if (surface === "preview") {
+          setIsDesktopVisible(true);
+        }
+        if (surface === "desktop" || surface === "terminal" || surface === "editor" || surface === "preview") {
           setForcedTab(surface);
         }
         applyWorkingLogChat();
@@ -728,6 +836,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         }
         if (msg.tool === "write_workspace_file" || msg.tool === "read_workspace_file") {
           setEditorSession((prev) => (prev ? { ...prev, running: false } : prev));
+        }
+        if (msg.tool === "write_workspace_file" || msg.tool === "publish_app_preview") {
+          setFilesRefreshKey((key) => key + 1);
         }
         break;
 
@@ -755,6 +866,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         break;
 
       case "agent_complete":
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -875,6 +987,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "error":
         const errDetail = msg.detail || msg.message || "Agent error occurred";
         setPageError(errDetail);
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -886,6 +999,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           msg.error || msg.reason || "The agent run stopped unexpectedly.";
         setPageError(workerErrDetail);
         toast(workerErrDetail, "error");
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -896,6 +1010,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           msg.reason || "The request could not be queued. Please try again.";
         setPageError(rejectDetail);
         toast(rejectDetail, "error");
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
@@ -905,12 +1020,14 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       // Terminal for a durable run: the worker released the turn. Clearing the
       // phase here keeps the composer usable even if agent_complete was lost.
       case "worker_finished":
+        endTurn();
         setPhase("done");
         setAgentStatus("");
         setAgentAction(null);
         break;
 
       case "run_queued":
+        beginTurn();
         setAgentStatus("Queued...");
         break;
 
@@ -924,7 +1041,16 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         const pending = (msg as { pending_text?: string }).pending_text;
         if (typeof pending === "string" && pending.trim()) {
           setTextInput(pending);
+          setChatItems((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.kind === "message" && last.role === "user" && last.text === pending) {
+              return prev.slice(0, -1);
+            }
+            return prev;
+          });
+          optimisticUserTextRef.current = null;
         }
+        beginTurn();
         setPhase("acting");
         setAgentStatus(msg.message || "Still working on the previous request...");
         toast(
@@ -936,14 +1062,10 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       }
 
       case "worker_claimed":
-        if (msg.reattached) {
-          // The run kept going while this tab was away. Show it as live work so
-          // the composer stays locked and the thinking indicator is honest.
-          setPhase("acting");
-          setAgentStatus("Reconnected — still working...");
-        } else {
-          setAgentStatus("Starting...");
+        if (!turnInFlightRef.current) {
+          break;
         }
+        setAgentStatus(msg.reattached ? "Reconnected — still working..." : "Starting...");
         break;
 
       case "agent_status":
@@ -976,7 +1098,8 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
             msg.target === "canvas" ||
             msg.target === "desktop" ||
             msg.target === "terminal" ||
-            msg.target === "editor"
+            msg.target === "editor" ||
+            msg.target === "preview"
           ) {
             setIsDesktopVisible(true);
           }
@@ -1033,6 +1156,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           running: msg.phase === "start",
           ts,
         }));
+        if (action === "write" && msg.phase === "result") {
+          setFilesRefreshKey((key) => key + 1);
+        }
         break;
       }
     }
@@ -1049,20 +1175,12 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
    * terminal event. If that event never arrives (dropped frame, backend that
    * bailed out silently, worker that died) the composer would stay locked
    * forever. After a long quiet period, unlock the UI and say so plainly.
-   *
-   * A durable run is exempt: it is owned by a worker, keeps writing events
-   * regardless of this socket, and the server settles it if it is truly dead.
-   * Unlocking here would only invite a resend that the server refuses because
-   * the run is still in flight.
    */
   useEffect(() => {
     if (viewMode !== "live") {
       return;
     }
     if (phase !== "thinking" && phase !== "acting") {
-      return;
-    }
-    if (durableTaskId && isRunStillExecuting(sessionInfo?.run_status)) {
       return;
     }
 
@@ -1072,6 +1190,24 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       if (idleMs < AGENT_STALL_TIMEOUT_MS) {
         return;
       }
+      // #region agent log
+      fetch("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "2a93a8",
+        },
+        body: JSON.stringify({
+          sessionId: "2a93a8",
+          hypothesisId: "E",
+          location: "session-workspace.tsx:stallWatchdog",
+          message: "stall watchdog fired",
+          data: { idleMs, phase },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      markTurnInFlight(false);
       setPhase("done");
       setAgentStatus("");
       setAgentAction(null);
@@ -1081,7 +1217,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }, AGENT_STALL_POLL_MS);
 
     return () => clearInterval(interval);
-  }, [durableTaskId, phase, sessionInfo?.run_status, viewMode]);
+  }, [phase, viewMode]);
 
   useEffect(() => {
     if (isNewSession || viewMode !== "live" || !streamUrl) {
@@ -1226,6 +1362,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
       setPageError(null);
       setPhase("idle");
+      markTurnInFlight(false);
+      reconnectPendingRef.current = false;
+      liveWorkConfirmedRef.current = false;
       setChatItems([]);
       setTodoItems([]);
       setContextUsage(null);
@@ -1238,6 +1377,8 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       setVoiceStatus("connected");
       setHasActivatedSession(false);
       setIsDesktopVisible(false);
+      setAppPreview(null);
+      setFilesRefreshKey(0);
       setPendingText(null);
       setPendingDesktopStart(false);
       setPendingMicStart(false);
@@ -1366,6 +1507,15 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         }
         return prev.length > 0 ? prev : [];
       });
+      const hydratedPreview = [...nextChatItems].reverse().find(
+        (item) => item.kind === "event" && item.type === "app_preview",
+      );
+      if (hydratedPreview && hydratedPreview.kind === "event") {
+        const preview = parseAppPreviewPayload(hydratedPreview, hydratedPreview.ts);
+        if (preview) {
+          setAppPreview(preview);
+        }
+      }
       setTodoItems(hydratedTodos);
       setRunInfo(run);
       setRunSteps(steps);
@@ -1376,6 +1526,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         if (!cancelled) {
           setViewMode("archived");
           setPhase("done");
+          markTurnInFlight(false);
         }
         return;
       }
@@ -1390,6 +1541,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         if (!cancelled) {
           setViewMode("archived");
           setPhase("done");
+          markTurnInFlight(false);
         }
         return;
       }
@@ -1421,15 +1573,13 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           setIsDesktopVisible(true);
         }
 
-        // A run still executing on a worker (we just refreshed away from it) can
-        // only be re-attached over the socket. Prefer the dedicated run doc over
-        // the session summary, which can stay "running" after the turn finished.
-        const liveRunStatus = run?.status || info.run_status;
-        if (isRunStillExecuting(liveRunStatus)) {
-          setHasActivatedSession(true);
-          setPhase("acting");
-          setAgentStatus(RECONNECTING_STATUS);
-        }
+        // Never lock the composer from a stored run status. History and durable
+        // run docs often stay "running" after the turn finished. Stop is reserved
+        // for a turn this tab started.
+        markTurnInFlight(false);
+        reconnectPendingRef.current = false;
+        liveWorkConfirmedRef.current = false;
+        setPhase(nextChatItems.length > 0 ? "done" : "idle");
       }
     }
 
@@ -1457,9 +1607,23 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     if (!isConnected || viewMode !== "live") return;
-    if (agentStatus !== RECONNECTING_STATUS) return;
-    setAgentStatus("");
+    if (agentStatus === RECONNECTING_STATUS) {
+      setAgentStatus("");
+    }
   }, [agentStatus, isConnected, viewMode]);
+
+  useEffect(() => {
+    if (!isConnected || viewMode !== "live") return;
+    if (!reconnectPendingRef.current) return;
+    const timeout = window.setTimeout(() => {
+      reconnectPendingRef.current = false;
+      if (!liveWorkConfirmedRef.current) {
+        setPhase("done");
+        markTurnInFlight(false);
+      }
+    }, 3500);
+    return () => window.clearTimeout(timeout);
+  }, [isConnected, viewMode]);
 
   useEffect(() => {
     if (!isConnected || viewMode !== "live") {
@@ -1467,12 +1631,13 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }
 
     if (pendingText) {
+      markTurnInFlight(true);
       sendJson({
         type: "text_input",
         text: pendingText.text,
         connector_ids: pendingText.connectorIds,
         tool_ids: pendingText.toolIds,
-        uploaded_files: pendingText.uploadedFiles,
+        uploaded_files: uploadedFilesForTransport(pendingText.uploadedFiles ?? []),
       });
       setPendingText(null);
       // Delivered: stop re-arming it on the next session-state reset.
@@ -1580,9 +1745,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
         if (options?.prompt) {
           setPendingText(options.prompt);
+          markTurnInFlight(true);
           setPhase("thinking");
         } else if (options?.demo) {
           setPendingText(options.demo);
+          markTurnInFlight(true);
           setPhase("thinking");
         } else if (options?.startMic) {
           setPendingMicStart(true);
@@ -1621,7 +1788,13 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         if (!payload) {
           return false;
         }
-        action = { ...action, payload };
+        action = {
+          ...action,
+          payload: {
+            ...payload,
+            uploadedFiles: uploadedFilesForTransport(payload.uploadedFiles ?? []),
+          },
+        };
       }
 
       createThreadInFlightRef.current = true;
@@ -1679,21 +1852,41 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       if (isNewSession) {
         return;
       }
+
+      const filesForUi = nextPayload.uploadedFiles ?? [];
+      const filesForSend = uploadedFilesForTransport(filesForUi);
+      const sendPayload: PendingTurnInput = {
+        ...nextPayload,
+        uploadedFiles: filesForSend,
+      };
+
       if (viewMode === "archived") {
-        void continueCurrentThread({ prompt: nextPayload });
+        void continueCurrentThread({ prompt: sendPayload });
         return;
       }
 
+      markTurnInFlight(true);
       setPhase("thinking");
+      optimisticUserTextRef.current = nextPayload.text;
+      setChatItems((prev) => [
+        ...prev,
+        {
+          kind: "message",
+          role: "user",
+          text: nextPayload.text,
+          ts: Date.now(),
+          ...(filesForUi.length > 0 ? { attachments: filesForUi } : {}),
+        },
+      ]);
 
       if (!hasActivatedSession) {
         setHasActivatedSession(true);
-        setPendingText(nextPayload);
+        setPendingText(sendPayload);
         return;
       }
 
       if (!isConnected) {
-        setPendingText(nextPayload);
+        setPendingText(sendPayload);
         return;
       }
 
@@ -1702,7 +1895,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         text: nextPayload.text,
         connector_ids: nextPayload.connectorIds,
         tool_ids: nextPayload.toolIds,
-        uploaded_files: nextPayload.uploadedFiles,
+        uploaded_files: filesForSend,
       });
     },
     [continueCurrentThread, hasActivatedSession, isConnected, isNewSession, sendJson, viewMode],
@@ -1832,9 +2025,25 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         return;
       }
 
+      const pendingItems: UploadedInputFile[] = files.map((file) => {
+        const pending: UploadedInputFile = {
+          name: file.name,
+          path: `pending/${crypto.randomUUID()}/${file.name}`,
+          mime_type: file.type || null,
+          size: file.size,
+          uploading: true,
+        };
+        if (file.type.startsWith("image/") || isImageUploadedFile(pending)) {
+          pending.previewUrl = URL.createObjectURL(file);
+        }
+        return pending;
+      });
+      setUploadedFiles((prev) => [...prev, ...pendingItems]);
       setIsUploadingFile(true);
       try {
-        for (const file of files) {
+        for (let index = 0; index < files.length; index += 1) {
+          const file = files[index];
+          const pending = pendingItems[index];
           const formData = new FormData();
           formData.append("file", file);
           formData.append("relative_path", `sources/uploads/${file.name}`);
@@ -1850,24 +2059,35 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
             throw new Error(await parseApiError(response));
           }
           const body = (await response.json()) as SessionUploadResponse;
+          const uploaded: UploadedInputFile = {
+            artifact_id: body.artifact.artifact_id,
+            name: body.artifact.title || file.name,
+            path: body.path,
+            mime_type: (body.artifact.metadata?.content_type as string | undefined) ?? file.type ?? null,
+            size: (body.artifact.metadata?.size as number | undefined) ?? file.size,
+            drive_status: body.drive_status ?? null,
+            drive_file_id: body.drive_file_id ?? null,
+            drive_web_view_link: body.drive_web_view_link ?? null,
+            drive_folder_path: body.drive_folder_path ?? null,
+            previewUrl: pending.previewUrl,
+          };
           setRunArtifacts((prev) => upsertRunArtifact(prev, body.artifact));
-          setUploadedFiles((prev) => [
-            ...prev,
-            {
-              artifact_id: body.artifact.artifact_id,
-              name: body.artifact.title || file.name,
-              path: body.path,
-              mime_type: (body.artifact.metadata?.content_type as string | undefined) ?? file.type ?? null,
-              size: (body.artifact.metadata?.size as number | undefined) ?? file.size,
-              drive_status: body.drive_status ?? null,
-              drive_file_id: body.drive_file_id ?? null,
-              drive_web_view_link: body.drive_web_view_link ?? null,
-              drive_folder_path: body.drive_folder_path ?? null,
-            },
-          ]);
+          setUploadedFiles((prev) =>
+            prev.map((item) => (item.path === pending.path ? uploaded : item)),
+          );
         }
       } catch (error) {
         toast(error instanceof Error ? error.message : "File upload failed.", "error");
+        setUploadedFiles((prev) =>
+          prev.filter((item) => {
+            const pending = pendingItems.find((candidate) => candidate.path === item.path);
+            if (pending && item.uploading) {
+              if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+              return false;
+            }
+            return true;
+          }),
+        );
       } finally {
         setIsUploadingFile(false);
       }
@@ -1876,12 +2096,22 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   );
 
   const handleRemoveUploadedFile = useCallback((path: string) => {
-    setUploadedFiles((prev) => prev.filter((file) => file.path !== path));
+    setUploadedFiles((prev) => {
+      const removed = prev.find((file) => file.path === path);
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return prev.filter((file) => file.path !== path);
+    });
   }, []);
 
   const handleTextSubmit = useCallback(async () => {
+    if (isUploadingFile || uploadedFiles.some((file) => file.uploading)) {
+      return;
+    }
+    const readyFiles = uploadedFiles.filter((file) => !file.uploading);
     const text = textInput.trim();
-    if (!text) return;
+    if (!text && readyFiles.length === 0) return;
 
     const byok = await ensureByokReady();
     if (!byok.ok) {
@@ -1898,7 +2128,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         availableConnectors,
       ),
       toolIds: selectedToolIds,
-      uploadedFiles,
+      uploadedFiles: readyFiles,
     };
     if (isNewSession) {
       // Clear optimistically so the composer feels responsive, but put the text
@@ -1915,7 +2145,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     sendTextOrQueue(payload);
     setTextInput("");
     setUploadedFiles([]);
-  }, [availableConnectors, createThreadFromPrompt, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
+  }, [availableConnectors, createThreadFromPrompt, ensureByokReady, isNewSession, isUploadingFile, selectedConnectorIds, selectedToolIds, sendTextOrQueue, textInput, toast, uploadedFiles]);
 
   useEffect(() => {
     workspaceTabRef.current = workspaceTab;
@@ -1953,6 +2183,34 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const handleHideDesktop = useCallback(() => {
     setIsDesktopVisible(false);
     setIsDesktopFullscreen(false);
+  }, []);
+
+  const handleOpenAppPreview = useCallback(
+    (payload?: {
+      url?: string;
+      title?: string;
+      port?: number;
+      workspace_path?: string;
+    }) => {
+      if (payload?.url) {
+        const preview = parseAppPreviewPayload(payload);
+        if (preview) {
+          setAppPreview((prev) => ({
+            ...preview,
+            expired: prev?.url === preview.url ? prev.expired : false,
+          }));
+        }
+      }
+      setIsDesktopVisible(true);
+      setForcedTab("preview");
+    },
+    [],
+  );
+
+  const handleOpenWorkspaceFile = useCallback((state: EditorSessionState) => {
+    setEditorSession(state);
+    setIsDesktopVisible(true);
+    setForcedTab("editor");
   }, []);
 
   const handleToggleDesktopFullscreen = useCallback(() => {
@@ -2041,6 +2299,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         ),
       );
       setAgentStatus("");
+      markTurnInFlight(true);
       setPhase("acting");
       sendJson({ type: "user_question_response", question_id: questionId, answer });
     },
@@ -2110,6 +2369,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     } else {
       const payload = armed.action.payload;
       setPendingText(payload);
+      markTurnInFlight(true);
       setPhase("thinking");
       // Show the user's message right away so the thread is never blank while
       // the socket dials. Never append twice on a re-apply.
@@ -2117,7 +2377,15 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       setChatItems((prev) =>
         prev.length > 0
           ? prev
-          : [{ kind: "message", role: "user", text: payload.text, ts: Date.now() }],
+          : [{
+              kind: "message",
+              role: "user",
+              text: payload.text,
+              ts: Date.now(),
+              ...((payload.uploadedFiles?.length ?? 0) > 0
+                ? { attachments: payload.uploadedFiles }
+                : {}),
+            }],
       );
     }
   }, [isNewSession, sessionId, sessionResetToken]);
@@ -2197,6 +2465,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const hasStarted = hasConversationStarted || isDesktopVisible;
   const uploadDisabled = isNewSession || viewMode !== "live" || isUploadingFile;
   const canShowComposer = !isNewSession;
+  const agentRunning = viewMode === "live" && turnInFlight;
 
   useEffect(() => {
     setLandingChrome(!hasStarted);
@@ -2232,6 +2501,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
             isLoading={isLoading}
             isUploadingFile={isUploadingFile}
             onStopAgent={handleStopAgent}
+            agentRunning={agentRunning}
             availableConnectors={availableConnectors}
             selectedConnectorIds={selectedConnectorIds}
             onToggleConnector={toggleConnectorSelection}
@@ -2326,6 +2596,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                               isLoading={isLoading}
                               isUploadingFile={isUploadingFile}
                               onStopAgent={handleStopAgent}
+                              agentRunning={agentRunning}
                               onShowDesktop={handleShowDesktop}
                               availableConnectors={availableConnectors}
                               selectedConnectorIds={selectedConnectorIds}
@@ -2350,6 +2621,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                       onPermissionRespond={handlePermissionRespond}
                       onQuestionRespond={handleQuestionRespond}
                       onTemplateDraftChange={handleTemplateDraftChange}
+                      onAppPreviewOpen={handleOpenAppPreview}
                       footer={
                         canShowComposer ? (
                           <div className="w-full">
@@ -2370,6 +2642,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                               isLoading={isLoading}
                               isUploadingFile={isUploadingFile}
                               onStopAgent={handleStopAgent}
+                              agentRunning={agentRunning}
                               onShowDesktop={handleShowDesktop}
                               availableConnectors={availableConnectors}
                               selectedConnectorIds={selectedConnectorIds}
@@ -2423,6 +2696,9 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                         isFullscreen={isDesktopFullscreen}
                         terminalSession={terminalSession}
                         editorSession={editorSession}
+                        appPreview={appPreview}
+                        filesRefreshKey={filesRefreshKey}
+                        onOpenWorkspaceFile={handleOpenWorkspaceFile}
                       />
                     </div>
                   </div>

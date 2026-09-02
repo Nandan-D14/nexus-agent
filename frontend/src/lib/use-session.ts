@@ -26,6 +26,7 @@ import type {
   WorkspaceResumeState,
 } from "./message-types";
 import type { DurableReplayEvent } from "./use-websocket";
+import { parseUploadedFiles } from "./session-utils";
 
 type CreateSessionOptions = {
   mode?: SessionCreateMode;
@@ -371,6 +372,7 @@ export function useSession(): UseSessionReturn {
           text: string;
           createdAt?: string | null;
           turnIndex?: number;
+          attachments?: unknown;
         }>;
       };
 
@@ -383,6 +385,7 @@ export function useSession(): UseSessionReturn {
           turn_index: typeof message.turnIndex === "number" ? message.turnIndex : 0,
           created_at:
             typeof message.createdAt === "string" ? message.createdAt : null,
+          attachments: parseUploadedFiles(message.attachments),
         };
       });
     } catch (err) {

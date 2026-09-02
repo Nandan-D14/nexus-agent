@@ -4,6 +4,7 @@ import * as React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ToastProvider } from "@/components/toast-provider";
+import { isQuotaExceededError } from "@/lib/api-client";
 import { AuthProvider } from "@/lib/auth-context";
 import { SignInGateProvider } from "@/components/auth/sign-in-gate";
 import { SettingsProvider } from "@/lib/settings-context";
@@ -17,7 +18,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
         defaultOptions: {
           queries: {
             staleTime: 30_000,
-            retry: 1,
+            retry: (failureCount, error) => {
+              if (isQuotaExceededError(error)) return false;
+              return failureCount < 1;
+            },
+            refetchOnWindowFocus: (query) => !isQuotaExceededError(query.state.error),
+            refetchOnReconnect: (query) => !isQuotaExceededError(query.state.error),
           },
         },
       }),

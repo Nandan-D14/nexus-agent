@@ -153,9 +153,22 @@ class SandboxSweeper:
             logger.info("Sandbox sweep complete. No orphans found.")
 
 
+_INVALID_SANDBOX_IDS = frozenset({"true", "false", "none", "null"})
+
+
+def is_valid_sandbox_id(value: object) -> bool:
+    """Return True for a real E2B sandbox id, not SDK booleans serialized as strings."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if len(text) < 8 or text.lower() in _INVALID_SANDBOX_IDS:
+        return False
+    return True
+
+
 def _sandbox_info_id(info: object) -> str | None:
     value = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
-    return value if isinstance(value, str) and value else None
+    return value if is_valid_sandbox_id(value) else None
 
 
 def _paginator_items(paginator: object) -> list[object]:
@@ -279,6 +292,40 @@ class SandboxManager:
     @property
     def stream_url(self) -> Optional[str]:
         return self._stream_url
+
+    def get_preview_url(self, port: int) -> str:
+        """Public HTTPS URL for a port listening inside the sandbox."""
+        self._require_sandbox()
+        try:
+            host = str(self._sandbox.get_host(int(port)) or "").strip()
+        except Exception as exc:
+            self._raise_if_dead(exc)
+            raise
+        if not host:
+            raise RuntimeError(f"Sandbox did not return a host for port {port}")
+        if host.startswith("http://") or host.startswith("https://"):
+            return host
+        return f"https://{host}"
+
+    def probe_listening_port(self, port: int, *, timeout: int = 4) -> bool:
+        """Return True if something is accepting TCP connections on 127.0.0.1:port."""
+        self._require_sandbox()
+        script = (
+            "import socket, sys\n"
+            f"port = {int(port)}\n"
+            "sock = socket.socket()\n"
+            "sock.settimeout(3)\n"
+            "try:\n"
+            "    sock.connect(('127.0.0.1', port))\n"
+            "    print('ok')\n"
+            "except Exception as exc:\n"
+            "    print('fail:' + type(exc).__name__)\n"
+            "    sys.exit(1)\n"
+            "finally:\n"
+            "    sock.close()\n"
+        )
+        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=max(timeout, 5))
+        return _coerce_exit_code(result.get("exit_code", -1)) == 0
 
     def mark_dead(self) -> None:
         """Drop a stale E2B client without attempting to kill the remote VM."""
@@ -459,17 +506,22 @@ class SandboxManager:
     def pause(self) -> str | None:
         """Pause the sandbox so it can be resumed later via ``connect``/``resume``.
 
-        Current E2B Desktop SDK exposes ``Sandbox.pause()`` which returns the
-        sandbox id. That id is what ``Sandbox.connect(id)`` resumes.
+        Current E2B Desktop SDK's ``Sandbox.pause()`` returns a boolean. Keep
+        the existing ``sandbox_id`` so the VM can be resumed later.
         """
         if not self._sandbox:
             return None
         try:
-            sandbox_id = self._sandbox.pause()
-            logger.info("Sandbox paused (id=%s)", sandbox_id)
+            existing_id = getattr(self._sandbox, "sandbox_id", None)
+            paused = self._sandbox.pause()
+            logger.info("Sandbox paused (id=%s, existing=%s)", paused, existing_id)
             self._sandbox = None
             self._stream_url = None
-            return str(sandbox_id) if sandbox_id else None
+            if is_valid_sandbox_id(existing_id):
+                return str(existing_id)
+            if is_valid_sandbox_id(paused):
+                return str(paused)
+            return None
         except Exception as exc:
             logger.warning("Sandbox pause failed: %s — destroying instead", exc)
             try:
@@ -487,6 +539,8 @@ class SandboxManager:
         """
         from e2b_desktop import Sandbox
 
+        if not is_valid_sandbox_id(sandbox_id):
+            raise ValueError(f"Invalid sandbox ID: {sandbox_id!r}")
         logger.info("Connecting to sandbox %s ...", sandbox_id)
         self._sandbox = Sandbox.connect(
             sandbox_id,

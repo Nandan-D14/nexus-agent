@@ -16,7 +16,7 @@ import jwt
 
 from nexus.config import settings
 from nexus.runtime_config import SessionRuntimeConfig
-from nexus.sandbox import SandboxManager
+from nexus.sandbox import SandboxManager, is_valid_sandbox_id
 
 if TYPE_CHECKING:
     from nexus.history_repository import FirestoreHistoryRepository
@@ -147,6 +147,38 @@ async def _maybe_mount_gdrive(
             logger.warning("Google Drive mount cmd failed for session %s: %s", session.id, exc)
             return
     logger.info("Google Drive mounted at ~/gdrive for session %s", session.id)
+
+
+async def _maybe_install_github_git(
+    session: "Session",
+    repo: "FirestoreHistoryRepository",
+) -> None:
+    """Install a GitHub git credential helper in the sandbox when connected."""
+    try:
+        connection = await repo.get_integration_connection(session.owner_id, "github")
+    except Exception:
+        return
+    if not connection or not connection.enabled:
+        return
+    token = connection.private.get("token") if connection.private else None
+    if not isinstance(token, str) or not token.strip():
+        return
+    try:
+        from nexus.github_git import install_github_git_credentials
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: install_github_git_credentials(session.sandbox, token),
+        )
+    except Exception as exc:
+        logger.warning(
+            "GitHub git credentials failed for session %s: %s",
+            session.id,
+            exc,
+        )
+        return
+    logger.info("GitHub git credentials installed for session %s", session.id)
 
 
 @dataclass
@@ -356,7 +388,7 @@ class SessionManager:
                 # sandbox when the user explicitly continued the latest workspace.
                 # Do not reconnect an id we just probed as dead.
                 paused_id: str | None = None
-                if not stale_client and session.sandbox_id:
+                if not stale_client and is_valid_sandbox_id(session.sandbox_id):
                     paused_id = session.sandbox_id
                 if (
                     not paused_id
@@ -364,7 +396,9 @@ class SessionManager:
                     and session.resume_mode == "continue_latest_workspace"
                 ):
                     try:
-                        paused_id = await self.history_repository.get_persistent_sandbox(session.owner_id)
+                        persisted = await self.history_repository.get_persistent_sandbox(session.owner_id)
+                        if is_valid_sandbox_id(persisted):
+                            paused_id = persisted
                     except Exception:
                         pass
 
@@ -410,6 +444,7 @@ class SessionManager:
             if self.history_repository:
                 await _rehydrate_workspace_from_gcs(session, self.history_repository)
                 await _maybe_mount_gdrive(session, self.history_repository)
+                await _maybe_install_github_git(session, self.history_repository)
 
             logger.info(
                 "Session %s sandbox ready (stream_url=%s)",
@@ -440,12 +475,15 @@ class SessionManager:
             task_id=stored.task_id,
             status=stored.status,
             sandbox_id=stored.sandbox_id or "",
-            resume_mode="fresh"
+            resume_mode="fresh",
+            current_run_id=stored.current_run_id,
         )
         # Note: this dummy session is NOT added to _local_sessions until activation
         return session
 
-
+    def get_live_session(self, session_id: str) -> Optional[Session]:
+        """Return the in-memory live session, or None if it is not running here."""
+        return self._local_sessions.get(session_id)
 
     def list_sessions_for_owner(self, owner_id: str) -> list[Session]:
         sessions = [session for session in self._local_sessions.values() if session.owner_id == owner_id]

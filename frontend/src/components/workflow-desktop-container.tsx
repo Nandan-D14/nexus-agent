@@ -9,20 +9,25 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen, Globe } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { WorkspacePanel } from "./workspace-panel";
 import { SandboxFilesPanel } from "./sandbox-files-panel";
 import { SandboxTerminalPane } from "./session/sandbox-terminal-pane";
 import { SandboxEditorPane } from "./session/sandbox-editor-pane";
+import { AppPreviewPane } from "./session/app-preview-pane";
 import { SessionCanvas } from "./session/session-canvas";
-import type { EditorSessionState, TerminalSessionState } from "@/lib/sandbox-session";
+import type {
+  AppPreviewState,
+  EditorSessionState,
+  TerminalSessionState,
+} from "@/lib/sandbox-session";
 import { RunArtifact } from "@/lib/message-types";
 import { Tabs, Tooltip } from "@heroui/react";
 import { useSessionCanvas } from "@/lib/session-canvas-context";
 import { isCanvasArtifact } from "@/lib/session-canvas";
 
-export type Tab = "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "artifacts" | "files" | "workspace";
+export type Tab = "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "preview" | "artifacts" | "files" | "workspace";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -48,6 +53,9 @@ type Props = {
   isFullscreen?: boolean;
   terminalSession?: TerminalSessionState | null;
   editorSession?: EditorSessionState | null;
+  appPreview?: AppPreviewState | null;
+  filesRefreshKey?: number;
+  onOpenWorkspaceFile?: (state: EditorSessionState) => void;
 };
 
 export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
@@ -67,6 +75,9 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   isFullscreen,
   terminalSession = null,
   editorSession = null,
+  appPreview = null,
+  filesRefreshKey = 0,
+  onOpenWorkspaceFile,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
   const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
@@ -116,7 +127,9 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
         ? "Terminal activity detected"
         : autoRouteTab === "editor"
           ? "Editing file"
-          : autoRouteTab === "canvas"
+          : autoRouteTab === "preview"
+            ? "App preview ready"
+            : autoRouteTab === "canvas"
           ? "Document ready"
           : autoRouteTab === "workflow"
             ? "Workflow activity detected"
@@ -224,6 +237,26 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                   </Tooltip.Trigger>
                   <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
                     Editor
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
+              <Tabs.Tab id="preview" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Globe className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
+                      {appPreview && !appPreview.expired && (
+                        <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        </span>
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Preview
                   </Tooltip.Content>
                 </Tooltip>
                 <Tabs.Indicator className="bg-zinc-700/80" />
@@ -399,6 +432,19 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
             </motion.div>
           )}
 
+          {activeTab === "preview" && (
+            <motion.div
+              key="preview"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <AppPreviewPane preview={appPreview} />
+            </motion.div>
+          )}
+
           {activeTab === "artifacts" && (
             <motion.div
               key="artifacts"
@@ -421,7 +467,12 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               transition={{ duration: 0.15 }}
               className="absolute inset-0"
             >
-              <SandboxFilesPanel sessionId={sessionId} active={activeTab === "files"} />
+              <SandboxFilesPanel
+                sessionId={sessionId}
+                active={activeTab === "files"}
+                refreshKey={filesRefreshKey}
+                onOpenFile={onOpenWorkspaceFile}
+              />
             </motion.div>
           )}
 

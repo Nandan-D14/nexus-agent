@@ -14,6 +14,7 @@ import {
   Search,
   Library,
   Settings2,
+  LayoutGrid,
 } from "lucide-react";
 
 import {
@@ -25,9 +26,11 @@ import {
   APP_SETTINGS,
   APP_SKILLS,
   APP_TEMPLATES,
+  APP_WORKSPACE,
 } from "./app-paths";
 
 export const NAV_LINKS = [
+  { name: "Workspace", href: APP_WORKSPACE, icon: LayoutGrid },
   { name: "History", href: APP_HISTORY, icon: MessagesSquare },
   { name: "Schedule task", href: APP_SCHEDULE, icon: Clock },
   { name: "Library", href: APP_LIBRARY, icon: Library },

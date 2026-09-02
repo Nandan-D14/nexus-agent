@@ -250,12 +250,7 @@ export function ConnectorsView() {
       return;
     }
     if (item.provider === "github") {
-      if (item.auth_mode === "oauth") {
-        void startGithubConnect();
-        return;
-      }
-      setSelectedItem(null);
-      setShowGithub(true);
+      void startGithubConnect();
       return;
     }
     if (item.provider === "slack") {
@@ -604,9 +599,9 @@ export function ConnectorsView() {
               : undefined
           }
           secondaryAction={
-            selectedItem.provider === "github" && !connected && selectedItem.auth_mode === "oauth"
+            selectedItem.provider === "github" && !connected
               ? {
-                  label: "Use a personal access token",
+                  label: "Use a personal access token instead",
                   onClick: () => {
                     setSelectedItem(null);
                     setShowGithub(true);

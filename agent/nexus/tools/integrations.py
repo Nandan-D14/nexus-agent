@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import re
+import shlex
 from html import escape
 from typing import Any
 
@@ -21,15 +22,26 @@ from nexus.google_services import (
     GmailClient,
     TasksClient,
     CalendarClient,
+    GoogleApiError,
     get_google_services_token_from_context,
 )
+from nexus.github_git import (
+    configure_git_identity,
+    install_github_git_credentials,
+    resolve_workspace_path,
+    run_sandbox_git,
+    validate_github_name,
+)
 from nexus.tools._context import (
+    ensure_sandbox,
     get_history_repository,
     get_owner_id,
+    get_sandbox,
     get_send_json,
     get_session_id,
 )
 from nexus.tools.base import normalized_tool, tool_error, tool_success
+from nexus.tools.workspace import get_active_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -297,32 +309,70 @@ async def tasks_create(title: str, notes: str = "", due: str | None = None) -> d
 
 
 # ---------------------------------------------------------------------------
-# Google Calendar tools (2)
+# Google Calendar tools (5)
 # ---------------------------------------------------------------------------
 
 @normalized_tool
-async def calendar_list(max_results: int = 10) -> dict[str, Any]:
-    """List upcoming events from the user's primary Google Calendar.
+async def calendar_list(
+    max_results: int = 10,
+    time_min: str | None = None,
+    time_max: str | None = None,
+) -> dict[str, Any]:
+    """List events from the user's primary Google Calendar.
 
     Args:
         max_results: Maximum number of events to return.
+        time_min: Optional RFC 3339 lower bound (inclusive). Defaults to now.
+        time_max: Optional RFC 3339 upper bound (exclusive).
 
     Returns:
-        NormalizedToolResult with upcoming events.
+        NormalizedToolResult with matching events.
     """
     token = await get_google_services_token_from_context()
     if not token:
         return tool_error(_GOOGLE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
     client = CalendarClient(token)
     try:
-        events = await client.list_events(max_results=max_results)
+        events = await client.list_events(
+            max_results=max(1, min(int(max_results or 10), 50)),
+            time_min=time_min,
+            time_max=time_max,
+        )
         items = events.get("items", [])
         return tool_success(
             f"Listed {len(items)} upcoming events",
             events=items, event_count=len(items),
         )
+    except GoogleApiError as e:
+        return tool_error(str(e), error_code=e.error_code or "HTTP_ERROR")
     except Exception as e:
         return tool_error(f"Calendar list failed: {e}")
+
+
+@normalized_tool
+async def calendar_get(event_id: str) -> dict[str, Any]:
+    """Read a specific Google Calendar event by ID.
+
+    Args:
+        event_id: The unique ID of the event to read.
+
+    Returns:
+        NormalizedToolResult with the full event.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return tool_error(_GOOGLE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    client = CalendarClient(token)
+    try:
+        event = await client.get_event(event_id)
+        return tool_success(
+            f"Read event {event_id}",
+            event=event,
+        )
+    except GoogleApiError as e:
+        return tool_error(str(e), error_code=e.error_code or "HTTP_ERROR")
+    except Exception as e:
+        return tool_error(f"Calendar get failed: {e}")
 
 
 @normalized_tool
@@ -368,8 +418,87 @@ async def calendar_create(
             f"Created event: {summary} ({start_time} - {end_time})",
             event=event,
         )
+    except GoogleApiError as e:
+        return tool_error(str(e), error_code=e.error_code or "HTTP_ERROR")
     except Exception as e:
         return tool_error(f"Calendar create failed: {e}")
+
+
+@normalized_tool
+async def calendar_update(
+    event_id: str,
+    summary: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    description: str | None = None,
+    location: str | None = None,
+    time_zone: str = "UTC",
+    attendees: list[str] | None = None,
+) -> dict[str, Any]:
+    """Update an existing event on the user's primary Google Calendar.
+
+    Args:
+        event_id: The unique ID of the event to update.
+        summary: Optional new title.
+        start_time: Optional new start time in RFC 3339 format.
+        end_time: Optional new end time in RFC 3339 format.
+        description: Optional new description.
+        location: Optional new location.
+        time_zone: IANA time zone for start/end when times are updated.
+        attendees: Optional replacement guest email addresses.
+
+    Returns:
+        NormalizedToolResult with the updated event.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return tool_error(_GOOGLE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    client = CalendarClient(token)
+    try:
+        event = await client.update_event(
+            event_id,
+            summary=summary,
+            start_time=start_time,
+            end_time=end_time,
+            description=description,
+            location=location,
+            time_zone=time_zone,
+            attendees=attendees,
+        )
+        return tool_success(
+            f"Updated event {event_id}",
+            event=event,
+        )
+    except GoogleApiError as e:
+        return tool_error(str(e), error_code=e.error_code or "HTTP_ERROR")
+    except Exception as e:
+        return tool_error(f"Calendar update failed: {e}")
+
+
+@normalized_tool
+async def calendar_delete(event_id: str) -> dict[str, Any]:
+    """Delete an event from the user's primary Google Calendar.
+
+    Args:
+        event_id: The unique ID of the event to delete.
+
+    Returns:
+        NormalizedToolResult confirming deletion.
+    """
+    token = await get_google_services_token_from_context()
+    if not token:
+        return tool_error(_GOOGLE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    client = CalendarClient(token)
+    try:
+        await client.delete_event(event_id)
+        return tool_success(
+            f"Deleted event {event_id}",
+            event_id=event_id,
+        )
+    except GoogleApiError as e:
+        return tool_error(str(e), error_code=e.error_code or "HTTP_ERROR")
+    except Exception as e:
+        return tool_error(f"Calendar delete failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +804,340 @@ async def github_summarize_pr(owner: str, repo: str, pull_number: int) -> dict[s
             "body": pr_data.get("body"),
         },
         files=changed_files,
+    )
+
+
+_DEFAULT_GITIGNORE = """node_modules/
+.venv/
+venv/
+__pycache__/
+.env
+.env.*
+dist/
+.next/
+.DS_Store
+"""
+
+
+def _git_ok(result: dict[str, Any]) -> bool:
+    try:
+        return int(result.get("exit_code", -1)) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _git_failure(action: str, result: dict[str, Any]) -> dict[str, Any]:
+    detail = (result.get("stderr") or result.get("stdout") or "").strip()[:800]
+    return tool_error(
+        f"git {action} failed.",
+        error_code="GIT_FAILED",
+        detail=detail,
+        retryable=True,
+    )
+
+
+async def _prepare_github_git(token: str) -> tuple[Any, str, str]:
+    sandbox = get_sandbox()
+    install_github_git_credentials(sandbox, token)
+    identity = await _github_request("GET", "/user")
+    login = "CoComputer"
+    email = "noreply@users.noreply.github.com"
+    if identity.get("status") != "error":
+        data = identity.get("data") or {}
+        login = str(data.get("login") or login).strip() or login
+        if data.get("email"):
+            email = str(data["email"]).strip()
+        else:
+            email = f"{login}@users.noreply.github.com"
+    configure_git_identity(sandbox, login, email)
+    return sandbox, login, email
+
+
+async def _create_github_repo_payload(
+    name: str,
+    *,
+    private: bool,
+    description: str,
+) -> dict[str, Any]:
+    invalid = validate_github_name(name, kind="repository name")
+    if invalid:
+        return tool_error(invalid, error_code="INVALID_INPUT")
+    result = await _github_request(
+        "POST",
+        "/user/repos",
+        json={
+            "name": name.strip(),
+            "private": bool(private),
+            "description": description or "",
+            "auto_init": False,
+        },
+    )
+    if result.get("status") == "error":
+        return result
+    data = result.get("data") or {}
+    full_name = str(data.get("full_name") or "")
+    clone_url = str(data.get("clone_url") or "")
+    html_url = str(data.get("html_url") or "")
+    if not clone_url and full_name:
+        clone_url = f"https://github.com/{full_name}.git"
+    return {
+        "status": "success",
+        "full_name": full_name,
+        "clone_url": clone_url,
+        "html_url": html_url,
+        "private": bool(data.get("private", private)),
+    }
+
+
+@normalized_tool
+async def github_clone_repo(owner: str, repo: str, dest: str = "", ref: str = "") -> dict[str, Any]:
+    """Clone a GitHub repository into the workspace using the connected GitHub account.
+
+    Args:
+        owner: Repository owner (user or organization).
+        repo: Repository name.
+        dest: Optional workspace-relative destination directory. Defaults to the repo name.
+        ref: Optional branch or tag to clone.
+    """
+    token = await _github_token()
+    if not token:
+        return tool_error(_GITHUB_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    await ensure_sandbox()
+    owner_error = validate_github_name(owner, kind="owner")
+    repo_error = validate_github_name(repo, kind="repository name")
+    if owner_error:
+        return tool_error(owner_error, error_code="INVALID_INPUT")
+    if repo_error:
+        return tool_error(repo_error, error_code="INVALID_INPUT")
+    try:
+        dest_path = resolve_workspace_path(
+            get_active_workspace_path(),
+            dest,
+            default_name=repo.strip(),
+        )
+    except ValueError as exc:
+        return tool_error(str(exc), error_code="INVALID_INPUT")
+    sandbox, _, _ = await _prepare_github_git(token)
+    argv = ["git", "clone"]
+    branch = (ref or "").strip()
+    if branch:
+        argv.extend(["--branch", branch])
+    argv.extend([f"https://github.com/{owner.strip()}/{repo.strip()}.git", dest_path])
+    result = run_sandbox_git(sandbox, argv, token=token, timeout=300)
+    if not _git_ok(result):
+        return _git_failure("clone", result)
+    return tool_success(
+        f"Cloned {owner.strip()}/{repo.strip()} into {dest_path}",
+        path=dest_path,
+        repository=f"{owner.strip()}/{repo.strip()}",
+        ref=branch or None,
+    )
+
+
+@normalized_tool
+async def github_create_repo(name: str, private: bool = True, description: str = "") -> dict[str, Any]:
+    """Create a new GitHub repository on the connected account.
+
+    Does not push local files. Use github_push with repo_name to create and push.
+
+    Args:
+        name: New repository name.
+        private: Whether the repository should be private. Default True.
+        description: Optional repository description.
+    """
+    token = await _github_token()
+    if not token:
+        return tool_error(_GITHUB_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    created = await _create_github_repo_payload(
+        name, private=private, description=description
+    )
+    if created.get("status") != "success":
+        return created
+    return tool_success(
+        f"Created GitHub repository {created.get('full_name')}",
+        repository={
+            "full_name": created.get("full_name"),
+            "html_url": created.get("html_url"),
+            "clone_url": created.get("clone_url"),
+            "private": created.get("private"),
+        },
+    )
+
+
+@normalized_tool
+async def github_push(
+    path: str = "",
+    branch: str = "",
+    commit_message: str = "",
+    repo_name: str = "",
+    private: bool = True,
+    description: str = "",
+) -> dict[str, Any]:
+    """Commit local changes if needed and push to GitHub using the connected account.
+
+    If origin is missing, pass repo_name to create a new GitHub repository and push to it.
+
+    Args:
+        path: Workspace-relative project directory. Defaults to the workspace root.
+        branch: Branch to push. Defaults to the current branch, or main.
+        commit_message: Commit message used when there are uncommitted changes.
+        repo_name: Create this repository and set it as origin when origin is missing.
+        private: Used only when creating a new repository. Default True.
+        description: Used only when creating a new repository.
+    """
+    token = await _github_token()
+    if not token:
+        return tool_error(_GITHUB_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    await ensure_sandbox()
+    try:
+        project_path = resolve_workspace_path(get_active_workspace_path(), path)
+    except ValueError as exc:
+        return tool_error(str(exc), error_code="INVALID_INPUT")
+    sandbox, _, _ = await _prepare_github_git(token)
+
+    inside = run_sandbox_git(
+        sandbox,
+        ["git", "-C", project_path, "rev-parse", "--is-inside-work-tree"],
+        token=token,
+        timeout=20,
+    )
+    if not _git_ok(inside):
+        init = run_sandbox_git(
+            sandbox,
+            ["git", "-C", project_path, "init", "-b", "main"],
+            token=token,
+            timeout=20,
+        )
+        if not _git_ok(init):
+            init = run_sandbox_git(
+                sandbox,
+                ["git", "-C", project_path, "init"],
+                token=token,
+                timeout=20,
+            )
+            if not _git_ok(init):
+                return _git_failure("init", init)
+            run_sandbox_git(
+                sandbox,
+                ["git", "-C", project_path, "checkout", "-b", "main"],
+                token=token,
+                timeout=20,
+            )
+
+    new_repo = (repo_name or "").strip()
+    if new_repo:
+        ignore_check = sandbox.run_command(
+            f"test -f {shlex.quote(project_path.rstrip('/') + '/.gitignore')}",
+            timeout=10,
+        ) or {}
+        if not _git_ok(ignore_check):
+            sandbox.write_text_file(
+                f"{project_path.rstrip('/')}/.gitignore",
+                _DEFAULT_GITIGNORE,
+            )
+
+    status = run_sandbox_git(
+        sandbox,
+        ["git", "-C", project_path, "status", "--porcelain"],
+        token=token,
+        timeout=30,
+    )
+    head = run_sandbox_git(
+        sandbox,
+        ["git", "-C", project_path, "rev-parse", "--verify", "HEAD"],
+        token=token,
+        timeout=15,
+    )
+    has_changes = bool((status.get("stdout") or "").strip())
+    has_commit = _git_ok(head)
+    if has_changes or not has_commit:
+        add = run_sandbox_git(
+            sandbox,
+            ["git", "-C", project_path, "add", "-A"],
+            token=token,
+            timeout=60,
+        )
+        if not _git_ok(add):
+            return _git_failure("add", add)
+        message = (commit_message or "").strip() or "Publish from CoComputer"
+        commit = run_sandbox_git(
+            sandbox,
+            ["git", "-C", project_path, "commit", "-m", message],
+            token=token,
+            timeout=60,
+        )
+        if not _git_ok(commit):
+            if not has_commit:
+                return tool_error(
+                    "Nothing to commit. Add project files before pushing.",
+                    error_code="EMPTY_REPO",
+                )
+            # Already committed; continue to push.
+
+    remote = run_sandbox_git(
+        sandbox,
+        ["git", "-C", project_path, "remote", "get-url", "origin"],
+        token=token,
+        timeout=15,
+    )
+    created_repo: dict[str, Any] | None = None
+    if not _git_ok(remote):
+        if not new_repo:
+            return tool_error(
+                "No git origin remote. Pass repo_name to create a GitHub repository, or add origin first.",
+                error_code="MISSING_REMOTE",
+            )
+        created = await _create_github_repo_payload(
+            new_repo, private=private, description=description
+        )
+        if created.get("status") != "success":
+            return created
+        created_repo = created
+        clone_url = str(created.get("clone_url") or "")
+        add_remote = run_sandbox_git(
+            sandbox,
+            ["git", "-C", project_path, "remote", "add", "origin", clone_url],
+            token=token,
+            timeout=20,
+        )
+        if not _git_ok(add_remote):
+            return _git_failure("remote add", add_remote)
+
+    target_branch = (branch or "").strip()
+    if not target_branch:
+        current = run_sandbox_git(
+            sandbox,
+            ["git", "-C", project_path, "rev-parse", "--abbrev-ref", "HEAD"],
+            token=token,
+            timeout=15,
+        )
+        name = (current.get("stdout") or "").strip()
+        target_branch = name if name and name != "HEAD" else "main"
+
+    push = run_sandbox_git(
+        sandbox,
+        ["git", "-C", project_path, "push", "-u", "origin", target_branch],
+        token=token,
+        timeout=180,
+    )
+    if not _git_ok(push):
+        return _git_failure("push", push)
+
+    html_url = ""
+    if created_repo:
+        html_url = str(created_repo.get("html_url") or "")
+    else:
+        origin_url = (remote.get("stdout") or "").strip()
+        if origin_url.endswith(".git"):
+            html_url = origin_url[:-4]
+        elif origin_url.startswith("https://github.com/"):
+            html_url = origin_url
+    return tool_success(
+        f"Pushed {target_branch} to GitHub" + (f" ({html_url})" if html_url else ""),
+        path=project_path,
+        branch=target_branch,
+        html_url=html_url or None,
+        repository=created_repo,
     )
 
 

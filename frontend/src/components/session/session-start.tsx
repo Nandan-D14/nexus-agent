@@ -21,6 +21,7 @@ import { withSchedulingConnectors } from "@/lib/scheduling-intent";
 import {
   SYSTEM_CONNECTOR,
   normalizePendingTurnInput,
+  uploadedFilesForTransport,
   type PendingSessionAction,
   type PendingTurnInput,
   type SessionConnector,
@@ -85,7 +86,13 @@ export function SessionStart() {
         if (!payload) {
           return false;
         }
-        nextAction = { ...action, payload };
+        nextAction = {
+          ...action,
+          payload: {
+            ...payload,
+            uploadedFiles: uploadedFilesForTransport(payload.uploadedFiles ?? []),
+          },
+        };
       }
 
       createThreadInFlightRef.current = true;

@@ -61,7 +61,19 @@ def test_connector_map_covers_native_providers():
     assert "gmail_search" in allowlist
     assert "gmail_send" in allowlist
     assert "github_create_issue" in allowlist
+    assert "github_clone_repo" in allowlist
+    assert "github_create_repo" in allowlist
+    assert "github_push" in allowlist
     assert "search_drive" not in allowlist
+    assert CONNECTOR_TOOLS["google_calendar"] == frozenset(
+        {
+            "calendar_list",
+            "calendar_get",
+            "calendar_create",
+            "calendar_update",
+            "calendar_delete",
+        }
+    )
 
 
 def test_infrastructure_tools_always_allowed_under_restriction():
@@ -139,6 +151,7 @@ def test_check_tool_allowlist_helper_passthrough():
         assert blocked is not None
         assert blocked["error_code"] == "TOOL_NOT_SELECTED"
         assert _check_tool_allowlist("publish_html_artifact") is None
+        assert _check_tool_allowlist("publish_app_preview") is None
         assert _check_tool_allowlist("ask_user") is None
     finally:
         clear_tool_allowlist()

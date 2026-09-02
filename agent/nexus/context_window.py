@@ -130,6 +130,7 @@ _CORE_TOOL_NAMES = _NEVER_DROP_TOOLS | frozenset({
     "web_search",
     "scrape_web_page",
     "publish_html_artifact",
+    "publish_app_preview",
     "ask_user",
     "generate_pdf_report",
     "generate_docx_report",

@@ -43,7 +43,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
             "playwright_verify",
         }
     ),
-    "artifacts": frozenset({"publish_html_artifact", "render_ui"}),
+    "artifacts": frozenset({"publish_html_artifact", "publish_app_preview", "render_ui"}),
     "memory": frozenset({"remember_fact", "recall_facts"}),
 }
 
@@ -53,7 +53,15 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
     "google_drive": frozenset(
         {"search_drive", "read_drive_file", "create_drive_doc", "upload_drive_file"}
     ),
-    "google_calendar": frozenset({"calendar_list", "calendar_create"}),
+    "google_calendar": frozenset(
+        {
+            "calendar_list",
+            "calendar_get",
+            "calendar_create",
+            "calendar_update",
+            "calendar_delete",
+        }
+    ),
     "google_tasks": frozenset({"tasks_list", "tasks_create"}),
     "github": frozenset(
         {
@@ -62,6 +70,9 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
             "github_list_issues",
             "github_create_issue",
             "github_summarize_pr",
+            "github_clone_repo",
+            "github_create_repo",
+            "github_push",
         }
     ),
     "tavily": frozenset({"tavily_search"}),
@@ -98,6 +109,7 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
             "scrape_web_page",
             "search_sources",
             "publish_html_artifact",
+            "publish_app_preview",
             "render_ui",
         }
     ),
@@ -133,6 +145,7 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "generate_docx_report",
         "generate_pptx_report",
         "save_as_artifact",
+        "publish_app_preview",
         "propose_workflow_template",
         "update_workflow_template",
         "publish_workflow_template",

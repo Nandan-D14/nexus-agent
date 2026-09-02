@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.composio_mcp import (
@@ -24,6 +24,8 @@ from nexus.composio_mcp import (
 )
 from nexus.config import settings
 from nexus.dependencies import get_history_repository
+from nexus.google_drive import get_google_drive_access_token_for_user
+from nexus.google_services import CalendarClient, GoogleApiError, slim_calendar_event
 from nexus.models import (
     CreateMcpConnectionRequest,
     IntegrationCatalogItem,
@@ -170,7 +172,7 @@ async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_cur
                 provider="google_calendar",
                 connector_type="native",
                 name="Google Calendar",
-                description="List and create calendar events.",
+                description="List, create, update, and delete calendar events.",
                 status=status,
             ).model_dump(mode="json"),
             IntegrationCatalogItem(
@@ -302,6 +304,38 @@ async def list_integration_connections(user: AuthenticatedUser = Depends(require
             for connection in connections
         ]
     }
+
+
+@router.get("/api/v1/calendar/events")
+async def list_calendar_events(
+    user: AuthenticatedUser = Depends(require_current_user),
+    max_results: Annotated[int, Query(ge=1, le=50)] = 10,
+    time_min: Annotated[str | None, Query()] = None,
+    time_max: Annotated[str | None, Query()] = None,
+):
+    token = await get_google_drive_access_token_for_user(history_repository, user.uid)
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Google Calendar is not connected.", "code": "AUTH_REQUIRED"},
+        )
+    try:
+        payload = await CalendarClient(token).list_events(
+            max_results=max_results,
+            time_min=(time_min or "").strip() or None,
+            time_max=(time_max or "").strip() or None,
+        )
+    except GoogleApiError as exc:
+        status = 403 if exc.error_code == "AUTH_REQUIRED" else 502
+        raise HTTPException(
+            status_code=status,
+            detail={"message": str(exc), "code": exc.error_code or "CALENDAR_ERROR"},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Calendar list failed: {exc}") from exc
+    items = payload.get("items") or []
+    events = [slim_calendar_event(item) for item in items if isinstance(item, dict)]
+    return {"events": events, "event_count": len(events)}
 
 @router.post("/api/v1/integrations/mcp", response_model=IntegrationConnection)
 async def create_mcp_connection(

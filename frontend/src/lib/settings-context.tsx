@@ -7,6 +7,8 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { SettingsPage } from "@/components/application/settings/settings-modal";
+import { useToast } from "@/components/toast-provider";
+import { isQuotaExceededError } from "./api-client";
 import { useAuth } from "./auth-context";
 import {
   fetchUserSettings,
@@ -31,6 +33,7 @@ const SettingsContext = createContext<SettingsContextType | undefined>(undefined
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const { user, isLoading: isAuthLoading } = useAuth();
+  const { toast } = useToast();
   const [isSettingsOpen, setIsSettingsOpenState] = useState(false);
   const [settingsDefaultPage, setSettingsDefaultPage] = useState<SettingsPage>("general");
   const [byokState, setByokState] = useState<{
@@ -64,10 +67,16 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
       applyByokFromSettings(data);
       return data;
     } catch (error) {
-      console.error("Failed to load API key status:", error);
+      if (isQuotaExceededError(error)) {
+        toast(
+          error instanceof Error ? error.message : "Firestore quota exceeded. Try again shortly.",
+          "warning",
+          { id: "firestore-quota" },
+        );
+      }
       return null;
     }
-  }, [applyByokFromSettings, user]);
+  }, [applyByokFromSettings, toast, user]);
 
   const requiresByokSetup = Boolean(byokState?.blocked);
   const byokMissing = byokState?.missing ?? [];
@@ -82,10 +91,17 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
       openSettings("api");
       return { ok: false, message: formatByokMissingMessage(data.byok.missing) };
     } catch (error) {
-      console.error("Failed to verify API keys:", error);
+      if (isQuotaExceededError(error)) {
+        toast(
+          error instanceof Error ? error.message : "Firestore quota exceeded. Try again shortly.",
+          "warning",
+          { id: "firestore-quota" },
+        );
+        return { ok: false, message: "Firestore quota exceeded. Try again shortly." };
+      }
       return { ok: true, message: "" };
     }
-  }, [applyByokFromSettings, openSettings]);
+  }, [applyByokFromSettings, openSettings, toast]);
 
   useEffect(() => {
     if (user && !isAuthLoading) {

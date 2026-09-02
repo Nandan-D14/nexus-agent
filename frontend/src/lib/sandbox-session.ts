@@ -23,6 +23,47 @@ export type EditorSessionState = {
   ts: number;
 };
 
+export type AppPreviewState = {
+  url: string;
+  port: number | null;
+  title: string;
+  workspacePath: string;
+  expired: boolean;
+  ts: number;
+};
+
+export function parseAppPreviewPayload(
+  payload: {
+    url?: unknown;
+    port?: unknown;
+    title?: unknown;
+    workspace_path?: unknown;
+  },
+  ts = Date.now(),
+): AppPreviewState | null {
+  const url = typeof payload.url === "string" ? payload.url.trim() : "";
+  if (!url) return null;
+  const rawPort = payload.port;
+  const port =
+    typeof rawPort === "number" && Number.isFinite(rawPort)
+      ? rawPort
+      : typeof rawPort === "string" && rawPort.trim()
+        ? Number(rawPort)
+        : null;
+  return {
+    url,
+    port: port && port > 0 && port <= 65535 ? port : null,
+    title:
+      typeof payload.title === "string" && payload.title.trim()
+        ? payload.title.trim()
+        : "App preview",
+    workspacePath:
+      typeof payload.workspace_path === "string" ? payload.workspace_path : "",
+    expired: false,
+    ts,
+  };
+}
+
 export function languageFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() || "";
   const map: Record<string, string> = {

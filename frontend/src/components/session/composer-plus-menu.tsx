@@ -111,6 +111,10 @@ export function ComposerPlusMenu({
       return;
     }
     onRefreshTools?.();
+  }, [open, onRefreshTools]);
+
+  useEffect(() => {
+    if (!open) return;
     const onDown = (e: PointerEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) onOpenChange(false);
     };
@@ -128,7 +132,7 @@ export function ComposerPlusMenu({
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, onOpenChange, onRefreshTools, flyout]);
+  }, [open, onOpenChange, flyout]);
 
   useEffect(() => () => clearCloseTimer(), []);
 

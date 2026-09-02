@@ -94,7 +94,6 @@ export function useSkillsQuery() {
     queryFn: fetchSkills,
     enabled: Boolean(!authLoading && user),
     staleTime: 30_000,
-    retry: 1,
   });
 }
 
@@ -111,7 +110,6 @@ export function useSkillQuery(skillId: string) {
     enabled: Boolean(!authLoading && user && skillId),
     placeholderData: placeholder as AgentSkill | undefined,
     staleTime: 30_000,
-    retry: 1,
   });
 }
 
@@ -235,7 +233,6 @@ export function useSkillCatalogQuery(source: string, enabled = true) {
     queryFn: () => fetchSkillCatalog(source),
     enabled: Boolean(!authLoading && user && enabled),
     staleTime: 5 * 60_000,
-    retry: 1,
   });
 }
 
