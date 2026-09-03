@@ -995,7 +995,7 @@ async def handle_websocket(
                         continue
 
                     msg_type = data.get("type", "")
-                    if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop"}:
+                    if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop", "restart_sandbox"}:
                         if not action_rate_limiter.is_allowed(session.owner_id):
                             await _safe_send_json(
                                 {
@@ -1113,6 +1113,24 @@ async def handle_websocket(
                         _track(
                             asyncio.create_task(orchestrator.start_desktop()),
                             label="start_desktop",
+                        )
+
+                    elif msg_type == "restart_sandbox":
+                        _touch_session()
+                        raw_port = data.get("port")
+                        try:
+                            restart_port = int(raw_port) if raw_port not in (None, "") else None
+                        except (TypeError, ValueError):
+                            restart_port = None
+                        _track(
+                            asyncio.create_task(
+                                orchestrator.restart_sandbox(
+                                    port=restart_port if restart_port and restart_port > 0 else None,
+                                    title=str(data.get("title") or ""),
+                                    workspace_path=str(data.get("workspace_path") or ""),
+                                )
+                            ),
+                            label="restart_sandbox",
                         )
 
                     elif msg_type == "analyze_screen":

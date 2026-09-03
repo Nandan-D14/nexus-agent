@@ -170,3 +170,37 @@ class GithubGitToolTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn(result["error_code"], {"MISSING_REMOTE", "GIT_FAILED", "EMPTY_REPO"})
+
+
+class GithubAuthErrorTests(IsolatedAsyncioTestCase):
+    async def test_github_401_asks_user_to_reconnect(self) -> None:
+        from nexus.tools import integrations as integrations_module
+
+        class FakeResponse:
+            status_code = 401
+            text = "Bad credentials"
+            content = b"Bad credentials"
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def request(self, *args, **kwargs):
+                return FakeResponse()
+
+        with (
+            patch(
+                "nexus.tools.integrations._github_token",
+                AsyncMock(return_value="gho_expired"),
+            ),
+            patch("nexus.tools.integrations.httpx.AsyncClient", return_value=FakeClient()),
+        ):
+            result = await integrations_module._github_request("GET", "/user")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "HTTP_401")
+        self.assertFalse(result.get("retryable", True))
+        self.assertIn("Connectors", result["summary"])

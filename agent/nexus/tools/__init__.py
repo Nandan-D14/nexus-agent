@@ -76,6 +76,7 @@ from nexus.tools.integrations import (
     calendar_delete,
 )
 from nexus.tools.ui_control import show_desktop_panel, show_workflow_panel
+from nexus.tools.web_scaffold import scaffold_web_project
 from nexus.tools.templates import (
     propose_workflow_template,
     update_workflow_template,
@@ -103,6 +104,7 @@ ALL_TOOLS = [
     generate_pptx_report,
     publish_html_artifact,
     publish_app_preview,
+    scaffold_web_project,
     save_as_artifact,
     search_drive,
     read_drive_file,

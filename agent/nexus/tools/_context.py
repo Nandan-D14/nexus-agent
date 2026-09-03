@@ -71,6 +71,9 @@ _current_task_budget_guard: contextvars.ContextVar[Optional["TaskBudgetGuard"]] 
 _current_tool_allowlist: contextvars.ContextVar[Optional[frozenset[str]]] = (
     contextvars.ContextVar("_current_tool_allowlist", default=None)
 )
+_timed_out_tool_approvals: contextvars.ContextVar[Optional[set[str]]] = (
+    contextvars.ContextVar("_timed_out_tool_approvals", default=None)
+)
 
 _ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable[None]]]] = (
     contextvars.ContextVar("_ensure_sandbox_callback", default=None)
@@ -323,3 +326,21 @@ def get_tool_allowlist() -> frozenset[str] | None:
 def clear_tool_allowlist() -> None:
     """Reset the per-turn tool allowlist to unrestricted."""
     _current_tool_allowlist.set(None)
+
+
+def reset_timed_out_tool_approvals() -> None:
+    """Clear tools whose approval wait already expired this turn."""
+    _timed_out_tool_approvals.set(set())
+
+
+def mark_tool_approval_timed_out(tool_name: str) -> None:
+    current = _timed_out_tool_approvals.get()
+    if current is None:
+        current = set()
+        _timed_out_tool_approvals.set(current)
+    current.add(tool_name)
+
+
+def tool_approval_timed_out(tool_name: str) -> bool:
+    current = _timed_out_tool_approvals.get()
+    return bool(current and tool_name in current)

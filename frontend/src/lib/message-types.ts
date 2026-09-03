@@ -79,7 +79,7 @@ export type WsEventMeta = {
 };
 
 export type WsMessage = WsEventMeta & (
-  | { type: "sandbox_status"; status: string }
+  | { type: "sandbox_status"; status: string; message?: string; reason?: string }
   | { type: "vnc_url"; url: string }
   | { type: "transcript"; role: "user" | "agent"; text: string }
   | { type: "run_status"; run: RunInfo | null }
@@ -332,6 +332,12 @@ export type WsCommand =
   | { type: "stop_agent" }
   | { type: "start_voice" }
   | { type: "start_desktop" }
+  | {
+      type: "restart_sandbox";
+      port?: number;
+      title?: string;
+      workspace_path?: string;
+    }
   | { type: "permission_response"; task_id: string; approved: boolean }
   | { type: "user_question_response"; question_id: string; answer: string }
   | { type: "ping" };

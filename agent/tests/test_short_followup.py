@@ -15,9 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nexus.orchestrator import (
     NexusOrchestrator,
+    extract_html_dump,
     format_continue_task,
+    is_deliverable_demand,
     is_short_followup,
     looks_like_create_or_build,
+    looks_like_unpublished_markup,
+    looks_like_website_request,
     outstanding_user_task,
 )
 
@@ -60,6 +64,36 @@ class ShortFollowupHelpersTests(TestCase):
         self.assertIn("Tembo landing page", brief)
         self.assertIn("create it", brief)
 
+    def test_recover_website_on_empty_or_missing_artifact(self) -> None:
+        from nexus.orchestrator import should_recover_website
+
+        request = "Create a modern marketing website for my product"
+        self.assertTrue(should_recover_website("MISSING_ARTIFACT", request))
+        self.assertTrue(should_recover_website("MISSING_FINAL_RESPONSE", request))
+        self.assertFalse(should_recover_website("MISSING_FINAL_RESPONSE", "summarize my emails"))
+        self.assertFalse(should_recover_website("MISSING_ARTIFACT", "generate a pdf report"))
+        self.assertTrue(is_deliverable_demand("where the fuck is my website"))
+        self.assertTrue(is_deliverable_demand("where is my website"))
+        self.assertFalse(is_deliverable_demand("do you have git and git cli"))
+        self.assertTrue(looks_like_website_request(
+            "Create a modern marketing website for my product"
+        ))
+        self.assertFalse(looks_like_website_request("generate a pdf report"))
+        self.assertTrue(looks_like_unpublished_markup(
+            '<section class="section features" id="features">'
+        ))
+        self.assertTrue(looks_like_unpublished_markup("Invoice card details: LEDGERLINE"))
+        html = extract_html_dump(
+            "Invoice card:\n\n"
+            '<section class="hero"><div class="wrap">'
+            "<h1>Ledgerline</h1>"
+            "<p>Get paid faster with invoices that chase themselves across reminders, taxes, and receipts.</p>"
+            "<p>Bill to Arcadia Studio LLC. Invoice 0042 is due September 17.</p>"
+            "</div></section>"
+        )
+        self.assertIn("<section", html)
+        self.assertGreater(len(html), 200)
+
 
 class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
     async def test_continue_expands_prior_user_task(self) -> None:
@@ -94,6 +128,35 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             fake._outstanding_task,
             "build a Tembo AI landing page in React Vite",
+        )
+
+    async def test_where_is_website_expands_prior_task(self) -> None:
+        fake = SimpleNamespace(
+            session=SimpleNamespace(id="s1"),
+            history_repository=SimpleNamespace(
+                get_session_messages=AsyncMock(
+                    return_value=[
+                        {
+                            "role": "user",
+                            "text": "Create a modern marketing website for my product",
+                        },
+                        {"role": "user", "text": "where the fuck is my website"},
+                    ]
+                )
+            ),
+            _send_json=AsyncMock(),
+            _persist_message=AsyncMock(),
+            _build_turn_input=AsyncMock(return_value="TURN_INPUT"),
+            _run_agent_tracked=AsyncMock(),
+            _seed_context="",
+        )
+        await NexusOrchestrator.handle_text_input(fake, "where the fuck is my website")
+        model_text = fake._build_turn_input.call_args.args[0]
+        self.assertIn("[CONTINUE TASK]", model_text)
+        self.assertIn("modern marketing website", model_text)
+        self.assertIn(
+            "marketing website",
+            fake._run_agent_tracked.call_args.kwargs["completion_request"].lower(),
         )
 
     async def test_full_prompt_is_unchanged(self) -> None:

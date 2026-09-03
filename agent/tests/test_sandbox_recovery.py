@@ -353,3 +353,45 @@ async def test_ensure_sandbox_callback_keyerror_falls_back_to_reconnect() -> Non
 
     assert ok is True
     sandbox.create.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_restart_sandbox_republishes_preview(monkeypatch) -> None:
+    sandbox = MagicMock()
+    sandbox.is_alive = True
+    sandbox.probe_listening_port.side_effect = [False, True]
+    sandbox.get_preview_url.return_value = "https://8000-new.e2b.app"
+
+    session = SimpleNamespace(
+        id="session-1",
+        owner_id="user-1",
+        runtime_config=SimpleNamespace(gemini_available=False),
+        sandbox=sandbox,
+        sandbox_id="old-id",
+        stream_url="http://old-vnc",
+        current_run_id="run-1",
+        seed_context="",
+        task_id="session-1",
+    )
+    ws = SimpleNamespace(send_json=AsyncMock())
+    orch = _orchestrator(session, ws)
+    orch._send_json = AsyncMock()
+    orch._ensure_sandbox_ready = AsyncMock(return_value=True)
+    orch._bind_workspace_context = MagicMock()
+    monkeypatch.setattr(orchestrator_module.asyncio, "sleep", AsyncMock())
+
+    await orch.restart_sandbox(
+        port=8000,
+        title="Ember & Oak",
+        workspace_path="/home/user/CoComputer/Workspaces/session-1/ember-and-oak",
+    )
+
+    sandbox.mark_dead.assert_called_once()
+    orch._ensure_sandbox_ready.assert_awaited_once_with("preview_restart")
+    sandbox.run_command.assert_called()
+    payloads = [call.args[0] for call in orch._send_json.await_args_list]
+    assert any(item.get("type") == "sandbox_status" and item.get("status") == "restarting" for item in payloads)
+    preview = next(item for item in payloads if item.get("type") == "app_preview")
+    assert preview["url"] == "https://8000-new.e2b.app"
+    assert preview["port"] == 8000
+    assert preview["title"] == "Ember & Oak"

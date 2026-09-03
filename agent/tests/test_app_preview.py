@@ -97,6 +97,9 @@ async def test_publish_app_preview_emits_ws_payload(monkeypatch) -> None:
         is_alive=True,
         probe_listening_port=lambda port: port == 5173,
         get_preview_url=lambda port: f"https://{port}-abc.e2b.app",
+        run_command=lambda *a, **k: {"exit_code": 0, "stdout": "", "stderr": ""},
+        read_text_file=lambda path: "",
+        write_text_file=lambda *a, **k: None,
     )
     send_token = set_send_json(capture)
     sandbox_token = set_sandbox(sandbox)

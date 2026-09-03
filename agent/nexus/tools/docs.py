@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import logging
@@ -663,6 +664,24 @@ async def publish_app_preview(port: int, title: str | None = None) -> dict[str, 
         workspace_path = get_workspace_path()
     except RuntimeError:
         workspace_path = ""
+
+    try:
+        from nexus.tools.preview_hosts import prepare_vite_preview_for_e2b
+
+        prep = await asyncio.to_thread(
+            prepare_vite_preview_for_e2b,
+            sandbox,
+            port=port_number,
+            workspace_path=workspace_path,
+            public_url=url,
+        )
+        if prep.get("restarted"):
+            for _ in range(12):
+                await asyncio.sleep(0.5)
+                if sandbox.probe_listening_port(port_number):
+                    break
+    except Exception:
+        logger.debug("Vite preview host preparation failed", exc_info=True)
 
     await emit_sandbox_event(
         {

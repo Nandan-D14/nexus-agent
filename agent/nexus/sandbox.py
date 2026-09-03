@@ -327,6 +327,34 @@ class SandboxManager:
         result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=max(timeout, 5))
         return _coerce_exit_code(result.get("exit_code", -1)) == 0
 
+    def find_listening_web_ports(self) -> list[int]:
+        """Find common web dev ports accepting TCP connections inside the sandbox."""
+        if self._sandbox is None:
+            return []
+        script = (
+            "import socket\n"
+            "found = []\n"
+            "for p in [5173, 3001, 3000, 8080, 8000, 5000, 4173, 8088, 80]:\n"
+            "    s = socket.socket()\n"
+            "    s.settimeout(0.3)\n"
+            "    try:\n"
+            "        s.connect(('127.0.0.1', p))\n"
+            "        found.append(p)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        s.close()\n"
+            "print(','.join(map(str, found)))\n"
+        )
+        try:
+            result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=5)
+            out = (result.get("stdout") or "").strip()
+            if not out:
+                return []
+            return [int(p.strip()) for p in out.split(",") if p.strip().isdigit()]
+        except Exception:
+            return []
+
     def mark_dead(self) -> None:
         """Drop a stale E2B client without attempting to kill the remote VM."""
         if self._sandbox is not None or self._stream_url is not None:
@@ -494,6 +522,19 @@ class SandboxManager:
                     "Sandbox doc-generation dependencies missing after provisioning: %s",
                     verify.get("stderr") or verify.get("stdout") or verify,
                 )
+
+            # Pre-provision Node.js so web/react/vite projects work out of the box
+            # without triggering interactive sudo/curl policy approval prompts.
+            try:
+                node_check = self.run_command("command -v node", timeout=10)
+                if not (node_check.get("stdout") and str(node_check.get("stdout")).strip()):
+                    logger.info("Node.js missing in sandbox; installing Node.js 20...")
+                    self.run_command(
+                        "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs",
+                        timeout=180,
+                    )
+            except Exception as exc:
+                logger.warning("Node.js provisioning check failed (non-fatal): %s", exc)
         try:
             self.ensure_chromium_cdp()
         except Exception as exc:
@@ -547,6 +588,14 @@ class SandboxManager:
             api_key=self._e2b_api_key or None,
             timeout=settings.sandbox_timeout_seconds,
         )
+        if not hasattr(self._sandbox, "_Sandbox__vnc_server"):
+            try:
+                from e2b_desktop.main import _VNCServer
+                self._sandbox._Sandbox__vnc_server = _VNCServer(self._sandbox)
+                if not hasattr(self._sandbox, "_display"):
+                    self._sandbox._display = ":0"
+            except Exception as exc:
+                logger.warning("Could not initialize _VNCServer on resumed sandbox: %s", exc)
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
         self.ensure_chromium_cdp()
@@ -578,21 +627,24 @@ class SandboxManager:
 
     # -- Screen --------------------------------------------------------------
 
-    def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
+    def run_command(self, command: str, timeout: int = 30, background: bool = False, cwd: str | None = None) -> dict:
         """Run a shell command. Returns {stdout, stderr, exit_code}."""
         self._require_sandbox()
         try:
+            kwargs = {"timeout": timeout}
+            if cwd and str(cwd).strip() and cwd != "~":
+                kwargs["cwd"] = cwd
             if background:
                 # Launch in background using nohup so it doesn't block
                 bg_cmd = f"nohup {command} > /dev/null 2>&1 & echo $!"
-                result = self._sandbox.commands.run(bg_cmd, timeout=10)
+                result = self._sandbox.commands.run(bg_cmd, **kwargs)
                 pid = (result.stdout or "").strip()
                 return {
                     "stdout": f"Started in background (PID: {pid})" if pid else "Started in background",
                     "stderr": result.stderr or "",
                     "exit_code": 0,
                 }
-            result = self._sandbox.commands.run(command, timeout=timeout)
+            result = self._sandbox.commands.run(command, **kwargs)
             return {
                 "stdout": result.stdout or "",
                 "stderr": result.stderr or "",

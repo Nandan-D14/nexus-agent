@@ -38,6 +38,7 @@ export function parseAppPreviewPayload(
     port?: unknown;
     title?: unknown;
     workspace_path?: unknown;
+    [key: string]: unknown;
   },
   ts = Date.now(),
 ): AppPreviewState | null {

@@ -34,6 +34,7 @@ from nexus.resilience import is_remote_deadline_error
 from nexus.sandbox import SandboxDeadError
 from nexus.skills import build_enabled_skills_prompt
 from nexus.tools._context import (
+    reset_timed_out_tool_approvals,
     reset_worker_call_count,
     set_artifact_callback,
     set_ask_user_callback,
@@ -102,6 +103,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DEBUG_LOG_PATHS = (
+    r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log",
+    r"C:\Users\nanda\OneDrive\Desktop\co-computer\.cursor\debug-2a93a8.log",
+)
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        import json as _dbg_json
+        from pathlib import Path as _DbgPath
+        import urllib.request
+
+        payload = {
+            "sessionId": "2a93a8",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        line = _dbg_json.dumps(payload) + "\n"
+        for path in _DEBUG_LOG_PATHS:
+            try:
+                _DbgPath(path).open("a", encoding="utf-8").write(line)
+            except Exception:
+                pass
+        req = urllib.request.Request(
+            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
+            data=line.encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Debug-Session-Id": "2a93a8",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.3)
+    except Exception:
+        pass
+
 # Nudge sent when the model produced no user-visible closing text.
 # Allow tools: "create it" after a skill read still needs file/worker work.
 _FINAL_SYNTHESIS_NUDGE = (
@@ -136,9 +176,102 @@ def is_short_followup(text: str) -> bool:
     return bool(_SHORT_FOLLOWUP_RE.match(str(text or "").strip()))
 
 
+_TASK_INQUIRY_RE = re.compile(
+    r"\b(what('s| was| is) (my|the) task|what are we doing|remind me what|what was the task)\b",
+    re.IGNORECASE,
+)
+
+
+def is_task_inquiry(text: str) -> bool:
+    """Return True when the user is asking what their task was or inquiring about goals."""
+    return bool(_TASK_INQUIRY_RE.search(str(text or "").strip()))
+
+
 def looks_like_create_or_build(text: str) -> bool:
     """Return True when the outstanding task still needs files or a preview."""
     return bool(_CREATE_OR_BUILD_RE.search(str(text or "")))
+
+
+def looks_like_website_request(text: str) -> bool:
+    """Return True when the request is a website/app page, not a PDF/Office file."""
+    raw = str(text or "")
+    if re.search(r"\b(pdf|xlsx|docx|pptx|spreadsheet)\b", raw, re.IGNORECASE) and not re.search(
+        r"\b(website|webpage|landing|html|react|vite)\b", raw, re.IGNORECASE
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(website|webpage|landing|html|react|vite|dashboard)\b",
+            raw,
+            re.IGNORECASE,
+        )
+    )
+
+
+def should_recover_website(error_code: str, request: str) -> bool:
+    """Recover a published page when a website turn ended with no deliverable."""
+    return error_code in {"MISSING_ARTIFACT", "MISSING_FINAL_RESPONSE"} and looks_like_website_request(
+        request
+    )
+
+
+_DELIVERABLE_DEMAND_RE = re.compile(
+    r"\bwhere\b.{0,80}\b(website|webpage|site|page|preview|\bapp\b)\b"
+    r"|\b(show|give|open)\s+me\s+(the\s+)?(website|site|preview|page)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_deliverable_demand(text: str) -> bool:
+    """Return True when the user is demanding the unpublished website/preview."""
+    return bool(_DELIVERABLE_DEMAND_RE.search(str(text or "").strip()))
+
+
+def looks_like_unpublished_markup(text: str) -> bool:
+    """Return True when the model is dumping page source or design notes as chat."""
+    raw = str(text or "")
+    low = raw.lower()
+    if any(
+        token in low
+        for token in (
+            "<section",
+            "<!doctype html",
+            "<html",
+            "<article",
+            "<div class=",
+        )
+    ):
+        return True
+    return any(
+        token in low
+        for token in (
+            "invoice card",
+            "bento grid",
+            "css: custom",
+            "grid-template-columns",
+            "one more consideration",
+        )
+    )
+
+
+def extract_html_dump(text: str) -> str:
+    """Pull a publishable HTML fragment out of a chat/reasoning dump."""
+    raw = str(text or "")
+    fence = re.search(r"```(?:html)?\s*([\s\S]+?)```", raw, re.IGNORECASE)
+    if fence and "<" in fence.group(1):
+        chunk = fence.group(1).strip()
+        if len(chunk) >= 200:
+            return chunk
+    start: int | None = None
+    lowered = raw.lower()
+    for marker in ("<!doctype html", "<html", "<section", "<article", "<div class="):
+        index = lowered.find(marker)
+        if index >= 0 and (start is None or index < start):
+            start = index
+    if start is None:
+        return ""
+    chunk = raw[start:].strip()
+    return chunk if len(chunk) >= 200 else ""
 
 
 def outstanding_user_task(messages: list[dict[str, Any]] | None, current: str) -> str:
@@ -150,7 +283,7 @@ def outstanding_user_task(messages: list[dict[str, Any]] | None, current: str) -
         if str(msg.get("role") or "").lower() != "user":
             continue
         text = str(msg.get("text") or "").strip()
-        if not text or is_short_followup(text):
+        if not text or is_short_followup(text) or is_task_inquiry(text) or is_deliverable_demand(text):
             continue
         if text.startswith("[SYSTEM") or text.startswith("[CONTINUE TASK]"):
             continue
@@ -189,7 +322,7 @@ def format_continue_task(goal: str, confirmation: str) -> str:
 # Pending background children are not an advisory caveat: delivering
 # agent_complete would mark the durable run finished and skip the worker's
 # wait-and-retry path in task_worker.py.
-_HARD_INCOMPLETE_ERROR_CODES = frozenset({"SUBAGENTS_PENDING"})
+_HARD_INCOMPLETE_ERROR_CODES = frozenset({"SUBAGENTS_PENDING", "MISSING_ARTIFACT"})
 
 
 def should_deliver_soft_veto(
@@ -349,6 +482,7 @@ class NexusOrchestrator:
         self._seed_context: str = session.seed_context.strip()
         self._last_user_message: str = ""
         self._outstanding_task: str = ""
+        self._html_dump_buffer: str = ""
         self._turn_screenshot_count: int = 0
         self._turn_tool_summaries: list[str] = []
         self._budget_stop_requested: bool = False
@@ -559,6 +693,102 @@ class NexusOrchestrator:
     async def start_desktop(self) -> None:
         """Start or resume the sandbox because the user opened the desktop."""
         await self._ensure_sandbox_ready("desktop")
+
+    async def restart_sandbox(
+        self,
+        *,
+        port: int | None = None,
+        title: str = "",
+        workspace_path: str = "",
+    ) -> None:
+        """User-triggered sandbox reboot used when the live preview host is gone."""
+        await self._send_json({"type": "sandbox_status", "status": "restarting"})
+        sandbox = getattr(self.session, "sandbox", None)
+        if sandbox is not None:
+            try:
+                sandbox.mark_dead()
+            except Exception:
+                logger.debug("Failed to drop stale sandbox client before restart", exc_info=True)
+        self.session.stream_url = ""
+        self._sandbox_ready_reported = False
+        if not await self._ensure_sandbox_ready("preview_restart"):
+            return
+        await self._restore_app_preview(
+            port=port,
+            title=title,
+            workspace_path=workspace_path,
+        )
+
+    def _safe_preview_cwd(self, workspace_path: str) -> str:
+        from nexus.tools.workspace import derive_session_workspace_path, get_active_workspace_path
+
+        try:
+            root = get_active_workspace_path()
+        except Exception:
+            root = derive_session_workspace_path(self.session.id)
+        root = str(root or "").rstrip("/")
+        candidate = str(workspace_path or "").strip() or root
+        if candidate and not candidate.startswith("/"):
+            candidate = f"{root}/{candidate.lstrip('/')}" if root else candidate
+        candidate = candidate.rstrip("/")
+        if root and candidate != root and not candidate.startswith(f"{root}/"):
+            return root
+        return candidate or root
+
+    async def _restore_app_preview(
+        self,
+        *,
+        port: int | None,
+        title: str,
+        workspace_path: str,
+    ) -> None:
+        sandbox = getattr(self.session, "sandbox", None)
+        if sandbox is None or not sandbox.is_alive:
+            return
+        target_port = int(port) if isinstance(port, int) and port > 0 else 0
+        if target_port <= 0:
+            listening = sandbox.find_listening_web_ports()
+            target_port = listening[0] if listening else 8000
+        if not sandbox.probe_listening_port(target_port):
+            cwd = self._safe_preview_cwd(workspace_path)
+            try:
+                sandbox.run_command(
+                    f"python3 -m http.server {target_port} --bind 0.0.0.0",
+                    timeout=8,
+                    background=True,
+                    cwd=cwd or None,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to start preview server on port %s for session %s",
+                    target_port,
+                    self.session.id,
+                    exc_info=True,
+                )
+            await asyncio.sleep(1.2)
+        if not sandbox.probe_listening_port(target_port):
+            await self._send_json({
+                "type": "resume_recovery",
+                "state": "recovered",
+                "message": (
+                    "Sandbox restarted. Tell the agent to start the preview server "
+                    "again if the page is still blank."
+                ),
+                "reused_context_digest": "",
+            })
+            return
+        try:
+            url = sandbox.get_preview_url(target_port)
+        except Exception as exc:
+            logger.warning("Could not resolve preview URL after sandbox restart: %s", exc)
+            return
+        await self._send_json({
+            "type": "app_preview",
+            "url": url,
+            "port": target_port,
+            "title": (title or "App preview").strip()[:160] or "App preview",
+            "workspace_path": workspace_path or self._safe_preview_cwd(workspace_path),
+        })
 
     async def _load_integration_tools(self) -> None:
         """Load enabled per-user skills and MCP tools into the ADK runner."""
@@ -830,7 +1060,10 @@ class NexusOrchestrator:
 
         completion_request = original_request
         goal = original_request.strip()
-        if is_short_followup(original_request):
+        should_expand = is_short_followup(original_request) or is_deliverable_demand(
+            original_request
+        )
+        if should_expand:
             messages: list[dict[str, Any]] = []
             repo = getattr(self, "history_repository", None)
             session = getattr(self, "session", None)
@@ -845,11 +1078,11 @@ class NexusOrchestrator:
                     )
                     messages = []
             goal = outstanding_user_task(messages, original_request)
-            if is_short_followup(goal):
+            if is_short_followup(goal) or is_deliverable_demand(goal):
                 seed = str(getattr(self, "_seed_context", "") or "").strip()
                 if seed:
                     goal = seed
-            if goal and not is_short_followup(goal):
+            if goal and goal.strip().casefold() != original_request.strip().casefold():
                 model_text = f"{format_continue_task(goal, original_request)}\n\n{model_text}"
                 completion_request = goal
         self._outstanding_task = goal
@@ -1365,6 +1598,7 @@ class NexusOrchestrator:
         model_candidates = self._task_model_candidates()
         turn_runner, turn_cap = self._select_turn_runner()
         reset_worker_call_count()
+        reset_timed_out_tool_approvals()
 
         for model_index, task_model in enumerate(model_candidates, start=1):
             self._trace_context = replace(
@@ -2043,10 +2277,12 @@ class NexusOrchestrator:
     ) -> None:
         """Execute one agent turn. Callers must hold ``_turn_lock``."""
         self._turn_status_settled = False
+        reset_timed_out_tool_approvals()
         self._stop_requested = False
         self._turn_started_monotonic = time.monotonic()
         self._turn_screenshot_count = 0
         self._turn_tool_summaries = []
+        self._html_dump_buffer = ""
         self._tool_trace_steps = {}
         resume_checkpoint = dict(getattr(self, "_resume_checkpoint", {}) or {})
         self._action_ledger = ActionLedger.from_dict(
@@ -2054,6 +2290,7 @@ class NexusOrchestrator:
             if isinstance(resume_checkpoint.get("action_ledger"), dict)
             else None
         )
+        self._action_ledger.advance_turn()
         self._resume_checkpoint = {}
         self.last_turn_result = None
         self._current_thinking = ""
@@ -2144,6 +2381,19 @@ class NexusOrchestrator:
                     if result["status"] == "blocked"
                     else "paused"
                 )
+                # #region agent log
+                _agent_debug_log(
+                    "A",
+                    "orchestrator.py:blocked_or_partial",
+                    "turn paused instead of completed",
+                    {
+                        "status": result.get("status"),
+                        "durable_status": durable_status,
+                        "error_code": str((result.get("verification") or {}).get("error_code") or ""),
+                        "summary": str(result.get("summary") or "")[:240],
+                    },
+                )
+                # #endregion
                 await self._fail_unfinished_tool_steps(
                     status="cancelled",
                     error=result.get("summary"),
@@ -2300,6 +2550,18 @@ class NexusOrchestrator:
                     "Agent turn for session %s ended without a terminal status — settling as failed",
                     self.session.id,
                 )
+                # #region agent log
+                _agent_debug_log(
+                    "A",
+                    "orchestrator.py:finally_unsettled",
+                    "TURN_NOT_SETTLED guard fired",
+                    {
+                        "session_run_status": str(getattr(self.session, "run_status", "") or ""),
+                        "last_status": str((self.last_turn_result or {}).get("status") or ""),
+                        "last_error": str(((self.last_turn_result or {}).get("verification") or {}).get("error_code") or ""),
+                    },
+                )
+                # #endregion
                 await self._send_json({
                     "type": "error",
                     "code": "TURN_NOT_SETTLED",
@@ -2428,10 +2690,60 @@ class NexusOrchestrator:
                 await self._reconnect_sandbox()
 
             final_response = result.response
+            request_text = completion_request if completion_request is not None else message
             completion_verification = await self._verify_turn_completion(
-                request=completion_request if completion_request is not None else message,
+                request=request_text,
                 final_response=final_response,
+                persist_step=False,
             )
+            # #region agent log
+            try:
+                import json as _dbg_json
+                from pathlib import Path as _DbgPath
+                _tools = [str(getattr(r.decision, "action", "") or "") for r in self._action_ledger.records[-16:]]
+                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"orchestrator.py:after_first_verify","message":"first verification","data":{"completion_request":str(completion_request if completion_request is not None else message)[:180],"outstanding_task":str(getattr(self,"_outstanding_task","") or "")[:180],"verified":bool(completion_verification.verified),"error_code":completion_verification.error_code,"n_artifacts":len(self._action_ledger.artifacts()),"tools":_tools,"publish_called":any(t in {"publish_html_artifact","publish_app_preview","scaffold_web_project"} for t in _tools),"response_prefix":str(final_response or "")[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+            except Exception:
+                pass
+            # #endregion
+            _agent_debug_log(
+                "C",
+                "orchestrator.py:after_first_verify",
+                "first verification",
+                {
+                    "completion_request": str(request_text)[:180],
+                    "outstanding_task": str(getattr(self, "_outstanding_task", "") or "")[:180],
+                    "verified": bool(completion_verification.verified),
+                    "error_code": completion_verification.error_code,
+                    "n_artifacts": len(self._action_ledger.artifacts()),
+                    "html_dump_len": len(str(getattr(self, "_html_dump_buffer", "") or "")),
+                    "response_len": len(str(final_response or "")),
+                },
+            )
+
+            if should_recover_website(
+                completion_verification.error_code,
+                request_text,
+            ) and not completion_verification.verified:
+                recovered = await self._publish_missing_website_artifact(
+                    request=request_text,
+                    dumped_text="\n".join(
+                        part
+                        for part in (
+                            str(final_response or ""),
+                            str(getattr(self, "_html_dump_buffer", "") or ""),
+                            str(getattr(self, "_current_thinking", "") or ""),
+                        )
+                        if part
+                    ),
+                    allow_scaffold=False,
+                )
+                if recovered:
+                    final_response = recovered
+                    completion_verification = await self._verify_turn_completion(
+                        request=request_text,
+                        final_response=final_response,
+                        persist_step=False,
+                    )
 
             # Honor a retryable MISSING_FINAL_RESPONSE: the model gathered
             # evidence but emitted no closing text. Re-invoke a bounded,
@@ -2439,20 +2751,32 @@ class NexusOrchestrator:
             synthesis_retries = 0
             while (
                 not completion_verification.verified
-                and completion_verification.error_code == "MISSING_FINAL_RESPONSE"
+                and completion_verification.error_code in {"MISSING_FINAL_RESPONSE", "MISSING_ARTIFACT"}
                 and completion_verification.retryable
                 and synthesis_retries < max(0, settings.max_final_synthesis_retries)
             ):
                 synthesis_retries += 1
                 logger.warning(
-                    "MISSING_FINAL_RESPONSE; synthesis retry %d/%d for session %s",
+                    "%s; synthesis retry %d/%d for session %s",
+                    completion_verification.error_code,
                     synthesis_retries,
                     settings.max_final_synthesis_retries,
                     self.session.id,
                 )
-                retry_result = await self._run_agent_with_retry(
-                    self._final_synthesis_nudge()
-                )
+                if completion_verification.error_code == "MISSING_ARTIFACT":
+                    req_text = completion_request if completion_request is not None else message
+                    nudge = (
+                        f"[DIRECTIVE: DELIVERABLE REQUIRED]\n"
+                        f"The user requested: {req_text}\n"
+                        "You must produce and publish the deliverable now. "
+                        "If this is a website, landing page, dashboard, or UI, call publish_html_artifact "
+                        "(for self-contained HTML/CSS/JS) or write files in the workspace and call publish_app_preview (for a live dev server). "
+                        "Do not return text advice, skill guidelines, or an explanation without publishing the artifact.\n"
+                        "[END DIRECTIVE]"
+                    )
+                else:
+                    nudge = self._final_synthesis_nudge()
+                retry_result = await self._run_agent_with_retry(nudge)
                 for usage in retry_result.usage_records:
                     await self._persist_token_usage(usage)
                 if retry_result.error:
@@ -2462,7 +2786,33 @@ class NexusOrchestrator:
                 completion_verification = await self._verify_turn_completion(
                     request=completion_request if completion_request is not None else message,
                     final_response=final_response,
+                    persist_step=False,
                 )
+
+            if should_recover_website(
+                completion_verification.error_code,
+                request_text,
+            ) and not completion_verification.verified:
+                recovered = await self._publish_missing_website_artifact(
+                    request=request_text,
+                    dumped_text="\n".join(
+                        part
+                        for part in (
+                            str(final_response or ""),
+                            str(getattr(self, "_html_dump_buffer", "") or ""),
+                            str(getattr(self, "_current_thinking", "") or ""),
+                        )
+                        if part
+                    ),
+                    allow_scaffold=True,
+                )
+                if recovered:
+                    final_response = recovered
+                    completion_verification = await self._verify_turn_completion(
+                        request=request_text,
+                        final_response=final_response,
+                        persist_step=False,
+                    )
 
             # Last resort: a research turn can use gathered tool notes. A
             # create/build turn must not ship an apology as the product.
@@ -2491,6 +2841,7 @@ class NexusOrchestrator:
                     completion_verification = await self._verify_turn_completion(
                         request=request_text,
                         final_response=final_response,
+                        persist_step=False,
                     )
 
             if (
@@ -2512,6 +2863,32 @@ class NexusOrchestrator:
                         "final_response": final_response or "",
                         "verification": completion_verification.to_dict(),
                     }
+
+            if should_recover_website(
+                completion_verification.error_code,
+                request_text,
+            ) and not completion_verification.verified:
+                recovered = await self._publish_missing_website_artifact(
+                    request=request_text,
+                    dumped_text="\n".join(
+                        part
+                        for part in (
+                            str(final_response or ""),
+                            str(getattr(self, "_html_dump_buffer", "") or ""),
+                            str(getattr(self, "_current_thinking", "") or ""),
+                        )
+                        if part
+                    ),
+                    allow_scaffold=True,
+                )
+                if recovered:
+                    final_response = recovered
+
+            completion_verification = await self._verify_turn_completion(
+                request=request_text,
+                final_response=final_response,
+                persist_step=True,
+            )
 
             if not completion_verification.verified:
                 soft_veto = should_deliver_soft_veto(
@@ -2957,11 +3334,40 @@ class NexusOrchestrator:
                         part, reasoning_is_text=settings.reasoning_is_text
                     )
                     if kind == "reasoning":
+                        if looks_like_unpublished_markup(clean):
+                            self._html_dump_buffer = (
+                                str(getattr(self, "_html_dump_buffer", "") or "") + clean
+                            )
                         await self._emit_reasoning(clean)
                         continue
                     if is_final or not self._extract_function_calls(event):
+                        if looks_like_unpublished_markup(clean):
+                            self._html_dump_buffer = (
+                                str(getattr(self, "_html_dump_buffer", "") or "") + clean
+                            )
+                            # #region agent log
+                            try:
+                                import json as _dbg_json
+                                from pathlib import Path as _DbgPath
+                                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:agent_delta","message":"routing markup to reasoning","data":{"thought":bool(getattr(part,"thought",False)),"kind":kind,"is_final":bool(is_final),"prefix":clean[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+                            except Exception:
+                                pass
+                            # #endregion
+                            await self._emit_reasoning(clean)
+                            continue
                         if not self._streaming_active:
                             self._streaming_active = True
+                        # #region agent log
+                        try:
+                            import json as _dbg_json
+                            from pathlib import Path as _DbgPath
+                            _htmlish = "<" in clean and ("class=" in clean or "<section" in clean.lower() or "<div" in clean.lower())
+                            _planish = any(tok in clean.lower() for tok in ("invoice card", "one more consideration", "writing now", "css:", "bento"))
+                            if _htmlish or _planish or is_final or len(clean) > 80:
+                                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:agent_delta","message":"streaming answer text","data":{"thought":bool(getattr(part,"thought",False)),"kind":kind,"is_final":bool(is_final),"htmlish":_htmlish,"planish":_planish,"prefix":clean[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+                        except Exception:
+                            pass
+                        # #endregion
                         await self._send_json({
                             "type": "agent_delta",
                             "delta": clean,
@@ -3042,6 +3448,14 @@ class NexusOrchestrator:
                         fallback_summary=output_str,
                     )
                     self._action_ledger.finish(action_observation)
+                    # #region agent log
+                    try:
+                        import json as _dbg_json
+                        from pathlib import Path as _DbgPath
+                        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"E","location":"orchestrator.py:tool_result","message":"tool observation","data":{"tool":str(tool_name),"status":action_observation.status,"n_artifacts":len(action_observation.artifacts),"artifact_tool":str(tool_name) in {"publish_html_artifact","publish_app_preview","scaffold_web_project"},"error_code":action_observation.error_code},"timestamp":int(__import__("time").time()*1000)})+"\n")
+                    except Exception:
+                        pass
+                    # #endregion
                     result_metadata = self._build_tool_result_metadata(
                         tool_name=tool_name,
                         output_mapping=output_mapping,
@@ -3470,6 +3884,7 @@ class NexusOrchestrator:
         *,
         request: str,
         final_response: str | None,
+        persist_step: bool = True,
     ):
         """Persist and emit deterministic completion-verification evidence."""
         verification = verify_completion(
@@ -3511,6 +3926,22 @@ class NexusOrchestrator:
             **verification.to_dict(),
             "action_count": len(self._action_ledger.records),
         }
+        is_soft_veto = should_deliver_soft_veto(
+            deliver_enabled=settings.deliver_answer_on_soft_veto,
+            final_response=final_response,
+            status=verification.status,
+            error_code=verification.error_code,
+        )
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"orchestrator.py:_verify_turn_completion","message":"verification step","data":{"verified":bool(verification.verified),"error_code":verification.error_code,"soft_veto":bool(is_soft_veto),"persist_step":bool(persist_step),"will_fail_step":bool(persist_step) and not (verification.verified or is_soft_veto),"request":str(request or "")[:160]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
+        if not persist_step:
+            return verification
         await self._send_json(payload)
         step_id = await self._create_step(
             step_type="verification",
@@ -3522,7 +3953,7 @@ class NexusOrchestrator:
                 "action_ledger": self._action_ledger.to_dict(),
             },
         )
-        if verification.verified:
+        if verification.verified or is_soft_veto:
             await self._complete_step(
                 step_id,
                 detail=verification.summary,
@@ -3605,6 +4036,84 @@ class NexusOrchestrator:
                 exc_info=True,
             )
 
+    async def _publish_missing_website_artifact(
+        self,
+        *,
+        request: str,
+        dumped_text: str,
+        allow_scaffold: bool = True,
+    ) -> str | None:
+        """Publish dumped HTML or a landing-page scaffold when the model never did."""
+        from nexus.control_loop import ActionObservation
+        from nexus.tools.docs import publish_html_artifact
+        from nexus.tools.web_scaffold import scaffold_web_project
+
+        html = extract_html_dump(dumped_text)
+        title = re.sub(
+            r"^(?:create|build|make|design)\s+(?:a|an|my)?\s*",
+            "",
+            str(request or "").strip(),
+            flags=re.IGNORECASE,
+        ).strip()[:80] or "Marketing website"
+        try:
+            if html:
+                result = await publish_html_artifact(
+                    title=title,
+                    html=html,
+                    filename="index.html",
+                )
+                tool_name = "publish_html_artifact"
+            elif allow_scaffold:
+                result = await scaffold_web_project(
+                    title=title,
+                    description=str(request or "")[:400],
+                )
+                tool_name = "scaffold_web_project"
+            else:
+                _agent_debug_log(
+                    "B",
+                    "orchestrator.py:_publish_missing_website_artifact",
+                    "skip recover no html",
+                    {"allow_scaffold": False, "dump_len": len(str(dumped_text or ""))},
+                )
+                return None
+        except Exception:
+            logger.warning(
+                "Failed to recover missing website artifact for session %s",
+                self.session.id,
+                exc_info=True,
+            )
+            return None
+        # #region agent log
+        _agent_debug_log(
+            "B",
+            "orchestrator.py:_publish_missing_website_artifact",
+            "artifact recovery",
+            {
+                "tool": tool_name,
+                "status": result.get("status"),
+                "had_html": bool(html),
+                "html_len": len(html or ""),
+                "title": title[:80],
+                "allow_scaffold": bool(allow_scaffold),
+            },
+        )
+        # #endregion
+        if str(result.get("status") or "") != "success":
+            return None
+        observation = ActionObservation.from_tool_result(
+            action_id="recover-website-artifact",
+            tool_name=tool_name,
+            result=result,
+        )
+        self._action_ledger.finish(observation)
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        url = str(detail.get("url") or "").strip()
+        summary = str(result.get("summary") or "Published the website.").strip()
+        if url:
+            return f"{summary}\n\nPreview: {url}"
+        return summary
+
     def _final_synthesis_instruction(self) -> str:
         goal = str(getattr(self, "_outstanding_task", "") or "").strip()
         if goal and not is_short_followup(goal):
@@ -3623,11 +4132,36 @@ class NexusOrchestrator:
             return f"{format_continue_task(goal, 'continue')}\n\n{_FINAL_SYNTHESIS_NUDGE}"
         return _FINAL_SYNTHESIS_NUDGE
 
+    def _find_underlying_task(self) -> str:
+        seed = str(getattr(self, "_seed_context", "") or "").strip()
+        if seed and not is_task_inquiry(seed):
+            return seed
+        for msg in reversed(getattr(self, "_transcript", []) or []):
+            if msg.get("role") == "user":
+                t = str(msg.get("text") or "").strip()
+                if t and not is_short_followup(t) and not is_task_inquiry(t):
+                    return self._clip_text(t, 300)
+        task_str = str(getattr(self, "_outstanding_task", "") or "").strip()
+        if task_str and not is_task_inquiry(task_str) and not is_short_followup(task_str):
+            return self._clip_text(task_str, 300)
+        return ""
+
     def _build_stalled_continuation_notice(self, message: str) -> str:
         goal = self._clip_text(
             str(getattr(self, "_outstanding_task", "") or message or self._last_user_message),
             400,
         )
+        if is_task_inquiry(message) or is_task_inquiry(goal):
+            real_task = self._find_underlying_task()
+            if real_task:
+                return (
+                    f"Your task in this session is: {real_task}. "
+                    "Let me know if you would like me to continue working on it."
+                )
+            return (
+                "You asked what your task was. We haven't started a specific build task yet in this session. "
+                "What would you like to work on?"
+            )
         if looks_like_create_or_build(goal):
             return (
                 "I started this turn but did not finish building the deliverable. "
@@ -4115,6 +4649,9 @@ class NexusOrchestrator:
         return False
 
     _TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+    _SETTLED_RUN_STATUSES = frozenset(
+        {"completed", "failed", "cancelled", "waiting_approval", "paused"}
+    )
 
     def _remaining_turn_seconds(self) -> float:
         """Seconds left before the hard turn cap, minus a settle buffer."""
@@ -4166,8 +4703,21 @@ class NexusOrchestrator:
 
     async def _set_run_status(self, status: str) -> None:
         self.session.run_status = status
-        if status in self._TERMINAL_RUN_STATUSES:
+        if status in self._SETTLED_RUN_STATUSES:
             self._turn_status_settled = True
+        # #region agent log
+        _agent_debug_log(
+            "A",
+            "orchestrator.py:_set_run_status",
+            "run status updated",
+            {
+                "status": status,
+                "settled": bool(self._turn_status_settled),
+                "durable_task_id": str(getattr(self, "_durable_task_id", "") or ""),
+                "durable_run_id": str(getattr(self, "_durable_run_id", "") or ""),
+            },
+        )
+        # #endregion
         if not self.history_repository or not self._current_run_id:
             await self._send_json({
                 "type": "run_status",
@@ -4417,6 +4967,7 @@ class NexusOrchestrator:
     _SELF_PERSISTING_ARTIFACT_TOOLS = frozenset({
         "publish_html_artifact",
         "publish_app_preview",
+        "scaffold_web_project",
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",

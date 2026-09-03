@@ -86,22 +86,33 @@ async def _rehydrate_workspace_from_gcs(
                 skipped += 1
                 continue
 
-            if not path.startswith("/"):
-                skipped += 1
-                continue
+            if path.startswith("/"):
+                target_path = path
+            else:
+                from pathlib import PurePosixPath
+                from nexus.tools.workspace import derive_session_workspace_path, derive_workspace_path
+                run_id = getattr(artifact, "run_id", None)
+                if run_id:
+                    target_path = f"{derive_workspace_path(session.id, run_id)}/{path}"
+                else:
+                    target_path = f"{derive_session_workspace_path(session.id)}/{path}"
 
             try:
+                from pathlib import PurePosixPath
+                parent_dir = str(PurePosixPath(target_path).parent)
+                session.sandbox.ensure_directory(parent_dir)
+
                 content_bytes = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda b=bucket_name, n=blob_name: (
                         gcs_client.get_bucket(b).blob(n).download_as_bytes()
                     ),
                 )
-                session.sandbox.write_binary_file(path, content_bytes)
+                session.sandbox.write_binary_file(target_path, content_bytes)
                 restored += 1
-                logger.debug("Rehydration: restored %s (%d bytes)", path, len(content_bytes))
+                logger.debug("Rehydration: restored %s (%d bytes)", target_path, len(content_bytes))
             except Exception as exc:
-                logger.warning("Rehydration: could not restore %s: %s", path, exc)
+                logger.warning("Rehydration: could not restore %s: %s", target_path, exc)
                 skipped += 1
 
         logger.info(

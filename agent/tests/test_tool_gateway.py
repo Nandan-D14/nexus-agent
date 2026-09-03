@@ -28,6 +28,7 @@ from nexus.tools._context import (
     set_run_id,
     set_send_json,
     set_task_id,
+    reset_timed_out_tool_approvals,
 )
 from nexus.tool_gateway import gate_tools, gated_tool
 
@@ -352,3 +353,68 @@ async def test_sudo_is_gated():
     result = await wrapped("sudo apt-get install -y nginx")
     assert result["status"] == "approval_required"
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_durable_approval_timeout_returns_expired_not_pending(monkeypatch):
+    monkeypatch.setattr(tool_gateway_module, "APPROVAL_POLL_SECONDS", 0)
+    monkeypatch.setattr(tool_gateway_module, "APPROVAL_TIMEOUT_SECONDS", 0)
+    reset_timed_out_tool_approvals()
+    calls: list[str] = []
+    created: list[dict] = []
+    resolved: list[dict] = []
+    sent: list[dict] = []
+
+    class FakeRepo:
+        async def consume_approved_action(self, **kwargs):
+            return None
+
+        async def create_approval(self, **kwargs):
+            created.append(kwargs)
+            return SimpleNamespace(
+                approval_id="appr_timeout",
+                description=kwargs["description"],
+                risk=kwargs["risk"],
+            )
+
+        async def get_approval(self, **kwargs):
+            return SimpleNamespace(status="pending", approved=False)
+
+        async def resolve_approval(self, **kwargs):
+            resolved.append(kwargs)
+            return SimpleNamespace(status="denied", approved=False)
+
+    async def send_json(event):
+        sent.append(event)
+
+    def gmail_send(to: str, subject: str, body: str) -> dict:
+        calls.append(to)
+        return {"status": "success", "summary": "sent"}
+
+    set_task_id("task_timeout")
+    set_owner_id("user_1")
+    set_run_id("run_timeout")
+    set_production_task_repository(FakeRepo())  # type: ignore[arg-type]
+    set_send_json(send_json)
+    set_bg_task_manager(None)  # type: ignore[arg-type]
+
+    wrapped = gated_tool(gmail_send)
+    result = await wrapped(to="user@example.com", subject="hi", body="hello")
+    retry = await wrapped(to="user@example.com", subject="hi", body="hello")
+
+    assert result["error_code"] == "APPROVAL_EXPIRED"
+    assert result["status"] == "error"
+    assert result["detail"]["retryable"] is False
+    assert calls == []
+    assert len(created) == 1
+    assert resolved and resolved[0]["approved"] is False
+    assert any(event.get("reason") == "timeout" for event in sent)
+    assert retry["error_code"] == "APPROVAL_EXPIRED"
+    assert len(created) == 1
+
+    set_task_id("")
+    set_owner_id("")
+    set_run_id("")
+    set_production_task_repository(None)
+    set_send_json(None)
+    reset_timed_out_tool_approvals()

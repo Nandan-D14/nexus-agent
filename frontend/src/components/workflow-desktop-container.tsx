@@ -9,7 +9,7 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen, Globe } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen, Globe, RotateCcw } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { WorkspacePanel } from "./workspace-panel";
 import { SandboxFilesPanel } from "./sandbox-files-panel";
@@ -56,6 +56,8 @@ type Props = {
   appPreview?: AppPreviewState | null;
   filesRefreshKey?: number;
   onOpenWorkspaceFile?: (state: EditorSessionState) => void;
+  sandboxRestarting?: boolean;
+  onRestartSandbox?: () => void;
 };
 
 export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
@@ -78,6 +80,8 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   appPreview = null,
   filesRefreshKey = 0,
   onOpenWorkspaceFile,
+  sandboxRestarting = false,
+  onRestartSandbox,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
   const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
@@ -312,20 +316,44 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
           </Tabs.ListContainer>
         </Tabs>
 
-        {/* Agent Activity */}
-        <AnimatePresence>
-          {agentReason && (
-            <motion.div
-              initial={{ opacity: 0, x: 10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 10 }}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700"
-            >
-              <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-              <span className="text-xs text-zinc-300">{agentReason}</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="flex items-center gap-2">
+          {onRestartSandbox ? (
+            <Tooltip delay={0} closeDelay={0}>
+              <Tooltip.Trigger>
+                <button
+                  type="button"
+                  onClick={onRestartSandbox}
+                  disabled={sandboxRestarting}
+                  aria-label="Restart sandbox"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-40"
+                >
+                  {sandboxRestarting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                  Restart
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                Restart sandbox
+              </Tooltip.Content>
+            </Tooltip>
+          ) : null}
+          <AnimatePresence>
+            {agentReason && (
+              <motion.div
+                initial={{ opacity: 0, x: 10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 10 }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700"
+              >
+                <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+                <span className="text-xs text-zinc-300">{agentReason}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
 
       {/* Content Area */}
@@ -441,7 +469,11 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               transition={{ duration: 0.15 }}
               className="absolute inset-0"
             >
-              <AppPreviewPane preview={appPreview} />
+              <AppPreviewPane
+                preview={appPreview}
+                restarting={sandboxRestarting}
+                onRestartSandbox={onRestartSandbox}
+              />
             </motion.div>
           )}
 

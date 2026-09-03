@@ -29,6 +29,18 @@ export type PermissionDecision = "approved" | "denied" | "timed_out";
 
 export const DEFAULT_ATTACHMENT_PROMPT = "Please review the attached file(s).";
 
+/** Durable/history run statuses that mean a worker may still be executing. */
+export const INFLIGHT_RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "cancelling",
+  "waiting_approval",
+]);
+
+export function isInflightRunStatus(status: string | null | undefined): boolean {
+  return Boolean(status && INFLIGHT_RUN_STATUSES.has(status));
+}
+
 export type ChatItem =
   | {
       kind: "message";

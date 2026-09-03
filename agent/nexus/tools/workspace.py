@@ -575,6 +575,10 @@ async def write_workspace_file(
         normalized_for_event = _normalize_relative_path(relative_path)
     except Exception:
         normalized_for_event = (relative_path or "").strip()
+    if not append:
+        from nexus.tools.preview_hosts import maybe_patch_dev_server_config
+
+        content_text = maybe_patch_dev_server_config(normalized_for_event, content_text)
     await emit_sandbox_event({
         "type": "sandbox_editor",
         "phase": "start",

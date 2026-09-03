@@ -144,6 +144,15 @@ async def _github_request(method: str, path: str, **kwargs: Any) -> dict[str, An
     ) as client:
         response = await client.request(method, path, **kwargs)
         if response.status_code >= 400:
+            if response.status_code == 401:
+                return tool_error(
+                    "GitHub returned 401 Bad credentials. The stored GitHub token "
+                    "expired or was revoked. Open Connectors, disconnect GitHub, "
+                    "connect it again, then retry the push.",
+                    error_code="HTTP_401",
+                    retryable=False,
+                    detail=(response.text or "")[:500],
+                )
             return tool_error(
                 f"GitHub API returned HTTP {response.status_code}.",
                 error_code=f"HTTP_{response.status_code}",

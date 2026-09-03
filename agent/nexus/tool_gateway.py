@@ -119,6 +119,28 @@ def _approval_required_result(tool_name: str, decision: ToolPolicyDecision) -> d
     }
 
 
+def _approval_expired_result(tool_name: str, decision: ToolPolicyDecision) -> dict[str, Any]:
+    """Approval wait ended with no decision. Do not leave the run waiting."""
+    return {
+        "status": "error",
+        "summary": (
+            f"{tool_name} approval timed out, so the action was not run. "
+            "The rest of this turn can finish without it."
+        ),
+        "detail": {
+            "tool": tool_name,
+            "policy_action": decision.action,
+            "risk": decision.risk,
+            "reason": decision.reason,
+            "retryable": False,
+            "remaining_work": [],
+        },
+        "metadata": {"policy_action": decision.action, "risk": decision.risk},
+        "error_code": "APPROVAL_EXPIRED",
+        "suggested_alternatives": [],
+    }
+
+
 def _approval_denied_result(tool_name: str, decision: ToolPolicyDecision) -> dict[str, Any]:
     return {
         "status": "blocked",
@@ -399,11 +421,43 @@ async def _await_durable_approval(
     try:
         import json as _dbg_json
         from pathlib import Path as _DbgPath
-        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"tool_gateway.py:_await_durable_approval","message":"approval timed out","data":{"tool":tool_name,"task_id":task_id,"approval_id":getattr(approval,"approval_id",None)},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        import urllib.request
+        _payload = _dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"F","location":"tool_gateway.py:_await_durable_approval","message":"approval timed out","data":{"tool":tool_name,"task_id":task_id,"approval_id":getattr(approval,"approval_id",None)},"timestamp":int(__import__("time").time()*1000)})+"\n"
+        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_payload)
+        req = urllib.request.Request("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", data=_payload.encode("utf-8"), headers={"Content-Type":"application/json","X-Debug-Session-Id":"2a93a8"}, method="POST")
+        urllib.request.urlopen(req, timeout=0.3)
     except Exception:
         pass
     # #endregion
-    return "pending"
+    try:
+        from nexus.tools._context import mark_tool_approval_timed_out
+
+        mark_tool_approval_timed_out(tool_name)
+    except Exception:
+        pass
+    if send_json is not None:
+        try:
+            await send_json(
+                {
+                    "type": "approval_resolved",
+                    "task_id": approval.approval_id,
+                    "approval_id": approval.approval_id,
+                    "approved": False,
+                    "reason": "timeout",
+                }
+            )
+        except Exception:
+            logger.debug("Failed to emit approval timeout for %s", tool_name, exc_info=True)
+    try:
+        await repository.resolve_approval(
+            task_id=task_id,
+            approval_id=approval.approval_id,
+            owner_id=owner_id,
+            approved=False,
+        )
+    except Exception:
+        logger.debug("Failed to close timed-out approval %s", approval.approval_id, exc_info=True)
+    return "expired"
 
 
 async def _await_approval(
@@ -513,6 +567,10 @@ def gated_tool(func: Callable) -> Callable:
         if decision.action == "deny":
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
+            from nexus.tools._context import tool_approval_timed_out
+
+            if tool_approval_timed_out(tool_name):
+                return _approval_expired_result(tool_name, decision)
             approved = await _await_approval(tool_name, decision, args_view)
             # #region agent log
             try:
@@ -533,6 +591,8 @@ def gated_tool(func: Callable) -> Callable:
                     return await _invoke_underlying(*args, **kwargs)
             if approved is False:
                 return _approval_denied_result(tool_name, decision)
+            if approved in {"pending", "expired"}:
+                return _approval_expired_result(tool_name, decision)
             return _approval_required_result(tool_name, decision)
 
         # Perception-action loop: never execute a blind shared-state mutation.

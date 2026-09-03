@@ -86,6 +86,7 @@ import {
   upsertArtifact,
   mapStoredMessagesToChatItems,
   foldDurableWorkingLogEvents,
+  isInflightRunStatus,
   reduceWorkingLogMessage,
   permissionDecisionsFromRunSteps,
   extractTodoItemsFromHistory,
@@ -219,6 +220,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const [terminalSession, setTerminalSession] = useState<TerminalSessionState | null>(null);
   const [editorSession, setEditorSession] = useState<EditorSessionState | null>(null);
   const [appPreview, setAppPreview] = useState<AppPreviewState | null>(null);
+  const [sandboxRestarting, setSandboxRestarting] = useState(false);
   const [filesRefreshKey, setFilesRefreshKey] = useState(0);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
   const [genUiSteps, setGenUiSteps] = useState<WorkflowStepData[]>([]);
@@ -471,6 +473,8 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       msg.type === "error" ||
       msg.type === "verification_result" ||
       msg.type === "permission_request" ||
+      msg.type === "approval_resolved" ||
+      msg.type === "run_status" ||
       msg.type === "agent_complete"
     ) {
       fetch("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", {
@@ -487,7 +491,10 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           data: {
             type: msg.type,
             code: (msg as { code?: string }).code,
+            error_code: (msg as { error_code?: string }).error_code,
+            verified: (msg as { verified?: boolean }).verified,
             status: (msg as { status?: string }).status,
+            run_status: (msg as { run?: { status?: string } }).run?.status,
             error: (msg as { error?: string }).error,
             message: (msg as { message?: string }).message,
             phase,
@@ -503,11 +510,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       lastServerActivityRef.current = ts;
     }
 
-    const beginTurn = () => {
-      // Ignore "still working" frames unless this tab already started a turn.
-      // Re-attach and replayed history otherwise leave the stop button stuck
-      // on idle sessions.
-      if (!turnInFlightRef.current) {
+    const beginTurn = (options?: { force?: boolean }) => {
+      // Hydrated history must not lock Stop on an idle session. Live evidence
+      // (this tab's prompt, a reconnect wait, or a server re-attach) should
+      // show the working UI so background worker progress is visible.
+      if (!options?.force && !turnInFlightRef.current && !reconnectPendingRef.current) {
         return;
       }
       liveWorkConfirmedRef.current = true;
@@ -515,6 +522,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     };
     const endTurn = () => {
       markTurnInFlight(false);
+      setTerminalSession((prev) => (prev?.running ? { ...prev, running: false } : prev));
     };
 
     const applyWorkingLogChat = () => {
@@ -533,7 +541,14 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           ...prev,
           { kind: "event", type: msg.type, status: msg.status, ts },
         ]);
+        if (msg.status === "restarting" || msg.status === "reconnecting" || msg.status === "connecting") {
+          setSandboxRestarting(true);
+        }
+        if (msg.status === "ready") {
+          setSandboxRestarting(false);
+        }
         if (msg.status === "error") {
+          setSandboxRestarting(false);
           setAppPreview((prev) => (prev ? { ...prev, expired: true } : prev));
         }
         break;
@@ -547,6 +562,10 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           setPhase("done");
           setAgentStatus("");
           setAgentAction(null);
+        } else if (isInflightRunStatus(msg.run?.status)) {
+          beginTurn();
+          setPhase("acting");
+          setAgentStatus((prev) => prev || "Working...");
         }
         setSessionInfo((prev) =>
           prev
@@ -652,6 +671,10 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         if (isCanvasArtifact(msg.artifact)) {
           canvasApiRef.current?.openFromArtifact(msg.artifact, "agent");
         }
+        if (msg.artifact?.kind === "html") {
+          setIsDesktopVisible(true);
+          setForcedTab("artifacts");
+        }
         setRunInfo((prev) =>
           prev
             ? { ...prev, artifact_count: prev.artifact_count + 1 }
@@ -672,6 +695,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       case "app_preview": {
         const preview = parseAppPreviewPayload(msg, ts);
         if (!preview) break;
+        setSandboxRestarting(false);
         setAppPreview(preview);
         setIsDesktopVisible(true);
         setForcedTab("preview");
@@ -1050,7 +1074,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           });
           optimisticUserTextRef.current = null;
         }
-        beginTurn();
+        beginTurn({ force: true });
         setPhase("acting");
         setAgentStatus(msg.message || "Still working on the previous request...");
         toast(
@@ -1062,10 +1086,16 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       }
 
       case "worker_claimed":
+        if (msg.reattached) {
+          beginTurn({ force: true });
+          setPhase("acting");
+          setAgentStatus("Reconnected — still working...");
+          break;
+        }
         if (!turnInFlightRef.current) {
           break;
         }
-        setAgentStatus(msg.reattached ? "Reconnected — still working..." : "Starting...");
+        setAgentStatus("Starting...");
         break;
 
       case "agent_status":
@@ -1107,6 +1137,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         break;
 
       case "sandbox_terminal": {
+        beginTurn();
         const command = typeof msg.command === "string" ? msg.command : "";
         const cwd = typeof msg.cwd === "string" && msg.cwd ? msg.cwd : "~";
         const stdout = typeof msg.stdout === "string" ? msg.stdout : "";
@@ -1127,6 +1158,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       }
 
       case "sandbox_editor": {
+        beginTurn();
         const path = typeof msg.path === "string" ? msg.path : "";
         const action = msg.action === "read" || msg.action === "list" ? msg.action : "write";
         const content = typeof msg.content === "string" ? msg.content : "";
@@ -1573,13 +1605,21 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           setIsDesktopVisible(true);
         }
 
-        // Never lock the composer from a stored run status. History and durable
-        // run docs often stay "running" after the turn finished. Stop is reserved
-        // for a turn this tab started.
-        markTurnInFlight(false);
-        reconnectPendingRef.current = false;
+        // Stored run docs can stay "running" after a turn finished, so do not
+        // lock Stop forever from history alone. If the server still has an
+        // in-flight run, show working chrome and wait for a live re-attach
+        // (or the reconnect timeout) to confirm.
         liveWorkConfirmedRef.current = false;
-        setPhase(nextChatItems.length > 0 ? "done" : "idle");
+        if (isInflightRunStatus(info.run_status)) {
+          reconnectPendingRef.current = true;
+          markTurnInFlight(true);
+          setPhase("acting");
+          setAgentStatus("Reconnecting to live work...");
+        } else {
+          reconnectPendingRef.current = false;
+          markTurnInFlight(false);
+          setPhase(nextChatItems.length > 0 ? "done" : "idle");
+        }
       }
     }
 
@@ -2315,6 +2355,20 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     setAgentStatus("Stopping...");
   }, [sendJson]);
 
+  const handleRestartSandbox = useCallback(() => {
+    if (sandboxRestarting) return;
+    setSandboxRestarting(true);
+    setAppPreview((prev) => (prev ? { ...prev, expired: true } : prev));
+    sendJson({
+      type: "restart_sandbox",
+      ...(typeof appPreview?.port === "number" && appPreview.port > 0
+        ? { port: appPreview.port }
+        : {}),
+      ...(appPreview?.title ? { title: appPreview.title } : {}),
+      ...(appPreview?.workspacePath ? { workspace_path: appPreview.workspacePath } : {}),
+    });
+  }, [appPreview, sandboxRestarting, sendJson]);
+
   useEffect(() => {
     if (isNewSession || !sessionId) {
       return;
@@ -2615,7 +2669,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                   ) : (
                     <UnifiedChatPanel
                       items={chatItems}
-                      isThinking={phase === "thinking"}
+                      isThinking={phase === "thinking" || phase === "acting"}
                       phase={phase}
                       statusLabel={agentStatus}
                       onPermissionRespond={handlePermissionRespond}
@@ -2699,6 +2753,8 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                         appPreview={appPreview}
                         filesRefreshKey={filesRefreshKey}
                         onOpenWorkspaceFile={handleOpenWorkspaceFile}
+                        sandboxRestarting={sandboxRestarting}
+                        onRestartSandbox={handleRestartSandbox}
                       />
                     </div>
                   </div>
