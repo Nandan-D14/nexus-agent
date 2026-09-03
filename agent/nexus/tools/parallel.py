@@ -34,6 +34,7 @@ _PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset({
     # Google Tasks/Calendar (read-only)
     "tasks_list",
     "calendar_list",
+    "calendar_get",
     # Documents (read-only)
     "extract_pdf_text",
     # Screen observation (read-only)
@@ -65,9 +66,14 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "gmail_send",
     "tasks_create",
     "calendar_create",
+    "calendar_update",
+    "calendar_delete",
     "create_drive_doc",
     "upload_drive_file",
     "github_create_issue",
+    "github_create_repo",
+    "github_push",
+    "github_clone_repo",
     "vyora_start_call",
     # Background tasks
     "request_background_task",
@@ -77,7 +83,11 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "show_workflow_panel",
     # Document generation
     "generate_pdf_report",
+    "generate_excel_report",
+    "generate_docx_report",
+    "generate_pptx_report",
     "publish_html_artifact",
+    "publish_app_preview",
     "save_as_artifact",
     # Web automation
     "tinyfish_web_agent",

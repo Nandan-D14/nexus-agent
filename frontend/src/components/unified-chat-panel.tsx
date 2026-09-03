@@ -20,12 +20,14 @@ import {
   resolveSearchResults,
   type SearchCiteRef,
 } from "@/lib/search-result-utils";
+import { CocomputerMark } from "@/components/brand/cocomputer-logo";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
   ChevronDown,
   ChevronRight,
   Eye,
+  ExternalLink,
   Terminal as TerminalIcon,
   Globe,
   Mail,
@@ -42,6 +44,8 @@ import {
   Sparkles,
   Layers,
   Wrench,
+  Check,
+  Clipboard,
 } from "lucide-react";
 import {
   classifyAgentTool,
@@ -54,6 +58,7 @@ import {
   groupTurnEvents,
   type GenerativeUiSegment,
   type ArtifactCreatedSegment,
+  type AppPreviewSegment,
   type CanvasDocumentSegment,
   type TemplateDraftSegment,
   type TaskGroup,
@@ -69,14 +74,16 @@ import {
   DOC_ARTIFACT_TOOLS,
   artifactFromToolResult,
 } from "@/lib/artifact-url";
-import type { RunArtifact } from "@/lib/message-types";
+import type { RunArtifact, UploadedInputFile } from "@/lib/message-types";
+import { userVisibleCaption } from "@/lib/session-utils";
+import { UploadedFilePreviewList } from "@/components/session/message-attachments";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
 type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number }
+  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[] }
   | { kind: "event"; type: string; ts: number; [key: string]: unknown }
   | {
       kind: "permission";
@@ -119,6 +126,12 @@ type Props = {
   ) => void;
   onQuestionRespond?: (questionId: string, answer: string) => void;
   onTemplateDraftChange?: (patch: TemplateDraftCardValue) => void;
+  onAppPreviewOpen?: (preview: {
+    url: string;
+    title?: string;
+    port?: number;
+    workspace_path?: string;
+  }) => void;
   /** Sticky dock rendered inside the chat scroll column (e.g. todos + composer). */
   footer?: ReactNode;
 };
@@ -235,6 +248,7 @@ type TimelineItem =
   | { kind: "taskGroup"; data: TaskGroup; ts: number }
   | { kind: "generative_ui"; data: GenerativeUiSegment; ts: number }
   | { kind: "artifact_created"; data: ArtifactCreatedSegment; ts: number }
+  | { kind: "app_preview"; data: AppPreviewSegment; ts: number }
   | { kind: "canvas_document"; data: CanvasDocumentSegment; ts: number }
   | { kind: "template_draft"; data: TemplateDraftSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
@@ -253,6 +267,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   onPermissionRespond,
   onQuestionRespond,
   onTemplateDraftChange,
+  onAppPreviewOpen,
   footer,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -345,10 +360,10 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   }, [isBusy, turns]);
 
   return (
-    <div className="relative h-full bg-white dark:bg-[#0d0d0d] transition-colors">
+    <div className="relative h-full bg-background-full transition-colors">
       <div
         ref={scrollRef}
-        className={`overflow-y-auto h-full custom-scrollbar flex flex-col px-6 pt-8 ${
+        className={`overflow-y-auto h-full custom-scrollbar flex flex-col px-2 pt-8 ${
           footer ? "pb-0" : "pb-8"
         }`}
       >
@@ -370,6 +385,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   onPermissionRespond={onPermissionRespond}
                   onQuestionRespond={onQuestionRespond}
                   onTemplateDraftChange={onTemplateDraftChange}
+                  onAppPreviewOpen={onAppPreviewOpen}
                 />
               );
             })}
@@ -382,11 +398,9 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="flex items-center gap-3 py-2 mt-2"
+                className="flex items-center gap-2 py-2 mt-2"
               >
-                <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center shadow-md shadow-blue-600/20">
-                  <MessageSquare className="w-3.5 h-3.5 text-white" />
-                </div>
+                <CocomputerMark size={16} className="size-4 rounded-md" />
                 <motion.div
                   key={phase}
                   initial={{ opacity: 0, x: 5 }}
@@ -401,7 +415,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
       </div>
 
       {footer ? (
-        <div className="absolute inset-x-0 bottom-0 z-20 bg-[#0d0d0d] px-6 pt-1 pb-3">
+        <div className="absolute inset-x-0 bottom-0 z-20 bg-background-full px-2 pt-1 pb-2">
           <AnimatePresence>
             {userScrolledUp && (
               <motion.button
@@ -409,7 +423,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
                 onClick={scrollToBottom}
-                className="mx-auto mb-2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                className="mx-auto mb-2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background-primary-default border border-card-border shadow-lg text-[12px] font-medium text-text-secondary hover:text-text-primary transition-colors"
               >
                 <ChevronDown className="w-3.5 h-3.5" />
                 Scroll to bottom
@@ -428,7 +442,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}
             onClick={scrollToBottom}
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-800 shadow-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background-primary-default border border-card-border shadow-lg text-[12px] font-medium text-text-secondary hover:text-text-primary transition-colors"
           >
             <ChevronDown className="w-3.5 h-3.5" />
             Scroll to bottom
@@ -450,6 +464,7 @@ function TurnBlock({
   onPermissionRespond,
   onQuestionRespond,
   onTemplateDraftChange,
+  onAppPreviewOpen,
 }: {
   turn: Turn;
   isWorking: boolean;
@@ -457,6 +472,7 @@ function TurnBlock({
   onPermissionRespond: Props["onPermissionRespond"];
   onQuestionRespond?: Props["onQuestionRespond"];
   onTemplateDraftChange?: Props["onTemplateDraftChange"];
+  onAppPreviewOpen?: Props["onAppPreviewOpen"];
 }) {
   // Build an interleaved timeline from event segments + messages + cards
   const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
@@ -476,6 +492,8 @@ function TurnBlock({
         items.push({ kind: "generative_ui", data: seg, ts: seg.ts });
       } else if (seg.kind === "artifact_created") {
         items.push({ kind: "artifact_created", data: seg, ts: seg.ts });
+      } else if (seg.kind === "app_preview") {
+        items.push({ kind: "app_preview", data: seg, ts: seg.ts });
       } else if (seg.kind === "canvas_document") {
         items.push({ kind: "canvas_document", data: seg, ts: seg.ts });
       } else if (seg.kind === "template_draft") {
@@ -497,14 +515,12 @@ function TurnBlock({
   }, [eventSegments, turn.agentMessages, turn.permissions, turn.questions]);
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="flex flex-col gap-5 w-full"
-    >
+    <div className="flex flex-col gap-5 w-full">
       {turn.userMessage && (
-        <UserMessageCard text={turn.userMessage.text} />
+        <UserMessageCard
+          text={turn.userMessage.text}
+          attachments={turn.userMessage.attachments}
+        />
       )}
 
       {timeline.map((item, idx) => {
@@ -522,8 +538,7 @@ function TurnBlock({
 
         if (item.kind === "generative_ui") {
           return (
-            <motion.div
-              layout
+            <div
               key={`genui-${item.data.ts}-${idx}`}
               className="w-full py-1"
             >
@@ -532,7 +547,7 @@ function TurnBlock({
                 componentType={item.data.component_type}
                 component={item.data.component}
               />
-            </motion.div>
+            </div>
           );
         }
 
@@ -541,8 +556,7 @@ function TurnBlock({
             ? item.data.input_fields
             : [];
           return (
-            <motion.div
-              layout
+            <div
               key={`template-draft-${item.data.template_id}`}
               className="w-full py-1"
             >
@@ -569,7 +583,7 @@ function TurnBlock({
                   })
                 }
               />
-            </motion.div>
+            </div>
           );
         }
 
@@ -578,13 +592,26 @@ function TurnBlock({
           const artifact = coerceRunArtifact(raw);
           if (!artifact) return null;
           return (
-            <motion.div
-              layout
+            <div
               key={`artifact-${artifact.artifact_id}-${idx}`}
               className="w-full max-w-xl py-1"
             >
               <ArtifactAttachmentCard artifact={artifact} compact />
-            </motion.div>
+            </div>
+          );
+        }
+
+        if (item.kind === "app_preview") {
+          return (
+            <div
+              key={`app-preview-${item.data.url}-${idx}`}
+              className="w-full max-w-xl py-1"
+            >
+              <AppPreviewChatCard
+                preview={item.data}
+                onOpen={onAppPreviewOpen}
+              />
+            </div>
           );
         }
 
@@ -592,13 +619,12 @@ function TurnBlock({
           const doc = coerceCanvasDocument(item.data.document);
           if (!doc) return null;
           return (
-            <motion.div
-              layout
+            <div
               key={`canvas-doc-${doc.id}-${idx}`}
               className="w-full max-w-xl py-1"
             >
               <CanvasDocumentHandleCard document={doc} />
-            </motion.div>
+            </div>
           );
         }
 
@@ -618,7 +644,7 @@ function TurnBlock({
 
         if (item.kind === "permission") {
           return (
-            <motion.div layout key={`perm-${idx}`} className="py-1">
+            <div key={`perm-${idx}`} className="py-1">
               <PermissionCard
                 taskId={item.data.task_id}
                 approvalId={item.data.approval_id}
@@ -631,13 +657,13 @@ function TurnBlock({
                 timedOut={item.data.decision === "timed_out"}
                 onRespond={onPermissionRespond}
               />
-            </motion.div>
+            </div>
           );
         }
 
         if (item.kind === "user_question") {
           return (
-            <motion.div layout key={`question-${item.data.question_id}`} className="py-1">
+            <div key={`question-${item.data.question_id}`} className="py-1">
               <AgentQuestionCard
                 questionId={item.data.question_id}
                 question={item.data.question}
@@ -649,13 +675,13 @@ function TurnBlock({
                 issuedAt={item.data.ts}
                 onRespond={onQuestionRespond}
               />
-            </motion.div>
+            </div>
           );
         }
 
         return null;
       })}
-    </motion.div>
+    </div>
   );
 }
 
@@ -723,11 +749,60 @@ function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocumen
 /*  User Message                                                       */
 /* ------------------------------------------------------------------ */
 
-function UserMessageCard({ text }: { text: string }) {
+function UserMessageCard({
+  text,
+  attachments = [],
+}: {
+  text: string;
+  attachments?: UploadedInputFile[];
+}) {
+  const caption = userVisibleCaption(text);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    const copyText = caption || attachments.map((file) => file.name).filter(Boolean).join(", ");
+    if (!copyText) return;
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // clipboard error
+    }
+  };
+
+  if (!caption && attachments.length === 0) {
+    return null;
+  }
+
   return (
-    <div className="flex w-full justify-end py-1">
-      <div className="max-w-[80%] rounded-2xl bg-zinc-100 dark:bg-[#1a1a1e] px-5 py-3 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 border border-zinc-200/80 dark:border-zinc-800/60">
-        {text}
+    <div className="group/user-msg relative flex w-full justify-end py-1">
+      <div className="flex max-w-[85%] flex-col items-end gap-2">
+        {attachments.length > 0 ? (
+          <UploadedFilePreviewList files={attachments} align="end" />
+        ) : null}
+
+        {caption ? (
+          <div className="relative flex items-center gap-2">
+            <button
+              type="button"
+              aria-label={copied ? "Copied" : "Copy prompt"}
+              title={copied ? "Copied" : "Copy prompt"}
+              onClick={() => void handleCopy()}
+              className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background-primary-default text-text-tertiary opacity-0 shadow-sm transition-all duration-150 group-hover/user-msg:opacity-100 hover:border-border-button-hover hover:bg-background-secondary-hover hover:text-text-primary focus-visible:opacity-100"
+            >
+              {copied ? (
+                <Check className="size-3.5 text-emerald-500" aria-hidden />
+              ) : (
+                <Clipboard className="size-3.5" aria-hidden />
+              )}
+            </button>
+
+            <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
+              {caption}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -747,11 +822,11 @@ function AgentMessageCard({
   extraSources?: SearchCiteRef[];
 }) {
   return (
-    <motion.div layout className="flex flex-col items-start w-full">
+    <div className="flex flex-col items-start w-full">
       <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
         <StreamingText text={text} isStreaming={stream} extraSources={extraSources} />
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -787,6 +862,7 @@ function buildSummary(task: TaskGroup): string {
   }
 
   const hasHandoff = task.steps.some((s) => s.kind === "delegation");
+  const errorCount = task.steps.filter((s) => s.kind === "error").length;
   const parts: string[] = [];
   if (hasThinking) parts.push("Thought");
   if (hasHandoff) parts.push("Handoff");
@@ -798,6 +874,7 @@ function buildSummary(task: TaskGroup): string {
   if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
   if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
   if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
+  if (errorCount > 0) parts.push(errorCount === 1 ? "Error" : `${errorCount} errors`);
   if (parts.length === 0) parts.push("Working");
 
   return parts.join(", ");
@@ -899,13 +976,7 @@ function ThoughtAccordion({
   );
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-      className="w-full flex flex-col gap-3"
-    >
+    <div className="w-full flex flex-col gap-3">
       {displayRows.map((row) => {
         if (row.kind === "reasoning") {
           return (
@@ -975,7 +1046,7 @@ function ThoughtAccordion({
           </AnimatePresence>
         </>
       ) : null}
-    </motion.div>
+    </div>
   );
 }
 
@@ -1402,6 +1473,41 @@ function ScreenshotCard({
         )}
       </div>
     </div>
+  );
+}
+
+function AppPreviewChatCard({
+  preview,
+  onOpen,
+}: {
+  preview: AppPreviewSegment;
+  onOpen?: Props["onAppPreviewOpen"];
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        onOpen?.({
+          url: preview.url,
+          title: preview.title,
+          port: preview.port,
+          workspace_path: preview.workspacePath,
+        })
+      }
+      className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900"
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-950 text-emerald-400">
+        <Globe className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-zinc-100">App preview</div>
+        <div className="truncate font-mono text-[11px] text-zinc-500">
+          {preview.title}
+          {preview.port ? ` · :${preview.port}` : ""}
+        </div>
+      </div>
+      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+    </button>
   );
 }
 

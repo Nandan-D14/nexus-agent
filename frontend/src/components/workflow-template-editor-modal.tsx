@@ -7,6 +7,7 @@
 
 import { useEffect, useReducer } from "react";
 
+import { InputPlusMenu } from "@/components/base/input-plus-menu";
 import type { WorkflowTemplateInputField } from "@/lib/message-types";
 import type { WorkflowTemplateDraft } from "@/lib/workflow-template-utils";
 
@@ -196,20 +197,34 @@ export function WorkflowTemplateEditorModal({
             </label>
           </div>
 
-          <label className="block space-y-2">
+          <div className="block space-y-2">
             <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
               Instructions
             </span>
-            <textarea
-              value={state.instructions}
-              onChange={(event) =>
-                dispatch({ type: "setInstructions", value: event.target.value })
-              }
-              rows={10}
-              className="w-full rounded-3xl border border-zinc-200 bg-zinc-50 px-4 py-4 text-sm leading-6 text-zinc-900 outline-none transition focus:border-cyan-500 dark:border-white/10 dark:bg-[#1a1a1d] dark:text-zinc-100"
-              placeholder="Describe the workflow the agent should reuse."
-            />
-          </label>
+            <div className="relative">
+              <textarea
+                value={state.instructions}
+                onChange={(event) =>
+                  dispatch({ type: "setInstructions", value: event.target.value })
+                }
+                rows={10}
+                className="w-full rounded-3xl border border-zinc-200 bg-zinc-50 px-4 pb-10 pt-4 text-sm leading-6 text-zinc-900 outline-none transition focus:border-cyan-500 dark:border-white/10 dark:bg-[#1a1a1d] dark:text-zinc-100"
+                placeholder="Describe the workflow the agent should reuse."
+              />
+              <div className="absolute bottom-2 left-2">
+                <InputPlusMenu
+                  showUpload={false}
+                  showVoice={false}
+                  onInsertText={(text) =>
+                    dispatch({
+                      type: "setInstructions",
+                      value: state.instructions + text,
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </div>
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">

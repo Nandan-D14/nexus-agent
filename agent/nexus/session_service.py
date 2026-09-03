@@ -15,11 +15,79 @@ from google.adk.sessions.base_session_service import (
     GetSessionConfig,
     ListSessionsResponse,
 )
+from pydantic import ValidationError
 import time
 
 from nexus.firebase import get_firestore_client
 
 logger = logging.getLogger(__name__)
+
+_REMOVED_PART_KEYS = {
+    "audioTranscription",
+    "audio_transcription",
+}
+
+
+def _sanitize_adk_value(value: Any) -> Any:
+    """Drop Part extras ADK no longer accepts (e.g. audioTranscription: null)."""
+    if isinstance(value, list):
+        return [_sanitize_adk_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _sanitize_adk_value(item)
+        for key, item in value.items()
+        if key not in _REMOVED_PART_KEYS
+    }
+
+
+def _delete_path(root: dict[str, Any], loc: tuple[Any, ...]) -> bool:
+    current: Any = root
+    for index, key in enumerate(loc):
+        last = index == len(loc) - 1
+        if isinstance(current, list):
+            if not isinstance(key, int) or key < 0 or key >= len(current):
+                return False
+            if last:
+                return False
+            current = current[key]
+        elif isinstance(current, dict):
+            if last:
+                if key in current:
+                    del current[key]
+                    return True
+                return False
+            current = current.get(key)
+            if current is None:
+                return False
+        else:
+            return False
+    return False
+
+
+def _validate_adk_session(data: dict[str, Any]) -> Session:
+    payload = _sanitize_adk_value(copy.deepcopy(data))
+    if not isinstance(payload, dict):
+        raise TypeError("ADK session payload must be an object")
+    last_error: ValidationError | None = None
+    for _ in range(16):
+        try:
+            return Session.model_validate(payload)
+        except ValidationError as exc:
+            last_error = exc
+            stripped = False
+            for err in exc.errors():
+                if err.get("type") != "extra_forbidden":
+                    continue
+                loc = tuple(err.get("loc") or ())
+                if _delete_path(payload, loc):
+                    stripped = True
+            if not stripped:
+                raise
+    if last_error is not None:
+        raise last_error
+    return Session.model_validate(payload)
+
 
 class FirestoreSessionService(BaseSessionService):
     """ADK session service that reads/writes directly to Firestore.
@@ -75,7 +143,7 @@ class FirestoreSessionService(BaseSessionService):
         # Save metadata to Firestore. Events are stored append-only in a
         # subcollection so the session document does not grow without bound.
         import asyncio
-        data = session.model_dump(by_alias=True, mode="json")
+        data = session.model_dump(by_alias=True, mode="json", exclude_none=True)
         data["events"] = []
         await asyncio.to_thread(doc_ref.set, data)
         
@@ -107,7 +175,7 @@ class FirestoreSessionService(BaseSessionService):
             data["events"] = [event_doc.to_dict() or {} for event_doc in event_docs]
         else:
             data["events"] = embedded_events
-        session = Session.model_validate(data)
+        session = _validate_adk_session(data)
         
         if config:
             if config.num_recent_events:
@@ -138,7 +206,7 @@ class FirestoreSessionService(BaseSessionService):
         for doc in docs:
             data = doc.to_dict() or {}
             data["events"] = []
-            s = Session.model_validate(data)
+            s = _validate_adk_session(data)
             s.events = [] # Following in-memory pattern which drops events for list
             sessions.append(s)
             
@@ -167,8 +235,8 @@ class FirestoreSessionService(BaseSessionService):
             or getattr(event, "event_id", None)
             or uuid.uuid4().hex
         )
-        event_data = event.model_dump(by_alias=True, mode="json")
-        data = session.model_dump(by_alias=True, mode="json")
+        event_data = event.model_dump(by_alias=True, mode="json", exclude_none=True)
+        data = session.model_dump(by_alias=True, mode="json", exclude_none=True)
         data["events"] = []
         await asyncio.to_thread(
             lambda: (

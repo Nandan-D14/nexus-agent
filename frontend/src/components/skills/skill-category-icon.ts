@@ -23,6 +23,12 @@ const CATEGORY_ICONS: Record<string, LucideIcon> = {
   Computer: Monitor,
   Documents: FileText,
   Files: FileText,
+  Analysis: Search,
+  Testing: Settings2,
+  Tools: Sparkles,
+  Productivity: BookOpen,
+  Automation: Settings2,
+  Design: Sparkles,
   Custom: Sparkles,
 };
 

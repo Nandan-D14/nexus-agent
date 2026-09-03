@@ -15,8 +15,20 @@ export const queryKeys = {
     catalog: () => ["integrations", "catalog"] as const,
     connections: () => ["integrations", "connections"] as const,
   },
+  calendar: {
+    eventsRoot: () => ["calendar", "events"] as const,
+    events: (opts?: { maxResults?: number; timeMin?: string; timeMax?: string }) =>
+      [
+        "calendar",
+        "events",
+        opts?.maxResults ?? 10,
+        opts?.timeMin ?? "",
+        opts?.timeMax ?? "",
+      ] as const,
+  },
   skills: () => ["skills"] as const,
   skill: (skillId: string) => ["skills", skillId] as const,
+  skillsCatalog: (source: string) => ["skills", "catalog", source] as const,
   templates: () => ["templates"] as const,
   dashboard: {
     stats: () => ["dashboard", "stats"] as const,

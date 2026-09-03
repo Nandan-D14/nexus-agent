@@ -46,7 +46,10 @@ from nexus.tools.integrations import (
     tasks_list,
     tasks_create,
     calendar_list,
+    calendar_get,
     calendar_create,
+    calendar_update,
+    calendar_delete,
     render_ui,
 )
 from nexus.tools.workspace import (
@@ -65,7 +68,9 @@ from nexus.tools.docs import (
     generate_docx_report,
     generate_excel_report,
     generate_pdf_report,
+    generate_pptx_report,
     publish_html_artifact,
+    publish_app_preview,
     save_as_artifact,
 )
 from nexus.tools.skills import read_skill, read_skill_file
@@ -81,7 +86,10 @@ GOOGLE_WORKSPACE_TOOLS = [
     tasks_list,
     tasks_create,
     calendar_list,
+    calendar_get,
     calendar_create,
+    calendar_update,
+    calendar_delete,
 ]
 
 TASK_STATE_TOOLS = [
@@ -225,6 +233,7 @@ Tools:
 - extract_pdf_text(path, max_chars) for reading uploaded PDFs or PDF base64 text files
 - generate_pdf_report(title, markdown_content, filename) for creating professional PDF documents
 - publish_html_artifact(title, html, filename) for simple calculators, dashboards, reports, charts, and single-page tools that should render in CoComputer Outputs instead of the sandbox browser
+- publish_app_preview(port, title) after starting a Vite/Next/Flask (or similar) server bound to 0.0.0.0 in the current workspace. Vite configs MUST include `server: { host: true, allowedHosts: true }` or the Preview tab shows a blank blocked page. Start the server with background=True. Do not tell the user to look at the desktop.
 - render_ui(component_type, title, data, description) for interactive Thesys C1 visuals (chart, table, form, dashboard, card, report) when Thesys is connected. If render_ui returns AUTH_REQUIRED (Thesys not connected), fall back to publish_html_artifact.
 - save_as_artifact(path, title) to promote any file (CSV, PNG, etc.) to the UI panel
 - type_text(text) and press_key(key) for terminal interaction
@@ -238,6 +247,7 @@ Workflow:
 6. Use command output to solve the task whenever possible.
 7. Use generate_pdf_report(...) to create high-quality documents instead of writing complex Python PDF code.
 8. For simple web apps/tools, generate self-contained HTML/CSS/JS and call publish_html_artifact(...). Do not open them in the sandbox browser unless the user asks.
+8b. For React/Vite/Next/Flask apps, write them in the current workspace, set Vite `server.allowedHosts: true`, start the server with --host 0.0.0.0 and background=True, then call publish_app_preview(port). The Files tab is the source of truth. Do not tell the user to look at the desktop.
 9. Use save_as_artifact(...) to show important files (like charts or data exports) in the user's dashboard.
 10. Append concise findings to notes.md or write deliverables into outputs/ with write_workspace_file(...).
 11. Use run_command(...) to affect or inspect terminal state.
@@ -367,7 +377,8 @@ Do:
 - shell commands, repo/file/log/config inspection, installs, scripts, process checks
 - file creation and edits in the workspace, data exports
 - reading uploaded PDFs with extract_pdf_text (never cat PDFs or base64 dumps)
-- generating documents with generate_pdf_report and promoting files with save_as_artifact
+- generating documents with generate_pdf_report, generate_excel_report, generate_docx_report, or generate_pptx_report, and promoting files with save_as_artifact
+- publishing a live app preview with publish_app_preview after a Vite/Next/Flask (or similar) server is bound to 0.0.0.0 in the current workspace. Vite needs server.allowedHosts: true or the Preview iframe is blank.
 
 Workflow:
 1. Read the brief. If a workspace file list or task state is referenced, read it first.
@@ -383,6 +394,7 @@ Rules:
 - Never run destructive commands.
 - On a tool error, read the message and suggested_alternatives, fix your arguments, retry.
   Return a clear failure summary only after real attempts.
+- If a tool says the sandbox is restarting, or returns SANDBOX_RECONNECT_FAILED, retry the same command. Do not return status=blocked with invented codes such as SANDBOX_NOT_RUNNING. Do not tell the planner to start a new session — recovery stays in this session.
 - If the task needs GUI interaction or a browser, say so in your summary instead of improvising.
 - Keep output small: exact paths, exit codes, short excerpts — not full logs."""
 
@@ -459,11 +471,13 @@ def create_terminal_worker(
             generate_pdf_report,
             generate_excel_report,
             generate_docx_report,
+            generate_pptx_report,
             save_as_artifact,
+            publish_app_preview,
             read_skill,
             read_skill_file,
         ]),
-        before_model_callback=make_context_trimmer(),
+        before_model_callback=make_context_trimmer(runtime_config),
     )
 
 
@@ -505,7 +519,7 @@ def create_desktop_worker(
             read_skill,
             read_skill_file,
         ]),
-        before_model_callback=make_context_trimmer(),
+        before_model_callback=make_context_trimmer(runtime_config),
     )
 
 
@@ -612,6 +626,7 @@ def _create_code_agent(
             extract_pdf_text,
             generate_pdf_report,
             publish_html_artifact,
+            publish_app_preview,
             render_ui,
             save_as_artifact,
             type_text,

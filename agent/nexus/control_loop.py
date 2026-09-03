@@ -19,6 +19,8 @@ FAILURE_STATUSES = frozenset(
 BLOCKED_ERROR_CODES = frozenset(
     {"APPROVAL_REQUIRED", "AUTH_REQUIRED", "APPROVAL_DENIED"}
 )
+# Timed-out optional side effects (e.g. github_push) must not wedge the turn.
+SKIPPABLE_ERROR_CODES = frozenset({"APPROVAL_EXPIRED"})
 
 GUI_MUTATIONS = frozenset(
     {
@@ -48,9 +50,12 @@ VISUAL_VERIFIERS = frozenset(
 ARTIFACT_TOOLS = frozenset(
     {
         "publish_html_artifact",
+        "publish_app_preview",
+        "scaffold_web_project",
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
+        "generate_pptx_report",
         "save_as_artifact",
     }
 )
@@ -62,13 +67,28 @@ SOURCE_TOOLS = frozenset(
         "search_sources",
     }
 )
+TERMINAL_TOOLS = frozenset(
+    {
+        "terminal_worker",
+        "run_command",
+        "bash",
+    }
+)
+WORKSPACE_FILE_TOOLS = frozenset(
+    {
+        "write_workspace_file",
+        "read_workspace_file",
+        "list_workspace_files",
+        "prepare_task_workspace",
+    }
+)
 
 # Tools that are interchangeable for satisfying the same goal. A failure by one
 # member is considered recovered when a later action by any member (or the same
 # tool) succeeds — not just the identical tool name. This lets the agent work
 # around a failed tool (e.g. web_search -> tavily_search) without the completion
 # verifier vetoing an otherwise-correct turn.
-_CAPABILITY_GROUPS = (SOURCE_TOOLS, ARTIFACT_TOOLS)
+_CAPABILITY_GROUPS = (SOURCE_TOOLS, ARTIFACT_TOOLS, TERMINAL_TOOLS, WORKSPACE_FILE_TOOLS)
 
 
 def _same_capability_group(candidate: str, failed: str) -> bool:
@@ -378,19 +398,27 @@ class ActionObservation:
 class ActionRecord:
     decision: ActionDecision
     observation: ActionObservation | None = None
+    turn_index: int = 0
 
 
 @dataclass
 class ActionLedger:
     records: list[ActionRecord] = field(default_factory=list)
+    current_turn_index: int = 0
+
+    def advance_turn(self) -> int:
+        self.current_turn_index += 1
+        return self.current_turn_index
 
     def start(self, decision: ActionDecision) -> None:
-        self.records.append(ActionRecord(decision=decision))
+        self.records.append(ActionRecord(decision=decision, turn_index=self.current_turn_index))
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any] | None) -> "ActionLedger":
         ledger = cls()
-        for raw in (value or {}).get("records", []):
+        data = value or {}
+        ledger.current_turn_index = int(data.get("current_turn_index") or 0)
+        for raw in data.get("records", []):
             if not isinstance(raw, Mapping):
                 continue
             decision_data = raw.get("decision")
@@ -465,8 +493,9 @@ class ActionLedger:
                     )
                 except (TypeError, ValueError):
                     observation = None
+            turn_idx = int(raw.get("turn_index") or 0)
             ledger.records.append(
-                ActionRecord(decision=decision, observation=observation)
+                ActionRecord(decision=decision, observation=observation, turn_index=turn_idx)
             )
         return ledger
 
@@ -477,6 +506,7 @@ class ActionLedger:
                 and record.observation is None
             ):
                 record.observation = observation
+                record.turn_index = self.current_turn_index
                 return
         self.records.append(
             ActionRecord(
@@ -486,12 +516,21 @@ class ActionLedger:
                     arguments={},
                 ),
                 observation=observation,
+                turn_index=self.current_turn_index,
             )
         )
 
-    def latest_unresolved_failures(self) -> list[ActionObservation]:
+    def latest_unresolved_failures(self, current_turn_only: bool = True) -> list[ActionObservation]:
         unresolved: list[ActionObservation] = []
-        for index, record in enumerate(self.records):
+        has_current_turn_records = any(
+            getattr(r, "turn_index", 0) == self.current_turn_index for r in self.records
+        )
+        target_records = (
+            [r for r in self.records if getattr(r, "turn_index", 0) == self.current_turn_index]
+            if current_turn_only and has_current_turn_records
+            else self.records
+        )
+        for index, record in enumerate(target_records):
             observation = record.observation
             if observation is None:
                 continue
@@ -509,7 +548,7 @@ class ActionLedger:
                         and later.decision.action in VISUAL_VERIFIERS
                     )
                 )
-                for later in self.records[index + 1 :]
+                for later in target_records[index + 1 :]
             )
             if not recovered:
                 unresolved.append(observation)
@@ -589,15 +628,17 @@ class ActionLedger:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "current_turn_index": self.current_turn_index,
             "records": [
                 {
+                    "turn_index": getattr(record, "turn_index", 0),
                     "decision": asdict(record.decision),
                     "observation": (
                         asdict(record.observation) if record.observation else None
                     ),
                 }
                 for record in self.records
-            ]
+            ],
         }
 
 
@@ -617,9 +658,9 @@ class CompletionVerification:
 
 
 _ARTIFACT_REQUEST = re.compile(
-    r"(?:\b(?:create|generate|build|make|export|produce)\b.{0,40}"
-    r"\b(?:pdf|xlsx|spreadsheet|docx|document|html|report|artifact|file)\b"
-    r"|\.pdf\b|\.xlsx\b|\.docx\b|\.html?\b)",
+    r"(?:\b(?:create|generate|build|make|export|produce|code|develop|design)\b.{0,50}"
+    r"\b(?:pdf|xlsx|spreadsheet|docx|document|html|report|artifact|file|website|webpage|site|landing|landing\s+page|prototype|app|application|dashboard|component)\b"
+    r"|\.pdf\b|\.xlsx\b|\.docx\b|\.html?\b|\blanding\s+page\b|\bweb\s+app\b|\breact\b|\bvite\b)",
     re.IGNORECASE,
 )
 _TASK_STATE_METADATA_KEYS = frozenset({"task_type", "stage", "review_status"})
@@ -656,6 +697,16 @@ def verify_completion(
 ) -> CompletionVerification:
     """Verify task completion from observable runtime evidence."""
     response = str(final_response or "").strip()
+    # #region agent log
+    try:
+        import json as _dbg_json
+        from pathlib import Path as _DbgPath
+        _arts = ledger.artifacts()
+        _tools = [str(getattr(r.decision, "action", "") or "") for r in ledger.records[-16:]]
+        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"control_loop.py:verify_completion:entry","message":"verify inputs","data":{"request":str(request or "")[:180],"artifact_regex":bool(_ARTIFACT_REQUEST.search(str(request or ""))),"n_artifacts":len(_arts),"artifact_kinds":[str((a or {}).get("kind") or (a or {}).get("title") or "")[:40] for a in _arts[:6]],"tools":_tools,"response_len":len(response),"htmlish":("<" in response and ("class=" in response or "<section" in response.lower())),"response_prefix":response[:120]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+    except Exception:
+        pass
+    # #endregion
     if not response or looks_like_worker_envelope(response):
         return CompletionVerification(
             verified=False,
@@ -671,8 +722,20 @@ def verify_completion(
             retryable=True,
         )
 
-    failures = ledger.latest_unresolved_failures()
+    failures = [
+        failure
+        for failure in ledger.latest_unresolved_failures()
+        if failure.error_code not in SKIPPABLE_ERROR_CODES
+    ]
     if failures:
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"control_loop.py:verify_completion","message":"unresolved failures block completion","data":{"tools":[{"tool":f.tool,"status":f.status,"error_code":f.error_code,"retryable":f.retryable,"remaining":f.remaining_work[:2]} for f in failures[:6]]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         blocked = next(
             (
                 failure
@@ -723,6 +786,14 @@ def verify_completion(
         )
 
     if _ARTIFACT_REQUEST.search(request) and not ledger.artifacts():
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"control_loop.py:verify_completion:missing_artifact","message":"MISSING_ARTIFACT branch","data":{"request":str(request or "")[:180]},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         return CompletionVerification(
             verified=False,
             status="failed",

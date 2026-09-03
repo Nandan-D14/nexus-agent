@@ -56,7 +56,7 @@ async def read_skill(skill_id: str) -> dict[str, Any]:
     resources = list(skill.get("resources") or sorted(skill.get("files") or {}))
     sandbox_path = skill.get("sandbox_path") or ""
     return tool_success(
-        f"Loaded skill {skill.get('name') or target}.",
+        f"Loaded skill {skill.get('name') or target}. Instructions are loaded. Now proceed immediately to create the requested files/deliverables using workspace or artifact tools. Do not stop with just a text summary.",
         skill_id=target,
         name=skill.get("name"),
         category=skill.get("category"),

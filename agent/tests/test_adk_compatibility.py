@@ -246,6 +246,42 @@ async def test_firestore_session_service_replays_adk_events() -> None:
     assert replayed.events[0].content.parts[0].text == "hello"
 
 
+@pytest.mark.asyncio
+async def test_firestore_session_service_strips_unknown_part_fields() -> None:
+    service = FirestoreSessionService.__new__(FirestoreSessionService)
+    service._db = _Firestore()
+
+    session = await service.create_session(
+        app_name="nexus",
+        user_id="user-1",
+        session_id="session-legacy",
+        state={"goal": "legacy"},
+    )
+    event = Event(
+        author="user",
+        invocation_id="invocation-legacy",
+        content=types.Content(role="user", parts=[types.Part(text="hello")]),
+    )
+    await service.append_event(session, event)
+    stored = service._db.collection("adk_sessions").document(
+        "nexus_user-1_session-legacy"
+    )
+    for payload in stored.events.docs.values():
+        parts = (((payload.get("content") or {}).get("parts")) or [])
+        if parts:
+            parts[0]["audioTranscription"] = None
+
+    replayed = await service.get_session(
+        app_name="nexus",
+        user_id="user-1",
+        session_id="session-legacy",
+        config=GetSessionConfig(num_recent_events=10),
+    )
+
+    assert replayed is not None
+    assert replayed.events[0].content.parts[0].text == "hello"
+
+
 @pytest.mark.parametrize(
     ("event_type", "payload", "required_key"),
     [

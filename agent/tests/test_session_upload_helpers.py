@@ -40,6 +40,11 @@ class SafeWorkspacePathTests(TestCase):
         )
         self.assertEqual(result, "outputs/report.pdf")
 
+    def test_safe_workspace_relative_path_sanitizes_parentheses(self) -> None:
+        self.assertEqual(
+            files._safe_workspace_relative_path("sources/uploads/Screenshot (1).png"),
+            "sources/uploads/Screenshot _1_.png",
+        )
 
 
 class DriveMirrorTests(IsolatedAsyncioTestCase):

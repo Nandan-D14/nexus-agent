@@ -57,7 +57,7 @@ def test_redact_command_text_strips_inline_keys() -> None:
 
 
 class _CommandSandbox:
-    def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
+    def run_command(self, command: str, timeout: int = 30, background: bool = False, cwd: str | None = None) -> dict:
         return {"stdout": "models listed\n", "stderr": "", "exit_code": 0}
 
 
@@ -186,3 +186,69 @@ async def test_read_workspace_file_emits_sandbox_editor_content_on_result() -> N
     assert "content" not in frames[0]
     assert frames[1]["phase"] == "result"
     assert frames[1]["content"] == "stored body"
+
+
+VITE_CONFIG_WITHOUT_HOSTS = """\
+import { defineConfig } from 'vite'
+export default defineConfig({
+  plugins: [],
+})
+"""
+
+
+@pytest.mark.asyncio
+async def test_write_workspace_file_injects_vite_allowed_hosts() -> None:
+    frames: list[dict] = []
+
+    async def capture(payload: dict) -> None:
+        frames.append(payload)
+
+    sandbox = _FileSandbox()
+    send_token = set_send_json(capture)
+    session_token = set_session_id("session-ws")
+    run_token = set_run_id("run-ws")
+    workspace_token = set_workspace_path("/home/user/CoComputer/Workspaces/session-ws/run-ws")
+    sandbox_token = set_sandbox(sandbox)
+    try:
+        with patch(
+            "nexus.tools.workspace.upload_artifact_async",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await write_workspace_file("vite.config.ts", VITE_CONFIG_WITHOUT_HOSTS)
+    finally:
+        for token in (sandbox_token, workspace_token, run_token, session_token, send_token):
+            token.var.reset(token)
+
+    written = sandbox.files["/home/user/CoComputer/Workspaces/session-ws/run-ws/vite.config.ts"]
+    assert result["status"] == "success"
+    assert "allowedHosts: true" in written
+    assert "allowedHosts: true" in frames[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_auto_backgrounds_vite_dev(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.tools.bash.asyncio.sleep", AsyncMock())
+    calls: list[dict] = []
+
+    class _DevSandbox:
+        def run_command(self, command: str, timeout: int = 30, background: bool = False, cwd: str | None = None) -> dict:
+            calls.append({"command": command, "background": background, "cwd": cwd})
+            return {"stdout": "Started in background (PID: 9)", "stderr": "", "exit_code": 0}
+
+        def find_listening_web_ports(self) -> list[int]:
+            return []
+
+    send_token = set_send_json(AsyncMock())
+    sandbox_token = set_sandbox(_DevSandbox())
+    try:
+        result = await run_command("npm run dev -- --host 0.0.0.0 --port 5173")
+    finally:
+        send_token.var.reset(send_token)
+        sandbox_token.var.reset(sandbox_token)
+
+    assert result["status"] == "success"
+    assert "auto-backgrounded" in result["summary"]
+    assert any(
+        call["background"] is True and "npm run dev" in call["command"] for call in calls
+    )

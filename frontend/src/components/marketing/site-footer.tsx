@@ -63,6 +63,9 @@ export function SiteFooter({ showStatus = false }: SiteFooterProps) {
                 <FooterLink href="/#features">Features</FooterLink>
               </li>
               <li>
+                <FooterLink href="/#integrations">Integrations</FooterLink>
+              </li>
+              <li>
                 <FooterLink href="/pricing">Pricing</FooterLink>
               </li>
             </ul>

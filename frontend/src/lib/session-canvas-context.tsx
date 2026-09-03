@@ -40,12 +40,15 @@ export type SessionCanvasApi = {
     reason?: SessionCanvasOpenReason,
   ) => SessionCanvasDocument;
   selectDocument: (id: string) => void;
+  openViewer: () => void;
+  closeViewer: () => void;
 };
 
 type SessionCanvasContextValue = SessionCanvasApi & {
   documents: SessionCanvasDocument[];
   activeId: string | null;
   todoItems: TodoItem[];
+  viewerOpen: boolean;
 };
 
 const SessionCanvasContext = createContext<SessionCanvasContextValue | null>(
@@ -67,12 +70,14 @@ export function SessionCanvasProvider({
 }: ProviderProps) {
   const [documents, setDocuments] = useState<SessionCanvasDocument[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   const openDocument = useCallback(
     (doc: SessionCanvasDocument, reason: SessionCanvasOpenReason = "user") => {
       setDocuments((prev) => upsertCanvasDocument(prev, doc));
       setActiveId(doc.id);
       onRequestPane(reason);
+      if (reason === "user") setViewerOpen(true);
     },
     [onRequestPane],
   );
@@ -99,14 +104,26 @@ export function SessionCanvasProvider({
     setActiveId(id);
   }, []);
 
+  const openViewer = useCallback(() => setViewerOpen(true), []);
+  const closeViewer = useCallback(() => setViewerOpen(false), []);
+
   const api = useMemo<SessionCanvasApi>(
     () => ({
       openDocument,
       openFromArtifact,
       openFromWorkspaceFile,
       selectDocument,
+      openViewer,
+      closeViewer,
     }),
-    [openDocument, openFromArtifact, openFromWorkspaceFile, selectDocument],
+    [
+      closeViewer,
+      openDocument,
+      openFromArtifact,
+      openFromWorkspaceFile,
+      openViewer,
+      selectDocument,
+    ],
   );
 
   if (apiRef) {
@@ -119,8 +136,9 @@ export function SessionCanvasProvider({
       documents,
       activeId,
       todoItems,
+      viewerOpen,
     }),
-    [activeId, api, documents, todoItems],
+    [activeId, api, documents, todoItems, viewerOpen],
   );
 
   return (

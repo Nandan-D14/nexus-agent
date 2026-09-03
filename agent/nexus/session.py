@@ -16,7 +16,7 @@ import jwt
 
 from nexus.config import settings
 from nexus.runtime_config import SessionRuntimeConfig
-from nexus.sandbox import SandboxManager
+from nexus.sandbox import SandboxManager, is_valid_sandbox_id
 
 if TYPE_CHECKING:
     from nexus.history_repository import FirestoreHistoryRepository
@@ -86,22 +86,33 @@ async def _rehydrate_workspace_from_gcs(
                 skipped += 1
                 continue
 
-            if not path.startswith("/"):
-                skipped += 1
-                continue
+            if path.startswith("/"):
+                target_path = path
+            else:
+                from pathlib import PurePosixPath
+                from nexus.tools.workspace import derive_session_workspace_path, derive_workspace_path
+                run_id = getattr(artifact, "run_id", None)
+                if run_id:
+                    target_path = f"{derive_workspace_path(session.id, run_id)}/{path}"
+                else:
+                    target_path = f"{derive_session_workspace_path(session.id)}/{path}"
 
             try:
+                from pathlib import PurePosixPath
+                parent_dir = str(PurePosixPath(target_path).parent)
+                session.sandbox.ensure_directory(parent_dir)
+
                 content_bytes = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda b=bucket_name, n=blob_name: (
                         gcs_client.get_bucket(b).blob(n).download_as_bytes()
                     ),
                 )
-                session.sandbox.write_binary_file(path, content_bytes)
+                session.sandbox.write_binary_file(target_path, content_bytes)
                 restored += 1
-                logger.debug("Rehydration: restored %s (%d bytes)", path, len(content_bytes))
+                logger.debug("Rehydration: restored %s (%d bytes)", target_path, len(content_bytes))
             except Exception as exc:
-                logger.warning("Rehydration: could not restore %s: %s", path, exc)
+                logger.warning("Rehydration: could not restore %s: %s", target_path, exc)
                 skipped += 1
 
         logger.info(
@@ -149,6 +160,38 @@ async def _maybe_mount_gdrive(
     logger.info("Google Drive mounted at ~/gdrive for session %s", session.id)
 
 
+async def _maybe_install_github_git(
+    session: "Session",
+    repo: "FirestoreHistoryRepository",
+) -> None:
+    """Install a GitHub git credential helper in the sandbox when connected."""
+    try:
+        connection = await repo.get_integration_connection(session.owner_id, "github")
+    except Exception:
+        return
+    if not connection or not connection.enabled:
+        return
+    token = connection.private.get("token") if connection.private else None
+    if not isinstance(token, str) or not token.strip():
+        return
+    try:
+        from nexus.github_git import install_github_git_credentials
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: install_github_git_credentials(session.sandbox, token),
+        )
+    except Exception as exc:
+        logger.warning(
+            "GitHub git credentials failed for session %s: %s",
+            session.id,
+            exc,
+        )
+        return
+    logger.info("GitHub git credentials installed for session %s", session.id)
+
+
 @dataclass
 class Session:
     """A single CoComputer session with its own sandbox and agent state."""
@@ -170,7 +213,7 @@ class Session:
     continuation_mode: str | None = None
     sandbox_id: str = ""
     stream_url: str = ""
-    status: str = "idle"  # idle | creating | ready | active | error | destroyed
+    status: str = "idle"  # idle | creating | ready | active | paused | error | destroyed
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     activation_lock: asyncio.Lock = field(
@@ -334,12 +377,16 @@ class SessionManager:
         self.cancel_idle_pause(session_id)
 
         async with session.activation_lock:
+            stale_client = False
             if session.sandbox.is_alive and session.stream_url:
-                if session.status not in {"ready", "active"}:
-                    session.status = "ready"
-                    session.touch()
-                    await self._sync_session(session, status="ready")
-                return session
+                if session.sandbox.extend_timeout():
+                    if session.status not in {"ready", "active"}:
+                        session.status = "ready"
+                        session.touch()
+                        await self._sync_session(session, status="ready")
+                    return session
+                session.stream_url = ""
+                stale_client = True
 
             session.status = "creating"
             session.touch()
@@ -348,11 +395,21 @@ class SessionManager:
             try:
                 loop = asyncio.get_running_loop()
 
-                # Try to resume a previously paused sandbox
+                # Resume a paused VM for this session, or a persisted workspace
+                # sandbox when the user explicitly continued the latest workspace.
+                # Do not reconnect an id we just probed as dead.
                 paused_id: str | None = None
-                if self.history_repository and session.resume_mode == "continue_latest_workspace":
+                if not stale_client and is_valid_sandbox_id(session.sandbox_id):
+                    paused_id = session.sandbox_id
+                if (
+                    not paused_id
+                    and self.history_repository
+                    and session.resume_mode == "continue_latest_workspace"
+                ):
                     try:
-                        paused_id = await self.history_repository.get_persistent_sandbox(session.owner_id)
+                        persisted = await self.history_repository.get_persistent_sandbox(session.owner_id)
+                        if is_valid_sandbox_id(persisted):
+                            paused_id = persisted
                     except Exception:
                         pass
 
@@ -393,18 +450,12 @@ class SessionManager:
             session.touch()
             await self._sync_session(session, status="ready")
 
-            # Rehydrate workspace files from GCS on resume (best-effort, non-fatal).
-            # Covers the case where the E2B snapshot expired (>24h) — all files
-            # are restored from permanent GCS storage so the agent can continue.
-            if self.history_repository and session.resume_mode in {
-                "continue_latest_workspace",
-                "continue_conversation",
-            }:
-                await _rehydrate_workspace_from_gcs(session, self.history_repository)
-
-            # Mount Google Drive if user has a refresh token configured
+            # Restore workspace files from GCS (best-effort). Covers E2B snapshot
+            # expiry and in-session VM timeout — artifacts live in GCS.
             if self.history_repository:
+                await _rehydrate_workspace_from_gcs(session, self.history_repository)
                 await _maybe_mount_gdrive(session, self.history_repository)
+                await _maybe_install_github_git(session, self.history_repository)
 
             logger.info(
                 "Session %s sandbox ready (stream_url=%s)",
@@ -435,12 +486,15 @@ class SessionManager:
             task_id=stored.task_id,
             status=stored.status,
             sandbox_id=stored.sandbox_id or "",
-            resume_mode="fresh"
+            resume_mode="fresh",
+            current_run_id=stored.current_run_id,
         )
         # Note: this dummy session is NOT added to _local_sessions until activation
         return session
 
-
+    def get_live_session(self, session_id: str) -> Optional[Session]:
+        """Return the in-memory live session, or None if it is not running here."""
+        return self._local_sessions.get(session_id)
 
     def list_sessions_for_owner(self, owner_id: str) -> list[Session]:
         sessions = [session for session in self._local_sessions.values() if session.owner_id == owner_id]
@@ -509,6 +563,59 @@ class SessionManager:
                 except Exception:
                     logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
+    async def pause_idle_sandbox(self, session_id: str) -> None:
+        """Pause or kill the VM but keep the Session so the same chat can resume."""
+        scheduled_pause = self._idle_pause_tasks.pop(session_id, None)
+        current_task = asyncio.current_task()
+        if scheduled_pause and scheduled_pause is not current_task and not scheduled_pause.done():
+            scheduled_pause.cancel()
+
+        session = self._local_sessions.get(session_id)
+        if session is None:
+            return
+
+        paused_id: str | None = None
+        if session.sandbox.is_alive:
+            loop = asyncio.get_event_loop()
+            if self.history_repository:
+                paused_id = await loop.run_in_executor(None, session.sandbox.pause)
+                if paused_id:
+                    try:
+                        await self.history_repository.save_paused_sandbox(
+                            session.owner_id, paused_id, session.id
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to persist paused sandbox for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+            if not paused_id:
+                await loop.run_in_executor(None, session.sandbox.destroy)
+
+        session.status = "paused"
+        session.stream_url = ""
+        if paused_id:
+            session.sandbox_id = paused_id
+        session.touch()
+        await self._sync_session(session, status="paused")
+        if self.history_repository:
+            try:
+                await self.history_repository.refresh_session_handoff(
+                    session.id,
+                    owner_id=session.owner_id,
+                    resume_state="paused",
+                    workspace_owner_session_id=session.id if paused_id else None,
+                    can_continue_workspace=bool(paused_id),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to refresh handoff summary for paused session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        logger.info("Idle sandbox paused for session %s (kept in-memory)", session_id)
+
     async def activate_session(self, session_id: str) -> Session:
         self.cancel_idle_pause(session_id)
         session = await self.ensure_session_ready(session_id)
@@ -535,7 +642,7 @@ class SessionManager:
         try:
             await asyncio.sleep(delay_seconds)
             session = self._local_sessions.get(session_id)
-            if not session or session.status in {"destroyed", "ended", "error"}:
+            if not session or session.status in {"destroyed", "ended", "error", "paused"}:
                 return
             if not session.sandbox.is_alive:
                 return
@@ -543,7 +650,7 @@ class SessionManager:
             if idle_for < delay_seconds:
                 return
             logger.info("Pausing idle sandbox after reconnect grace for session %s", session_id)
-            await self.destroy_session(session_id, status="ended")
+            await self.pause_idle_sandbox(session_id)
         except asyncio.CancelledError:
             raise
         except Exception:

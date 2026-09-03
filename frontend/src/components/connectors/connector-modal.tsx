@@ -58,12 +58,14 @@ export function ConnectorField({
   onChange,
   placeholder,
   type = "text",
+  readOnly = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   type?: string;
+  readOnly?: boolean;
 }) {
   return (
     <label className="block space-y-2">
@@ -73,7 +75,12 @@ export function ConnectorField({
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         type={type}
-        className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-zinc-600"
+        readOnly={readOnly}
+        className={`w-full rounded-xl border border-zinc-200 px-4 py-2.5 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-800 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-zinc-600 ${
+          readOnly
+            ? "cursor-default bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+            : "bg-zinc-50 dark:bg-zinc-900"
+        }`}
       />
     </label>
   );

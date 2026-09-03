@@ -137,7 +137,15 @@ def create_model(
         from nexus.user_llm_router import create_user_llm_model
         assert runtime_config is not None
         return create_user_llm_model(model_name, runtime_config)
-    elif settings.model_provider == "bynara":
+
+    selected_provider = str(getattr(runtime_config, "llm_provider", "") or "").strip()
+    if selected_provider:
+        raise RuntimeError(
+            f"LLM provider '{selected_provider}' is selected but the API key was not "
+            "loaded for this session. Save the key in Settings and start a new task."
+        )
+
+    if settings.model_provider == "bynara":
         from nexus.bynara_router import create_bynara_model
         return create_bynara_model(model_name)
     else:

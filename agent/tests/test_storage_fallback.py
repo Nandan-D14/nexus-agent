@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus.storage import download_artifact_as_data_uri
-from nexus.routers.tasks import download_artifact_by_id
+from nexus.storage import download_artifact_as_data_uri, parse_gcs_object_url
+from nexus.routers.tasks import download_artifact_by_id, download_artifact_content
 
 
 class StorageFallbackUnitTests(TestCase):
@@ -117,3 +117,70 @@ class RouterDownloadFallbackTests(IsolatedAsyncioTestCase):
         self.assertEqual(response["url"], "data:image/png;base64,ZmFrZS1wbmctY29udGVudA==")
         mock_generate_signed.assert_called_once_with(bucket_name="test-bucket", blob_name="test-blob.png")
         mock_download_data_uri.assert_called_once_with(bucket_name="test-bucket", blob_name="test-blob.png")
+
+
+class ParseGcsUrlTests(TestCase):
+    def test_path_style_signed_url(self) -> None:
+        url = (
+            "https://storage.googleapis.com/nexus-artifacts-development/"
+            "15c0d0aa0b34/58dbc08f39bd/outputs/q1-sales.xlsx"
+            "?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+        )
+        self.assertEqual(
+            parse_gcs_object_url(url),
+            (
+                "nexus-artifacts-development",
+                "15c0d0aa0b34/58dbc08f39bd/outputs/q1-sales.xlsx",
+            ),
+        )
+
+    def test_virtual_hosted_style(self) -> None:
+        url = "https://nexus-artifacts-development.storage.googleapis.com/sess/run/file.xlsx"
+        self.assertEqual(
+            parse_gcs_object_url(url),
+            ("nexus-artifacts-development", "sess/run/file.xlsx"),
+        )
+
+    def test_non_gcs(self) -> None:
+        self.assertIsNone(parse_gcs_object_url("https://drive.google.com/file"))
+
+
+class RouterContentProxyTests(IsolatedAsyncioTestCase):
+    @patch("nexus.routers.tasks.get_history_repository")
+    @patch("nexus.routers.tasks.download_artifact_bytes")
+    async def test_content_proxies_gcs_bytes_from_url(
+        self,
+        mock_download_bytes: MagicMock,
+        mock_get_history_repo: MagicMock,
+    ) -> None:
+        mock_artifact = MagicMock()
+        mock_artifact.artifact_id = "artifact-123"
+        mock_artifact.title = "q1-sales.xlsx"
+        mock_artifact.url = (
+            "https://storage.googleapis.com/test-bucket/sess/run/q1-sales.xlsx"
+            "?X-Goog-Signature=abc"
+        )
+        mock_artifact.metadata = {}
+
+        mock_history_repo = MagicMock()
+        mock_history_repo.get_artifact_for_owner = AsyncMock(return_value=mock_artifact)
+        mock_get_history_repo.return_value = mock_history_repo
+        mock_download_bytes.return_value = (
+            b"xlsx-bytes",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        mock_user = MagicMock()
+        mock_user.uid = "user-123"
+
+        response = await download_artifact_content(artifact_id="artifact-123", user=mock_user)
+
+        self.assertEqual(response.body, b"xlsx-bytes")
+        self.assertEqual(
+            response.media_type,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        mock_download_bytes.assert_called_once_with(
+            bucket_name="test-bucket",
+            blob_name="sess/run/q1-sales.xlsx",
+        )

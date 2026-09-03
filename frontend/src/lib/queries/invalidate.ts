@@ -15,4 +15,5 @@ export function invalidateSessionLists(queryClient: QueryClient) {
 export function invalidateIntegrations(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.catalog() });
   void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.connections() });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.calendar.eventsRoot() });
 }

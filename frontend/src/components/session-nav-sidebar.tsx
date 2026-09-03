@@ -97,7 +97,7 @@ function RailTooltip({
   if (!collapsed) return <>{children}</>;
   return (
     <Tooltip>
-      <TooltipTrigger render={<span className="flex w-full justify-center" />}>
+      <TooltipTrigger render={<span className="flex w-full" />}>
         {children}
       </TooltipTrigger>
       <TooltipContent side="right" sideOffset={10} className="flex items-center gap-2">
@@ -351,7 +351,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
         aria-label={isSidebarOpen ? "Close navigation" : "Open navigation"}
         aria-expanded={isSidebarOpen}
         onClick={() => setIsSidebarOpen((open) => !open)}
-        className="fixed top-4 left-4 z-[60] inline-flex size-10 items-center justify-center rounded-full border border-border-button-white bg-background-secondary-default text-foreground-icon-secondary shadow-sidebar md:hidden"
+        className="fixed top-4 left-4 z-[60] inline-flex size-10 items-center justify-center rounded-full border border-input-border bg-input-bg text-foreground-icon-secondary shadow-sidebar md:hidden"
       >
         {isSidebarOpen ? <X className="size-5" /> : <Menu className="size-5" />}
       </button>
@@ -367,25 +367,21 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
       <aside
         className={cx(
-          "fixed top-3 bottom-3 left-3 z-50 flex h-[calc(100dvh-24px)] shrink-0 flex-col overflow-hidden rounded-xl border shadow-sidebar transition-[width,transform,background-color,border-color,backdrop-filter] duration-300 ease-in-out md:sticky md:top-3 md:bottom-auto md:z-20 md:m-3 md:h-[calc(100vh-24px)] md:translate-x-0",
-          isLandingChrome
-            ? "border-white/40 bg-white/45 backdrop-blur-2xl dark:border-white/20 dark:bg-black/25"
-            : "border-border-button-white bg-background-secondary-default",
-          collapsed ? "w-[60px] px-[11px] py-3" : "w-[260px] p-3",
+          "fixed top-3 bottom-3 left-3 z-50 flex h-[calc(100dvh-24px)] shrink-0 flex-col overflow-hidden rounded-xl border border-input-border bg-input-bg p-3 shadow-sidebar transition-[width,transform,background-color,border-color,backdrop-filter] duration-300 ease-in-out md:sticky md:top-3 md:bottom-auto md:z-20 md:m-3 md:h-[calc(100vh-24px)] md:translate-x-0",
+          collapsed ? "w-[60px]" : "w-[260px]",
           isMobile && !isSidebarOpen && "-translate-x-[calc(100%+24px)]",
         )}
       >
         <div className="flex min-h-0 flex-1 flex-col gap-3">
-          <div className={cx("flex items-center", collapsed ? "flex-col gap-2.5" : "justify-between")}>
+          <div className="flex h-9 w-full items-center justify-between">
             <Link
               href={APP_DASHBOARD}
-              className={cx(
-                "flex min-w-0 items-center",
-                collapsed ? "h-9 w-full justify-center" : "gap-2",
-              )}
+              className="flex min-w-0 items-center gap-2"
               onClick={closeMobile}
             >
-              <CocomputerMark size={28} className="size-7 rounded-lg" />
+              <div className="flex size-9 shrink-0 items-center justify-center">
+                <CocomputerMark size={28} className="size-7 rounded-lg" />
+              </div>
               <Collapsible collapsed={collapsed}>
                 <span className="truncate text-title-3-semibold text-text-primary">CoComputer</span>
               </Collapsible>
@@ -399,16 +395,18 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
               >
                 <X className="size-5" />
               </button>
-            ) : !collapsed ? (
-              <button
-                type="button"
-                aria-label="Collapse sidebar"
-                onClick={() => setIsCollapsed(true)}
-                className="flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground-icon-secondary hover:bg-background-secondary-hover"
-              >
-                <PanelLeftClose className="size-5" />
-              </button>
-            ) : null}
+            ) : (
+              <Collapsible collapsed={collapsed}>
+                <button
+                  type="button"
+                  aria-label="Collapse sidebar"
+                  onClick={() => setIsCollapsed(true)}
+                  className="flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground-icon-secondary hover:bg-background-secondary-hover"
+                >
+                  <PanelLeftClose className="size-5" />
+                </button>
+              </Collapsible>
+            )}
           </div>
 
           <RailTooltip label="Quick Search" collapsed={collapsed} kbd="⌘L">
@@ -418,16 +416,11 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                 setIsSearchOpen(true);
                 closeMobile();
               }}
-              className={cx(
-                "flex items-center bg-background-tertiary-default text-foreground-icon-secondary transition-colors hover:bg-background-tertiary-hover",
-                collapsed
-                  ? "size-9 shrink-0 justify-center rounded-2lg"
-                  : "w-full gap-2 rounded-full p-2",
-              )}
+              className="flex h-9 w-full items-center gap-2 rounded-2lg bg-background-tertiary-default px-2 text-foreground-icon-secondary transition-colors hover:bg-background-tertiary-hover"
             >
               <Search className="size-5 shrink-0" />
               <Collapsible collapsed={collapsed}>
-                <span className="flex flex-1 items-center justify-between gap-2 text-body-medium text-text-secondary">
+                <span className="flex flex-1 items-center justify-between gap-2 text-body-medium text-text-secondary whitespace-nowrap">
                   Quick Search <Kbd>⌘L</Kbd>
                 </span>
               </Collapsible>
@@ -438,10 +431,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
             <button
               type="button"
               onClick={handleNewSession}
-              className={cx(
-                "flex items-center rounded-2lg bg-linear-to-b from-blue-500 to-blue-600 text-white shadow-nav-selected",
-                collapsed ? "size-9 shrink-0 justify-center" : "w-full gap-2 p-2",
-              )}
+              className="flex h-9 w-full items-center gap-2 rounded-2lg bg-linear-to-b from-blue-500 to-blue-600 px-2 text-white shadow-nav-selected"
             >
               <Plus className="size-5 shrink-0" />
               <Collapsible collapsed={collapsed}>
@@ -464,8 +454,7 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                 </>
               );
               const className = cx(
-                "flex items-center rounded-2lg transition-colors",
-                collapsed ? "size-9 shrink-0 justify-center" : "w-full gap-2 p-2",
+                "flex h-9 w-full items-center gap-2 rounded-2lg px-2 transition-colors",
                 active || (settings && isSettingsOpen)
                   ? "bg-linear-to-b from-blue-500 to-blue-600 text-white shadow-nav-selected"
                   : "text-text-secondary hover:bg-background-secondary-hover",
@@ -498,24 +487,22 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
 
           {collapsed ? (
             <HoverCard>
-              <div className="flex w-full justify-center">
-                <HoverCardTrigger
-                  render={
-                    <button
-                      type="button"
-                      aria-label="Recent chats"
-                      className="flex size-9 shrink-0 items-center justify-center rounded-2lg text-text-secondary transition-colors hover:bg-background-secondary-hover"
-                    />
-                  }
-                >
-                  <MessageSquareText className="size-5" />
-                </HoverCardTrigger>
-              </div>
+              <HoverCardTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="Recent chats"
+                    className="flex h-9 w-full items-center gap-2 rounded-2lg px-2 text-text-secondary transition-colors hover:bg-background-secondary-hover"
+                  >
+                    <MessageSquareText className="size-5 shrink-0" />
+                  </button>
+                }
+              />
               <HoverCardContent
                 side="right"
                 align="start"
                 sideOffset={12}
-                className="w-[280px] rounded-xl border border-border-button-white bg-background-secondary-default p-3 shadow-sidebar"
+                className="w-[280px] rounded-xl border border-input-border bg-input-bg p-3 shadow-sidebar"
               >
                 <div className="mb-2 flex items-center justify-between px-1">
                   <span className="text-caption-1-semibold tracking-wide text-text-tertiary uppercase">
@@ -547,16 +534,16 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                   <Link
                     href={APP_DASHBOARD}
                     onClick={closeMobile}
-                    className="flex size-9 shrink-0 items-center justify-center rounded-2lg bg-background-tertiary-default hover:bg-background-tertiary-hover"
+                    className="flex h-9 w-full items-center gap-2 rounded-2lg bg-background-tertiary-default px-2 hover:bg-background-tertiary-hover"
                     aria-label={`Usage ${usage}%`}
                   >
                     <span
-                      className="relative flex size-5 items-center justify-center rounded-full"
+                      className="relative flex size-5 shrink-0 items-center justify-center rounded-full"
                       style={{
                         background: `conic-gradient(#3b82f6 ${usage}%, rgba(148,163,184,0.25) 0)`,
                       }}
                     >
-                      <span className="size-3 rounded-full bg-background-secondary-default" />
+                      <span className="size-3 rounded-full bg-input-bg" />
                     </span>
                   </Link>
                 </RailTooltip>
@@ -566,9 +553,9 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
                   type="button"
                   aria-label="Expand sidebar"
                   onClick={() => setIsCollapsed(false)}
-                  className="flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground-icon-secondary hover:bg-background-secondary-hover"
+                  className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-foreground-icon-secondary hover:bg-background-secondary-hover"
                 >
-                  <PanelLeftOpen className="size-5" />
+                  <PanelLeftOpen className="size-5 shrink-0" />
                 </button>
               </RailTooltip>
             </>
@@ -596,18 +583,17 @@ export const SessionNavSidebar = memo(function SessionNavSidebar() {
           <Dropdown isOpen={isProfileOpen} onOpenChange={setIsProfileOpen}>
             <DropdownTrigger
               aria-label="Account menu"
-              className={cx(
-                "flex w-full items-center rounded-lg text-left hover:bg-background-secondary-hover",
-                collapsed ? "justify-center" : "gap-2 p-1",
-              )}
+              className="flex h-9 w-full items-center gap-2 rounded-lg p-0 text-left hover:bg-background-secondary-hover"
             >
-              <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-100 text-body-medium font-semibold text-blue-700 dark:bg-blue-950 dark:text-blue-200">
-                {user?.photoURL ? (
-                  <img src={user.photoURL} alt="" className="size-full object-cover" />
-                ) : (
-                  initial
-                )}
-              </span>
+              <div className="flex size-9 shrink-0 items-center justify-center">
+                <span className="flex size-7 items-center justify-center overflow-hidden rounded-full bg-blue-100 text-body-medium font-semibold text-blue-700 dark:bg-blue-950 dark:text-blue-200">
+                  {user?.photoURL ? (
+                    <img src={user.photoURL} alt="" className="size-full object-cover" />
+                  ) : (
+                    initial
+                  )}
+                </span>
+              </div>
               <Collapsible collapsed={collapsed}>
                 <span className="flex min-w-0 flex-1 items-center gap-1">
                   <span className="min-w-0 flex-1">

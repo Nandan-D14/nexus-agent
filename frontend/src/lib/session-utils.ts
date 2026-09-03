@@ -27,8 +27,28 @@ import { coerceAskUserOptions } from "@/lib/ask-user-options";
 
 export type PermissionDecision = "approved" | "denied" | "timed_out";
 
+export const DEFAULT_ATTACHMENT_PROMPT = "Please review the attached file(s).";
+
+/** Durable/history run statuses that mean a worker may still be executing. */
+export const INFLIGHT_RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "cancelling",
+  "waiting_approval",
+]);
+
+export function isInflightRunStatus(status: string | null | undefined): boolean {
+  return Boolean(status && INFLIGHT_RUN_STATUSES.has(status));
+}
+
 export type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number }
+  | {
+      kind: "message";
+      role: "user" | "agent";
+      text: string;
+      ts: number;
+      attachments?: UploadedInputFile[];
+    }
   | { kind: "event"; type: string; ts: number; [key: string]: unknown }
   | {
       kind: "permission";
@@ -239,13 +259,59 @@ export function upsertRunArtifact(prev: RunArtifact[], nextArtifact: RunArtifact
   return updated;
 }
 
+export function parseUploadedFiles(value: unknown): UploadedInputFile[] {
+  if (!Array.isArray(value)) return [];
+  const files: UploadedInputFile[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    if (!name && !path) continue;
+    const previewUrl = typeof record.previewUrl === "string" ? record.previewUrl : undefined;
+    files.push({
+      artifact_id: typeof record.artifact_id === "string" ? record.artifact_id : undefined,
+      name: name || path.split("/").pop() || "file",
+      path,
+      mime_type: typeof record.mime_type === "string" ? record.mime_type : null,
+      size: typeof record.size === "number" ? record.size : null,
+      drive_status: typeof record.drive_status === "string" ? record.drive_status : null,
+      drive_file_id: typeof record.drive_file_id === "string" ? record.drive_file_id : null,
+      drive_web_view_link: typeof record.drive_web_view_link === "string" ? record.drive_web_view_link : null,
+      drive_folder_path: typeof record.drive_folder_path === "string" ? record.drive_folder_path : null,
+      previewUrl,
+    });
+  }
+  return files;
+}
+
+export function userVisibleCaption(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed === DEFAULT_ATTACHMENT_PROMPT) return "";
+  return text;
+}
+
+export function uploadedFilesForTransport(files: UploadedInputFile[]): UploadedInputFile[] {
+  return files
+    .filter((file) => !file.uploading)
+    .map((file) => {
+      const { previewUrl: _previewUrl, uploading: _uploading, ...rest } = file;
+      return rest;
+    });
+}
+
+export function hasPendingComposerUpload(files: UploadedInputFile[], isUploadingFile = false): boolean {
+  return isUploadingFile || files.some((file) => file.uploading);
+}
+
 export function normalizePendingTurnInput(value: unknown): PendingTurnInput | null {
   if (!value || typeof value !== "object") {
     return null;
   }
   const record = value as Record<string, unknown>;
+  const uploadedFiles = parseUploadedFiles(record.uploadedFiles);
   const text = typeof record.text === "string" ? record.text.trim() : "";
-  if (!text) {
+  if (!text && uploadedFiles.length === 0) {
     return null;
   }
   const connectorIds = Array.isArray(record.connectorIds)
@@ -254,10 +320,12 @@ export function normalizePendingTurnInput(value: unknown): PendingTurnInput | nu
   const toolIds = Array.isArray(record.toolIds)
     ? record.toolIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
-  const uploadedFiles = Array.isArray(record.uploadedFiles)
-    ? record.uploadedFiles.filter((item): item is UploadedInputFile => Boolean(item && typeof item === "object"))
-    : [];
-  return { text, connectorIds, toolIds, uploadedFiles };
+  return {
+    text: text || DEFAULT_ATTACHMENT_PROMPT,
+    connectorIds,
+    toolIds,
+    uploadedFiles,
+  };
 }
 
 export function upsertRunStep(prev: RunStep[], nextStep: RunStep): RunStep[] {
@@ -422,16 +490,19 @@ export function mapStoredMessagesToChatItems(
         role: "user",
         text: message.text,
         ts,
+        attachments: parseUploadedFiles(message.attachments),
       });
       continue;
     }
 
     if (message.role === "user" || message.role === "agent") {
+      const attachments = parseUploadedFiles(message.attachments);
       items.push({
         kind: "message",
         role: message.role,
         text: message.text,
         ts,
+        ...(attachments.length > 0 ? { attachments } : {}),
       });
     }
   }
@@ -916,7 +987,17 @@ export function reduceWorkingLogMessage(
     case "agent_stream_end":
       return { chatItems: prevChatItems };
 
-    case "error":
+    case "error": {
+      const last = prevChatItems[prevChatItems.length - 1];
+      if (
+        last &&
+        last.kind === "event" &&
+        last.type === "error" &&
+        last.message === msg.message &&
+        last.code === msg.code
+      ) {
+        return { chatItems: prevChatItems };
+      }
       return {
         chatItems: [
           ...prevChatItems,
@@ -930,6 +1011,32 @@ export function reduceWorkingLogMessage(
           },
         ],
       };
+    }
+
+    case "app_preview": {
+      const url = typeof msg.url === "string" ? msg.url.trim() : "";
+      if (!url) {
+        return { chatItems: prevChatItems };
+      }
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "event",
+            type: "app_preview",
+            url,
+            port: typeof msg.port === "number" ? msg.port : undefined,
+            title:
+              typeof msg.title === "string" && msg.title.trim()
+                ? msg.title
+                : "App preview",
+            workspace_path:
+              typeof msg.workspace_path === "string" ? msg.workspace_path : "",
+            ts,
+          },
+        ],
+      };
+    }
 
     // Skipped on purpose (history / REST / ephemeral / page-owned side effects):
     // transcript, generative_ui, template_draft, artifact_created, run_status, step_*,

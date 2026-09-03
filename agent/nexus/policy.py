@@ -16,8 +16,12 @@ PolicyAction = Literal["allow", "require_approval", "deny"]
 _EXTERNAL_SIDE_EFFECT_TOOLS = {
     "gmail_send",
     "calendar_create",
+    "calendar_update",
+    "calendar_delete",
     "tasks_create",
     "github_create_issue",
+    "github_create_repo",
+    "github_push",
     "vyora_start_call",
     "upload_drive_file",
     "create_drive_doc",
@@ -138,6 +142,12 @@ def evaluate_tool_policy(
                 "Command can modify or destroy system state.",
                 "high",
             )
+        if re.search(r"(?is)\bgit\s+push\b", command):
+            return ToolPolicyDecision(
+                "require_approval",
+                "git push publishes to a remote repository.",
+                "high",
+            )
         return ToolPolicyDecision("allow", "Low-risk shell command.", "medium")
 
     if normalized_tool in _EXTERNAL_SIDE_EFFECT_TOOLS:
@@ -156,7 +166,7 @@ def evaluate_tool_policy(
 
     if mode == "manual" and normalized_tool.startswith(("gmail_", "calendar_", "tasks_", "github_", "drive_")):
         # Only gate connector calls that MODIFY data. Read-only connector reads
-        # (gmail_read, gmail_search, calendar_list, read_drive_file, github_read_*,
+        # (gmail_read, gmail_search, calendar_list, calendar_get, read_drive_file, github_read_*,
         # etc.) are allowed without a per-call prompt so a batch of reads in one
         # turn does not spam approvals. Mutating verbs still require approval.
         # (Explicit mutating tools are already caught by _EXTERNAL_SIDE_EFFECT_TOOLS

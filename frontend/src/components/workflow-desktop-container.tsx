@@ -9,20 +9,25 @@ import { useState, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentWorkflowPanel, WorkflowRun } from "./agent-workflow-panel";
 import { DesktopPanel, type AgentVisualAction } from "./desktop-panel";
-import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen } from "lucide-react";
+import { Activity, Monitor, Loader2, FileText, Folder, LayoutGrid, Terminal, FileCode, BookOpen, Globe, RotateCcw } from "lucide-react";
 import { OutputsPanel } from "./outputs-panel";
 import { WorkspacePanel } from "./workspace-panel";
 import { SandboxFilesPanel } from "./sandbox-files-panel";
 import { SandboxTerminalPane } from "./session/sandbox-terminal-pane";
 import { SandboxEditorPane } from "./session/sandbox-editor-pane";
+import { AppPreviewPane } from "./session/app-preview-pane";
 import { SessionCanvas } from "./session/session-canvas";
-import type { EditorSessionState, TerminalSessionState } from "@/lib/sandbox-session";
+import type {
+  AppPreviewState,
+  EditorSessionState,
+  TerminalSessionState,
+} from "@/lib/sandbox-session";
 import { RunArtifact } from "@/lib/message-types";
 import { Tabs, Tooltip } from "@heroui/react";
 import { useSessionCanvas } from "@/lib/session-canvas-context";
 import { isCanvasArtifact } from "@/lib/session-canvas";
 
-export type Tab = "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "artifacts" | "files" | "workspace";
+export type Tab = "canvas" | "workflow" | "desktop" | "terminal" | "editor" | "preview" | "artifacts" | "files" | "workspace";
 
 export type UiActionMessage = {
   type: "ui_action";
@@ -48,6 +53,11 @@ type Props = {
   isFullscreen?: boolean;
   terminalSession?: TerminalSessionState | null;
   editorSession?: EditorSessionState | null;
+  appPreview?: AppPreviewState | null;
+  filesRefreshKey?: number;
+  onOpenWorkspaceFile?: (state: EditorSessionState) => void;
+  sandboxRestarting?: boolean;
+  onRestartSandbox?: () => void;
 };
 
 export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
@@ -67,6 +77,11 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
   isFullscreen,
   terminalSession = null,
   editorSession = null,
+  appPreview = null,
+  filesRefreshKey = 0,
+  onOpenWorkspaceFile,
+  sandboxRestarting = false,
+  onRestartSandbox,
 }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
   const [autoRouteTab, setAutoRouteTab] = useState<Tab | null>(null);
@@ -116,16 +131,18 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
         ? "Terminal activity detected"
         : autoRouteTab === "editor"
           ? "Editing file"
-          : autoRouteTab === "canvas"
+          : autoRouteTab === "preview"
+            ? "App preview ready"
+            : autoRouteTab === "canvas"
           ? "Document ready"
           : autoRouteTab === "workflow"
             ? "Workflow activity detected"
             : null;
 
   return (
-    <div className="h-full flex flex-col bg-[#0a0a0c] rounded-xl border border-zinc-800 overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden bg-background-full">
       {/* Clean Tab Bar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800/50 bg-transparent shadow-sm z-10 relative">
+      <div className="relative z-10 flex items-center justify-between border-b border-separator-border bg-background-full px-4 py-2">
         <Tabs 
           selectedKey={activeTab} 
           onSelectionChange={(key) => handleTabChange(key as Tab)}
@@ -137,7 +154,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                   <Tooltip delay={0} closeDelay={0}>
                     <Tooltip.Trigger>
                       <div className="relative flex items-center justify-center">
-                        <BookOpen className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                        <BookOpen className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                         {canvasCount > 0 && (
                           <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
                             {canvasCount}
@@ -157,7 +174,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <Activity className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <Activity className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                       {workflowRun && workflowRun.steps.length > 0 && (
                         <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
                           {workflowRun.steps.length}
@@ -179,7 +196,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <Monitor className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <Monitor className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                       {isStreamActive && (
                         <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
                           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
@@ -199,7 +216,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <Terminal className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <Terminal className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                       {terminalSession?.running && (
                         <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-cyan-500 rounded-full" />
                       )}
@@ -216,7 +233,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <FileCode className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <FileCode className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                       {editorSession?.running && (
                         <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-amber-400 rounded-full" />
                       )}
@@ -229,11 +246,31 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tabs.Indicator className="bg-zinc-700/80" />
               </Tabs.Tab>
 
+              <Tabs.Tab id="preview" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
+                <Tooltip delay={0} closeDelay={0}>
+                  <Tooltip.Trigger>
+                    <div className="relative flex items-center justify-center">
+                      <Globe className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
+                      {appPreview && !appPreview.expired && (
+                        <span className="absolute -top-1 -right-1 flex h-1.5 w-1.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        </span>
+                      )}
+                    </div>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                    Preview
+                  </Tooltip.Content>
+                </Tooltip>
+                <Tabs.Indicator className="bg-zinc-700/80" />
+              </Tabs.Tab>
+
               <Tabs.Tab id="artifacts" className="flex items-center justify-center px-3 py-2 outline-none cursor-pointer">
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <FileText className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <FileText className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                       {artifacts.length > 0 && (
                         <span className="absolute -top-2 -right-3 px-[4px] py-[1px] rounded-md bg-zinc-800 text-zinc-300 text-[9px] font-semibold leading-none border border-zinc-700/50">
                           {artifacts.length}
@@ -252,7 +289,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <Folder className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <Folder className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                     </div>
                   </Tooltip.Trigger>
                   <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
@@ -266,7 +303,7 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
                 <Tooltip delay={0} closeDelay={0}>
                   <Tooltip.Trigger>
                     <div className="relative flex items-center justify-center">
-                      <LayoutGrid className="w-4 h-4 text-zinc-400 hover:text-zinc-200 transition-colors" />
+                      <LayoutGrid className="w-4 h-4 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" />
                     </div>
                   </Tooltip.Trigger>
                   <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
@@ -279,24 +316,48 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
           </Tabs.ListContainer>
         </Tabs>
 
-        {/* Agent Activity */}
-        <AnimatePresence>
-          {agentReason && (
-            <motion.div
-              initial={{ opacity: 0, x: 10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 10 }}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700"
-            >
-              <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-              <span className="text-xs text-zinc-300">{agentReason}</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="flex items-center gap-2">
+          {onRestartSandbox ? (
+            <Tooltip delay={0} closeDelay={0}>
+              <Tooltip.Trigger>
+                <button
+                  type="button"
+                  onClick={onRestartSandbox}
+                  disabled={sandboxRestarting}
+                  aria-label="Restart sandbox"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-40"
+                >
+                  {sandboxRestarting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                  Restart
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Content className="px-2 py-1 text-xs font-medium rounded-md bg-zinc-900 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 border border-zinc-800 dark:border-zinc-700 shadow-md">
+                Restart sandbox
+              </Tooltip.Content>
+            </Tooltip>
+          ) : null}
+          <AnimatePresence>
+            {agentReason && (
+              <motion.div
+                initial={{ opacity: 0, x: 10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 10 }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700"
+              >
+                <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+                <span className="text-xs text-zinc-300">{agentReason}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
 
       {/* Content Area */}
-      <div className="flex-1 relative overflow-hidden bg-[#0a0a0c]">
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-background-full">
         <AnimatePresence mode="wait">
           {activeTab === "canvas" && (
             <motion.div
@@ -399,6 +460,23 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
             </motion.div>
           )}
 
+          {activeTab === "preview" && (
+            <motion.div
+              key="preview"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0"
+            >
+              <AppPreviewPane
+                preview={appPreview}
+                restarting={sandboxRestarting}
+                onRestartSandbox={onRestartSandbox}
+              />
+            </motion.div>
+          )}
+
           {activeTab === "artifacts" && (
             <motion.div
               key="artifacts"
@@ -421,7 +499,12 @@ export const WorkflowDesktopContainer = memo(function WorkflowDesktopContainer({
               transition={{ duration: 0.15 }}
               className="absolute inset-0"
             >
-              <SandboxFilesPanel sessionId={sessionId} active={activeTab === "files"} />
+              <SandboxFilesPanel
+                sessionId={sessionId}
+                active={activeTab === "files"}
+                refreshKey={filesRefreshKey}
+                onOpenFile={onOpenWorkspaceFile}
+              />
             </motion.div>
           )}
 

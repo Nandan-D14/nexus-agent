@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import logging
+import re
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
@@ -27,17 +28,41 @@ from nexus.usage import (
 logger = logging.getLogger(__name__)
 
 
-# Instruction used when the model finished a turn on tool calls without ever
-# emitting a closing answer. It is nudged to synthesize from what it already
-# gathered instead of calling more tools.
+def extract_answer_from_reasoning(text: str) -> str:
+    """Extract a usable user response from reasoning tokens when no explicit answer part was emitted."""
+    if not text or not text.strip():
+        return ""
+    # Strip any <think>...</think> tags if present
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    if cleaned and cleaned != text.strip():
+        return cleaned
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return text.strip()
+    for p in reversed(paragraphs):
+        lower = p.lower()
+        if len(p) > 20 and not lower.startswith(("let's", "i need to", "wait,", "first,", "thinking", "the user")):
+            return p
+    return paragraphs[-1]
+
+
+# Instruction used when the model finished a turn with no user-visible answer
+# (tool-only, or reasoning-only thinking parts). Keep working if the user asked
+# to create/build something; otherwise write the reply now.
 _FINAL_SYNTHESIS_INSTRUCTION = (
-    "You have gathered enough information from the previous tool results. "
-    "Do NOT call any tools. Using only the information already collected, "
-    "write the final answer or summary for the user now."
+    "The previous turn produced no user-visible reply (reasoning-only or empty). "
+    "Continue the user's last request now. If the latest user text is a short "
+    "confirmation like 'continue', 'create it', or 'do it', finish the previous "
+    "substantial request in this conversation — do not treat the confirmation "
+    "as the whole task. If they asked to create, build, or publish something "
+    "that is not done, use tools to do the work "
+    "(write_workspace_file, terminal_worker, publish_app_preview, github_push). "
+    "Then write a direct plain text status to the user. Never finish with empty text or "
+    "internal reasoning only. Do not enclose your answer in thought or reasoning tags."
 )
-# Small, bounded turn cap for the forced synthesis pass so a stray tool call
-# cannot re-open an unbounded loop.
-_SYNTHESIS_TURN_CAP = 2
+# Bound the forced continuation so a stray loop cannot run forever. 20 tool
+# rounds is enough to resume a create/build after a reasoning-only stall.
+_SYNTHESIS_TURN_CAP = 20
 
 
 @dataclass
@@ -107,6 +132,7 @@ async def run_agent_turn(
     runtime_config: SessionRuntimeConfig,
     event_callback=None,
     max_turns: int | None = None,
+    synthesis_instruction: str | None = None,
 ) -> AgentTurnResult:
     """Execute one planner turn and return its final text and usage."""
     adk_session = await session_service.get_session(
@@ -137,6 +163,7 @@ async def run_agent_turn(
         """
         final_text: str | None = None
         last_text: str | None = None
+        last_reasoning_text: str | None = None
         rounds = 0
         response_count = 0
         hit_cap = False
@@ -180,8 +207,11 @@ async def run_agent_turn(
                         # or reasoning fields). Do NOT apply the reasoning_is_text
                         # blanket here: that heuristic is for routing the live
                         # think-log stream; final/last answer text is the answer.
-                        if getattr(part, "text", None) and not is_reasoning_part(part):
-                            last_text = part.text
+                        if getattr(part, "text", None):
+                            if is_reasoning_part(part):
+                                last_reasoning_text = part.text
+                            else:
+                                last_text = part.text
 
                 if (
                     event.is_final_response()
@@ -189,9 +219,12 @@ async def run_agent_turn(
                     and event.content.parts
                 ):
                     for part in event.content.parts:
-                        if part.text and not is_reasoning_part(part):
-                            final_text = part.text
-                            break
+                        if part.text:
+                            if is_reasoning_part(part):
+                                last_reasoning_text = part.text
+                            else:
+                                final_text = part.text
+                                break
 
                 if rounds >= turn_cap:
                     logger.warning(
@@ -220,7 +253,7 @@ async def run_agent_turn(
                     )
             else:
                 raise
-        return final_text, last_text, rounds, response_count, hit_cap
+        return final_text, last_text, last_reasoning_text, rounds, response_count, hit_cap
 
     content = types.Content(
         role="user",
@@ -229,6 +262,7 @@ async def run_agent_turn(
     (
         final_response,
         last_text,
+        last_reasoning_text,
         turn_count,
         function_response_count,
         hit_turn_cap,
@@ -245,24 +279,23 @@ async def run_agent_turn(
     ):
         final_response = last_text
 
-    # Forced final synthesis: the model ran tools but produced no closing text.
+    # Forced final synthesis: empty answer after tools OR after a reasoning-only
+    # turn with no user-visible text (thinking models often emit thought parts
+    # and then stop, which used to skip this pass and fail the turn).
     forced_synthesis_used = False
-    if (
-        settings.force_final_synthesis
-        and not (final_response and final_response.strip())
-        and (turn_count > 0 or function_response_count > 0)
-    ):
+    if settings.force_final_synthesis and not (final_response and final_response.strip()):
         forced_synthesis_used = True
         logger.warning(
             "No final text after %d tool round(s); forcing synthesis turn for session %s",
             turn_count,
             session_id,
         )
+        instruction = (synthesis_instruction or "").strip() or _FINAL_SYNTHESIS_INSTRUCTION
         synthesis_message = types.Content(
             role="user",
-            parts=[types.Part(text=_FINAL_SYNTHESIS_INSTRUCTION)],
+            parts=[types.Part(text=instruction)],
         )
-        synth_final, synth_last, _, _, _ = await _consume(
+        synth_final, synth_last, synth_reasoning, _, _, _ = await _consume(
             synthesis_message,
             _SYNTHESIS_TURN_CAP,
         )
@@ -270,6 +303,19 @@ async def run_agent_turn(
             final_response = synth_final
         elif synth_last and synth_last.strip() and not looks_like_worker_envelope(synth_last):
             final_response = synth_last
+        elif not (final_response and final_response.strip()):
+            reasoning_candidate = synth_reasoning or last_reasoning_text
+            if reasoning_candidate and reasoning_candidate.strip():
+                extracted = extract_answer_from_reasoning(reasoning_candidate)
+                if extracted and not looks_like_worker_envelope(extracted):
+                    logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
+                    final_response = extracted
+
+    if not (final_response and final_response.strip()) and last_reasoning_text:
+        extracted = extract_answer_from_reasoning(last_reasoning_text)
+        if extracted and not looks_like_worker_envelope(extracted):
+            logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
+            final_response = extracted
 
     return AgentTurnResult(
         response=final_response,

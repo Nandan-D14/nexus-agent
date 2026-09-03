@@ -129,11 +129,12 @@ class GuardedWriteTests(IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 
-def _part(function_call=None, function_response=None, text=None):
+def _part(function_call=None, function_response=None, text=None, thought=False):
     return SimpleNamespace(
         function_call=function_call,
         function_response=function_response,
         text=text,
+        thought=thought,
     )
 
 
@@ -152,8 +153,10 @@ class _FakeRunner:
     def __init__(self, scripts):
         self._scripts = scripts
         self.calls = 0
+        self.messages = []
 
     async def run_async(self, *, user_id, session_id, new_message):
+        self.messages.append(new_message)
         events = self._scripts[self.calls]
         self.calls += 1
         for event in events:
@@ -197,6 +200,31 @@ class RunAgentTurnTests(IsolatedAsyncioTestCase):
             result = await self._run(runner)
         self.assertEqual(result.response, "Here is your summary.")
         self.assertEqual(runner.calls, 2)
+
+    async def test_forced_synthesis_when_reasoning_only_without_tools(self) -> None:
+        scripts = [
+            [_FakeEvent([_part(text="internal plan", thought=True)], final=True)],
+            [_FakeEvent([_part(text="Building the landing page now.")], final=True)],
+        ]
+        runner = _FakeRunner(scripts)
+        with patch.object(settings, "force_final_synthesis", True):
+            result = await self._run(runner)
+        self.assertEqual(result.response, "Building the landing page now.")
+        self.assertEqual(runner.calls, 2)
+
+    async def test_custom_synthesis_instruction_is_used(self) -> None:
+        scripts = [
+            [_FakeEvent([_part(text="internal plan", thought=True)], final=True)],
+            [_FakeEvent([_part(text="Building the landing page now.")], final=True)],
+        ]
+        runner = _FakeRunner(scripts)
+        with patch.object(settings, "force_final_synthesis", True):
+            result = await self._run(
+                runner,
+                synthesis_instruction="Outstanding request:\nTembo landing page",
+            )
+        self.assertEqual(result.response, "Building the landing page now.")
+        self.assertIn("Tembo landing page", runner.messages[1].parts[0].text)
 
     async def test_happy_path_is_unchanged(self) -> None:
         scripts = [[_FakeEvent([_part(text="Direct answer.")], final=True)]]

@@ -11,7 +11,7 @@ from PIL import Image
 
 from nexus.config import settings
 from nexus.resilience import retry_sync
-from nexus.sandbox import SandboxDeadError, _coerce_exit_code
+from nexus.sandbox import SandboxDeadError, _coerce_exit_code, is_dead_sandbox_error
 from nexus.sandbox_components.base import SandboxComponent
 
 
@@ -44,11 +44,9 @@ class SandboxDisplay(SandboxComponent):
             try:
                 return bytes(self._sandbox.screenshot())
             except Exception as e:
-                if "not found" in str(e).lower() or "timeout" in str(e).lower():
-                    self._sandbox = None
-                    raise SandboxDeadError(
-                        "Sandbox timed out while taking screenshot."
-                    ) from e
+                if is_dead_sandbox_error(e, include_timeout=True):
+                    self.mark_dead()
+                    raise SandboxDeadError() from e
                 raise
 
         return retry_sync(

@@ -118,6 +118,40 @@ class ContextTrimmerTests(TestCase):
             )
             self.assertFalse(has_fr, "orphan tool response leaked into trimmed context")
 
+    def test_groq_budget_prunes_mcp_tools_on_first_turn(self):
+        with patch.object(settings, "model_context_limit", 262144):
+            fat = types.FunctionDeclaration(
+                name="mcp__exa__web_search_exa",
+                description="x" * 20000,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "q": {"type": "string", "description": "y" * 4000},
+                    },
+                },
+            )
+            core = types.FunctionDeclaration(
+                name="terminal_worker",
+                description="Run shell work",
+            )
+            req = _request([_text_content("user", "make xlsx")])
+            req.config.tools = [
+                types.Tool(function_declarations=[fat]),
+                types.Tool(function_declarations=[core]),
+            ]
+            runtime = SimpleNamespace(
+                llm_provider="groq",
+                llm_api_base="https://api.groq.com/openai/v1",
+            )
+            make_context_trimmer(runtime)(None, req)
+            names = [
+                decl.name
+                for tool in (req.config.tools or [])
+                for decl in (tool.function_declarations or [])
+            ]
+            self.assertIn("terminal_worker", names)
+            self.assertNotIn("mcp__exa__web_search_exa", names)
+
 
 class GmailSlimTests(TestCase):
     def _raw_message(self, body: str):

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from nexus.auth import AuthenticatedUser, require_current_user
@@ -19,7 +20,12 @@ from nexus.dependencies import (
 )
 from nexus.policy import evaluate_tool_policy, normalize_autonomy_mode
 from nexus.production_tasks import DurableApproval, DurableTask, DurableTaskEvent, DurableTaskRun
-from nexus.storage import download_artifact_as_data_uri, generate_artifact_signed_url
+from nexus.storage import (
+    download_artifact_as_data_uri,
+    download_artifact_bytes,
+    generate_artifact_signed_url,
+    parse_gcs_object_url,
+)
 
 router = APIRouter()
 
@@ -386,6 +392,25 @@ async def preview_policy(
     }
 
 
+def _artifact_gcs_location(artifact) -> tuple[str, str] | None:
+    metadata = artifact.metadata or {}
+    bucket = metadata.get("gcs_bucket")
+    blob = metadata.get("gcs_blob")
+    if isinstance(bucket, str) and bucket.strip() and isinstance(blob, str) and blob.strip():
+        return bucket.strip(), blob.strip()
+    return parse_gcs_object_url(getattr(artifact, "url", None) or "")
+
+
+def _content_disposition_filename(artifact, blob_name: str | None = None) -> str:
+    raw = (
+        getattr(artifact, "title", None)
+        or (blob_name.split("/")[-1] if blob_name else "")
+        or "artifact"
+    )
+    cleaned = "".join(ch for ch in str(raw) if ch not in {"\r", "\n", '"'}).strip()
+    return cleaned[:180] or "artifact"
+
+
 @router.get("/api/v1/artifacts/{artifact_id}/download")
 async def download_artifact_by_id(
     artifact_id: str,
@@ -404,12 +429,11 @@ async def download_artifact_by_id(
             "expires_in_seconds": 900,
         }
 
-    metadata = artifact.metadata or {}
-    bucket = metadata.get("gcs_bucket")
-    blob = metadata.get("gcs_blob")
+    location = _artifact_gcs_location(artifact)
 
-    # If artifact has GCS metadata, try to fetch it
-    if isinstance(bucket, str) and isinstance(blob, str):
+    # If artifact has GCS metadata or a GCS URL, try to fetch it
+    if location:
+        bucket, blob = location
         url = generate_artifact_signed_url(bucket_name=bucket, blob_name=blob)
         if not url:
             # Signed URL failed — fall back to downloading the blob directly
@@ -436,5 +460,41 @@ async def download_artifact_by_id(
         detail="This artifact was created before cloud storage was configured. "
                "The original sandbox has expired and the file data is no longer available. "
                "Future artifacts will be stored durably."
+    )
+
+
+@router.get("/api/v1/artifacts/{artifact_id}/content")
+async def download_artifact_content(
+    artifact_id: str,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    """Same-origin byte proxy so the browser never fetch()es GCS (no CORS)."""
+    history_repo = get_history_repository()
+    artifact = await history_repo.get_artifact_for_owner(user.uid, artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    location = _artifact_gcs_location(artifact)
+    if location:
+        bucket, blob = location
+        payload = download_artifact_bytes(bucket_name=bucket, blob_name=blob)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Artifact file not found")
+        content, mime = payload
+        filename = _content_disposition_filename(artifact, blob)
+        return Response(
+            content=content,
+            media_type=mime,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Cache-Control": "private, max-age=60",
+            },
+        )
+
+    raise HTTPException(
+        status_code=404,
+        detail="This artifact was created before cloud storage was configured. "
+               "The original sandbox has expired and the file data is no longer available. "
+               "Future artifacts will be stored durably.",
     )
 

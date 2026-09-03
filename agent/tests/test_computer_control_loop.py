@@ -171,6 +171,52 @@ def test_completion_rejects_missing_artifact_and_unresolved_error() -> None:
     assert failed.retryable is True
 
 
+def test_completion_skips_expired_github_push_approval() -> None:
+    ledger = ActionLedger()
+    _record(
+        ledger,
+        action_id="1",
+        tool="github_push",
+        status="error",
+        error_code="APPROVAL_EXPIRED",
+        retryable=False,
+    )
+    _record(
+        ledger,
+        action_id="2",
+        tool="publish_app_preview",
+        status="success",
+        artifacts=[{"path": "index.html", "kind": "app_preview"}],
+    )
+    result = verify_completion(
+        request="Create a modern marketing website",
+        final_response="The landing page is live in preview.",
+        ledger=ledger,
+    )
+    assert result.verified is True
+
+
+def test_completion_still_blocks_live_approval_required() -> None:
+    ledger = ActionLedger()
+    _record(
+        ledger,
+        action_id="1",
+        tool="github_push",
+        status="approval_required",
+        error_code="APPROVAL_REQUIRED",
+        retryable=True,
+        remaining_work=["Approve the exact blocked github_push action."],
+    )
+    result = verify_completion(
+        request="Create a modern marketing website",
+        final_response="The landing page is live in preview.",
+        ledger=ledger,
+    )
+    assert result.verified is False
+    assert result.status == "blocked"
+    assert result.error_code == "APPROVAL_REQUIRED"
+
+
 def test_completion_requires_real_final_response() -> None:
     result = verify_completion(
         request="Explain the architecture",

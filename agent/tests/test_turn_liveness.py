@@ -255,5 +255,31 @@ async def test_turn_timeout_records_result_and_settles_durable_run(
     assert finished[0]["run_id"] == "run_1"
 
 
+@pytest.mark.asyncio
+async def test_blocked_waiting_approval_does_not_emit_turn_not_settled(
+    monkeypatch,
+) -> None:
+    orch, sent = _orchestrator()
+
+    async def blocked(*_args, **_kwargs):
+        return {
+            "status": "blocked",
+            "summary": "github_push requires approval",
+            "verification": {"error_code": "APPROVAL_REQUIRED"},
+        }
+
+    monkeypatch.setattr(orch, "_create_step", _async_none)
+    monkeypatch.setattr(orch, "_fail_unfinished_tool_steps", _async_none)
+    monkeypatch.setattr(orch, "_fail_step", _async_none)
+    monkeypatch.setattr(orch, "_bind_workspace_context", lambda: None)
+    monkeypatch.setattr(orch, "_run_agent", blocked)
+
+    await orch._run_agent_tracked("prompt", source="typed")
+
+    codes = [event.get("code") for event in sent if event.get("type") == "error"]
+    assert "TURN_NOT_SETTLED" not in codes
+    assert _statuses(sent)[-1] == "waiting_approval"
+
+
 async def _async_none(*_args, **_kwargs):
     return None

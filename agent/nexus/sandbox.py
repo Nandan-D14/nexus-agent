@@ -34,8 +34,57 @@ def _coerce_exit_code(value: object) -> int:
         return -1
 
 
+SANDBOX_RESTART_MESSAGE = (
+    "Sandbox is not running. It will be restarted in this session; "
+    "retry the command after reconnect. Do not start a new session."
+)
+
+_DEAD_SANDBOX_MARKERS = (
+    "sandbox not found",
+    "sandbox was not found",
+    "sandbox is not found",
+    "sandbox not running",
+    "sandbox is not running",
+    "sandbox has been killed",
+    "sandbox has been paused",
+    "sandbox does not exist",
+    "no sandbox found",
+    "404 not found",
+    "status code 404",
+    "not found for url",
+)
+
+
+def is_dead_sandbox_error(
+    exc: BaseException | str,
+    *,
+    include_timeout: bool = False,
+) -> bool:
+    """Return True when an E2B/API error means the remote VM is gone."""
+    if isinstance(exc, SandboxDeadError):
+        return True
+    status = getattr(exc, "status_code", None) if not isinstance(exc, str) else None
+    if status is None and not isinstance(exc, str):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 404:
+        return True
+    if not isinstance(exc, str) and "notfound" in type(exc).__name__.lower():
+        return True
+    text = str(exc).lower()
+    if any(marker in text for marker in _DEAD_SANDBOX_MARKERS):
+        return True
+    if include_timeout and (
+        "timeout" in text or "timed out" in text or "deadline exceeded" in text
+    ):
+        return True
+    return False
+
+
 class SandboxDeadError(RuntimeError):
     """Raised when the E2B sandbox has timed out or been destroyed."""
+
+    def __init__(self, message: str = SANDBOX_RESTART_MESSAGE) -> None:
+        super().__init__(message)
 
 
 class SandboxSweeper:
@@ -104,9 +153,22 @@ class SandboxSweeper:
             logger.info("Sandbox sweep complete. No orphans found.")
 
 
+_INVALID_SANDBOX_IDS = frozenset({"true", "false", "none", "null"})
+
+
+def is_valid_sandbox_id(value: object) -> bool:
+    """Return True for a real E2B sandbox id, not SDK booleans serialized as strings."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if len(text) < 8 or text.lower() in _INVALID_SANDBOX_IDS:
+        return False
+    return True
+
+
 def _sandbox_info_id(info: object) -> str | None:
     value = getattr(info, "sandbox_id", None) or getattr(info, "id", None)
-    return value if isinstance(value, str) and value else None
+    return value if is_valid_sandbox_id(value) else None
 
 
 def _paginator_items(paginator: object) -> list[object]:
@@ -231,21 +293,98 @@ class SandboxManager:
     def stream_url(self) -> Optional[str]:
         return self._stream_url
 
+    def get_preview_url(self, port: int) -> str:
+        """Public HTTPS URL for a port listening inside the sandbox."""
+        self._require_sandbox()
+        try:
+            host = str(self._sandbox.get_host(int(port)) or "").strip()
+        except Exception as exc:
+            self._raise_if_dead(exc)
+            raise
+        if not host:
+            raise RuntimeError(f"Sandbox did not return a host for port {port}")
+        if host.startswith("http://") or host.startswith("https://"):
+            return host
+        return f"https://{host}"
+
+    def probe_listening_port(self, port: int, *, timeout: int = 4) -> bool:
+        """Return True if something is accepting TCP connections on 127.0.0.1:port."""
+        self._require_sandbox()
+        script = (
+            "import socket, sys\n"
+            f"port = {int(port)}\n"
+            "sock = socket.socket()\n"
+            "sock.settimeout(3)\n"
+            "try:\n"
+            "    sock.connect(('127.0.0.1', port))\n"
+            "    print('ok')\n"
+            "except Exception as exc:\n"
+            "    print('fail:' + type(exc).__name__)\n"
+            "    sys.exit(1)\n"
+            "finally:\n"
+            "    sock.close()\n"
+        )
+        result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=max(timeout, 5))
+        return _coerce_exit_code(result.get("exit_code", -1)) == 0
+
+    def find_listening_web_ports(self) -> list[int]:
+        """Find common web dev ports accepting TCP connections inside the sandbox."""
+        if self._sandbox is None:
+            return []
+        script = (
+            "import socket\n"
+            "found = []\n"
+            "for p in [5173, 3001, 3000, 8080, 8000, 5000, 4173, 8088, 80]:\n"
+            "    s = socket.socket()\n"
+            "    s.settimeout(0.3)\n"
+            "    try:\n"
+            "        s.connect(('127.0.0.1', p))\n"
+            "        found.append(p)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        s.close()\n"
+            "print(','.join(map(str, found)))\n"
+        )
+        try:
+            result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=5)
+            out = (result.get("stdout") or "").strip()
+            if not out:
+                return []
+            return [int(p.strip()) for p in out.split(",") if p.strip().isdigit()]
+        except Exception:
+            return []
+
+    def mark_dead(self) -> None:
+        """Drop a stale E2B client without attempting to kill the remote VM."""
+        if self._sandbox is not None or self._stream_url is not None:
+            logger.info("Dropping stale sandbox client (remote VM is gone)")
+        self._sandbox = None
+        self._stream_url = None
+
     def _require_sandbox(self) -> None:
         """Raise SandboxDeadError if sandbox is gone."""
         if self._sandbox is None:
-            raise SandboxDeadError(
-                "Sandbox is not running. It may have timed out. "
-                "Please end this session and create a new one."
-            )
+            raise SandboxDeadError()
 
-    def extend_timeout(self, timeout: int = 900) -> None:
-        """Best-effort extend sandbox lifetime."""
-        if self._sandbox:
-            try:
-                self._sandbox.set_timeout(timeout)
-            except Exception:
-                logger.debug("Failed to extend sandbox timeout", exc_info=True)
+    def _raise_if_dead(self, exc: BaseException) -> None:
+        """Mark the client dead and raise SandboxDeadError for remote-gone faults."""
+        if is_dead_sandbox_error(exc):
+            self.mark_dead()
+            raise SandboxDeadError() from exc
+
+    def extend_timeout(self, timeout: int | None = None) -> bool:
+        """Extend sandbox lifetime. Returns False and marks dead on failure."""
+        seconds = settings.sandbox_timeout_seconds if timeout is None else timeout
+        if not self._sandbox:
+            return False
+        try:
+            self._sandbox.set_timeout(seconds)
+            return True
+        except Exception:
+            logger.info("Failed to extend sandbox timeout; marking client dead", exc_info=True)
+            self.mark_dead()
+            return False
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -364,7 +503,7 @@ class SandboxManager:
         if settings.sandbox_template_id:
             logger.info("Skipping runtime provisioning; using pre-baked template %s", settings.sandbox_template_id)
         else:
-            libs = ["weasyprint", "openpyxl", "python-docx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
+            libs = ["weasyprint", "openpyxl", "python-docx", "python-pptx", "fpdf2", "markdown2", "pandas", "yfinance", "matplotlib", "seaborn"]
             cmd = f"pip install {' '.join(libs)}"
             try:
                 logger.info("Provisioning sandbox with libraries: %s", libs)
@@ -375,7 +514,7 @@ class SandboxManager:
             # Surface silent degradation: boot-time pip can fail without raising,
             # or packages may still be missing after a partial install.
             verify = self.run_command(
-                'python3 -c "import docx, openpyxl, fpdf, markdown2"',
+                'python3 -c "import docx, openpyxl, pptx, fpdf, markdown2"',
                 timeout=60,
             )
             if verify.get("exit_code") != 0:
@@ -383,30 +522,47 @@ class SandboxManager:
                     "Sandbox doc-generation dependencies missing after provisioning: %s",
                     verify.get("stderr") or verify.get("stdout") or verify,
                 )
+
+            # Pre-provision Node.js so web/react/vite projects work out of the box
+            # without triggering interactive sudo/curl policy approval prompts.
+            try:
+                node_check = self.run_command("command -v node", timeout=10)
+                if not (node_check.get("stdout") and str(node_check.get("stdout")).strip()):
+                    logger.info("Node.js missing in sandbox; installing Node.js 20...")
+                    self.run_command(
+                        "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs",
+                        timeout=180,
+                    )
+            except Exception as exc:
+                logger.warning("Node.js provisioning check failed (non-fatal): %s", exc)
         try:
             self.ensure_chromium_cdp()
         except Exception as exc:
             logger.warning("Chromium CDP provisioning failed: %s", exc)
 
-    def keep_alive(self, timeout: int = 900) -> None:
+    def keep_alive(self, timeout: int | None = None) -> bool:
         """Extend sandbox timeout."""
-        if self._sandbox:
-            self._sandbox.set_timeout(timeout)
+        return self.extend_timeout(timeout)
 
     def pause(self) -> str | None:
         """Pause the sandbox so it can be resumed later via ``connect``/``resume``.
 
-        Current E2B Desktop SDK exposes ``Sandbox.pause()`` which returns the
-        sandbox id. That id is what ``Sandbox.connect(id)`` resumes.
+        Current E2B Desktop SDK's ``Sandbox.pause()`` returns a boolean. Keep
+        the existing ``sandbox_id`` so the VM can be resumed later.
         """
         if not self._sandbox:
             return None
         try:
-            sandbox_id = self._sandbox.pause()
-            logger.info("Sandbox paused (id=%s)", sandbox_id)
+            existing_id = getattr(self._sandbox, "sandbox_id", None)
+            paused = self._sandbox.pause()
+            logger.info("Sandbox paused (id=%s, existing=%s)", paused, existing_id)
             self._sandbox = None
             self._stream_url = None
-            return str(sandbox_id) if sandbox_id else None
+            if is_valid_sandbox_id(existing_id):
+                return str(existing_id)
+            if is_valid_sandbox_id(paused):
+                return str(paused)
+            return None
         except Exception as exc:
             logger.warning("Sandbox pause failed: %s — destroying instead", exc)
             try:
@@ -424,12 +580,22 @@ class SandboxManager:
         """
         from e2b_desktop import Sandbox
 
+        if not is_valid_sandbox_id(sandbox_id):
+            raise ValueError(f"Invalid sandbox ID: {sandbox_id!r}")
         logger.info("Connecting to sandbox %s ...", sandbox_id)
         self._sandbox = Sandbox.connect(
             sandbox_id,
             api_key=self._e2b_api_key or None,
             timeout=settings.sandbox_timeout_seconds,
         )
+        if not hasattr(self._sandbox, "_Sandbox__vnc_server"):
+            try:
+                from e2b_desktop.main import _VNCServer
+                self._sandbox._Sandbox__vnc_server = _VNCServer(self._sandbox)
+                if not hasattr(self._sandbox, "_display"):
+                    self._sandbox._display = ":0"
+            except Exception as exc:
+                logger.warning("Could not initialize _VNCServer on resumed sandbox: %s", exc)
         self._sandbox.stream.start(require_auth=False)
         self._stream_url = self._sandbox.stream.get_url()
         self.ensure_chromium_cdp()
@@ -461,27 +627,33 @@ class SandboxManager:
 
     # -- Screen --------------------------------------------------------------
 
-    def run_command(self, command: str, timeout: int = 30, background: bool = False) -> dict:
+    def run_command(self, command: str, timeout: int = 30, background: bool = False, cwd: str | None = None) -> dict:
         """Run a shell command. Returns {stdout, stderr, exit_code}."""
         self._require_sandbox()
-        if background:
-            # Launch in background using nohup so it doesn't block
-            bg_cmd = f"nohup {command} > /dev/null 2>&1 & echo $!"
-            result = self._sandbox.commands.run(bg_cmd, timeout=10)
-            pid = (result.stdout or "").strip()
-            return {
-                "stdout": f"Started in background (PID: {pid})" if pid else "Started in background",
-                "stderr": result.stderr or "",
-                "exit_code": 0,
-            }
         try:
-            result = self._sandbox.commands.run(command, timeout=timeout)
+            kwargs = {"timeout": timeout}
+            if cwd and str(cwd).strip() and cwd != "~":
+                kwargs["cwd"] = cwd
+            if background:
+                # Launch in background using nohup so it doesn't block
+                bg_cmd = f"nohup {command} > /dev/null 2>&1 & echo $!"
+                result = self._sandbox.commands.run(bg_cmd, **kwargs)
+                pid = (result.stdout or "").strip()
+                return {
+                    "stdout": f"Started in background (PID: {pid})" if pid else "Started in background",
+                    "stderr": result.stderr or "",
+                    "exit_code": 0,
+                }
+            result = self._sandbox.commands.run(command, **kwargs)
             return {
                 "stdout": result.stdout or "",
                 "stderr": result.stderr or "",
                 "exit_code": result.exit_code,
             }
+        except SandboxDeadError:
+            raise
         except Exception as e:
+            self._raise_if_dead(e)
             err_msg = str(e)
             # Try to extract structured info from CommandExitException
             stdout = getattr(e, 'stdout', '') or ''

@@ -9,6 +9,7 @@ import {
   GoogleAuthProvider,
   getRedirectResult,
   onAuthStateChanged,
+  signInWithPopup,
   signInWithRedirect,
   signOut,
   type User,
@@ -88,11 +89,14 @@ export function AuthProvider({
   useEffect(() => {
     // Capture the redirect result when the user returns from the Google sign-in page.
     getRedirectResult(auth).catch((err) => {
-      // Ignore benign redirect errors (e.g. no redirect pending).
-      const code = (err as { code?: string }).code;
-      if (code && code !== "auth/credential-already-in-use") {
+      // Ignore benign redirect errors (e.g. no redirect pending or user cancelled).
+      const code = (err as { code?: string })?.code;
+      if (
+        code &&
+        code !== "auth/credential-already-in-use" &&
+        code !== "auth/null-user"
+      ) {
         console.error("[AuthProvider] Redirect result error", err);
-        setError(err instanceof Error ? err.message : "Google sign-in failed");
       }
     });
 
@@ -119,10 +123,28 @@ export function AuthProvider({
   const signInWithGoogle = useCallback(async () => {
     setError(null);
     try {
-      await signInWithRedirect(auth, googleProvider);
-      // The page will redirect to Google; onAuthStateChanged and
-      // getRedirectResult handle the rest when the user returns.
-    } catch (err) {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: unknown) {
+      const authErr = err as { code?: string; message?: string };
+      if (
+        authErr?.code === "auth/popup-blocked" ||
+        authErr?.code === "auth/cancelled-popup-request"
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setError(
+            redirectErr instanceof Error
+              ? redirectErr.message
+              : "Google sign-in failed",
+          );
+          throw redirectErr;
+        }
+      }
+      if (authErr?.code === "auth/popup-closed-by-user") {
+        return;
+      }
       setError(err instanceof Error ? err.message : "Google sign-in failed");
       throw err;
     }

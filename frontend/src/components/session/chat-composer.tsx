@@ -16,23 +16,25 @@ import {
 } from "react";
 import {
   ArrowUp,
-  BookOpen,
+  Check,
   ChevronDown,
-  Image as ImageIcon,
   Loader2,
+  MessageCircle,
   Mic,
-  Monitor,
-  Paperclip,
-  Plus,
+  Smile,
   Square,
-  X,
 } from "lucide-react";
-import { ToolPickerPanel } from "./tool-picker";
-import type { SessionConnector } from "@/lib/session-utils";
+import { ComposerPlusMenu, COMPOSER_MENU_SURFACE } from "./composer-plus-menu";
+import { UploadedFilePreviewList } from "./message-attachments";
+import { hasPendingComposerUpload, type SessionConnector } from "@/lib/session-utils";
 import type { UploadedInputFile } from "@/lib/message-types";
 import { useSkillsQuery, type AgentSkill } from "@/lib/queries/skills";
+import { APP_CONNECTORS } from "@/lib/app-paths";
+import { googleSuiteConnected, looksLikeSchedulingPrompt } from "@/lib/scheduling-intent";
 import { builtInPaletteItems, type ToolPaletteItem } from "@/lib/tool-catalog";
+import { useSettings } from "@/lib/settings-context";
 import { cx } from "@/utils/cx";
+import Link from "next/link";
 
 type Props = {
   textInput: string;
@@ -62,9 +64,15 @@ type Props = {
   isLanding?: boolean;
   inputRef?: React.RefObject<HTMLDivElement | null>;
   onEnhance?: (prompt: string, signal?: AbortSignal) => Promise<string>;
+  /** True only while this tab has a live run actually executing. */
+  agentRunning?: boolean;
 };
 
 type Phase = "idle" | "enhancing" | "enhanced";
+type ComposerMode = "agent" | "ask";
+
+const PLACEHOLDER =
+  "Ask for websites, apps, slides, sheets, reports, images, videos, or audio";
 
 const MOCK_ENHANCED =
   "This is an example prompt — rewritten to be clear and specific: state the goal, add the relevant context and constraints, define the expected output format and tone, and note any assumptions. Ask a clarifying question first if key details are missing.";
@@ -117,7 +125,6 @@ export function ChatComposer({
   onToggleMic,
   isRecording,
   voiceStatus,
-  phase,
   isLoading,
   isUploadingFile,
   onStopAgent,
@@ -125,31 +132,27 @@ export function ChatComposer({
   availableConnectors,
   selectedConnectorIds,
   onToggleConnector,
-  onToggleAllConnectors,
   selectedToolIds,
   onToggleTool,
-  onToggleAllTools,
   connectorsLoading = false,
   onRefreshTools,
-  isLanding = false,
   inputRef: externalInputRef,
   onEnhance = mockEnhance,
+  agentRunning = false,
 }: Props) {
   const localEditorRef = useRef<HTMLDivElement>(null);
   const editorRef = externalInputRef || localEditorRef;
   const frameRef = useRef<HTMLDivElement>(null);
-  const plusRef = useRef<HTMLDivElement>(null);
+  const autoRef = useRef<HTMLDivElement>(null);
+  const { openSettings } = useSettings();
 
   const { data: skillList } = useSkillsQuery();
   const skills = (skillList ?? []).filter((skill) => skill.enabled);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [skillsExpanded, setSkillsExpanded] = useState(false);
-  const [menuPlacement, setMenuPlacement] = useState<"top" | "bottom">("top");
-  const [menuMaxHeight, setMenuMaxHeight] = useState(480);
+  const [autoOpen, setAutoOpen] = useState(false);
+  const [composerMode, setComposerMode] = useState<ComposerMode>("agent");
 
   const [enhancePhase, setEnhancePhase] = useState<Phase>("idle");
-  const [pillMounted, setPillMounted] = useState(false);
-  const [pillExiting, setPillExiting] = useState(false);
 
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
@@ -180,9 +183,12 @@ export function ChatComposer({
 
   const hasText = textInput.trim().length > 0;
   const enhancing = enhancePhase === "enhancing";
-  const isBusy = phase === "thinking" || phase === "acting";
-  const sendActive = hasText && !enhancing && !isLoading && !isUploadingFile;
-  const showEnhancePill = hasText && !enhancing && !isBusy;
+  const isBusy = agentRunning;
+  const filesUploading = hasPendingComposerUpload(uploadedFiles, isUploadingFile);
+  const hasReadyFiles = uploadedFiles.some((file) => !file.uploading);
+  const sendActive = (hasText || hasReadyFiles) && !enhancing && !isLoading && !filesUploading;
+  const showGoogleScheduleCta =
+    looksLikeSchedulingPrompt(textInput) && !googleSuiteConnected(availableConnectors);
 
   const allTools: ToolPaletteItem[] = [
     ...builtInPaletteItems(),
@@ -347,6 +353,7 @@ export function ChatComposer({
     }
     insertPillOverRange(range, skill.skill_id, skill.name);
     setMenuOpen(false);
+    setAutoOpen(false);
   };
 
   const applySlash = (skillId: string) => {
@@ -638,12 +645,12 @@ export function ChatComposer({
   };
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!autoOpen) return;
     const onDown = (e: PointerEvent) => {
-      if (!plusRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      if (!autoRef.current?.contains(e.target as Node)) setAutoOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key === "Escape") setAutoOpen(false);
     };
     document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
@@ -651,48 +658,7 @@ export function ChatComposer({
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
-
-  useEffect(() => {
-    if (!menuOpen) {
-      setSkillsExpanded(false);
-      return;
-    }
-    onRefreshTools?.();
-  }, [menuOpen, onRefreshTools]);
-
-  // Flip the menu above/below the trigger based on free viewport space, and
-  // cap its height to whatever that side actually offers.
-  useLayoutEffect(() => {
-    if (!menuOpen) return;
-    const VIEWPORT_MARGIN = 16;
-    const TRIGGER_GAP = 12;
-    const MIN_HEIGHT = 220;
-    const MAX_HEIGHT = 560;
-
-    const update = () => {
-      const trigger = plusRef.current;
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const spaceAbove = rect.top - VIEWPORT_MARGIN - TRIGGER_GAP;
-      const spaceBelow =
-        window.innerHeight - rect.bottom - VIEWPORT_MARGIN - TRIGGER_GAP;
-      const openUp = spaceAbove >= spaceBelow;
-      const available = openUp ? spaceAbove : spaceBelow;
-      setMenuPlacement(openUp ? "top" : "bottom");
-      setMenuMaxHeight(
-        Math.round(Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, available))),
-      );
-    };
-
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [menuOpen]);
+  }, [autoOpen]);
 
   useLayoutEffect(() => {
     if (enhancing || pendingHTML.current === null) return;
@@ -730,26 +696,6 @@ export function ChatComposer({
     setTimeout(finish, 260);
   }, [enhancePhase, enhancing, editorRef, focusEnd, syncFromEditor]);
 
-  useEffect(() => {
-    if (showEnhancePill) {
-      setPillMounted(true);
-      setPillExiting(false);
-      return;
-    }
-    if (!pillMounted) return;
-    if (enhancing) {
-      setPillMounted(false);
-      setPillExiting(false);
-      return;
-    }
-    setPillExiting(true);
-    const t = setTimeout(() => {
-      setPillMounted(false);
-      setPillExiting(false);
-    }, 200);
-    return () => clearTimeout(t);
-  }, [showEnhancePill, enhancing, pillMounted]);
-
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const runEnhance = async () => {
@@ -778,31 +724,23 @@ export function ChatComposer({
     setEnhancePhase("idle");
   };
 
-  const menuSurface =
-    "border border-zinc-200/80 dark:border-white/8 bg-white/90 dark:bg-[#1c1c1e]/90 backdrop-blur-md shadow-2xl rounded-2xl";
-
-  const menuItemClass = cx(
-    "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-[13px] transition-colors",
-    "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]",
-    "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
-  );
-
   return (
     <div
       ref={frameRef}
       className={cx(
-        "relative flex flex-col transition-all",
-        isLanding
-          ? "min-h-[120px] rounded-[24px] border border-white/55 bg-white/70 p-1 shadow-[0_18px_50px_rgba(0,0,0,0.18)] backdrop-blur-xl focus-within:border-sky-400/70 dark:border-white/25 dark:bg-black/30"
-          : "min-h-[80px] rounded-[24px] border border-zinc-200/80 bg-transparent p-1 focus-within:border-indigo-500/30 dark:border-white/8",
+        "relative flex flex-col overflow-visible transition-all",
+        "min-h-[120px] rounded-[24px] border border-input-border bg-input-bg p-1.5",
+        "shadow-sidebar",
+        "focus-within:border-border-button-hover",
         enhancing && "opacity-90",
+        (menuOpen || autoOpen) && "z-30",
       )}
     >
       {/* Slash skills palette */}
       {slashOpen && !enhancing && (
         <div className="absolute bottom-full left-0 right-0 z-50 mb-3 px-4">
-          <div className={cx(menuSurface, "max-h-60 overflow-y-auto p-1 no-scrollbar")}>
-            <div className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+          <div className={cx(COMPOSER_MENU_SURFACE, "max-h-60 overflow-y-auto p-1 no-scrollbar")}>
+            <div className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
               Skills
             </div>
             {slashResults.length ? (
@@ -825,8 +763,8 @@ export function ChatComposer({
                     className={cx(
                       "flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-left transition-colors",
                       i === slashIndex
-                        ? "bg-indigo-500/10 font-medium text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400"
-                        : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.04]",
+                        ? "bg-dropdown-item-hover-background font-medium text-text-primary"
+                        : "text-text-primary hover:bg-dropdown-item-hover-background",
                     )}
                     onMouseDown={(e) => e.preventDefault()}
                     onMouseEnter={() => {
@@ -837,16 +775,16 @@ export function ChatComposer({
                   >
                     <span className="flex min-w-0 items-center gap-2">
                       <span className="text-sm font-semibold">/{skill.skill_id}</span>
-                      <span className="truncate text-xs text-zinc-500">({skill.name})</span>
+                      <span className="truncate text-xs text-text-secondary">({skill.name})</span>
                     </span>
-                    <span className="max-w-[250px] truncate text-xs text-zinc-400">
+                    <span className="max-w-[250px] truncate text-xs text-text-tertiary">
                       {skill.description}
                     </span>
                   </button>
                 ))}
               </div>
             ) : (
-              <div className="px-3 py-2 text-sm text-zinc-500">No matching skills</div>
+              <div className="px-3 py-2 text-sm text-text-tertiary">No matching skills</div>
             )}
           </div>
         </div>
@@ -855,7 +793,7 @@ export function ChatComposer({
       {/* @ tools palette */}
       {atOpen && !enhancing && atResults.length > 0 && (
         <div className="absolute bottom-full left-0 right-0 z-50 mb-3 px-4">
-          <div className={cx(menuSurface, "max-h-60 overflow-y-auto p-1 no-scrollbar")}>
+          <div className={cx(COMPOSER_MENU_SURFACE, "max-h-60 overflow-y-auto p-1 no-scrollbar")}>
             <div className="flex flex-col gap-1" role="listbox" aria-label="Tools">
               {atResults.map((tool, i) => (
                 <button
@@ -866,8 +804,8 @@ export function ChatComposer({
                   className={cx(
                     "flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-left transition-colors",
                     i === atIndex
-                      ? "bg-emerald-500/10 font-medium text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400"
-                      : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.04]",
+                      ? "bg-dropdown-item-hover-background font-medium text-text-primary"
+                      : "text-text-primary hover:bg-dropdown-item-hover-background",
                   )}
                   onMouseDown={(e) => e.preventDefault()}
                   onMouseEnter={() => setAtIndex(i)}
@@ -875,9 +813,9 @@ export function ChatComposer({
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     <span className="text-sm font-semibold">@{tool.id}</span>
-                    <span className="text-xs text-zinc-400">({tool.category})</span>
+                    <span className="text-xs text-text-tertiary">({tool.category})</span>
                   </span>
-                  <span className="max-w-[250px] truncate text-xs text-zinc-400">
+                  <span className="max-w-[250px] truncate text-xs text-text-tertiary">
                     {tool.description}
                   </span>
                 </button>
@@ -887,39 +825,28 @@ export function ChatComposer({
         </div>
       )}
 
+      {showGoogleScheduleCta ? (
+        <p className="px-4 pt-2 text-xs leading-5 text-text-secondary">
+          Connect Google Calendar in{" "}
+          <Link href={APP_CONNECTORS} className="font-medium text-indigo-500 hover:underline">
+            Connectors
+          </Link>{" "}
+          so the agent can create the event or task.
+        </p>
+      ) : null}
+
       {/* Attachments */}
-      {uploadedFiles.length > 0 && (
-        <div className="mb-1 flex flex-wrap gap-2 px-3 pt-2">
-          {uploadedFiles.map((file) => (
-            <span
-              key={file.path}
-              className="inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-200"
-            >
-              <Paperclip className="h-3.5 w-3.5" />
-              <span className="max-w-44 truncate">{file.name}</span>
-              <button
-                type="button"
-                onClick={() => onRemoveFile(file.path)}
-                className="text-zinc-400 transition-colors hover:text-zinc-200"
-                aria-label={`Remove ${file.name}`}
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </span>
-          ))}
+      {(uploadedFiles.length > 0 || isUploadingFile) && (
+        <div className="mb-1 px-3 pt-2">
+          <UploadedFilePreviewList files={uploadedFiles} onRemove={onRemoveFile} />
         </div>
       )}
 
       {/* Editor */}
-      <div
-        className={cx(
-          "relative flex w-full items-start px-4",
-          isLanding ? "min-h-[80px] py-3" : "min-h-[80px] py-4",
-        )}
-      >
+      <div className="relative flex w-full items-start px-4 py-3 min-h-[72px]">
         {enhancing ? (
           <div
-            className="w-full whitespace-pre-wrap break-words text-[18px] leading-relaxed text-zinc-500"
+            className="w-full whitespace-pre-wrap break-words text-[16px] leading-relaxed text-text-secondary"
             aria-live="polite"
           >
             {textInput}
@@ -928,16 +855,16 @@ export function ChatComposer({
           <div
             ref={editorRef}
             className={cx(
-              "relative z-10 w-full max-h-60 overflow-y-auto break-words bg-transparent text-[18px] leading-relaxed",
-              "text-zinc-900 outline-none no-scrollbar dark:text-zinc-200",
+              "relative z-10 w-full max-h-60 overflow-y-auto break-words bg-transparent text-[16px] leading-relaxed",
+              "text-text-primary outline-none no-scrollbar",
               !hasText && "min-h-[1.5em]",
             )}
             contentEditable
             suppressContentEditableWarning
             role="textbox"
             aria-multiline="true"
-            aria-label="Send message to CoComputer"
-            data-placeholder="Send message to CoComputer"
+            aria-label={PLACEHOLDER}
+            data-placeholder={PLACEHOLDER}
             data-empty={!hasText || undefined}
             onInput={onEditorInput}
             onKeyDown={onEditorKeyDown}
@@ -950,195 +877,149 @@ export function ChatComposer({
         {!hasText && !enhancing && (
           <div
             aria-hidden
-            className={cx(
-              "pointer-events-none absolute inset-x-4 text-[18px] font-medium leading-relaxed text-zinc-500",
-              isLanding ? "top-3" : "top-4",
-            )}
+            className="pointer-events-none absolute inset-x-4 top-3 text-[16px] leading-relaxed text-text-placeholder"
           >
-            Send message to CoComputer
+            {PLACEHOLDER}
           </div>
         )}
       </div>
 
       {/* Toolbar */}
-      <div className="mt-1 flex items-center justify-between px-2 pb-2">
-        <div className="flex items-center gap-2">
-          <div className="relative" ref={plusRef}>
+      <div className="mt-0.5 flex items-center justify-between gap-2 px-1.5 pb-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <ComposerPlusMenu
+            open={menuOpen}
+            onOpenChange={setMenuOpen}
+            uploadDisabled={uploadDisabled}
+            onOpenFilePicker={onOpenFilePicker}
+            skills={skills}
+            onAddSkill={addSkillFromMenu}
+            onToggleMic={onToggleMic}
+            isRecording={isRecording}
+            voiceStatus={voiceStatus}
+            availableConnectors={availableConnectors}
+            selectedConnectorIds={selectedConnectorIds}
+            onToggleConnector={onToggleConnector}
+            selectedToolIds={selectedToolIds}
+            onToggleTool={onToggleTool}
+            connectorsLoading={connectorsLoading}
+            onRefreshTools={onRefreshTools}
+            selectionCount={selectionCount}
+          />
+
+          <div
+            className="flex items-center rounded-full bg-background-secondary-default p-0.5"
+            role="group"
+            aria-label="Composer mode"
+          >
             <button
               type="button"
               className={cx(
-                "relative flex items-center justify-center rounded-full border border-zinc-700/50 p-1.5 transition-colors",
-                "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200",
-                "disabled:opacity-40",
-                menuOpen && "bg-zinc-800 text-zinc-200",
+                "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] font-medium transition-colors",
+                composerMode === "agent"
+                  ? "bg-background-primary-default text-text-primary shadow-sm"
+                  : "text-text-secondary hover:text-text-primary",
               )}
-              style={{
-                backgroundColor: menuOpen
-                  ? undefined
-                  : "var(--color-ai-chat-composer-add-background)",
-              }}
-              aria-label="Add attachment, skill, or tools"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((o) => !o)}
+              aria-pressed={composerMode === "agent"}
+              onClick={() => setComposerMode("agent")}
             >
-              <Plus className="h-4 w-4" />
-              {selectionCount > 0 && (
-                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-indigo-500 text-[10px] font-bold text-white">
-                  {selectionCount}
-                </span>
+              <Smile className="h-3.5 w-3.5" />
+              Agent
+            </button>
+            <button
+              type="button"
+              className={cx(
+                "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] font-medium transition-colors",
+                composerMode === "ask"
+                  ? "bg-background-primary-default text-text-primary shadow-sm"
+                  : "text-text-secondary hover:text-text-primary",
+              )}
+              aria-pressed={composerMode === "ask"}
+              onClick={() => setComposerMode("ask")}
+            >
+              <MessageCircle className="h-3.5 w-3.5" />
+              Ask
+            </button>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <div className="relative" ref={autoRef}>
+            <button
+              type="button"
+              className={cx(
+                "flex items-center gap-1 rounded-full px-2 py-1 text-[13px] font-medium transition-colors",
+                "text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary",
+                autoOpen && "bg-background-secondary-hover text-text-primary",
+              )}
+              aria-label="Model"
+              aria-expanded={autoOpen}
+              onClick={() => setAutoOpen((o) => !o)}
+            >
+              {enhancing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <>
+                  Auto
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </>
               )}
             </button>
-
-            {menuOpen && (
+            {autoOpen && (
               <div
                 className={cx(
-                  menuSurface,
-                  "absolute left-0 z-50 flex w-80 flex-col overflow-hidden p-1.5",
-                  menuPlacement === "top"
-                    ? "bottom-full mb-3 origin-bottom-left"
-                    : "top-full mt-3 origin-top-left",
+                  COMPOSER_MENU_SURFACE,
+                  "absolute right-0 bottom-full z-50 mb-2 w-52 p-1",
                   "animate-in fade-in-0 zoom-in-95 duration-150",
                 )}
-                style={{ maxHeight: menuMaxHeight }}
               >
-                <div className="shrink-0 space-y-0.5">
-                  <button
-                    type="button"
-                    className={menuItemClass}
-                    disabled={uploadDisabled}
-                    onClick={() => {
-                      if (uploadDisabled) return;
-                      onOpenFilePicker("image");
-                      setMenuOpen(false);
-                    }}
-                  >
-                    <ImageIcon className="h-4 w-4 shrink-0 text-zinc-500" />
-                    <span className="flex-1 text-left">Add photos</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={menuItemClass}
-                    disabled={uploadDisabled}
-                    onClick={() => {
-                      if (uploadDisabled) return;
-                      onOpenFilePicker("file");
-                      setMenuOpen(false);
-                    }}
-                  >
-                    <Paperclip className="h-4 w-4 shrink-0 text-zinc-500" />
-                    <span className="flex-1 text-left">Attach files</span>
-                  </button>
-                </div>
-
-                <div className="my-1.5 h-px shrink-0 bg-zinc-200/80 dark:bg-white/5" />
-
-                <div className="flex min-h-0 shrink-0 flex-col">
-                  <button
-                    type="button"
-                    className={menuItemClass}
-                    aria-expanded={skillsExpanded}
-                    onClick={() => setSkillsExpanded((o) => !o)}
-                  >
-                    <BookOpen className="h-4 w-4 shrink-0 text-zinc-500" />
-                    <span className="flex-1 text-left">Skills</span>
-                    {skills.length > 0 && (
-                      <span className="text-[11px] tabular-nums text-zinc-400 dark:text-zinc-600">
-                        {skills.length}
-                      </span>
-                    )}
-                    <ChevronDown
-                      className={cx(
-                        "h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200",
-                        skillsExpanded && "rotate-180",
-                      )}
-                    />
-                  </button>
-                  {skillsExpanded && (
-                    <div className="custom-scrollbar mt-0.5 max-h-44 space-y-0.5 overflow-y-auto pl-2">
-                      {skills.length ? (
-                        skills.map((sk) => (
-                          <button
-                            key={sk.skill_id}
-                            type="button"
-                            className="flex w-full flex-col rounded-lg px-3 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]"
-                            onClick={() => addSkillFromMenu(sk)}
-                          >
-                            <span className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200">
-                              /{sk.skill_id}
-                            </span>
-                            <span className="truncate text-[11px] text-zinc-500">
-                              {sk.name}
-                            </span>
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-3 py-2 text-[13px] text-zinc-500">
-                          No skills enabled
-                        </div>
-                      )}
-                    </div>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] text-text-primary hover:bg-dropdown-item-hover-background"
+                  onClick={() => setAutoOpen(false)}
+                >
+                  <span className="flex-1 text-left">Auto</span>
+                  <Check className="h-3.5 w-3.5 text-text-tertiary" />
+                </button>
+                <button
+                  type="button"
+                  className={cx(
+                    "flex w-full items-center rounded-lg px-2.5 py-2 text-[13px] text-left transition-colors",
+                    "text-text-primary hover:bg-dropdown-item-hover-background",
+                    (!hasText || enhancing) && "cursor-not-allowed opacity-40",
                   )}
-                </div>
-
-                <div className="my-1.5 h-px shrink-0 bg-zinc-200/80 dark:bg-white/5" />
-
-                <ToolPickerPanel
-                  availableConnectors={availableConnectors}
-                  selectedConnectorIds={selectedConnectorIds}
-                  onToggleConnector={onToggleConnector}
-                  onToggleAllConnectors={onToggleAllConnectors}
-                  selectedToolIds={selectedToolIds}
-                  onToggleTool={onToggleTool}
-                  onToggleAllTools={onToggleAllTools}
-                  loading={connectorsLoading}
-                />
+                  disabled={!hasText || enhancing}
+                  onClick={() => {
+                    if (enhancePhase === "enhanced") revert();
+                    else void runEnhance();
+                    setAutoOpen(false);
+                  }}
+                >
+                  {enhancePhase === "enhanced" ? "Revert prompt" : "Enhance prompt"}
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-lg px-2.5 py-2 text-[13px] text-text-primary hover:bg-dropdown-item-hover-background"
+                  onClick={() => {
+                    openSettings("api");
+                    setAutoOpen(false);
+                  }}
+                >
+                  Open model settings
+                </button>
               </div>
             )}
           </div>
 
           <button
             type="button"
-            onClick={onShowDesktop}
-            className="rounded p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-            title="Workspace Context"
-          >
-            <Monitor className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {enhancing ? (
-            <span
-              className="flex items-center justify-center rounded-full border border-zinc-700/50 p-1.5 text-zinc-400"
-              aria-label="Enhancing prompt"
-            >
-              <Loader2 className="h-4 w-4 animate-spin" />
-            </span>
-          ) : (
-            pillMounted && (
-              <button
-                type="button"
-                className={cx(
-                  "rounded-full border border-zinc-700/50 px-3 py-1 text-xs font-medium transition-all",
-                  "text-zinc-300 hover:bg-zinc-800 hover:text-white",
-                  pillExiting && "scale-95 opacity-0",
-                )}
-                onClick={enhancePhase === "enhanced" ? revert : runEnhance}
-              >
-                {enhancePhase === "enhanced" ? "Revert" : "Enhance Prompt"}
-              </button>
-            )
-          )}
-
-          <button
-            type="button"
             onClick={onToggleMic}
             disabled={voiceStatus !== "connected"}
             className={cx(
-              "rounded p-1.5 transition-colors disabled:opacity-40",
+              "rounded-full p-1.5 transition-colors disabled:opacity-40",
               isRecording
                 ? "bg-red-500/10 text-red-400"
-                : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200",
+                : "text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary",
             )}
             title="Voice Input"
           >
@@ -1150,20 +1031,22 @@ export function ChatComposer({
             onClick={isBusy ? onStopAgent : onSubmitText}
             disabled={!isBusy && !sendActive}
             className={cx(
-              "rounded-full border p-1.5 transition-colors",
+              "flex h-7 w-7 items-center justify-center rounded-full transition-colors",
               isBusy
-                ? "border-red-500/30 bg-red-500/10 text-red-500 hover:bg-red-500/20"
+                ? "bg-red-500/10 text-red-500 hover:bg-red-500/20"
                 : sendActive
-                  ? "border-zinc-700/50 bg-[#3a3a3c] text-indigo-400 hover:bg-indigo-500 hover:text-white"
-                  : "cursor-not-allowed border-zinc-700/50 bg-zinc-800 text-zinc-500 opacity-50",
+                  ? "bg-foreground text-background"
+                  : "cursor-not-allowed bg-foreground/40 text-background/70",
             )}
-            title={isBusy ? "Stop" : "Send"}
-            aria-label={isBusy ? "Stop" : "Send"}
+            title={isBusy ? "Stop" : filesUploading ? "Uploading..." : "Send"}
+            aria-label={isBusy ? "Stop" : filesUploading ? "Uploading" : "Send"}
           >
             {isBusy ? (
-              <Square className="h-4 w-4 fill-current" />
+              <Square fill="currentColor" className="h-3 w-3" />
+            ) : filesUploading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
-              <ArrowUp className="h-4 w-4" />
+              <ArrowUp strokeWidth={3} className="h-4 w-4" />
             )}
           </button>
         </div>
