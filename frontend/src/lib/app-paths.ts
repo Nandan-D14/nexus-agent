@@ -6,6 +6,7 @@
 /** Product shell (logged-in app). Marketing stays at `/`. */
 
 export const APP_HOME = "/app";
+export const APP_WORKSPACE = "/app/workspace";
 export const APP_DASHBOARD = "/app/dashboard";
 export const APP_HISTORY = "/app/history";
 export const APP_SCHEDULE = "/app/schedule";

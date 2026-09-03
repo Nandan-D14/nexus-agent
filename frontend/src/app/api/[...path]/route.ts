@@ -30,7 +30,9 @@ async function handler(
 
   const headers = new Headers(request.headers);
   headers.delete("host");
-  headers.set("accept", "application/json");
+  if (!headers.has("accept")) {
+    headers.set("accept", "*/*");
+  }
 
   const init: RequestInit & { duplex?: string } = {
     method: request.method,

@@ -17,11 +17,20 @@ const nextConfig: NextConfig = {
     "@crayonai/react-core",
     "@crayonai/stream",
   ],
-  webpack: (config) => {
+  webpack: (config, { dev }) => {
     config.resolve.alias["@react-aria/ssr"] = path.resolve(
       __dirname,
-      "shims/react-aria-ssr.js"
+      "shims/react-aria-ssr.js",
     );
+    if (dev) {
+      // Cold compiles of the root layout can exceed webpack's 120s default on
+      // this repo (first /app/* compile has been ~90s), which surfaces as
+      // ChunkLoadError: Loading chunk app/layout failed (timeout).
+      config.output = {
+        ...config.output,
+        chunkLoadTimeout: 300_000,
+      };
+    }
     return config;
   },
   async redirects() {
@@ -44,6 +53,7 @@ const nextConfig: NextConfig = {
     ];
   },
   images: {
+    qualities: [75, 100],
     localPatterns: [
       {
         pathname: "/**",

@@ -10,6 +10,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { APP_DASHBOARD, APP_SETTINGS } from "@/lib/app-paths";
 import { useSettings } from "@/lib/settings-context";
+import { stashPostSignInRedirect } from "@/components/auth/sign-in-gate";
 import { AppShell } from "@/components/app-shell";
 import { AppShellSkeleton } from "@/components/app-shell-skeleton";
 
@@ -26,9 +27,11 @@ export default function AppLayout({
 
   useEffect(() => {
     if (!isLoading && !user) {
+      // Remember the deep link so sign-in returns here instead of the app root.
+      stashPostSignInRedirect(pathname);
       router.push("/");
     }
-  }, [user, isLoading, router]);
+  }, [user, isLoading, pathname, router]);
 
   useEffect(() => {
     if (isLoading) {

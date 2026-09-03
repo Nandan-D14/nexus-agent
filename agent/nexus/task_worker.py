@@ -51,6 +51,14 @@ class TaskWorker:
             worker_id=self.worker_id,
             claim_token=claim_token,
         )
+        # #region agent log
+        try:
+            import json as _dbg_json
+            from pathlib import Path as _DbgPath
+            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"task_worker.py:claim","message":"claim_run result","data":{"task_id":task_id,"run_id":run_id,"claimed":bool(claimed),"worker_id":self.worker_id},"timestamp":int(__import__("time").time()*1000)})+"\n")
+        except Exception:
+            pass
+        # #endregion
         if not claimed:
             # A skipped claim produces no events at all, so the UI would wait on
             # a run that will never execute. Record why it was rejected and, when
@@ -138,20 +146,40 @@ class TaskWorker:
                         retryable=True,
                     )
             if result.status in {"partial", "blocked"}:
-                pause_status = (
-                    "waiting_approval"
-                    if result.status == "blocked"
-                    else "paused"
+                verification_code = str(
+                    (result.verification or {}).get("error_code") or ""
                 )
-                await repo.pause_run(
-                    task_id=task_id,
-                    run_id=run_id,
-                    status=pause_status,
-                    summary=result.summary,
-                    checkpoint=result.checkpoint,
-                    verification=result.verification,
-                    final_response=result.final_response,
-                )
+                # #region agent log
+                try:
+                    import json as _dbg_json
+                    from pathlib import Path as _DbgPath
+                    _payload = _dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"task_worker.py:after_execute","message":"durable run pause-or-fail branch","data":{"status":result.status,"verification_code":verification_code,"retryable":bool(result.retryable),"summary":str(result.summary or "")[:240]},"timestamp":int(__import__("time").time()*1000)})+"\n"
+                    _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_payload)
+                except Exception:
+                    pass
+                # #endregion
+                if verification_code == "APPROVAL_EXPIRED":
+                    await self._finish_failed(
+                        repo=repo,
+                        task_id=task_id,
+                        run_id=run_id,
+                        result=result,
+                    )
+                else:
+                    pause_status = (
+                        "waiting_approval"
+                        if result.status == "blocked"
+                        else "paused"
+                    )
+                    await repo.pause_run(
+                        task_id=task_id,
+                        run_id=run_id,
+                        status=pause_status,
+                        summary=result.summary,
+                        checkpoint=result.checkpoint,
+                        verification=result.verification,
+                        final_response=result.final_response,
+                    )
             elif result.status == "completed":
                 await repo.finish_run(
                     task_id=task_id,

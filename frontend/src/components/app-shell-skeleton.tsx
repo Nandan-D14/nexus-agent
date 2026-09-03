@@ -10,12 +10,12 @@
 export function AppShellSkeleton() {
   return (
     <div
-      className="flex h-screen bg-white dark:bg-[#0d0d0d] overflow-hidden text-foreground"
+      className="flex h-screen min-h-screen overflow-hidden bg-background-full text-foreground supports-[height:100dvh]:h-[100dvh]"
       aria-busy="true"
       aria-label="Loading"
     >
       {/* Sidebar placeholder — expanded desktop width */}
-      <aside className="hidden md:flex sticky top-3 m-3 h-[calc(100vh-24px)] w-[260px] shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border-button-white bg-background-secondary-default p-3 shadow-sidebar">
+      <aside className="hidden md:flex sticky top-3 m-3 h-[calc(100dvh-24px)] w-[260px] shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-input-border bg-input-bg p-3 shadow-sidebar">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="size-7 shrink-0 animate-pulse rounded-lg bg-background-tertiary-default" />

@@ -115,8 +115,21 @@ async def test_catalog_includes_new_connectors() -> None:
     ):
         result = await get_integrations_catalog(user)
     providers = [item["provider"] for item in result["catalog"]]
-    for provider in ("github", "linear", "vercel", "cloudflare", "apify", "slack", "vyora", "openai"):
+    for provider in (
+        "github",
+        "linear",
+        "vercel",
+        "cloudflare",
+        "apify",
+        "slack",
+        "vyora",
+        "openai",
+        "composio",
+    ):
         assert provider in providers
+    composio = next(item for item in result["catalog"] if item["provider"] == "composio")
+    assert composio["connector_type"] == "mcp_remote_http"
+    assert composio["name"] == "Composio"
     github_item = next(item for item in result["catalog"] if item["provider"] == "github")
     assert github_item["status"] == "connected"
     assert github_item["auth_mode"] == "token"

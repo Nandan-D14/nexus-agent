@@ -6,7 +6,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, Check, X } from "lucide-react";
+import { ArrowUp, Check, Clock, HelpCircle, X } from "lucide-react";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import {
   coerceAskUserOptions,
@@ -158,9 +158,10 @@ export function AgentQuestionCard({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="rounded-lg bg-background-primary-default px-3 py-2 text-[12.5px] font-medium text-text-primary shadow-card transition-colors duration-150 hover:bg-background-primary-hover"
+        className="flex items-center gap-1.5 rounded-lg border border-border/70 bg-background px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
       >
-        Open question
+        <HelpCircle className="size-3.5 text-indigo-500" />
+        <span>Open question</span>
       </button>
     );
   }
@@ -178,34 +179,59 @@ export function AgentQuestionCard({
           handlePick(choices[index - 1]);
         }
       }}
-      className="flex w-full max-w-[24rem] flex-col items-stretch outline-none animate-fade-up"
+      className="flex w-full max-w-[28rem] flex-col items-stretch outline-none animate-fade-up"
     >
-      <div className="w-full self-start overflow-hidden rounded-xl border border-separator-border bg-background-primary-default shadow-card">
-        <div className="px-3.5 pt-3.5 pb-1.5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1 text-[13px] font-semibold text-text-primary [&_.markdown]:text-[13px] [&_.markdown]:leading-snug [&_.markdown]:font-semibold">
-              <ChatMarkdown content={heading} />
+      <div className="w-full self-start overflow-hidden rounded-2xl border border-indigo-500/20 bg-background shadow-lg dark:border-indigo-500/30">
+        {/* Header bar */}
+        <div className="border-b border-border/50 bg-indigo-50/50 px-4 py-3 dark:bg-indigo-950/20">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="flex size-6 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">
+                <HelpCircle className="size-3.5" />
+              </span>
+              <span className="text-[11.5px] font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                Agent Question
+              </span>
             </div>
-            <button
-              type="button"
-              aria-label="Dismiss"
-              onClick={() => setOpen(false)}
-              className="flex size-6 shrink-0 items-center justify-center rounded-[5px] text-text-tertiary transition-colors duration-100 hover:bg-background-primary-hover hover:text-text-primary"
-            >
-              <X className="size-3.5" strokeWidth={2.2} aria-hidden />
-            </button>
+
+            <div className="flex items-center gap-2">
+              {!frozen ? (
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-medium tabular-nums ${
+                    remaining <= 30
+                      ? "bg-amber-500/15 text-amber-600 dark:text-amber-400 animate-pulse"
+                      : "bg-muted text-muted-foreground"
+                  }`}
+                  aria-live="polite"
+                >
+                  <Clock className="size-3" />
+                  {formatCountdown(remaining)}
+                </span>
+              ) : timedOut ? (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  Timed out
+                </span>
+              ) : null}
+
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setOpen(false)}
+                className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            </div>
           </div>
-          {!frozen ? (
-            <p className="mt-1 font-mono text-[11px] tabular-nums text-text-tertiary" aria-live="polite">
-              {formatCountdown(remaining)}
-            </p>
-          ) : timedOut ? (
-            <p className="mt-1 text-[11px] text-text-tertiary">No answer in time</p>
-          ) : null}
+
+          <div className="mt-2.5 text-[13.5px] font-medium leading-relaxed text-foreground [&_.markdown]:text-[13.5px]">
+            <ChatMarkdown content={heading} />
+          </div>
         </div>
 
+        {/* Options list */}
         {choices.length >= 2 ? (
-          <div className="flex flex-col px-1.5 pb-2" role="listbox" aria-label={heading}>
+          <div className="flex flex-col gap-1.5 p-3" role="listbox" aria-label={heading}>
             {choices.map((label, index) => {
               const selected = active === label;
               return (
@@ -216,28 +242,42 @@ export function AgentQuestionCard({
                   aria-selected={selected}
                   disabled={frozen}
                   onClick={() => handlePick(label)}
-                  className="flex min-h-9 items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors duration-100 hover:bg-background-primary-hover disabled:cursor-default disabled:hover:bg-transparent"
+                  className={`group/opt flex min-h-10 items-center justify-between gap-3 rounded-xl border p-2.5 text-left transition-all ${
+                    selected
+                      ? "border-indigo-500 bg-indigo-50/70 dark:border-indigo-500 dark:bg-indigo-950/40 shadow-sm"
+                      : "border-border/60 bg-muted/30 hover:border-indigo-500/40 hover:bg-muted/80"
+                  } disabled:cursor-default disabled:hover:border-border/60 disabled:hover:bg-muted/30`}
                 >
-                  <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] bg-background-secondary-default text-[11px] tabular-nums text-text-tertiary">
-                    {index + 1}
-                  </span>
-                  <span
-                    className={cx(
-                      "min-w-0 flex-1 truncate text-[13px]",
-                      selected ? "font-medium text-text-primary" : "text-text-tertiary",
-                    )}
-                  >
-                    {label}
-                  </span>
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span
+                      className={`flex size-5 shrink-0 items-center justify-center rounded-md font-mono text-[11px] font-semibold tabular-nums transition-colors ${
+                        selected
+                          ? "bg-indigo-600 text-white"
+                          : "bg-muted text-muted-foreground group-hover/opt:bg-indigo-500/10 group-hover/opt:text-indigo-600 dark:group-hover/opt:text-indigo-400"
+                      }`}
+                    >
+                      {index + 1}
+                    </span>
+                    <span
+                      className={`min-w-0 text-[13px] leading-snug ${
+                        selected ? "font-semibold text-indigo-900 dark:text-indigo-200" : "text-foreground"
+                      }`}
+                    >
+                      {label}
+                    </span>
+                  </div>
+
                   {selected ? (
-                    <Check className="size-3.5 shrink-0 text-text-primary" strokeWidth={2.5} aria-hidden />
+                    <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white">
+                      <Check className="size-3" strokeWidth={3} aria-hidden />
+                    </span>
                   ) : null}
                 </button>
               );
             })}
+
             {customOpen ? (
-              <label className="mt-1 flex items-center gap-2 rounded-lg px-2.5 py-1">
-                <span aria-hidden className="size-5 shrink-0" />
+              <label className="mt-2 flex items-center gap-2 rounded-xl border border-indigo-500/40 bg-background p-1.5 focus-within:ring-2 focus-within:ring-indigo-500/20">
                 <input
                   ref={inputRef}
                   value={textAnswer}
@@ -248,23 +288,21 @@ export function AgentQuestionCard({
                       handleSubmitCustom();
                     }
                   }}
-                  placeholder="Type your answer…"
+                  placeholder="Type a custom answer…"
                   aria-label="Custom answer"
                   disabled={frozen || !onRespond}
-                  className="min-w-0 flex-1 bg-transparent text-[13px] text-text-primary outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50"
+                  className="min-w-0 flex-1 bg-transparent px-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 />
                 <button
                   type="button"
                   aria-label="Send answer"
                   disabled={!canSendCustom}
                   onClick={handleSubmitCustom}
-                  className={cx(
-                    "flex size-7 shrink-0 items-center justify-center rounded-[8px] transition-[background-color,color,transform] duration-200",
-                    "enabled:active:scale-[0.96]",
+                  className={`flex size-7 shrink-0 items-center justify-center rounded-lg transition-all ${
                     canSendCustom
-                      ? "bg-text-primary text-background-primary-default"
-                      : "bg-background-secondary-default text-text-tertiary",
-                  )}
+                      ? "bg-indigo-600 text-white shadow hover:bg-indigo-700"
+                      : "bg-muted text-muted-foreground opacity-50"
+                  }`}
                 >
                   <ArrowUp className="size-3.5" strokeWidth={2.5} aria-hidden />
                 </button>
@@ -273,18 +311,18 @@ export function AgentQuestionCard({
           </div>
         ) : sent ? (
           <div className="flex flex-col items-center justify-center gap-2 px-4 py-8">
-            <span className="flex size-6 items-center justify-center rounded-full bg-emerald-500 text-white animate-pop-in">
-              <Check className="size-3" strokeWidth={3} aria-hidden />
+            <span className="flex size-7 items-center justify-center rounded-full bg-emerald-500 text-white">
+              <Check className="size-3.5" strokeWidth={3} aria-hidden />
             </span>
-            <span className="text-[13px] font-medium text-text-primary">Answer sent</span>
+            <span className="text-[13px] font-semibold text-foreground">Answer submitted</span>
           </div>
         ) : timedOut ? (
-          <div className="flex flex-col items-center justify-center gap-2 px-4 pb-8 pt-2">
-            <span className="text-[13px] font-medium text-text-secondary">No answer in time</span>
+          <div className="flex flex-col items-center justify-center gap-2 px-4 pb-8 pt-4">
+            <span className="text-[13px] text-muted-foreground">No response in time</span>
           </div>
         ) : (
-          <div className="px-3.5 pb-3">
-            <label className="flex items-center gap-2 rounded-lg py-1">
+          <div className="p-3">
+            <label className="flex items-center gap-2 rounded-xl border border-border/80 bg-background p-1.5 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20">
               <input
                 ref={inputRef}
                 value={textAnswer}
@@ -295,23 +333,21 @@ export function AgentQuestionCard({
                     handleSubmitCustom();
                   }
                 }}
-                placeholder="Type something…"
+                placeholder="Type your response here…"
                 aria-label="Your answer"
                 disabled={frozen || !onRespond}
-                className="min-w-0 flex-1 bg-transparent text-[13px] text-text-primary outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50"
+                className="min-w-0 flex-1 bg-transparent px-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
               />
               <button
                 type="button"
                 aria-label="Send answer"
                 disabled={!canSendCustom}
                 onClick={handleSubmitCustom}
-                className={cx(
-                  "flex size-7 items-center justify-center rounded-[8px] transition-[background-color,color,transform] duration-200",
-                  "enabled:active:scale-[0.96]",
+                className={`flex size-7 shrink-0 items-center justify-center rounded-lg transition-all ${
                   canSendCustom
-                    ? "bg-text-primary text-background-primary-default"
-                    : "bg-background-secondary-default text-text-tertiary",
-                )}
+                    ? "bg-indigo-600 text-white shadow hover:bg-indigo-700"
+                    : "bg-muted text-muted-foreground opacity-50"
+                }`}
               >
                 <ArrowUp className="size-3.5" strokeWidth={2.5} aria-hidden />
               </button>

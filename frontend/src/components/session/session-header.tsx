@@ -39,7 +39,7 @@ export function SessionHeader({
   onOpenSaveTemplate,
 }: Props) {
   return (
-    <header className="h-14 shrink-0 flex items-center justify-between px-6 bg-white dark:bg-[#0d0d0d] z-10">
+    <header className="z-10 flex h-14 shrink-0 items-center justify-between bg-background-full px-6">
       <div className="flex items-center gap-4">
         <button className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <CocomputerLogo size={24} wordmarkClassName="text-sm font-semibold text-zinc-900 dark:text-zinc-100" />

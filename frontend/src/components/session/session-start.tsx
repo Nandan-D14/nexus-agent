@@ -17,9 +17,11 @@ import { useIntegrationsConnectionsQuery } from "@/lib/queries/integrations";
 import { useLandingChrome } from "@/lib/landing-chrome-context";
 import { useSession } from "@/lib/use-session";
 import { useSettings } from "@/lib/settings-context";
+import { withSchedulingConnectors } from "@/lib/scheduling-intent";
 import {
   SYSTEM_CONNECTOR,
   normalizePendingTurnInput,
+  uploadedFilesForTransport,
   type PendingSessionAction,
   type PendingTurnInput,
   type SessionConnector,
@@ -84,7 +86,13 @@ export function SessionStart() {
         if (!payload) {
           return false;
         }
-        nextAction = { ...action, payload };
+        nextAction = {
+          ...action,
+          payload: {
+            ...payload,
+            uploadedFiles: uploadedFilesForTransport(payload.uploadedFiles ?? []),
+          },
+        };
       }
 
       createThreadInFlightRef.current = true;
@@ -134,7 +142,12 @@ export function SessionStart() {
 
     const payload: PendingTurnInput = {
       text,
-      connectorIds: selectedConnectorIds,
+      connectorIds: withSchedulingConnectors(
+        text,
+        selectedConnectorIds,
+        selectedToolIds,
+        availableConnectors,
+      ),
       toolIds: selectedToolIds,
     };
     setTextInput("");
@@ -143,7 +156,15 @@ export function SessionStart() {
         setTextInput(payload.text);
       }
     });
-  }, [createThreadFromAction, requireByok, selectedConnectorIds, selectedToolIds, textInput, user]);
+  }, [
+    availableConnectors,
+    createThreadFromAction,
+    requireByok,
+    selectedConnectorIds,
+    selectedToolIds,
+    textInput,
+    user,
+  ]);
 
   const handleShowDesktop = useCallback(async () => {
     if (await requireByok()) return;

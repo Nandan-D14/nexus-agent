@@ -41,6 +41,7 @@ async def websocket_endpoint(
     session_id: str,
 ):
     """WebSocket endpoint for voice + agent event streaming."""
+    logger.info("WS handshake for session %s", session_id[:16])
     session_manager = get_session_manager()
     ws_connect_limiter = get_ws_connect_limiter()
     history_repository = get_history_repository()

@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.dependencies import get_history_repository
 from nexus.models import AgentSkillImportRequest, AgentSkillUpsertRequest, StatusMessage
+from nexus.skill_catalog import CatalogFetchError, CatalogSourceError, load_catalog
 from nexus.skill_format import SkillFormatError, parse_skill_md, render_skill_md, normalize_skill_files
 from nexus.skill_import import (
     companion_urls_for_skill,
@@ -53,6 +54,27 @@ async def list_skills(user: AuthenticatedUser = Depends(require_current_user)):
     user_settings = await history_repository.get_user_settings(user.uid)
     skills = [_public(skill) for skill in list_agent_skills(user_settings, include_files=True)]
     return {"skills": skills}
+
+
+@router.get("/api/v1/skills/catalog")
+async def list_skill_catalog(
+    source: str | None = None,
+    user: AuthenticatedUser = Depends(require_current_user),
+):
+    user_settings = await history_repository.get_user_settings(user.uid)
+    installed_ids = {str(skill.get("skill_id") or "") for skill in list_agent_skills(user_settings)}
+    try:
+        catalog = await load_catalog(
+            source,
+            fetch_json=_catalog_fetch_json,
+            fetch_text=_fetch_remote_text,
+            installed_ids=installed_ids,
+        )
+    except CatalogSourceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogFetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return catalog
 
 
 @router.post("/api/v1/skills")
@@ -329,6 +351,13 @@ async def _fetch_remote_text(url: str) -> str | None:
         return content.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+async def _catalog_fetch_json(url: str) -> Any:
+    payload = await _fetch_github_json(url)
+    if payload is None:
+        raise CatalogFetchError("Could not read GitHub skill tree.")
+    return payload
 
 
 async def _fetch_github_json(url: str) -> Any:

@@ -44,6 +44,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def slim_message_attachments(uploaded_files: Any, *, limit: int = 16) -> list[dict[str, Any]]:
+    """Keep only stable, serializable fields for a user-message attachment list."""
+    if not isinstance(uploaded_files, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for raw in uploaded_files:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or raw.get("title") or "").strip()
+        path = str(raw.get("path") or "").strip()
+        if not name and not path:
+            continue
+        item: dict[str, Any] = {
+            "name": name or path.rsplit("/", 1)[-1],
+            "path": path,
+        }
+        artifact_id = raw.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id.strip():
+            item["artifact_id"] = artifact_id.strip()
+        mime_type = raw.get("mime_type") or raw.get("content_type")
+        if isinstance(mime_type, str) and mime_type.strip():
+            item["mime_type"] = mime_type.strip()
+        size = raw.get("size")
+        if isinstance(size, bool):
+            pass
+        elif isinstance(size, (int, float)):
+            item["size"] = int(size)
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return items
+
+
 class FirestoreHistoryRepository(FirestoreRepoBase):
     """Sync Firestore access wrapped with async-friendly helpers.
 
@@ -335,6 +368,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         role: str,
         source: str,
         text: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         async with guarded_write(session_id):
             await asyncio.to_thread(
@@ -345,6 +379,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
                     role,
                     source,
                     text,
+                    attachments,
                 ),
                 description="append_message",
             )
@@ -1809,6 +1844,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         role: str,
         source: str,
         text: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append a message without a read-modify-write counter.
 
@@ -1858,6 +1894,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             "sessionId": session_id,
             "taskId": task_id,
         }
+        slim_attachments = slim_message_attachments(attachments)
+        if slim_attachments:
+            message_payload["attachments"] = slim_attachments
         if run_id:
             message_payload["runId"] = run_id
 
@@ -1912,10 +1951,11 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         role: str,
         source: str,
         text: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         if settings.use_time_ordered_message_ids:
             self._append_message_time_ordered(
-                session_id, owner_id, role, source, text
+                session_id, owner_id, role, source, text, attachments
             )
             return
         session_ref = self._db.collection("sessions").document(session_id)
@@ -1949,6 +1989,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
                 "sessionId": session_id,
                 "taskId": task_id,
             }
+            slim_attachments = slim_message_attachments(attachments)
+            if slim_attachments:
+                message_payload["attachments"] = slim_attachments
             if run_id:
                 message_payload["runId"] = run_id
 
@@ -2543,14 +2586,18 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         results = []
         for doc in messages_docs:
             data = doc.to_dict()
-            results.append({
+            item: dict[str, Any] = {
                 "id": doc.id,
                 "role": data.get("role"),
                 "source": data.get("source"),
                 "text": data.get("text"),
                 "createdAt": data.get("createdAt"),
-                "turnIndex": data.get("turnIndex")
-            })
+                "turnIndex": data.get("turnIndex"),
+            }
+            attachments = data.get("attachments")
+            if isinstance(attachments, list) and attachments:
+                item["attachments"] = slim_message_attachments(attachments)
+            results.append(item)
         return results
 
     def _refresh_session_handoff_sync(

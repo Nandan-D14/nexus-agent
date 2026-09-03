@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 from unittest import TestCase
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus.sandbox_components.files import raise_sandbox_io_error
+from nexus.sandbox_components.files import SandboxFiles, raise_sandbox_io_error
 
 
 class RaiseSandboxIoErrorTests(TestCase):
@@ -44,3 +45,16 @@ class RaiseSandboxIoErrorTests(TestCase):
         self.assertEqual(str(caught.exception), "Failed to read file /tmp/secret.md")
         self.assertNotIn("Traceback", str(caught.exception))
         self.assertNotIn("PermissionError", str(caught.exception))
+
+
+class WriteBinaryFileTests(TestCase):
+    def test_write_binary_file_uses_e2b_files_api(self) -> None:
+        owner = MagicMock()
+        e2b = MagicMock()
+        owner._sandbox = e2b
+        files = SandboxFiles(owner)
+        payload = b"png-bytes"
+        files.write_binary_file("/tmp/photo.png", payload)
+        e2b.files.write.assert_called_once_with("/tmp/photo.png", payload, request_timeout=120)
+        owner.run_command.assert_not_called()
+

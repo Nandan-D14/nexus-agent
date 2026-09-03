@@ -69,15 +69,13 @@ class Settings(BaseSettings):
     bynara_api_key: str = ""
     bynara_api_base: str = "https://router.bynara.id/v1"
 
-    # --- Context-window budget (prevents input > model context limit) ---
-    # Active model context window (Kimi-K2.6 = 262144). The trimmer keeps the
-    # per-turn prompt under context_input_budget_ratio * this limit, leaving
-    # headroom for reasoning + output tokens.
-    model_context_limit: int = 262144
-    context_input_budget_ratio: float = 0.75
+    # Active model context window (default 1,000,000 tokens; configurable via MODEL_CONTEXT_LIMIT).
+    # The trimmer keeps the per-turn prompt under context_input_budget_ratio * this limit.
+    model_context_limit: int = 1_000_000
+    context_input_budget_ratio: float = 0.85
     enforce_context_budget: bool = True
     # Max characters of a single gmail_read body fed into the prompt/history.
-    gmail_read_max_chars: int = 8000
+    gmail_read_max_chars: int = 16_000
 
     # Model roles (shared across providers)
     planner_model: str = "tencent-hy3"
@@ -284,14 +282,14 @@ class Settings(BaseSettings):
     # env-based overrides don't need re-plumbing when we ship the hint.
     routing_model: str = "tencent-hy3"
     routing_fallback_model: str = "tencent-hy3"
-    max_worker_calls_per_turn: int = 8
+    max_worker_calls_per_turn: int = 20
     ask_user_timeout_seconds: float = 300.0
 
     # Context builder + memory (production stack Layers 1 and 4)
     memory_enabled: bool = True
     memory_max_facts: int = 12
-    memory_injection_max_chars: int = 2000
-    turn_context_max_chars: int = 24000
+    memory_injection_max_chars: int = 4000
+    turn_context_max_chars: int = 64000
     retrieval_max_results: int = 5
 
     # Development-only starter entitlement
@@ -300,10 +298,10 @@ class Settings(BaseSettings):
     default_plan_price_usd: int = 5
     default_credit_limit: int = 4_000
     default_credit_unit_usd: float = 0.001
-    default_credit_reset_version: str = "starter_4k_reset_20260322"
+    default_credit_reset_version: str = "starter_4k_reset_20260831"
 
     # Internal token safety cap (telemetry/debug only, not the user-facing plan allowance)
-    default_token_limit: int = 100_000
+    default_token_limit: int = 1_000_000
 
     # Thesys Generative UI
     thesys_api_key: str = ""

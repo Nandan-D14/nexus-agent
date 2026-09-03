@@ -67,3 +67,45 @@ class McpClientToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["arguments"]["apiKey"], "[redacted]")
         call_tool.assert_awaited_once()
 
+    async def test_build_mcp_adk_tools_passes_extra_headers(self) -> None:
+        connection = StoredIntegrationConnection(
+            connection_id="composio",
+            owner_id="user_1",
+            connector_type="mcp_remote_http",
+            provider="composio",
+            name="Composio",
+            enabled=True,
+            status="connected",
+            public={},
+            private={
+                "url": "https://connect.composio.dev/mcp",
+                "extraHeaders": {"x-consumer-api-key": "ck_test"},
+                "tools": [
+                    {
+                        "name": "COMPOSIO_SEARCH_TOOLS",
+                        "description": "Search Composio tools.",
+                        "input_schema": {"type": "object"},
+                    }
+                ],
+            },
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        tools = build_mcp_adk_tools([connection])
+        self.assertEqual(len(tools), 1)
+
+        with patch("nexus.mcp_client.McpRemoteClient") as client_cls:
+            instance = client_cls.return_value
+            instance.call_tool = AsyncMock(return_value={"status": "success", "text": "ok"})
+            result = await tools[0]({"query": "gmail"})
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["connection_id"], "composio")
+        client_cls.assert_called_once()
+        self.assertEqual(client_cls.call_args.kwargs["url"], "https://connect.composio.dev/mcp")
+        self.assertEqual(
+            client_cls.call_args.kwargs["headers"],
+            {"x-consumer-api-key": "ck_test"},
+        )
+

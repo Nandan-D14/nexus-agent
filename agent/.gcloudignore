@@ -1,0 +1,13 @@
+.gcloudignore
+.git
+.gitignore
+.env
+.env.*
+__pycache__
+*.pyc
+.venv
+.pytest_cache
+build/
+dist/
+*.egg-info
+graphify-out/

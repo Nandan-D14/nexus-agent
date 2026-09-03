@@ -18,7 +18,7 @@ export type AgentToolProvider =
   | "worker"
   | "generic";
 
-export type AgentSurface = "workflow" | "desktop" | "terminal" | "editor";
+export type AgentSurface = "workflow" | "desktop" | "terminal" | "editor" | "preview";
 
 const DESKTOP_TOOLS = new Set([
   "left_click",
@@ -42,6 +42,7 @@ const WORKFLOW_TOOLS = new Set([
   "update_task_state",
   "read_task_state",
   "publish_html_artifact",
+  "publish_app_preview",
   "render_ui",
   "ask_user",
   "propose_workflow_template",
@@ -62,6 +63,7 @@ const WORKER_TOOLS = new Set(["terminal_worker", "desktop_worker"]);
 
 const WORKFLOW_VISUAL_TOOLS = new Set([
   "publish_html_artifact",
+  "publish_app_preview",
   "render_ui",
   "propose_workflow_template",
   "update_workflow_template",
@@ -76,6 +78,7 @@ export function classifyAgentTool(tool = ""): AgentToolProvider {
   if (tool.startsWith("gmail_")) return "gmail";
   if (tool.startsWith("calendar_")) return "calendar";
   if (tool.startsWith("tasks_")) return "tasks";
+  if (tool === "github_clone_repo" || tool === "github_push") return "terminal";
   if (tool.startsWith("mcp__")) return "mcp";
   if (SKILL_TOOLS.has(tool)) return "skill";
   if (SUBAGENT_TOOLS.has(tool)) return "subagent";
@@ -93,6 +96,7 @@ export function surfaceForAgentTool(tool = ""): AgentSurface {
   if (provider === "desktop") return "desktop";
   if (provider === "browser" && tool === "open_browser") return "desktop";
   if (provider === "terminal" || tool === "terminal_worker") return "terminal";
+  if (tool === "publish_app_preview") return "preview";
   if (provider === "file" && tool !== "list_workspace_files") return "editor";
   return "workflow";
 }
@@ -110,6 +114,9 @@ export function displayAgentToolName(tool = ""): string {
     if (tool === "mcp__treg__balance") return "Treg Balance";
     if (tool === "mcp__treg__my_tools") return "Treg Tools";
     const [, server, remoteTool] = tool.split("__");
+    if (server === "composio") {
+      return `Composio${remoteTool ? `: ${formatToolPart(remoteTool)}` : ""}`;
+    }
     return `MCP: ${formatToolPart(server)}${remoteTool ? ` / ${formatToolPart(remoteTool)}` : ""}`;
   }
 
@@ -126,6 +133,12 @@ export function displayAgentToolName(tool = ""): string {
     desktop_worker: "Desktop Worker",
     render_ui: "Render C1 UI",
     publish_html_artifact: "Publish HTML",
+    publish_app_preview: "App Preview",
+    generate_pdf_report: "Generate PDF",
+    generate_excel_report: "Generate Spreadsheet",
+    generate_docx_report: "Generate Document",
+    generate_pptx_report: "Generate Slides",
+    save_as_artifact: "Save Artifact",
     ask_user: "Ask User",
     propose_workflow_template: "Propose Template",
     update_workflow_template: "Update Template",
@@ -148,6 +161,9 @@ export function displayAgentToolName(tool = ""): string {
     vyora_list_calls: "Vyora Calls",
     vyora_get_call: "Vyora Call Detail",
     run_command: "Terminal Command",
+    github_clone_repo: "GitHub Clone",
+    github_create_repo: "GitHub Create Repo",
+    github_push: "GitHub Push",
     read_workspace_file: "Read File",
     write_workspace_file: "Write File",
     list_workspace_files: "List Files",
@@ -181,6 +197,7 @@ export function providerLabel(provider: AgentToolProvider, tool?: string): strin
   if (provider === "workflow") {
     if (tool === "render_ui") return "C1 Visual";
     if (tool === "publish_html_artifact") return "HTML Artifact";
+    if (tool === "publish_app_preview") return "App Preview";
     if (tool === "ask_user") return "Question";
     if (
       tool === "propose_workflow_template" ||
@@ -201,6 +218,12 @@ export function toolActionLabel(tool = ""): string {
   if (tool === "read_skill_file") return "Reading skill file";
   if (tool === "render_ui") return "Rendering C1 UI";
   if (tool === "publish_html_artifact") return "Publishing artifact";
+  if (tool === "publish_app_preview") return "Publishing preview";
+  if (tool === "generate_pdf_report") return "Generating PDF";
+  if (tool === "generate_excel_report") return "Generating spreadsheet";
+  if (tool === "generate_docx_report") return "Generating document";
+  if (tool === "generate_pptx_report") return "Generating slides";
+  if (tool === "save_as_artifact") return "Saving artifact";
   if (tool === "ask_user") return "Asking user";
   if (tool === "propose_workflow_template") return "Drafting template";
   if (tool === "update_workflow_template") return "Updating template";

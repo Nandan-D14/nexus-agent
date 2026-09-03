@@ -46,6 +46,32 @@ export type ImportSkillPayload = {
   enabled?: boolean;
 };
 
+export type SkillCatalogSource = {
+  id: string;
+  label: string;
+  repo: string;
+};
+
+export type SkillCatalogItem = {
+  id: string;
+  name: string;
+  description: string;
+  license: string;
+  source: string;
+  source_label: string;
+  source_url: string;
+  html_url: string;
+  restricted: boolean;
+  category?: string;
+  installed: boolean;
+};
+
+export type SkillCatalogResponse = {
+  sources: SkillCatalogSource[];
+  skills: SkillCatalogItem[];
+  error?: string | null;
+};
+
 export async function fetchSkills(): Promise<AgentSkill[]> {
   const body = await apiJson<{ skills?: AgentSkill[] }>("/api/v1/skills");
   return body.skills ?? [];
@@ -62,16 +88,17 @@ export async function fetchSkill(skillId: string): Promise<AgentSkill> {
 }
 
 export function useSkillsQuery() {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   return useQuery({
     queryKey: queryKeys.skills(),
     queryFn: fetchSkills,
-    enabled: Boolean(user),
+    enabled: Boolean(!authLoading && user),
+    staleTime: 30_000,
   });
 }
 
 export function useSkillQuery(skillId: string) {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
   const placeholder = queryClient
     .getQueryData<AgentSkill[]>(queryKeys.skills())
@@ -80,8 +107,9 @@ export function useSkillQuery(skillId: string) {
   return useQuery({
     queryKey: queryKeys.skill(skillId),
     queryFn: () => fetchSkill(skillId),
-    enabled: Boolean(user && skillId),
-    placeholderData: placeholder,
+    enabled: Boolean(!authLoading && user && skillId),
+    placeholderData: placeholder as AgentSkill | undefined,
+    staleTime: 30_000,
   });
 }
 
@@ -181,8 +209,30 @@ export function useImportSkillMutation() {
     },
     onSuccess: (skill) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.skills() });
+      void queryClient.invalidateQueries({ queryKey: ["skills", "catalog"] });
       queryClient.setQueryData(queryKeys.skill(skill.skill_id), skill);
     },
+  });
+}
+
+export async function fetchSkillCatalog(source = ""): Promise<SkillCatalogResponse> {
+  const params = source.trim() ? `?source=${encodeURIComponent(source.trim())}` : "";
+  const body = await apiJson<SkillCatalogResponse>(`/api/v1/skills/catalog${params}`);
+  return {
+    sources: body.sources ?? [],
+    skills: body.skills ?? [],
+    error: body.error ?? null,
+  };
+}
+
+export function useSkillCatalogQuery(source: string, enabled = true) {
+  const { user, isLoading: authLoading } = useAuth();
+  const key = source.trim() || "defaults";
+  return useQuery({
+    queryKey: queryKeys.skillsCatalog(key),
+    queryFn: () => fetchSkillCatalog(source),
+    enabled: Boolean(!authLoading && user && enabled),
+    staleTime: 5 * 60_000,
   });
 }
 

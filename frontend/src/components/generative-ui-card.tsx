@@ -135,7 +135,7 @@ function decodeEntities(html: string): string {
   return txt.value;
 }
 
-export function GenerativeUICard({ title, component }: GenerativeUICardProps) {
+export function GenerativeUICard({ title: _title, component }: GenerativeUICardProps) {
   const dslString = useMemo(() => {
     let raw: string;
     if (typeof component === "string") raw = component;
@@ -204,14 +204,8 @@ export function GenerativeUICard({ title, component }: GenerativeUICardProps) {
   }, [reportRenderError]);
 
   return (
-    <div className="my-2 overflow-hidden rounded-xl border border-white/10 bg-[#14142b] shadow-lg">
-      {title ? (
-        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
-          <span className="text-sm font-medium text-zinc-200">{title}</span>
-        </div>
-      ) : null}
-
-      <div className="themed-dark c1-host p-4 font-sans text-zinc-100">
+    <div className="my-2 w-full overflow-hidden rounded-2xl bg-transparent">
+      <div className="themed-dark c1-host p-0 font-sans text-zinc-100">
         {customMarkdownContent ? (
           <ChatMarkdown content={customMarkdownContent} />
         ) : dslString && C1 && ThesysThemeProvider && !renderError ? (
@@ -226,17 +220,17 @@ export function GenerativeUICard({ title, component }: GenerativeUICardProps) {
             </ThesysThemeProvider>
           </C1ErrorBoundary>
         ) : renderError ? (
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
+          <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 p-3 text-sm text-zinc-500">
             <AlertCircle className="h-4 w-4" />
             <span>Thesys returned malformed UI. Try again.</span>
           </div>
         ) : dslString ? (
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
+          <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 p-3 text-sm text-zinc-500">
             <AlertCircle className="h-4 w-4 animate-pulse" />
             <span>Loading visual…</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
+          <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 p-3 text-sm text-zinc-500">
             <AlertCircle className="h-4 w-4" />
             <span>No component data</span>
           </div>

@@ -7,6 +7,8 @@
 
 import type { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
+import { useSignInGate } from "@/components/auth/sign-in-gate";
+import { APP_HOME } from "@/lib/app-paths";
 import { SiteNav } from "@/components/marketing/site-nav";
 import { SiteFooter } from "@/components/marketing/site-footer";
 
@@ -19,7 +21,8 @@ export function MarketingShell({
   children,
   showStatus = false,
 }: MarketingShellProps) {
-  const { user, signInWithGoogle } = useAuth();
+  const { user } = useAuth();
+  const { requestSignIn } = useSignInGate();
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-blue-500/30 overflow-x-hidden font-sans">
@@ -27,7 +30,7 @@ export function MarketingShell({
         variant="marketing"
         user={user}
         onSignIn={() => {
-          void signInWithGoogle().catch(() => {});
+          requestSignIn({ redirectTo: APP_HOME });
         }}
       />
       {children}

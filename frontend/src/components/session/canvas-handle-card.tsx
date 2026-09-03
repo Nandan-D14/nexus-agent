@@ -42,8 +42,8 @@ export function CanvasHandleCard({
   downloading = false,
 }: Props) {
   return (
-    <Artifact className="w-full max-w-xl rounded-xl border-zinc-200 bg-zinc-50 shadow-sm dark:border-zinc-800 dark:bg-[#141414]">
-      <ArtifactHeader className="gap-3 border-b-0 bg-transparent px-3.5 py-3 dark:bg-transparent">
+    <Artifact className="w-full max-w-xl rounded-xl border-card-border bg-background-secondary-default shadow-sm">
+      <ArtifactHeader className="gap-3 border-b-0 bg-transparent px-3.5 py-3">
         <button
           type="button"
           onClick={onOpen}
@@ -52,15 +52,15 @@ export function CanvasHandleCard({
           {artifact ? (
             <ArtifactIconTile artifact={artifact} />
           ) : (
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-zinc-100 text-[10px] font-semibold uppercase tracking-wide text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-card-border bg-background-tertiary-default text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
               {kind === "plan" ? "Plan" : kind === "file" ? "File" : "Doc"}
             </span>
           )}
           <div className="min-w-0">
-            <ArtifactTitle className="truncate text-[14px] text-zinc-800 dark:text-zinc-100">
+            <ArtifactTitle className="truncate text-[14px] text-text-primary">
               {canvasHandleLabel(kind)}
             </ArtifactTitle>
-            <ArtifactDescription className="mt-0.5 truncate text-[12px] text-zinc-500">
+            <ArtifactDescription className="mt-0.5 truncate text-[12px] text-text-secondary">
               {subtitle || title}
             </ArtifactDescription>
           </div>

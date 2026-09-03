@@ -66,6 +66,31 @@ def test_policy_denies_env_grep_for_keys() -> None:
     assert decision.risk == "blocked"
 
 
+def test_policy_requires_approval_for_github_push_and_create_repo() -> None:
+    push = evaluate_tool_policy("github_push", {"repo_name": "demo"}, autonomy_mode="auto")
+    create = evaluate_tool_policy("github_create_repo", {"name": "demo"}, autonomy_mode="auto")
+    clone = evaluate_tool_policy(
+        "github_clone_repo",
+        {"owner": "acme", "repo": "demo"},
+        autonomy_mode="manual",
+    )
+
+    assert push.action == "require_approval"
+    assert create.action == "require_approval"
+    assert clone.action == "allow"
+
+
+def test_policy_requires_approval_for_shell_git_push() -> None:
+    decision = evaluate_tool_policy(
+        "run_command",
+        {"command": "git push origin main"},
+        autonomy_mode="auto",
+    )
+
+    assert decision.action == "require_approval"
+    assert decision.risk == "high"
+
+
 def test_policy_allows_workspace_listing() -> None:
     decision = evaluate_tool_policy(
         "run_command",

@@ -80,7 +80,8 @@ export function OutputsPanel({
   // Prefetch URLs for anything that renders a thumbnail on its card.
   useEffect(() => {
     deliverables.forEach((artifact) => {
-      if (previewKind(artifact) === "none") return;
+      const kind = previewKind(artifact);
+      if (kind === "none" || kind === "sheet" || kind === "markdown") return;
       if (freshUrls[artifact.artifact_id] || fetchedIds.current.has(artifact.artifact_id)) {
         return;
       }
@@ -134,8 +135,8 @@ export function OutputsPanel({
 
   if (artifacts.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center px-4 py-6 bg-[#0a0a0c]">
-        <div className="flex min-h-[240px] w-full max-w-2xl items-center justify-center rounded-2xl border border-dashed border-zinc-800 bg-white/5 p-6 text-center text-sm text-zinc-500">
+      <div className="flex h-full items-center justify-center bg-background-full px-4 py-6">
+        <div className="flex min-h-[240px] w-full max-w-2xl items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-6 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:bg-white/5">
           <div className="flex flex-col items-center gap-3">
             <File className="w-8 h-8 opacity-20" />
             <p>{emptyState}</p>
@@ -146,10 +147,10 @@ export function OutputsPanel({
   }
 
   return (
-    <div className="h-full overflow-y-auto custom-scrollbar px-6 py-8 bg-[#0a0a0c]">
+    <div className="h-full overflow-y-auto custom-scrollbar bg-background-full px-6 py-8">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
             <FileText className="w-5 h-5 text-amber-400" />
             Generated Artifacts
           </h3>

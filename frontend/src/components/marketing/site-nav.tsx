@@ -62,6 +62,12 @@ export function SiteNav({
                 Features
               </a>
               <a
+                href="#integrations"
+                className="hover:text-foreground transition-colors"
+              >
+                Integrations
+              </a>
+              <a
                 href="#how-it-works"
                 className="hover:text-foreground transition-colors"
               >

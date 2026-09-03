@@ -150,7 +150,7 @@ class SessionRuntimeConfig:
 
     @property
     def qwen_available(self) -> bool:
-        return bool(settings.qwen_api_key)
+        return bool(getattr(settings, "qwen_api_key", "") or getattr(settings, "bynara_api_key", ""))
 
 
 def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict[str, Any]:
@@ -184,7 +184,7 @@ def runtime_config_snapshot(runtime_config: SessionRuntimeConfig | None) -> dict
         "qwen_micro_fallback_models": list(runtime_config.qwen_micro_fallback_models),
         "qwen_vision_model": runtime_config.qwen_vision_model,
         "qwen_vision_fallback_models": list(runtime_config.qwen_vision_fallback_models),
-        "qwen_api_key_set": bool(settings.qwen_api_key),
+        "qwen_api_key_set": bool(getattr(settings, "qwen_api_key", "") or getattr(settings, "bynara_api_key", "")),
         "autonomy_mode": runtime_config.autonomy_mode,
         "llm_provider": runtime_config.llm_provider,
         "llm_model": runtime_config.llm_model,

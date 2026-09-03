@@ -473,6 +473,7 @@ async def get_github_auth_url(user: AuthenticatedUser = Depends(require_current_
     params = {
         "client_id": settings.github_oauth_client_id,
         "redirect_uri": _github_redirect_uri(),
+        "response_type": "code",
         "scope": GITHUB_SCOPES,
         "state": state,
         "code_challenge": _pkce_challenge(code_verifier),
@@ -512,6 +513,7 @@ async def exchange_github_code(
                     "client_id": settings.github_oauth_client_id,
                     "client_secret": settings.github_oauth_client_secret,
                     "code": str(code),
+                    "grant_type": "authorization_code",
                     "redirect_uri": _github_redirect_uri(),
                     "code_verifier": code_verifier,
                 },

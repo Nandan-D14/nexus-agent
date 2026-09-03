@@ -12,7 +12,7 @@ import { motion, useScroll, useSpring } from "framer-motion";
 import { useAuth } from "@/lib/auth-context";
 import { listRecentSessions } from "@/lib/firestore-history";
 import type { RecentSession } from "@/lib/message-types";
-import { APP_HOME } from "@/lib/app-paths";
+import { APP_CONNECTORS, APP_HOME } from "@/lib/app-paths";
 import {
   Eye,
   KeyRound,
@@ -25,17 +25,12 @@ import { SiteNav } from "@/components/marketing/site-nav";
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { MarketingHeroPanel } from "@/components/marketing/marketing-hero-panel";
 import { HeroAnnouncement } from "@/components/marketing/hero-announcement";
+import { IntegrationsSection } from "@/components/marketing/integrations-section";
+import {
+  readPostSignInRedirect,
+  useSignInGate,
+} from "@/components/auth/sign-in-gate";
 import { AppShellSkeleton } from "@/components/app-shell-skeleton";
-
-const CONNECTOR_LOGOS = [
-  { name: "Linear", src: "/connectors/linear.svg" },
-  { name: "Vercel", src: "/connectors/vercel.svg" },
-  { name: "Slack", src: "/connectors/slack.svg" },
-  { name: "OpenAI", src: "/connectors/openai.svg" },
-  { name: "MCP", src: "/connectors/mcp.svg" },
-  { name: "Cloudflare", src: "/connectors/cloudflare.svg" },
-  { name: "Tavily", src: "/connectors/tavily.svg" },
-];
 
 export default function HomePage() {
   const router = useRouter();
@@ -44,9 +39,9 @@ export default function HomePage() {
   const {
     user,
     isLoading: authLoading,
-    signInWithGoogle,
     signOutUser,
   } = useAuth();
+  const { requestSignIn } = useSignInGate();
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const mounted = useSyncExternalStore(
     () => () => {},
@@ -82,13 +77,25 @@ export default function HomePage() {
       return;
     }
     setIsCheckingAccess(true);
-    router.replace(APP_HOME);
+    // Honour a gated destination (e.g. "Browse all connectors") over the default.
+    router.replace(readPostSignInRedirect() ?? APP_HOME);
   }, [authLoading, router, user]);
 
   const handleStart = async () => {
     if (!user) return;
     setIsLaunching(true);
     router.push(APP_HOME);
+  };
+
+  /** Signed in → straight to the app. Signed out → consent dialog first. */
+  const handlePrimaryCta = () => {
+    if (user) {
+      void handleStart();
+      return;
+    }
+    // No explicit redirect: preserves any deep link the app shell stashed
+    // when it bounced a signed-out visitor here. Falls back to APP_HOME.
+    requestSignIn();
   };
 
   // Wait for auth before rendering marketing content so signed-in
@@ -121,7 +128,7 @@ export default function HomePage() {
         isLaunching={isLaunching}
         resumableSession={Boolean(resumableSession)}
         onSignIn={() => {
-          void signInWithGoogle().catch(() => {});
+          requestSignIn();
         }}
         onSignOut={() => {
           void signOutUser().catch(() => {});
@@ -163,7 +170,7 @@ export default function HomePage() {
             className="flex flex-col items-center gap-4"
           >
             <button
-              onClick={() => (user ? handleStart() : signInWithGoogle())}
+              onClick={handlePrimaryCta}
               disabled={isLaunching || authLoading}
               className="px-8 h-12 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black text-sm font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-all active:scale-[0.98] disabled:opacity-50"
             >
@@ -295,42 +302,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="relative overflow-hidden py-20">
-        <div className="mx-auto mb-10 max-w-2xl px-6 text-center">
-          <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-blue-600 dark:text-blue-500">
-            Connectors you opt in
-          </p>
-          <p className="text-muted-foreground">
-            Drive, Gmail, GitHub, Linear, Slack, Vercel, and custom MCP. The
-            agent only uses what you connect.
-          </p>
-        </div>
-        <div className="relative">
-          <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-24 bg-gradient-to-r from-background to-transparent" />
-          <div className="pointer-events-none absolute inset-y-0 right-0 z-10 w-24 bg-gradient-to-l from-background to-transparent" />
-          <div className="flex w-max logo-marquee">
-            {[0, 1].map((copy) => (
-              <div key={copy} className="flex items-center gap-16 px-8">
-                {CONNECTOR_LOGOS.map((item) => (
-                  <div
-                    key={`${copy}-${item.name}`}
-                    className="flex items-center gap-3 text-muted-foreground"
-                  >
-                    <img
-                      src={item.src}
-                      alt=""
-                      className="h-7 w-7 object-contain opacity-80"
-                    />
-                    <span className="text-sm font-medium tracking-tight">
-                      {item.name}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <IntegrationsSection connectorsHref={APP_CONNECTORS} />
 
       <section id="how-it-works" className="py-32 bg-background overflow-hidden">
         <div className="max-w-7xl mx-auto px-6">
@@ -398,9 +370,7 @@ export default function HomePage() {
                 {mounted ? (
                   <>
                     <button
-                      onClick={() =>
-                        user ? handleStart() : signInWithGoogle()
-                      }
+                      onClick={handlePrimaryCta}
                       className="w-full sm:w-auto px-10 py-4 bg-white text-blue-600 rounded-xl font-bold hover:bg-zinc-100 transition-colors shadow-lg"
                     >
                       Get Started Now

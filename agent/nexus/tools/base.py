@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 _NORMALIZED_KEYS = frozenset({
     "status", "summary", "detail", "metadata",
-    "error_code", "suggested_alternatives", "retry_after",
+    "error_code", "suggested_alternatives", "retry_after", "retryable",
 })
 
 
@@ -37,6 +37,7 @@ class NormalizedToolResult(TypedDict, total=False):
         ``"NOT_FOUND"``, ``"TIMEOUT"``, ``"INVALID_INPUT"``, ``"AUTH_REQUIRED"``.
     suggested_alternatives : Other tool names the LLM could try instead.
     retry_after : Seconds to wait before retrying (for rate-limit errors).
+    retryable : Whether the caller should retry (sandbox reconnect, transient faults).
     """
 
     status: str
@@ -46,6 +47,7 @@ class NormalizedToolResult(TypedDict, total=False):
     error_code: str
     suggested_alternatives: list[str]
     retry_after: int
+    retryable: bool
 
 
 def tool_error(
@@ -54,6 +56,7 @@ def tool_error(
     error_code: str = "",
     suggested_alternatives: list[str] | None = None,
     retry_after: int | None = None,
+    retryable: bool | None = None,
     **metadata: Any,
 ) -> NormalizedToolResult:
     """Build a consistent error result for any tool.
@@ -73,6 +76,8 @@ def tool_error(
     }
     if retry_after is not None:
         result["retry_after"] = retry_after
+    if retryable is not None:
+        result["retryable"] = retryable
     return result
 
 
@@ -108,18 +113,52 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
     def decorator(fn: Callable) -> Callable:
         is_coro = asyncio.iscoroutinefunction(fn)
 
+        async def _invoke(*args: Any, **kwargs: Any) -> Any:
+            if needs_sandbox:
+                from nexus.tools._context import ensure_sandbox
+                await ensure_sandbox()
+            if is_coro:
+                return await fn(*args, **kwargs)
+            # Keep blocking I/O (E2B commands, screenshots) off the loop.
+            return await asyncio.to_thread(fn, *args, **kwargs)
+
         @wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> NormalizedToolResult:
+            from nexus.sandbox import SandboxDeadError
+
             try:
-                if needs_sandbox:
-                    from nexus.tools._context import ensure_sandbox
-                    await ensure_sandbox()
-                if is_coro:
-                    result = await fn(*args, **kwargs)
-                else:
-                    # Keep blocking I/O (E2B commands, screenshots) off the loop.
-                    result = await asyncio.to_thread(fn, *args, **kwargs)
+                result = await _invoke(*args, **kwargs)
                 return _normalize(fn.__name__, result)
+            except SandboxDeadError:
+                if not needs_sandbox:
+                    logger.exception("Tool %s failed", fn.__name__)
+                    return tool_error(
+                        f"Tool {fn.__name__} failed: sandbox is not running",
+                        error_code="TOOL_EXCEPTION",
+                        tool_name=fn.__name__,
+                    )
+                logger.warning(
+                    "Sandbox died during %s — reconnecting and retrying once",
+                    fn.__name__,
+                )
+                try:
+                    result = await _invoke(*args, **kwargs)
+                    return _normalize(fn.__name__, result)
+                except SandboxDeadError as e:
+                    logger.exception("Tool %s failed after sandbox reconnect", fn.__name__)
+                    return tool_error(
+                        f"Sandbox could not be restarted in this session: {e}",
+                        error_code="SANDBOX_RECONNECT_FAILED",
+                        retryable=True,
+                        tool_name=fn.__name__,
+                    )
+                except Exception as e:
+                    logger.exception("Tool %s failed", fn.__name__)
+                    return tool_error(
+                        f"Tool {fn.__name__} failed: {e}",
+                        error_code="TOOL_EXCEPTION",
+                        tool_name=fn.__name__,
+                    )
             except Exception as e:
                 logger.exception("Tool %s failed", fn.__name__)
                 return tool_error(
@@ -156,7 +195,7 @@ def _normalize(func_name: str, result: Any) -> NormalizedToolResult:
     if isinstance(result, dict):
         # Already a NormalizedToolResult — fill in missing keys
         if "status" in result and "summary" in result:
-            return {
+            normalized = {
                 "status": result.get("status", "success"),
                 "summary": result.get("summary", ""),
                 "detail": result.get("detail", result),
@@ -165,6 +204,9 @@ def _normalize(func_name: str, result: Any) -> NormalizedToolResult:
                 "suggested_alternatives": result.get("suggested_alternatives", []),
                 **({"retry_after": result["retry_after"]} if "retry_after" in result else {}),
             }
+            if "retryable" in result:
+                normalized["retryable"] = bool(result["retryable"])
+            return normalized
 
         # Legacy dict with "error" key
         if "error" in result:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from nexus.tools.docs import (
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
+    generate_pptx_report,
     publish_html_artifact,
 )
 
@@ -155,6 +157,40 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         # Verify docx generation was invoked
         commands = self.sandbox.commands_run
         self.assertTrue(any("python3 /tmp/gen_docx_" in cmd for cmd in commands))
+
+    async def test_generate_pptx_report_success(self) -> None:
+        result = await generate_pptx_report(
+            title="Design Review",
+            slides=[
+                {"title": "Agenda", "bullets": ["Goals", "Timeline"]},
+                {"title": "Next steps", "bullets": ["Ship preview"]},
+            ],
+            filename="review.pptx",
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["detail"]["filename"], "review.pptx")
+        self.assertEqual(result["detail"]["artifact_id"], "artifact_abc")
+        self.assertEqual(result["detail"]["preview_url"], "https://gcs/url")
+
+        commands = self.sandbox.commands_run
+        self.assertTrue(any("python3 /tmp/gen_pptx_" in cmd for cmd in commands))
+        script_files = [k for k in self.sandbox.files if "gen_pptx_" in k]
+        self.assertTrue(script_files)
+        script = self.sandbox.files[script_files[0]]
+        self.assertIn("python-pptx", script)
+        self.assertIn("from pptx import Presentation", script)
+        ast.parse(script)
+
+        self.mock_history_repo.create_artifact.assert_awaited()
+        create_kwargs = self.mock_history_repo.create_artifact.await_args.kwargs
+        self.assertEqual(create_kwargs["kind"], "presentation")
+        self.assertEqual(create_kwargs["metadata"]["preview_url"], "https://gcs/url")
+        self.assertTrue(str(create_kwargs["metadata"]["preview_path"]).endswith(".html"))
+
+    async def test_generate_pptx_report_requires_slides(self) -> None:
+        result = await generate_pptx_report(title="Empty", slides=[], filename="empty.pptx")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "INVALID_SLIDES")
 
     async def test_publish_html_artifact_creates_preview_without_sandbox(self) -> None:
         result = await publish_html_artifact(

@@ -42,9 +42,17 @@ export type ConnectorSection = {
 
 const GOOGLE_PROVIDERS = new Set(["google_drive", "gmail", "google_calendar", "google_tasks"]);
 
-const FEATURED_PROVIDERS = ["google_drive", "gmail", "google_calendar", "github", "linear", "vercel"];
+const FEATURED_PROVIDERS = [
+  "google_drive",
+  "gmail",
+  "google_calendar",
+  "google_tasks",
+  "github",
+  "linear",
+  "vercel",
+];
 const SEARCH_PROVIDERS = ["exa", "treg", "tavily", "tinyfish"];
-const DEVELOPER_PROVIDERS = ["google_tasks", "cloudflare", "apify", "slack", "openai", "vyora", "mcp"];
+const DEVELOPER_PROVIDERS = ["cloudflare", "apify", "slack", "openai", "vyora", "composio", "mcp"];
 
 const CATALOG_DEFAULTS: CatalogItem[] = [
   {
@@ -103,6 +111,13 @@ const CATALOG_DEFAULTS: CatalogItem[] = [
     description: "SEO, SERP, backlinks, enrichment, ads, and social APIs via Treg MCP.",
     status: "available",
   },
+  {
+    provider: "composio",
+    connector_type: "mcp_remote_http",
+    name: "Composio",
+    description: "Connect 1000+ apps through Composio MCP.",
+    status: "available",
+  },
 ];
 
 /** Keep first-class connectors visible even if an older agent catalog omits them. */
@@ -156,6 +171,12 @@ export function providerLogo(provider: string): string | null {
       return "/connectors/vyora.png";
     case "mcp":
       return "/connectors/mcp.svg";
+    case "composio":
+      return "/connectors/composio.svg";
+    case "stripe":
+      return "/connectors/stripe.svg";
+    case "insights":
+      return "/connectors/insights.svg";
     default:
       return null;
   }
@@ -171,7 +192,7 @@ export function invertLogoInDark(provider: string): boolean {
 }
 
 export function logoFillsTile(provider: string): boolean {
-  return provider === "treg" || provider === "tavily" || provider === "mcp";
+  return provider === "treg" || provider === "tavily" || provider === "mcp" || provider === "composio";
 }
 
 export function logoTileClass(provider: string): string {
@@ -182,6 +203,8 @@ export function logoTileClass(provider: string): string {
       return "border-0 bg-white dark:bg-[#1F1E1E]";
     case "mcp":
       return "border border-zinc-200 bg-black dark:border-white/10";
+    case "composio":
+      return "border-0 bg-[#111111]";
     default:
       return "border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900";
   }
@@ -350,31 +373,35 @@ const CONNECTOR_DETAILS: Record<string, ConnectorDetail> = {
     connectHint: "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks.",
   },
   google_calendar: {
-    summary: "List and create calendar events so the agent can schedule and summarize your day.",
+    summary: "List, create, update, and delete calendar events so the agent can schedule and manage your day.",
     capabilities: [
-      "List upcoming events",
-      "Create events with title, time, and guests",
-      "Use calendar context in session replies",
+      "List and read upcoming events",
+      "Create, reschedule, edit, and cancel events with title, time, timezone, and optional guests",
+      "Ask in chat: “Move Design Review to 10am” or “Cancel tomorrow’s standup.”",
     ],
-    connectHint: "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks.",
+    connectHint:
+      "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks. Creating, updating, or deleting an event always shows an approval card in chat.",
   },
   google_tasks: {
     summary: "Manage Google Tasks lists and to-dos from the agent loop.",
     capabilities: [
-      "List tasks and task lists",
-      "Create and complete to-dos",
-      "Keep session work in sync with Tasks",
+      "List tasks in your default list",
+      "Create to-dos with an optional due date",
+      "Ask in chat: “Add a Google Task: send the weekly digest, due Friday 5pm.”",
     ],
-    connectHint: "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks.",
+    connectHint:
+      "Connects with Google OAuth. One Google login covers Drive, Gmail, Calendar, and Tasks. Creating a task always shows an approval card in chat.",
   },
   github: {
-    summary: "Search repos, read files, list issues, and summarize pull requests from GitHub.",
+    summary: "Search repos, read files, clone, create repositories, and push with git using your connected GitHub account.",
     capabilities: [
       "Search repositories and read files",
+      "Clone a repo into the workspace",
+      "Create a GitHub repository and push local code",
       "List and create issues",
       "Summarize pull requests",
     ],
-    connectHint: "Connects with GitHub OAuth when configured, or a personal access token.",
+    connectHint: "Connects with GitHub OAuth, the same popup flow as Google. A personal access token is optional fallback. Clone and push use the sandbox git CLI with your connected token.",
   },
   exa: {
     summary:
@@ -423,6 +450,17 @@ const CONNECTOR_DETAILS: Record<string, ConnectorDetail> = {
       "HTTPS required in production",
     ],
     connectHint: "You’ll enter a server name, HTTPS endpoint, and optional bearer token.",
+  },
+  composio: {
+    summary:
+      "Give the agent 1000+ apps (Gmail, Notion, Slack, GitHub, and more) through one Composio MCP connection.",
+    capabilities: [
+      "Search, connect, and run tools across connected apps",
+      "Authorize each app in the browser the first time it is needed",
+      "Seven meta-tools instead of a separate connector per app",
+    ],
+    connectHint:
+      "Connects to https://connect.composio.dev/mcp. Optional consumer API key from connect.composio.dev if the server returns 401.",
   },
   linear: {
     summary: "Work Linear issues, projects, and comments from the session without leaving CoComputer.",

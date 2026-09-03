@@ -8,6 +8,7 @@ import mimetypes
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _storage_client: Optional[storage.Client] = None
 _SIGNED_URL_EXPIRATION_SECONDS = 900
+_CONTENT_MAX_BYTES = 25 * 1024 * 1024
 
 
 def _resolve_sa_credentials():
@@ -84,6 +86,26 @@ def artifact_storage_metadata(session_id: str, run_id: str, relative_path: str) 
         "gcs_blob": artifact_blob_name(session_id, run_id, relative_path),
     }
 
+def parse_gcs_object_url(url: str) -> Optional[tuple[str, str]]:
+    """Extract (bucket, blob) from a Google Cloud Storage HTTPS URL."""
+    if not url or "storage.googleapis.com" not in url:
+        return None
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if host == "storage.googleapis.com":
+        if len(parts) < 2:
+            return None
+        return parts[0], "/".join(parts[1:])
+    suffix = ".storage.googleapis.com"
+    if host.endswith(suffix):
+        bucket = host[: -len(suffix)]
+        if not bucket or not parts:
+            return None
+        return bucket, "/".join(parts)
+    return None
+
+
 def generate_artifact_signed_url(
     *,
     bucket_name: str,
@@ -106,6 +128,37 @@ def generate_artifact_signed_url(
         logger.error("Failed to generate signed URL for %s/%s: %s", bucket_name, blob_name, e)
         return None
 
+def download_artifact_bytes(
+    *,
+    bucket_name: str,
+    blob_name: str,
+    max_bytes: int = _CONTENT_MAX_BYTES,
+) -> Optional[tuple[bytes, str]]:
+    """Download a GCS blob and return (bytes, content_type).
+
+    Returns None if the blob doesn't exist or exceeds *max_bytes*.
+    """
+    try:
+        client = get_storage_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        if not blob.exists():
+            return None
+        blob.reload()
+        if blob.size and blob.size > max_bytes:
+            logger.warning(
+                "Blob %s/%s is %d bytes, exceeds download limit of %d",
+                bucket_name, blob_name, blob.size, max_bytes,
+            )
+            return None
+        content = blob.download_as_bytes()
+        mime = blob.content_type or mimetypes.guess_type(blob_name)[0] or "application/octet-stream"
+        return content, mime
+    except Exception:
+        logger.exception("Failed to download blob %s/%s", bucket_name, blob_name)
+        return None
+
+
 def download_artifact_as_data_uri(
     *,
     bucket_name: str,
@@ -120,29 +173,18 @@ def download_artifact_as_data_uri(
 
     Returns None if the blob doesn't exist or exceeds *max_bytes*.
     """
-    try:
-        import base64
-        import mimetypes
-
-        client = get_storage_client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        if not blob.exists():
-            return None
-        blob.reload()
-        if blob.size and blob.size > max_bytes:
-            logger.warning(
-                "Blob %s/%s is %d bytes, exceeds data-URI limit of %d",
-                bucket_name, blob_name, blob.size, max_bytes,
-            )
-            return None
-        content = blob.download_as_bytes()
-        mime = blob.content_type or mimetypes.guess_type(blob_name)[0] or "application/octet-stream"
-        encoded = base64.b64encode(content).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
-    except Exception:
-        logger.exception("Failed to download blob %s/%s as data URI", bucket_name, blob_name)
+    payload = download_artifact_bytes(
+        bucket_name=bucket_name,
+        blob_name=blob_name,
+        max_bytes=max_bytes,
+    )
+    if payload is None:
         return None
+    import base64
+
+    content, mime = payload
+    encoded = base64.b64encode(content).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def upload_artifact(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:

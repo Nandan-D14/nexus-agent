@@ -34,6 +34,7 @@ import {
 } from "@/lib/connectors";
 import { invalidateIntegrations } from "@/lib/queries/invalidate";
 import {
+  useConnectComposioMutation,
   useConnectGithubMutation,
   useConnectMcpMutation,
   useConnectOpenAIMutation,
@@ -73,6 +74,7 @@ export function ConnectorsView() {
   const deleteMutation = useDeleteIntegrationMutation();
   const disconnectGoogleMutation = useDisconnectGoogleMutation();
   const connectMcpMutation = useConnectMcpMutation();
+  const connectComposioMutation = useConnectComposioMutation();
   const connectGithubMutation = useConnectGithubMutation();
   const connectTavilyMutation = useConnectTavilyMutation();
   const connectTinyfishMutation = useConnectTinyfishMutation();
@@ -83,6 +85,7 @@ export function ConnectorsView() {
   const [error, setError] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [showMcp, setShowMcp] = useState(false);
+  const [showComposio, setShowComposio] = useState(false);
   const [showGithub, setShowGithub] = useState(false);
   const [showTavily, setShowTavily] = useState(false);
   const [showTinyfish, setShowTinyfish] = useState(false);
@@ -91,6 +94,7 @@ export function ConnectorsView() {
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpToken, setMcpToken] = useState("");
+  const [composioKey, setComposioKey] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
   const [tinyfishKey, setTinyfishKey] = useState("");
@@ -246,12 +250,7 @@ export function ConnectorsView() {
       return;
     }
     if (item.provider === "github") {
-      if (item.auth_mode === "oauth") {
-        void startGithubConnect();
-        return;
-      }
-      setSelectedItem(null);
-      setShowGithub(true);
+      void startGithubConnect();
       return;
     }
     if (item.provider === "slack") {
@@ -267,6 +266,7 @@ export function ConnectorsView() {
     else if (item.provider === "tinyfish") setShowTinyfish(true);
     else if (item.provider === "vyora") setShowVyora(true);
     else if (item.provider === "openai") setShowOpenai(true);
+    else if (item.provider === "composio") setShowComposio(true);
     else if (item.provider === "mcp") setShowMcp(true);
   };
 
@@ -288,6 +288,21 @@ export function ConnectorsView() {
       setMcpToken("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add MCP server");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitComposio = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      await connectComposioMutation.mutateAsync(composioKey);
+      setShowComposio(false);
+      setComposioKey("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect Composio");
     } finally {
       setSubmitting(false);
     }
@@ -534,6 +549,32 @@ export function ConnectorsView() {
         </ConnectorModal>
       ) : null}
 
+      {showComposio ? (
+        <ConnectorModal title="Connect Composio" onClose={() => setShowComposio(false)}>
+          <form onSubmit={submitComposio} className="space-y-4">
+            <ConnectorField
+              label="Endpoint URL"
+              value="https://connect.composio.dev/mcp"
+              onChange={() => undefined}
+              readOnly
+            />
+            <ConnectorField
+              label="Consumer API key"
+              value={composioKey}
+              onChange={setComposioKey}
+              placeholder="Optional — ck_..."
+              type="password"
+            />
+            <p className="text-xs leading-relaxed text-zinc-500">
+              Leave the key blank first. If connect fails with 401, paste a consumer API key from
+              connect.composio.dev (Settings → Sessions & API Key).
+            </p>
+            {error ? <p className="text-xs leading-relaxed text-red-500">{error}</p> : null}
+            <ConnectorSubmitButton loading={submitting} label="Link Composio" />
+          </form>
+        </ConnectorModal>
+      ) : null}
+
       {selectedItem ? (
         <ConnectorDetailModal
           item={selectedItem}
@@ -558,9 +599,9 @@ export function ConnectorsView() {
               : undefined
           }
           secondaryAction={
-            selectedItem.provider === "github" && !connected && selectedItem.auth_mode === "oauth"
+            selectedItem.provider === "github" && !connected
               ? {
-                  label: "Use a personal access token",
+                  label: "Use a personal access token instead",
                   onClick: () => {
                     setSelectedItem(null);
                     setShowGithub(true);

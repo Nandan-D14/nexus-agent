@@ -15,6 +15,7 @@ import {
 
 import { db } from "@/lib/firebase-client";
 import type { ArchivedMessage, RecentSession } from "@/lib/message-types";
+import { parseUploadedFiles } from "@/lib/session-utils";
 
 export async function listRecentSessions(
   ownerId: string,
@@ -118,6 +119,7 @@ export async function listArchivedMessages(
       source: typeof data.source === "string" ? data.source : undefined,
       turn_index: typeof data.turnIndex === "number" ? data.turnIndex : 0,
       created_at: data.createdAt?.toDate?.().toISOString?.() || null,
+      attachments: parseUploadedFiles(data.attachments),
     };
   });
 }

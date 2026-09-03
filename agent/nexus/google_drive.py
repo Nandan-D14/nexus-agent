@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any
 
 import httpx
 
-from nexus.config import settings
+from nexus.config import get_oauth_client_secret, settings
+
+logger = logging.getLogger(__name__)
 
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DOC_MIME_TYPE = "application/vnd.google-apps.document"
@@ -188,19 +191,30 @@ async def get_google_drive_access_token_for_user(
     refresh_token = (user_settings or {}).get("googleDriveRefreshToken")
     if not refresh_token:
         return None
-    if not (settings.google_oauth_client_id and settings.google_oauth_client_secret):
+    client_secret = get_oauth_client_secret()
+    if not (settings.google_oauth_client_id and client_secret):
         return None
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": settings.google_oauth_client_id,
-                "client_secret": settings.google_oauth_client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.google_oauth_client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+    except httpx.HTTPError:
+        logger.warning("Google token refresh transport failed for user %s", user_id, exc_info=True)
+        return None
+    if response.status_code >= 400:
+        logger.warning(
+            "Google token refresh failed for user %s: HTTP %s",
+            user_id,
+            response.status_code,
         )
-        response.raise_for_status()
+        return None
     token = response.json().get("access_token")
     return token if isinstance(token, str) and token else None
 

@@ -42,6 +42,7 @@ class FakeOrchestrator:
         self.kwargs = kwargs
         self.initialize = AsyncMock()
         self.start_desktop = AsyncMock()
+        self.restart_sandbox = AsyncMock()
         self.close = AsyncMock()
         self.disconnect_marked = False
 
@@ -259,6 +260,50 @@ async def test_start_desktop_command_starts_orchestrator_desktop(monkeypatch) ->
     await ws_handler.handle_websocket(ws, session, session_manager)
 
     created[0].start_desktop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_restart_sandbox_command_restarts_orchestrator_sandbox(monkeypatch) -> None:
+    FakeOrchestrator.active_on_disconnect = False
+    session = SimpleNamespace(id="session-123", owner_id="firebase-uid")
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+    ws = FakeWebSocket(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "type": "restart_sandbox",
+                        "port": 8000,
+                        "title": "Ember & Oak",
+                        "workspace_path": "/ws/ember-and-oak",
+                    }
+                )
+            },
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    created: list[FakeOrchestrator] = []
+
+    class CapturingOrchestrator(FakeOrchestrator):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", CapturingOrchestrator)
+
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    created[0].restart_sandbox.assert_awaited_once_with(
+        port=8000,
+        title="Ember & Oak",
+        workspace_path="/ws/ember-and-oak",
+    )
 
 
 @pytest.mark.asyncio
@@ -509,3 +554,32 @@ async def test_disconnect_mid_turn_can_replay_durable_events(monkeypatch) -> Non
             "seq": 1,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_error_on_cleanup_does_not_send_ws_error(monkeypatch) -> None:
+    FakeOrchestrator.active_on_disconnect = False
+    session = SimpleNamespace(id="session-123", owner_id="firebase-uid")
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+
+    class VoiceBoomOrchestrator(FakeOrchestrator):
+        async def run_voice_receive_loop(self) -> None:
+            raise RuntimeError("voice boom")
+
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", VoiceBoomOrchestrator)
+
+    ws = FakeWebSocket()
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    error_frames = [
+        call.args[0]
+        for call in ws.send_json.await_args_list
+        if isinstance(call.args[0], dict) and call.args[0].get("code") == "WS_ERROR"
+    ]
+    assert error_frames == []

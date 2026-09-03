@@ -416,6 +416,14 @@ class TaskRunStore(BoundProductionStore):
         final_response: str,
     ) -> None:
         now = utcnow()
+        run_ref = self._run_ref(task_id, run_id)
+        current = run_ref.get()
+        if current.exists:
+            current_status = canonicalize_task_status(
+                (current.to_dict() or {}).get("status")
+            )
+            if current_status in TERMINAL_TASK_STATUSES:
+                return
         updates = {
             "status": canonicalize_task_status(status),
             "summary": summary,
@@ -427,7 +435,7 @@ class TaskRunStore(BoundProductionStore):
             "leaseExpiresAt": None,
         }
         batch = self._db.batch()
-        batch.set(self._run_ref(task_id, run_id), updates, merge=True)
+        batch.set(run_ref, updates, merge=True)
         batch.set(
             self._task_ref(task_id),
             {

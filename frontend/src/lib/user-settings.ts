@@ -5,7 +5,7 @@
 
 "use client";
 
-import { authenticatedFetch, readApiError } from "./api-client";
+import { authenticatedFetch, errorFromApiResponse, readApiError } from "./api-client";
 import { DEFAULT_PLAN_QUOTA, type PlanQuota } from "./message-types";
 
 export type GeminiProvider = "apiKey" | "vertex";
@@ -186,8 +186,7 @@ export async function patchAppSettings(
 export async function fetchUserQuota(): Promise<PlanQuota> {
   const response = await authenticatedFetch("/api/v1/user/quota");
   if (!response.ok) {
-    const error = await readApiError(response);
-    throw new Error(error.message);
+    throw errorFromApiResponse(response, await readApiError(response));
   }
   const body = (await response.json()) as Partial<PlanQuota>;
   return {
@@ -257,8 +256,7 @@ function normalizeUserSettings(body: UserSettingsResponse): UserSettingsResponse
 export async function fetchUserSettings(): Promise<UserSettingsResponse> {
   const response = await authenticatedFetch("/api/v1/user/settings");
   if (!response.ok) {
-    const error = await readApiError(response);
-    throw new Error(error.message);
+    throw errorFromApiResponse(response, await readApiError(response));
   }
   return normalizeUserSettings((await response.json()) as UserSettingsResponse);
 }

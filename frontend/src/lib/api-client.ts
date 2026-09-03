@@ -23,6 +23,72 @@ export type ApiErrorData = {
   missing?: string[];
 };
 
+export class ApiClientError extends Error {
+  readonly code?: string;
+  readonly status: number;
+
+  constructor(message: string, options?: { code?: string; status?: number }) {
+    super(message);
+    this.name = "ApiClientError";
+    this.code = options?.code;
+    this.status = options?.status ?? 0;
+  }
+}
+
+export function isQuotaExceededError(error: unknown): boolean {
+  if (error instanceof ApiClientError) {
+    return error.code === "GOOGLE_QUOTA_EXCEEDED" || /firestore quota/i.test(error.message);
+  }
+  return error instanceof Error && /firestore quota/i.test(error.message);
+}
+
+export function errorFromApiResponse(response: Response, data: ApiErrorData): ApiClientError {
+  return new ApiClientError(data.message, { code: data.code, status: response.status });
+}
+
+const FIRESTORE_QUOTA_MESSAGE =
+  "Firestore quota exceeded. Check GCP quotas/billing for this project, then retry.";
+const DEFAULT_QUOTA_COOLDOWN_MS = 60_000;
+
+let firestoreQuotaCooldownUntil = 0;
+
+export function isFirestoreQuotaCoolingDown(): boolean {
+  return Date.now() < firestoreQuotaCooldownUntil;
+}
+
+function isFirestoreQuotaPayload(data: ApiErrorData): boolean {
+  return data.code === "GOOGLE_QUOTA_EXCEEDED" || /firestore quota/i.test(data.message);
+}
+
+function quotaCooldownResponse(): Response {
+  const remainingSec = Math.max(1, Math.ceil((firestoreQuotaCooldownUntil - Date.now()) / 1000));
+  return new Response(
+    JSON.stringify({
+      detail: {
+        code: "GOOGLE_QUOTA_EXCEEDED",
+        detail: FIRESTORE_QUOTA_MESSAGE,
+      },
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(remainingSec),
+      },
+    },
+  );
+}
+
+async function noteFirestoreQuotaResponse(response: Response): Promise<void> {
+  if (response.status !== 429) return;
+  const retryAfter = Number(response.headers.get("Retry-After"));
+  const data = await readApiError(response.clone());
+  if (!isFirestoreQuotaPayload(data)) return;
+  const waitMs =
+    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : DEFAULT_QUOTA_COOLDOWN_MS;
+  firestoreQuotaCooldownUntil = Math.max(firestoreQuotaCooldownUntil, Date.now() + waitMs);
+}
+
 const TOKEN_SKEW_MS = 60_000;
 
 type CachedAuthToken = {
@@ -116,6 +182,10 @@ export async function authenticatedFetch(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
+  if (isFirestoreQuotaCoolingDown()) {
+    return quotaCooldownResponse();
+  }
+
   const perform = async (forceRefresh = false) => {
     const authHeader = await getAuthHeader(forceRefresh);
     return fetch(resolveApiPath(path), {
@@ -131,6 +201,7 @@ export async function authenticatedFetch(
     response = await perform(true);
   }
 
+  await noteFirestoreQuotaResponse(response);
   return response;
 }
 
@@ -195,11 +266,7 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await authenticatedFetch(path, init);
   if (!response.ok) {
     const apiError = await readApiError(response);
-    const error = new Error(apiError.message);
-    if (apiError.code) {
-      (error as Error & { code?: string }).code = apiError.code;
-    }
-    throw error;
+    throw errorFromApiResponse(response, apiError);
   }
 
   if (response.status === 204) {

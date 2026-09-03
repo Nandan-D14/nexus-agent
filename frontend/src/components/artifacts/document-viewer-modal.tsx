@@ -8,22 +8,26 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { Download, ExternalLink, Loader2, Maximize2, Minimize2, X } from "lucide-react";
+import { Download, ExternalLink, FileText, Loader2, Maximize2, Minimize2, X } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
-import { downloadArtifactFile } from "@/lib/artifact-url";
+import { downloadArtifactFile, previewKind } from "@/lib/artifact-url";
 import { ArtifactIconTile, artifactBadge } from "./artifact-icon";
 import { ArtifactPreview } from "./artifact-preview";
+import { MarkdownPreview } from "./markdown-preview";
 
 type Props = {
-  /** The artifact to display; `null` closes the viewer. */
+  /** The artifact to display; `null` closes the viewer unless markdown is set. */
   artifact: RunArtifact | null;
   /** Pre-resolved preview URL. Resolved internally when omitted. */
   url?: string | null;
+  /** Inline markdown for workspace files that are not stored as artifacts. */
+  markdown?: string | null;
+  title?: string;
   onClose: () => void;
 };
 
 const ICON_BUTTON =
-  "flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50";
+  "flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-background-secondary-hover hover:text-text-primary disabled:opacity-50";
 
 // `createPortal` needs a real DOM, so the modal renders nothing until hydration.
 const subscribeNoop = () => () => {};
@@ -45,10 +49,14 @@ function formatModified(value: string | null | undefined): string {
 function ViewerPanel({
   artifact,
   url: initialUrl,
+  markdown,
+  title: titleOverride,
   onClose,
 }: {
-  artifact: RunArtifact;
+  artifact: RunArtifact | null;
   url?: string | null;
+  markdown?: string | null;
+  title?: string;
   onClose: () => void;
 }) {
   const [url, setUrl] = useState<string | null>(initialUrl ?? null);
@@ -56,7 +64,10 @@ function ViewerPanel({
   const [downloading, setDownloading] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
-  const title = artifact.title || artifact.kind.replace(/_/g, " ");
+  const title =
+    artifact?.title || titleOverride || artifact?.kind.replace(/_/g, " ") || "Document";
+  const kind = artifact ? previewKind(artifact) : "markdown";
+  const wide = kind === "sheet" || kind === "html" || kind === "pdf";
 
   useEffect(() => {
     const previous = document.body.style.overflow;
@@ -101,6 +112,7 @@ function ViewerPanel({
   }, []);
 
   const handleDownload = useCallback(async () => {
+    if (!artifact) return;
     setDownloading(true);
     try {
       await downloadArtifactFile(artifact);
@@ -139,22 +151,31 @@ function ViewerPanel({
         transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
         className={
           isFullscreen
-            ? "relative z-10 flex h-screen w-screen flex-col overflow-hidden bg-[#1a1a1c]"
-            : "relative z-10 flex h-[min(880px,calc(100dvh-64px))] w-[min(1100px,calc(100vw-64px))] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#1a1a1c] shadow-2xl"
+            ? "relative z-10 flex h-screen w-screen flex-col overflow-hidden bg-background-full"
+            : wide
+              ? "relative z-10 flex h-[min(920px,calc(100dvh-40px))] w-[min(1280px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border border-card-border bg-background-full shadow-2xl"
+              : "relative z-10 flex h-[min(880px,calc(100dvh-64px))] w-[min(920px,calc(100vw-64px))] flex-col overflow-hidden rounded-2xl border border-card-border bg-background-full shadow-2xl"
         }
       >
-        <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3">
-          <ArtifactIconTile
-            artifact={artifact}
-            className="h-9 w-9"
-            iconClassName="w-[18px] h-[18px]"
-          />
+        <div className="flex shrink-0 items-center gap-3 border-b border-separator-border px-4 py-3">
+          {artifact ? (
+            <ArtifactIconTile
+              artifact={artifact}
+              className="h-9 w-9"
+              iconClassName="w-[18px] h-[18px]"
+            />
+          ) : (
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-violet-500/20 bg-violet-500/10 text-violet-400">
+              <FileText className="h-[18px] w-[18px]" />
+            </div>
+          )}
           <div className="min-w-0 flex-1">
-            <div className="truncate text-[14px] font-semibold text-zinc-100" title={title}>
+            <div className="truncate text-[14px] font-semibold text-text-primary" title={title}>
               {title}
             </div>
-            <div className="mt-0.5 truncate text-[12px] text-zinc-500">
-              {artifactBadge(artifact)} · Last modified {formatModified(artifact.created_at)}
+            <div className="mt-0.5 truncate text-[12px] text-text-secondary">
+              {artifact ? artifactBadge(artifact) : "Markdown"} · Last modified{" "}
+              {formatModified(artifact?.created_at)}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -169,19 +190,21 @@ function ViewerPanel({
                 <ExternalLink className="h-4 w-4" />
               </a>
             )}
-            <button
-              type="button"
-              onClick={handleDownload}
-              disabled={downloading}
-              className={ICON_BUTTON}
-              title="Download"
-            >
-              {downloading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Download className="h-4 w-4" />
-              )}
-            </button>
+            {artifact ? (
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className={ICON_BUTTON}
+                title="Download"
+              >
+                {downloading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={toggleFullscreen}
@@ -200,12 +223,16 @@ function ViewerPanel({
           </div>
         </div>
 
-        <ArtifactPreview
-          artifact={artifact}
-          url={initialUrl}
-          onUrlChange={setUrl}
-          className="relative min-h-0 flex-1 bg-[#0e0e10]"
-        />
+        {artifact ? (
+          <ArtifactPreview
+            artifact={artifact}
+            url={initialUrl}
+            onUrlChange={setUrl}
+            className="relative min-h-0 flex-1 bg-background-full"
+          />
+        ) : (
+          <MarkdownPreview content={markdown || ""} className="relative min-h-0 flex-1" />
+        )}
       </motion.div>
     </motion.div>
   );
@@ -215,18 +242,21 @@ function ViewerPanel({
  * Full-screen document viewer rendered into `document.body`, so it is never
  * constrained by the chat bubble or the artifacts grid cell that launched it.
  */
-export function DocumentViewerModal({ artifact, url, onClose }: Props) {
+export function DocumentViewerModal({ artifact, url, markdown, title, onClose }: Props) {
   const hydrated = useSyncExternalStore(subscribeNoop, getIsClient, getIsServer);
+  const open = Boolean(artifact) || Boolean(markdown);
 
   if (!hydrated) return null;
 
   return createPortal(
     <AnimatePresence>
-      {artifact ? (
+      {open ? (
         <ViewerPanel
-          key={artifact.artifact_id}
+          key={artifact?.artifact_id || title || "markdown"}
           artifact={artifact}
           url={url}
+          markdown={markdown}
+          title={title}
           onClose={onClose}
         />
       ) : null}

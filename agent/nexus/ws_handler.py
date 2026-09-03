@@ -25,7 +25,6 @@ from nexus.session import Session, SessionManager
 
 logger = logging.getLogger(__name__)
 
-
 class DurableEnqueueError(RuntimeError):
     """Raised when a durable run was persisted but the queue rejected it.
 
@@ -702,6 +701,7 @@ async def _try_start_durable_text_run(
                 role="user",
                 source="typed",
                 text=text,
+                attachments=uploaded_files,
             )
         except Exception:
             logger.warning(
@@ -781,6 +781,14 @@ async def _try_start_durable_text_run(
             "queue": enqueue.__dict__,
         }
     )
+    # #region agent log
+    try:
+        import json as _dbg_json
+        from pathlib import Path as _DbgPath
+        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"ws_handler.py:run_queued","message":"durable run queued","data":{"task_id":task.task_id,"run_id":run.run_id,"provider":getattr(enqueue,"provider",None),"queued":getattr(enqueue,"queued",None)},"timestamp":int(__import__("time").time()*1000)})+"\n")
+    except Exception:
+        pass
+    # #endregion
     logger.info(
         "Durable run queued for session %s task %s run %s via %s",
         session.id,
@@ -807,6 +815,7 @@ async def handle_websocket(
     5. Clean up on disconnect
     """
     await ws.accept(subprotocol=subprotocol)
+
     send_lock = asyncio.Lock()
     setattr(ws, "_cocomputer_send_lock", send_lock)
 
@@ -846,6 +855,7 @@ async def handle_websocket(
     try:
         # Initialize voice + agent connections
         await orchestrator.initialize(lazy_sandbox=True)
+
 
         # Start background task: Gemini Live → frontend
         voice_task = asyncio.create_task(orchestrator.run_voice_receive_loop())
@@ -985,7 +995,7 @@ async def handle_websocket(
                         continue
 
                     msg_type = data.get("type", "")
-                    if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop"}:
+                    if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop", "restart_sandbox"}:
                         if not action_rate_limiter.is_allowed(session.owner_id):
                             await _safe_send_json(
                                 {
@@ -1105,6 +1115,24 @@ async def handle_websocket(
                             label="start_desktop",
                         )
 
+                    elif msg_type == "restart_sandbox":
+                        _touch_session()
+                        raw_port = data.get("port")
+                        try:
+                            restart_port = int(raw_port) if raw_port not in (None, "") else None
+                        except (TypeError, ValueError):
+                            restart_port = None
+                        _track(
+                            asyncio.create_task(
+                                orchestrator.restart_sandbox(
+                                    port=restart_port if restart_port and restart_port > 0 else None,
+                                    title=str(data.get("title") or ""),
+                                    workspace_path=str(data.get("workspace_path") or ""),
+                                )
+                            ),
+                            label="restart_sandbox",
+                        )
+
                     elif msg_type == "analyze_screen":
                         _touch_session()
                         _track(
@@ -1192,7 +1220,7 @@ async def handle_websocket(
                         if orchestrator.has_active_agent_turn() or _has_active_bg_task():
                             _touch_session()
                             try:
-                                session.sandbox.extend_timeout(900)
+                                session.sandbox.extend_timeout()
                             except Exception:
                                 pass
 
@@ -1219,11 +1247,21 @@ async def handle_websocket(
                 await voice_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # A failed voice loop must not become "Server error. Please
+                # reconnect." on the way out — that frame has no event id, so
+                # the client appends a new chat row on every reconnect.
+                logger.debug(
+                    "Voice receive loop ended with an error during WS cleanup for session %s",
+                    session.id,
+                    exc_info=True,
+                )
             if _bg_tasks:
                 await asyncio.gather(*_bg_tasks, return_exceptions=True)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("WebSocket handler error for session %s", session.id)
+
         try:
             await _safe_send_json({
                 "type": "error",
