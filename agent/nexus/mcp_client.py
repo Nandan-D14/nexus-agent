@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Remote MCP client support for user-configured Streamable HTTP servers."""
@@ -28,7 +28,10 @@ from nexus.tracing import (
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY_RE = re.compile(r"(authorization|token|secret|password|api[_-]?key)", re.I)
+SECRET_KEY_RE = re.compile(
+    r"(authorization|cookie|credential|token|secret|password|api[_-]?key|private[_-]?key)",
+    re.I,
+)
 
 if TYPE_CHECKING:
     from nexus.history_repository import StoredIntegrationConnection
@@ -60,17 +63,16 @@ def slugify_tool_part(value: str, *, fallback: str = "tool") -> str:
 
 
 def redact_sensitive(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, raw in value.items():
-            if SECRET_KEY_RE.search(str(key)):
-                redacted[str(key)] = "[redacted]"
-            else:
-                redacted[str(key)] = redact_sensitive(raw)
-        return redacted
-    if isinstance(value, list):
-        return [redact_sensitive(item) for item in value]
-    return value
+    from nexus.redact import redact_sensitive as _unified_redact
+
+    unified = _unified_redact(value)
+    if isinstance(unified, dict):
+        # Preserve legacy "[redacted]" marker for secret keys.
+        return {
+            str(key): ("[redacted]" if raw == "***" else raw)
+            for key, raw in unified.items()
+        }
+    return unified
 
 
 async def _emit_mcp_trace(event_type: str, **payload: Any) -> None:
@@ -512,9 +514,18 @@ def build_mcp_adk_tools(
                                 }
                             except Exception as retry_exc:
                                 exc = retry_exc
+                    from nexus.tools.base import (
+                        classify_exception_message,
+                        root_error_message,
+                    )
+
+                    message = root_error_message(exc)
+                    error_code, retryable = classify_exception_message(message)
                     return {
                         "status": "error",
-                        "error": str(exc)[:500] or "MCP tool call failed",
+                        "error": message or "MCP tool call failed",
+                        "error_code": error_code,
+                        "retryable": retryable,
                         "connection_id": _connection_id,
                         "connector": _connection_name,
                         "tool": _tool_name,

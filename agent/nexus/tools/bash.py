@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Terminal command execution tool."""
@@ -91,34 +91,6 @@ async def run_command(command: str, background: bool = False, cwd: str | None = 
             target_cwd = "~"
 
     visible_command = redact_command_text(command)
-    # #region agent log
-    try:
-        import json as _dbg_json
-        import time as _dbg_time
-        _dbg_cmd = (command or "").lower()
-        if any(token in _dbg_cmd for token in ("pptx", "python-pptx", "from __future__", "gen_pptx")):
-            with open(
-                r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
-                "a",
-                encoding="utf-8",
-            ) as _dbg_f:
-                _dbg_f.write(
-                    _dbg_json.dumps(
-                        {
-                            "sessionId": "993e46",
-                            "runId": "pre-fix",
-                            "hypothesisId": "H2",
-                            "location": "bash.py:run_command",
-                            "message": "pptx-related shell command",
-                            "data": {"command": (command or "")[:600]},
-                            "timestamp": int(_dbg_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-    except Exception:
-        pass
-    # #endregion
     await emit_sandbox_event({
         "type": "sandbox_terminal",
         "phase": "start",

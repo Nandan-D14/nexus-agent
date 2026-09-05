@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -8,6 +8,7 @@
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { SettingsModal } from "@/components/application/settings/settings-modal";
+import { ConnectToolsOnboarding } from "@/components/connectors/connect-tools-onboarding";
 import { isSessionWorkspacePath } from "@/lib/app-paths";
 import { useSettings } from "@/lib/settings-context";
 import { useLandingChrome } from "@/lib/landing-chrome-context";
@@ -59,6 +60,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onClose={() => setIsSettingsOpen(false)}
         defaultPage={settingsDefaultPage}
       />
+
+      <ConnectToolsOnboarding />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -17,7 +17,10 @@ import {
 } from "@/components/connectors/connector-modal";
 import { ConnectorRow } from "@/components/connectors/connector-row";
 import { ConnectorsSkeleton } from "@/components/connectors/connectors-skeleton";
-import { authenticatedFetch, parseApiError } from "@/lib/api-client";
+import {
+  MCP_OAUTH_PROVIDERS,
+  startOAuthPopup,
+} from "@/lib/connect-oauth";
 import {
   type CatalogItem,
   type IntegrationConnection,
@@ -52,19 +55,6 @@ import { useQueryClient } from "@tanstack/react-query";
 function rowId(item: CatalogItem): string {
   return `connector-${item.provider}-${item.connector_type}`.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
-
-const MCP_OAUTH_PROVIDERS: Record<string, { windowName: string; messageType: string; failLabel: string }> = {
-  exa: { windowName: "ExaAuth", messageType: "exa_connected", failLabel: "Failed to start Exa OAuth" },
-  treg: { windowName: "TregAuth", messageType: "treg_connected", failLabel: "Failed to start Treg OAuth" },
-  linear: { windowName: "LinearAuth", messageType: "linear_connected", failLabel: "Failed to start Linear OAuth" },
-  vercel: { windowName: "VercelAuth", messageType: "vercel_connected", failLabel: "Failed to start Vercel OAuth" },
-  cloudflare: {
-    windowName: "CloudflareAuth",
-    messageType: "cloudflare_connected",
-    failLabel: "Failed to start Cloudflare OAuth",
-  },
-  apify: { windowName: "ApifyAuth", messageType: "apify_connected", failLabel: "Failed to start Apify OAuth" },
-};
 
 export function ConnectorsView() {
   const queryClient = useQueryClient();
@@ -148,61 +138,25 @@ export function ConnectorsView() {
     setError("");
     setConnecting(true);
     try {
-      const response = await authenticatedFetch(opts.urlPath);
-      if (response.status === 501 && opts.onNotConfigured) {
+      const result = await startOAuthPopup(opts);
+      if (result === "not-configured") {
         setConnecting(false);
-        opts.onNotConfigured();
         return;
       }
-      if (!response.ok) throw new Error(await parseApiError(response));
-      const body = await response.json();
-
-      let popupClosedPoll: number | null = null;
-      const handleMessage = (event: MessageEvent) => {
-        if (event.origin !== window.location.origin) return;
-        if (!opts.messageTypes.includes(event.data?.type)) return;
-
-        window.removeEventListener("message", handleMessage);
-        if (popupClosedPoll !== null) window.clearInterval(popupClosedPoll);
-        setSelectedItem(null);
+      if (result === "connected") setSelectedItem(null);
+      if (result === "redirected") {
         setConnecting(false);
-        refreshIntegrations();
-      };
-
-      window.addEventListener("message", handleMessage);
-
-      const width = 600;
-      const height = 700;
-      const left = window.screen.width / 2 - width / 2;
-      const top = window.screen.height / 2 - height / 2;
-      const popup = window.open(
-        body.auth_url,
-        opts.windowName,
-        `width=${width},height=${height},top=${top},left=${left},scrollbars=yes`,
-      );
-
-      if (!popup) {
-        window.removeEventListener("message", handleMessage);
-        setConnecting(false);
-        window.location.href = body.auth_url;
         return;
       }
-
-      popupClosedPoll = window.setInterval(() => {
-        if (popup.closed) {
-          window.clearInterval(popupClosedPoll as number);
-          window.removeEventListener("message", handleMessage);
-          setConnecting(false);
-          refreshIntegrations();
-        }
-      }, 500);
+      setConnecting(false);
+      refreshIntegrations();
     } catch (err) {
       setError(err instanceof Error ? err.message : opts.failLabel);
       setConnecting(false);
     }
   };
 
-  const startGoogleConnect = async () => {
+  const handleGoogleConnect = async () => {
     await startOauthPopup({
       urlPath: "/api/v1/auth/google/url",
       messageTypes: ["google_drive_connected", "google_connected"],
@@ -211,7 +165,7 @@ export function ConnectorsView() {
     });
   };
 
-  const startGithubConnect = async () => {
+  const handleGithubConnect = async () => {
     await startOauthPopup({
       urlPath: "/api/v1/auth/github/url",
       messageTypes: ["github_connected"],
@@ -224,7 +178,7 @@ export function ConnectorsView() {
     });
   };
 
-  const startSlackConnect = async () => {
+  const handleSlackConnect = async () => {
     await startOauthPopup({
       urlPath: "/api/v1/auth/slack/url",
       messageTypes: ["slack_connected"],
@@ -246,15 +200,15 @@ export function ConnectorsView() {
 
   const connectItem = (item: CatalogItem) => {
     if (isGoogleProvider(item.provider)) {
-      void startGoogleConnect();
+      void handleGoogleConnect();
       return;
     }
     if (item.provider === "github") {
-      void startGithubConnect();
+      void handleGithubConnect();
       return;
     }
     if (item.provider === "slack") {
-      void startSlackConnect();
+      void handleSlackConnect();
       return;
     }
     if (item.provider in MCP_OAUTH_PROVIDERS) {

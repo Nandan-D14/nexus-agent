@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -7,15 +7,15 @@
 
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import {
-  AudioLines,
   ChevronRight,
+  Code2,
   Globe,
-  ImageIcon,
   LineChart,
   Presentation,
-  Smartphone,
+  Search,
+  Sparkles,
   Table2,
-  Video,
+  Terminal,
   Workflow,
 } from "lucide-react";
 
@@ -68,28 +68,28 @@ const CATEGORY_STARTERS: CategoryStarter[] = [
     prompt: "Design an automation workflow that triages incoming requests and drafts a reply.",
   },
   {
-    id: "apps",
-    label: "Apps",
-    icon: Smartphone,
-    prompt: "Build a simple web app with a dashboard, a form, and a list of saved items.",
+    id: "code",
+    label: "Code",
+    icon: Code2,
+    prompt: "Write and execute code in the workspace to solve my task.",
   },
   {
-    id: "images",
-    label: "Images",
-    icon: ImageIcon,
-    prompt: "Generate a set of on-brand images I can use on a landing page, including a hero and feature illustrations.",
+    id: "research",
+    label: "Research",
+    icon: Search,
+    prompt: "Deeply research a topic online, verify sources, and summarize the findings.",
   },
   {
-    id: "videos",
-    label: "Videos",
-    icon: Video,
-    prompt: "Create a short product video storyboard with scenes, on-screen text, and a voiceover script.",
+    id: "terminal",
+    label: "Terminal",
+    icon: Terminal,
+    prompt: "Run terminal commands to set up, test, or inspect the environment.",
   },
   {
-    id: "audio",
-    label: "Audio",
-    icon: AudioLines,
-    prompt: "Write a short podcast-style audio script introducing the product in under two minutes.",
+    id: "other",
+    label: "Other",
+    icon: Sparkles,
+    prompt: "Help me with a custom task, question, or project.",
   },
 ];
 

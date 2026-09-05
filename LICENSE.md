@@ -1,10 +1,10 @@
 # Proprietary License
 
-Copyright (c) 2026 Agentic Company
+Copyright (c) 2026 nandan-d14
 
 All rights reserved.
 
-This software and associated documentation files (the "Software") are proprietary to Agentic Company. 
+This software and associated documentation files (the "Software") are proprietary to nandan-d14. 
 
 ## Restrictions
 
