@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -66,7 +66,7 @@ export type ToolInvocation = {
 export type GroupedEvent =
   | ToolInvocation
   | { kind: "screenshot"; image_b64?: string; analysis?: string; ts: number }
-  | { kind: "error"; message: string; code?: string; count: number; ts: number }
+  | { kind: "error"; message: string; code?: string; count: number; ts: number; detail?: string }
   | {
       kind: "retry";
       reason: string;
@@ -220,13 +220,19 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
    * wall) collapse onto one row with a count instead of stacking identical
    * lines, which they did whenever another step landed in between.
    */
-  function pushError(message: string, code: string | undefined, ts: number) {
+  function pushError(
+    message: string,
+    code: string | undefined,
+    ts: number,
+    detail?: string,
+  ) {
     const task = currentTask;
     if (!task) return;
     const key = `${code ?? ""}::${message}`;
     const existing = errorSteps.get(key);
     if (existing) {
       existing.count += 1;
+      if (!existing.detail && detail) existing.detail = detail;
       return;
     }
     const step: Extract<GroupedEvent, { kind: "error" }> = {
@@ -236,6 +242,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
       count: 1,
       ts,
     };
+    if (detail) step.detail = detail;
     errorSteps.set(key, step);
     task.steps.push(step);
   }
@@ -499,6 +506,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         String(event.error || "MCP request failed"),
         typeof event.error_type === "string" ? event.error_type : "MCP_HTTP_ERROR",
         event.ts,
+        sanitizeDisplayText(event.detail).slice(0, 500) || undefined,
       );
       continue;
     }
@@ -607,6 +615,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         String(event.message || "Failed"),
         typeof event.code === "string" ? event.code : undefined,
         event.ts,
+        sanitizeDisplayText(event.detail).slice(0, 500) || undefined,
       );
       continue;
     }

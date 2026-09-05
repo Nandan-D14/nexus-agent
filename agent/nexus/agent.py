@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """ADK planner construction and turn execution."""
@@ -15,7 +15,11 @@ from google.adk.sessions import BaseSessionService
 from google.genai import types
 
 from nexus.config import settings
-from nexus.control_loop import looks_like_slide_code_dump, looks_like_worker_envelope
+from nexus.control_loop import (
+    looks_like_empty_summary,
+    looks_like_slide_code_dump,
+    looks_like_worker_envelope,
+)
 from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.session_service import FirestoreSessionService
@@ -276,18 +280,21 @@ async def run_agent_turn(
     # back to the last text it emitted so a summary is not silently dropped.
     # Never promote a raw worker/tool result envelope — that must trigger
     # forced synthesis instead of leaking JSON into the user bubble.
-    # Same for leaked slide-layout code (python-pptx internals): promoting it
-    # lets a zero-tool turn deliver "def kicker(slide, ...)" as the answer.
-    if looks_like_worker_envelope(final_response) or looks_like_slide_code_dump(
-        final_response
-    ):
+    # Same for leaked slide-layout code (python-pptx internals) and empty
+    # lead-in stubs ("here is my comprehensive final response" + nothing):
+    # promoting them ships a void as the answer.
+    def _promotable(text: str | None) -> bool:
+        return bool(
+            text
+            and text.strip()
+            and not looks_like_worker_envelope(text)
+            and not looks_like_slide_code_dump(text)
+            and not looks_like_empty_summary(text)
+        )
+
+    if not _promotable(final_response):
         final_response = None
-    if not (final_response and final_response.strip()) and (
-        last_text
-        and last_text.strip()
-        and not looks_like_worker_envelope(last_text)
-        and not looks_like_slide_code_dump(last_text)
-    ):
+    if not (final_response and final_response.strip()) and _promotable(last_text):
         final_response = last_text
 
     # Forced final synthesis: empty answer after tools OR after a reasoning-only
@@ -310,39 +317,21 @@ async def run_agent_turn(
             synthesis_message,
             _SYNTHESIS_TURN_CAP,
         )
-        if (
-            synth_final
-            and synth_final.strip()
-            and not looks_like_worker_envelope(synth_final)
-            and not looks_like_slide_code_dump(synth_final)
-        ):
+        if _promotable(synth_final):
             final_response = synth_final
-        elif (
-            synth_last
-            and synth_last.strip()
-            and not looks_like_worker_envelope(synth_last)
-            and not looks_like_slide_code_dump(synth_last)
-        ):
+        elif _promotable(synth_last):
             final_response = synth_last
         elif not (final_response and final_response.strip()):
             reasoning_candidate = synth_reasoning or last_reasoning_text
             if reasoning_candidate and reasoning_candidate.strip():
                 extracted = extract_answer_from_reasoning(reasoning_candidate)
-                if (
-                    extracted
-                    and not looks_like_worker_envelope(extracted)
-                    and not looks_like_slide_code_dump(extracted)
-                ):
+                if _promotable(extracted):
                     logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
                     final_response = extracted
 
     if not (final_response and final_response.strip()) and last_reasoning_text:
         extracted = extract_answer_from_reasoning(last_reasoning_text)
-        if (
-            extracted
-            and not looks_like_worker_envelope(extracted)
-            and not looks_like_slide_code_dump(extracted)
-        ):
+        if _promotable(extracted):
             logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
             final_response = extracted
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -20,7 +20,6 @@ import {
   ChevronDown,
   Loader2,
   MessageCircle,
-  Mic,
   Smile,
   Square,
 } from "lucide-react";
@@ -71,8 +70,7 @@ type Props = {
 type Phase = "idle" | "enhancing" | "enhanced";
 type ComposerMode = "agent" | "ask";
 
-const PLACEHOLDER =
-  "Ask for websites, apps, slides, sheets, reports, images, videos, or audio";
+const PLACEHOLDER = "Ask me Anything.";
 
 const MOCK_ENHANCED =
   "This is an example prompt — rewritten to be clear and specific: state the goal, add the relevant context and constraints, define the expected output format and tone, and note any assumptions. Ask a clarifying question first if key details are missing.";
@@ -1010,21 +1008,6 @@ export function ChatComposer({
               </div>
             )}
           </div>
-
-          <button
-            type="button"
-            onClick={onToggleMic}
-            disabled={voiceStatus !== "connected"}
-            className={cx(
-              "rounded-full p-1.5 transition-colors disabled:opacity-40",
-              isRecording
-                ? "bg-red-500/10 text-red-400"
-                : "text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary",
-            )}
-            title="Voice Input"
-          >
-            <Mic className="h-4 w-4" />
-          </button>
 
           <button
             type="button"

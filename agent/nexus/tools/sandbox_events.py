@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Computer-pane events for live Terminal and Editor takeovers.
@@ -18,16 +18,24 @@ logger = logging.getLogger(__name__)
 
 _EDITOR_CONTENT_LIMIT = 20_000
 _INLINE_SECRET_RE = re.compile(
-    r"(?i)((?:api[_-]?key|token|secret|password|authorization|bearer|orca_key)"
+    r"(?i)((?:api[_-]?key|token|secret|password|authorization|bearer|orca_key|"
+    r"cookie|credential|private[_-]?key|client_secret)"
     r"\s*[=:]\s*['\"]?)([^\s'\"]+)"
 )
-_SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_SK_TOKEN_RE = re.compile(
+    r"(\bsk-[A-Za-z0-9._-]{8,}\b|\bAKIA[0-9A-Z]{16}\b|"
+    r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b|\bxox[bap]-[A-Za-z0-9-]+\b|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+)
 
 
 def redact_command_text(command: str) -> str:
-    """Strip inline key assignments and sk- tokens from a visible command line."""
+    """Strip inline key assignments and known token formats from commands."""
+    from nexus.redact import redact_inline_values
+
     text = _INLINE_SECRET_RE.sub(lambda match: f"{match.group(1)}[redacted]", command or "")
-    return _SK_TOKEN_RE.sub("[redacted]", text)
+    text = _SK_TOKEN_RE.sub("[redacted]", text)
+    return redact_inline_values(text)
 
 
 def clip_editor_content(content: str | None, *, limit: int = _EDITOR_CONTENT_LIMIT) -> str:

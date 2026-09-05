@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Shared agent-turn runner for live and durable execution adapters."""
@@ -18,6 +18,7 @@ from nexus.runtime_config import resolve_session_runtime_config
 from nexus.task_budget import TaskBudgetGuard
 from nexus.tools._context import (
     clear_unattended_tools,
+    clear_untrusted_content,
     set_task_budget_guard,
     set_unattended_tools,
 )
@@ -94,10 +95,11 @@ class AgentTurnRunner:
         unattended_items = [
             str(item) for item in request.allowed_unattended_tools if str(item).strip()
         ]
-        if skip_confirm and not unattended_items:
-            set_unattended_tools(frozenset(["*"]))
-        else:
-            set_unattended_tools(frozenset(unattended_items))
+        # No wildcard expansion: empty allowlist means no unattended bypass.
+        # skip_confirmations alone never grants tool approval; each schedule
+        # must pass an explicit sanitized allowlist.
+        set_unattended_tools(frozenset(unattended_items))
+        clear_untrusted_content()
 
         session = await self.session_manager.get_session(request.session_id)
         if not session or session.owner_id != request.owner_id or getattr(session, "runtime_config", None) is None:

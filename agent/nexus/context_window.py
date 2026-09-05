@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Context-window budgeting for LLM turns.
@@ -16,9 +16,11 @@ with a safety margin, and it avoids orphaning tool responses.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 from collections import Counter
-from typing import Any
+from typing import Any, Iterator
 
 from google.genai import types
 
@@ -234,6 +236,25 @@ def _repair_unpaired_tool_turns(contents: list) -> list:
     return repaired
 
 
+# One-shot override for the compaction retry after a context-overflow
+# rejection (see orchestrator._run_agent_with_retry). Propagates through
+# `await` chains into ADK before_model_callbacks running in the same task
+# tree. Model-specific caps below still apply via min().
+_compact_retry_tokens: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "nexus_compact_retry_tokens", default=None
+)
+
+
+@contextlib.contextmanager
+def compact_retry_scope(tokens: int) -> Iterator[None]:
+    """Temporarily cap the per-turn input budget (compaction retry)."""
+    token = _compact_retry_tokens.set(max(1000, int(tokens)))
+    try:
+        yield
+    finally:
+        _compact_retry_tokens.reset(token)
+
+
 # Groq on-demand TPM for small SKUs is ~8k; stay under that including tokenizer slack.
 _GROQ_INPUT_TOKEN_CAP = 5500
 _NEVER_DROP_TOOLS = frozenset({
@@ -281,6 +302,9 @@ def _input_token_budget(runtime_config: Any | None) -> tuple[int, int]:
     budget = int(limit * float(settings.context_input_budget_ratio))
     if _is_groq_runtime(runtime_config):
         budget = min(budget, _GROQ_INPUT_TOKEN_CAP)
+    override = _compact_retry_tokens.get()
+    if override is not None:
+        budget = min(budget, override)
     return limit, budget
 
 

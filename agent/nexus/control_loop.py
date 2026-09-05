@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Typed action ledger and deterministic completion verification."""
@@ -727,6 +727,80 @@ def looks_like_slide_code_dump(text: str | None) -> bool:
     return bool(_DEF_WITH_SLIDE_RE.search(raw) and _DIMENSION_RE.search(raw))
 
 
+# Conservative claim phrases: the model asserting a file deliverable is done.
+# Kept narrow on purpose -- broad words like "finished" or "ready" alone would
+# veto legitimate chat. A claim only fails when paired with a deliverable noun
+# below AND no recorded artifact AND no clickable link in the text.
+_SUCCESS_CLAIM_RE = re.compile(
+    r"\b(done and verified"
+    r"|deliverable\s+(?:is\s+|was\s+)?(?:done|complete|completed|ready|finished)"
+    r"|comprehensive final response"
+    r"|has been delivered"
+    r"|successfully\s+(?:created|generated|built|completed))"
+    r"|\bthe\s+(?:report|spreadsheet|deck|file|document)\s+is\s+(?:complete|done|ready)\b",
+    re.IGNORECASE,
+)
+_DELIVERABLE_NOUN_RE = re.compile(
+    r"\b(file|report|sheet|spreadsheet|deck|slides?|presentation|pptx?|xlsx|docx|pdf|artifact|workbook|document|deliverable)\b",
+    re.IGNORECASE,
+)
+_LINK_RE = re.compile(r"https?://", re.IGNORECASE)
+_LEAD_IN_RE = re.compile(
+    r"^(?:here is my comprehensive final response"
+    r"|let me write a concise summary again"
+    r"|in summary"
+    r"|summary)\s*[:\-\u2014]?\s*",
+    re.IGNORECASE,
+)
+# Meta-talk about the reply itself or the todo list, with no substance after
+# it. Short legitimate answers ("Submitted.", "It is warm.") never contain
+# these, so the stub test below cannot misfire on them.
+_STUB_META_RE = re.compile(
+    r"\ball todos are complete\b"
+    r"|\blet me write\b"
+    r"|\bhere is my\b"
+    r"|\bin summary\b",
+    re.IGNORECASE,
+)
+_RULE_LINE_RE = re.compile(r"(?m)^\s*(?:---|\*\*\*|___|#{1,6}\s.*)\s*$")
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def looks_like_unverified_success_claim(response: str, *, has_artifacts: bool) -> bool:
+    """Return True when the text claims a file deliverable is done with no proof.
+
+    Task-state ``passed`` and todo checkmarks are the model narrating stale
+    leftovers -- only a ledger artifact or a clickable link counts as delivery.
+    """
+    if has_artifacts:
+        return False
+    text = str(response or "").strip()
+    if not text or _LINK_RE.search(text):
+        return False
+    return bool(
+        _SUCCESS_CLAIM_RE.search(text) and _DELIVERABLE_NOUN_RE.search(text)
+    )
+
+
+def looks_like_empty_summary(response: str | None) -> bool:
+    """Return True when the text is a lead-in with no actual content.
+
+    Catches stubs like ``"Let me write a concise summary again."`` or a
+    ``"Here is my comprehensive final response."`` followed by nothing but a
+    rule -- a turn that ended mid-synthesis, not a real answer.
+    """
+    raw = str(response or "").strip()
+    if not raw or _LINK_RE.search(raw):
+        return False
+    body = _RULE_LINE_RE.sub("", raw).strip()
+    body = _LEAD_IN_RE.sub("", body).strip()
+    if not body:
+        return True
+    if _STUB_META_RE.search(raw) and len(_WORD_RE.findall(body)) < 25:
+        return True
+    return False
+
+
 def _requires_artifact(request: str | None, outstanding_task: str | None = "") -> bool:
     """Return True when the turn owes the user a file/preview deliverable.
 
@@ -864,6 +938,37 @@ def verify_completion(
             retryable=True,
         )
 
+    if looks_like_unverified_success_claim(response, has_artifacts=bool(ledger.artifacts())):
+        # The model declares the deliverable done (often parroting stale task
+        # state or todo checkmarks) without any recorded artifact or link.
+        # Never deliver the claim as success -- force the actual build.
+        return CompletionVerification(
+            verified=False,
+            status="failed",
+            method="artifact_exists",
+            summary=(
+                "The model claims the deliverable is complete, but no "
+                "artifact was recorded and the response has no file link."
+            ),
+            error_code="MISSING_ARTIFACT",
+            remaining_work=[
+                "Build and publish the deliverable, then reply with its link. "
+                "Do not assert completion without an artifact."
+            ],
+            retryable=True,
+        )
+
+    if looks_like_empty_summary(response):
+        return CompletionVerification(
+            verified=False,
+            status="failed",
+            method="final_response",
+            summary="The model returned a lead-in with no actual content.",
+            error_code="MISSING_FINAL_RESPONSE",
+            remaining_work=["Produce the promised summary or result text."],
+            retryable=True,
+        )
+
     if _requires_artifact(request, outstanding_task) and not ledger.artifacts():
         return CompletionVerification(
             verified=False,
@@ -932,7 +1037,9 @@ __all__ = [
     "ActionObservation",
     "CompletionVerification",
     "RetryPolicy",
+    "looks_like_empty_summary",
     "looks_like_slide_code_dump",
+    "looks_like_unverified_success_claim",
     "looks_like_worker_envelope",
     "verify_completion",
 ]

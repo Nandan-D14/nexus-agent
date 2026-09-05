@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Verification guard for the typed perception-action loop."""
@@ -8,7 +8,7 @@ from __future__ import annotations
 from nexus.tools.screen_state import get_last_action, is_dirty, time_since_change
 
 _GUI_ACTIONS = frozenset({
-    "move_mouse", "left_click", "right_click", "double_click",
+    "move_mouse", "left_click", "right_click", "double_click", "triple_click",
     "type_text", "press_key", "scroll_screen", "drag",
     "open_browser",
     "playwright_navigate", "playwright_click", "playwright_type",

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """CRUD endpoints for scheduled agent jobs."""
@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings
-from nexus.dependencies import get_schedule_store
+from nexus.dependencies import get_schedule_create_limiter, get_schedule_store
 from nexus.repositories.schedule_store import ScheduleStore, build_schedule_from_input
 from nexus.schedules import (
     compute_next_run,
@@ -68,6 +68,8 @@ async def create_schedule(
     user: AuthenticatedUser = Depends(require_current_user),
     store: ScheduleStore = Depends(get_schedule_store),
 ):
+    if not get_schedule_create_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many schedule creates; slow down.")
     active = await store.count_active(user.uid)
     if active >= settings.max_active_schedules:
         raise HTTPException(

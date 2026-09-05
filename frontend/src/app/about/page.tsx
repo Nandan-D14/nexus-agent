@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -47,7 +47,7 @@ export default function AboutPage() {
                 Give an agent a real computer
               </h1>
               <p className="text-blue-100 text-lg leading-relaxed max-w-2xl mx-auto text-balance">
-                CoComputer is a cloud workspace from Agentic Company: chat on
+                CoComputer is a cloud workspace from nandan-d14: chat on
                 one side, an isolated Linux desktop on the other. The agent can
                 see the screen, run the terminal, browse, and use the tools you
                 connect — not just another chatbot.

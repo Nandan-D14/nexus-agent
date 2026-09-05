@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Tool gateway — centralized policy enforcement for agent tools.
@@ -192,18 +192,30 @@ def _tool_not_selected_result(tool_name: str) -> dict[str, Any]:
 
 def _check_tool_allowlist(tool_name: str, func: Callable | None = None) -> dict[str, Any] | None:
     """Return a blocked result when the tool is outside the per-turn allowlist."""
-    try:
-        from nexus.tool_catalog import is_tool_allowed
-        from nexus.tools._context import get_tool_allowlist
+    from nexus.tool_catalog import is_tool_allowed
+    from nexus.tools._context import get_tool_allowlist
 
+    try:
         allowlist = get_tool_allowlist()
+    except Exception:
+        logger.warning(
+            "tool_allowlist_unavailable tool=%s — failing closed",
+            tool_name,
+            exc_info=True,
+        )
+        return _tool_not_selected_result(tool_name)
+    try:
         connection_id = getattr(func, "_connection_id", None) if func is not None else None
         if is_tool_allowed(tool_name, allowlist, connection_id=connection_id):
             return None
         return _tool_not_selected_result(tool_name)
     except Exception:
-        # Fail open if context/catalog is unavailable — never brick a turn.
-        return None
+        logger.warning(
+            "tool_allowlist_check_failed tool=%s — failing closed",
+            tool_name,
+            exc_info=True,
+        )
+        return _tool_not_selected_result(tool_name)
 
 
 def _bind_args(func: Callable, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -213,14 +225,31 @@ def _bind_args(func: Callable, args: tuple, kwargs: dict[str, Any]) -> dict[str,
         sig = inspect.signature(func)
         bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
-        return {
+        view = {
             key: value
             for key, value in bound.arguments.items()
             if not str(key).startswith("_")
         }
+        # Recover positional command when signature binding drops it: policy
+        # must never see an empty command for run_command.
+        if not str(view.get("command") or "").strip() and args:
+            for item in list(args) + list(kwargs.values()):
+                if isinstance(item, str) and item.strip():
+                    view.setdefault("command", item)
+                    break
+        return view
     except (TypeError, ValueError):
-        # Fall back to kwargs only — better than nothing.
-        return dict(kwargs)
+        # Fail closed for run_command: missing command view must not become
+        # "Low-risk shell command". Record raw text when available.
+        fallback = dict(kwargs)
+        if args:
+            for item in args:
+                if isinstance(item, str) and item.strip():
+                    fallback.setdefault("command", item)
+                    break
+            else:
+                fallback.setdefault("_unbound_positional", True)
+        return fallback
 
 
 def _log_decision(tool_name: str, decision: ToolPolicyDecision, args_view: dict[str, Any]) -> None:
@@ -242,21 +271,22 @@ def _log_decision(tool_name: str, decision: ToolPolicyDecision, args_view: dict[
 
 
 def _is_secret_key(key: str) -> bool:
-    lowered = str(key).lower()
-    return any(
-        marker in lowered
-        for marker in ("token", "secret", "password", "api_key", "apikey", "authorization")
-    )
+    from nexus.redact import is_secret_key
+
+    return is_secret_key(key)
 
 
 def _preview_args(args_view: dict[str, Any], *, limit: int = 240) -> dict[str, Any]:
+    from nexus.redact import redact_inline_values
+
     preview: dict[str, Any] = {}
     for key, value in args_view.items():
         if _is_secret_key(str(key)):
             preview[key] = "***"
             continue
         if isinstance(value, str):
-            preview[key] = value if len(value) <= limit else value[: limit - 1] + "…"
+            cleaned = redact_inline_values(value)
+            preview[key] = cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
         elif isinstance(value, (int, float, bool)) or value is None:
             preview[key] = value
         else:
@@ -266,15 +296,18 @@ def _preview_args(args_view: dict[str, Any], *, limit: int = 240) -> dict[str, A
 
 def _canonical_approval_args(args_view: dict[str, Any]) -> dict[str, Any]:
     """Secret-safe args retained for exact approved-action resume matching."""
+    from nexus.redact import redact_inline_values
+
     canonical: dict[str, Any] = {}
     for key, value in args_view.items():
         if _is_secret_key(str(key)):
             canonical[key] = "***"
             continue
         if isinstance(value, str):
+            cleaned = redact_inline_values(value)
             # Keep full command/path strings for hash-stable resume; truncate only
             # extremely large payloads so Firestore docs stay bounded.
-            canonical[key] = value if len(value) <= 8000 else value[:7999] + "…"
+            canonical[key] = cleaned if len(cleaned) <= 8000 else cleaned[:7999] + "…"
         elif isinstance(value, (int, float, bool)) or value is None:
             canonical[key] = value
         elif isinstance(value, (list, tuple)):
@@ -496,12 +529,51 @@ async def _await_approval(
 
 
 def _check_verification_warning(tool_name: str) -> str | None:
-    """Check if the perception-action loop should warn before this tool runs."""
+    """Check if the agent must refresh its observation before this action."""
     try:
         from nexus.tools.verification import should_verify_before_action
         return should_verify_before_action(tool_name)
     except Exception:
+        # Fail closed for GUI mutators: a broken verifier must not permit a
+        # blind shared-state mutation.
+        from nexus.tools.verification import _GUI_ACTIONS
+
+        if tool_name in _GUI_ACTIONS:
+            logger.warning(
+                "verification_unavailable tool=%s — blocking blind mutation",
+                tool_name,
+                exc_info=True,
+            )
+            return (
+                "Verification service unavailable. Observe with take_screenshot, "
+                f"playwright_snapshot, or playwright_verify before '{tool_name}'."
+            )
         return None
+
+
+_UNTRUSTED_PRODUCER_TOOLS = frozenset(
+    {
+        "scrape_web_page",
+        "web_search",
+        "tavily_search",
+        "search_sources",
+        "desktop_worker",
+        "take_screenshot",
+        "playwright_get_text",
+        "playwright_snapshot",
+        "playwright_verify",
+        "open_browser",
+        "read_drive_file",
+        "gmail_read",
+        "github_read_file",
+    }
+)
+
+
+def _is_untrusted_producer(tool_name: str) -> bool:
+    if tool_name in _UNTRUSTED_PRODUCER_TOOLS:
+        return True
+    return str(tool_name).startswith("mcp__")
 
 
 def _inject_warning(result: Any, warning: str) -> Any:
@@ -582,35 +654,52 @@ def gated_tool(func: Callable) -> Callable:
         finally:
             run_progress.tool_finished(run_id)
 
+    async def _invoke_guarded(*args: Any, **kwargs: Any) -> Any:
+        """Invoke the tool, converting an escaping raise into a tool error.
+
+        Native tools are already protected by ``normalized_tool``'s catch-all,
+        but approved MCP/ADK tools are not: any raise here used to propagate
+        through the runner and kill the entire turn with a generic
+        AGENT_ERROR. A failed tool call must be a ledger observation the
+        planner can retry or route around — never a turn-ending exception.
+        ``CancelledError`` still propagates so stall-watchdog cancellation
+        keeps working.
+        """
+        try:
+            return await _invoke_underlying(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            from nexus.tools.base import (
+                classify_exception_message,
+                root_error_message,
+            )
+
+            message = root_error_message(exc)
+            error_code, retryable = classify_exception_message(message)
+            logger.exception(
+                "Approved tool %s raised; converting to tool error", tool_name
+            )
+            return {
+                "status": "error",
+                "summary": f"{tool_name} failed during execution: {message}",
+                "detail": {
+                    "tool": tool_name,
+                    "exception": type(exc).__name__,
+                    "message": message,
+                    "retryable": retryable,
+                    "remaining_work": [
+                        f"Retry {tool_name} with narrower inputs, "
+                        "or use an alternative tool."
+                    ],
+                },
+                "metadata": {"tool": tool_name},
+                "error_code": error_code,
+                "suggested_alternatives": [],
+            }
+
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-        # #region agent log
-        if tool_name in {"generate_pptx_report", "terminal_worker", "read_skill"}:
-            try:
-                import json as _dbg_json
-                import time as _dbg_time
-                with open(
-                    r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
-                    "a",
-                    encoding="utf-8",
-                ) as _dbg_f:
-                    _dbg_f.write(
-                        _dbg_json.dumps(
-                            {
-                                "sessionId": "993e46",
-                                "runId": "pre-fix",
-                                "hypothesisId": "H4",
-                                "location": "tool_gateway.py:gated_tool",
-                                "message": "pptx-path tool invoked",
-                                "data": {"tool": tool_name},
-                                "timestamp": int(_dbg_time.time() * 1000),
-                            }
-                        )
-                        + "\n"
-                    )
-            except Exception:
-                pass
-        # #endregion
         blocked = _check_tool_allowlist(tool_name, func)
         if blocked is not None:
             return blocked
@@ -618,6 +707,18 @@ def gated_tool(func: Callable) -> Callable:
         if budget_block is not None:
             return budget_block
         args_view = _bind_args(func, args, kwargs)
+        # Fail closed for run_command when the command text could not be
+        # recovered: never treat it as low-risk.
+        if tool_name == "run_command" and not str(args_view.get("command") or "").strip():
+            if args_view.get("_unbound_positional"):
+                return _denied_result(
+                    tool_name,
+                    ToolPolicyDecision(
+                        "deny",
+                        "Command text unavailable for policy inspection.",
+                        "blocked",
+                    ),
+                )
         unattended: frozenset[str] = frozenset()
         try:
             from nexus.tools._context import get_unattended_tools
@@ -625,37 +726,34 @@ def gated_tool(func: Callable) -> Callable:
             unattended = get_unattended_tools()
         except Exception:
             unattended = frozenset()
+        try:
+            from nexus.tools._context import untrusted_content_in_scope
+
+            untrusted_flag = untrusted_content_in_scope()
+        except Exception:
+            untrusted_flag = False
         decision = evaluate_tool_policy(
             tool_name,
             args_view,
             autonomy_mode=_resolve_autonomy_mode(),
+            untrusted_input_in_scope=untrusted_flag,
             allowed_unattended_tools=unattended,
         )
         _log_decision(tool_name, decision, args_view)
         if decision.action == "deny":
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
-            from nexus.tools._context import get_skip_confirmations, tool_approval_timed_out
+            from nexus.tools._context import tool_approval_timed_out
 
-            if get_skip_confirmations():
-                logger.info(
-                    "Auto-approving tool %s because skip_confirmations is active for this scheduled task",
-                    tool_name,
-                )
-                approved = True
-            elif tool_approval_timed_out(tool_name):
+            if tool_approval_timed_out(tool_name):
                 return _approval_expired_result(tool_name, decision)
-            else:
-                approved = await _await_approval(tool_name, decision, args_view)
+            approved = await _await_approval(tool_name, decision, args_view)
             if approved is True:
-                warning = _check_verification_warning(tool_name)
-                if warning:
-                    return _verification_required_result(tool_name, warning)
-                locks = _resolve_resource_locks()
-                if locks is None:
-                    return await _invoke_underlying(*args, **kwargs)
-                async with locks.async_lock(tool_name):
-                    return await _invoke_underlying(*args, **kwargs)
+                result = await _invoke_with_verification_and_locks(
+                    tool_name, _invoke_underlying, args, kwargs
+                )
+                _mark_untrusted_producer(tool_name)
+                return result
             if approved is False:
                 return _approval_denied_result(tool_name, decision)
             if approved in {"pending", "expired"}:
@@ -666,13 +764,79 @@ def gated_tool(func: Callable) -> Callable:
         warning = _check_verification_warning(tool_name)
         if warning:
             return _verification_required_result(tool_name, warning)
-        locks = _resolve_resource_locks()
-        if locks is None:
-            return await _invoke_underlying(*args, **kwargs)
-        async with locks.async_lock(tool_name):
-            return await _invoke_underlying(*args, **kwargs)
+        result = await _invoke_with_locks(tool_name, _invoke_underlying, args, kwargs)
+        _mark_untrusted_producer(tool_name)
+        return result
 
     return async_wrapper
+
+
+def _tool_exception_result(tool_name: str, exc: BaseException) -> dict[str, Any]:
+    """Convert an escaped tool raise into a ledger observation.
+
+    Native tools are already protected by ``normalized_tool``'s catch-all,
+    but approved MCP/ADK tools are not: any raise used to propagate through
+    the runner and kill the entire turn with a generic AGENT_ERROR. A failed
+    tool call must be an observation the planner can retry or route around --
+    never a turn-ending exception. ``CancelledError`` is never converted so
+    stall-watchdog cancellation keeps working.
+    """
+    from nexus.tools.base import (
+        classify_exception_message,
+        root_error_message,
+    )
+
+    message = root_error_message(exc)
+    error_code, retryable = classify_exception_message(message)
+    logger.exception("Tool %s raised; converting to tool error", tool_name)
+    return {
+        "status": "error",
+        "summary": f"{tool_name} failed during execution: {message}",
+        "detail": {
+            "tool": tool_name,
+            "exception": type(exc).__name__,
+            "message": message,
+            "retryable": retryable,
+            "remaining_work": [
+                f"Retry {tool_name} with narrower inputs, "
+                "or use an alternative tool."
+            ],
+        },
+        "metadata": {"tool": tool_name},
+        "error_code": error_code,
+        "suggested_alternatives": [],
+    }
+
+
+async def _invoke_with_locks(tool_name: str, invoke_fn, args, kwargs):
+    try:
+        locks = _resolve_resource_locks()
+        if locks is None:
+            return await invoke_fn(*args, **kwargs)
+        async with locks.async_lock(tool_name):
+            return await invoke_fn(*args, **kwargs)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return _tool_exception_result(tool_name, exc)
+
+
+async def _invoke_with_verification_and_locks(tool_name: str, invoke_fn, args, kwargs):
+    warning = _check_verification_warning(tool_name)
+    if warning:
+        return _verification_required_result(tool_name, warning)
+    return await _invoke_with_locks(tool_name, invoke_fn, args, kwargs)
+
+
+def _mark_untrusted_producer(tool_name: str) -> None:
+    if not _is_untrusted_producer(tool_name):
+        return
+    try:
+        from nexus.tools._context import mark_untrusted_content_seen
+
+        mark_untrusted_content_seen()
+    except Exception:
+        pass
 
 
 def gate_tools(tools: list[Callable]) -> list[Callable]:
@@ -680,7 +844,8 @@ def gate_tools(tools: list[Callable]) -> list[Callable]:
 
     Non-callable entries (e.g. ADK ``google_search`` builtin objects)
     are returned untouched so we don't accidentally break ADK's
-    introspection on them.
+    introspection on them. Callable wrap failures fail closed with a
+    blocked stub instead of an unwrapped passthrough.
     """
     wrapped: list[Callable] = []
     for tool in tools:
@@ -689,11 +854,26 @@ def gate_tools(tools: list[Callable]) -> list[Callable]:
                 wrapped.append(gated_tool(tool))
                 continue
             except Exception:
+                tool_label = getattr(tool, "__name__", repr(tool))
                 logger.warning(
-                    "Failed to wrap tool %s with gated_tool; passing through.",
-                    getattr(tool, "__name__", repr(tool)),
+                    "Failed to wrap tool %s with gated_tool; failing closed.",
+                    tool_label,
                     exc_info=True,
                 )
+
+                @functools.wraps(tool)
+                async def _blocked_stub(*args: Any, _tool_label: str = str(tool_label), **kwargs: Any) -> Any:
+                    return {
+                        "status": "blocked",
+                        "summary": f"{_tool_label} blocked: policy wrapper unavailable.",
+                        "detail": {"tool": _tool_label, "retryable": False},
+                        "metadata": {"policy_action": "deny"},
+                        "error_code": "POLICY_WRAP_FAILED",
+                        "suggested_alternatives": [],
+                    }
+
+                wrapped.append(_blocked_stub)
+                continue
         wrapped.append(tool)
     return wrapped
 

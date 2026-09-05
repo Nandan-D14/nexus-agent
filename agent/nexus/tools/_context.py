@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Tool context — provides access to the current sandbox and BG task manager.
@@ -384,3 +384,26 @@ def mark_tool_approval_timed_out(tool_name: str) -> None:
 def tool_approval_timed_out(tool_name: str) -> bool:
     current = _timed_out_tool_approvals.get()
     return bool(current and tool_name in current)
+
+
+_current_untrusted_content: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_current_untrusted_content",
+    default=False,
+)
+
+
+def mark_untrusted_content_seen() -> None:
+    """Mark that untrusted web/MCP/desktop content is in scope this turn."""
+    _current_untrusted_content.set(True)
+
+
+def untrusted_content_in_scope() -> bool:
+    """Return True when untrusted external content has been observed."""
+    try:
+        return bool(_current_untrusted_content.get())
+    except LookupError:
+        return False
+
+
+def clear_untrusted_content() -> None:
+    _current_untrusted_content.set(False)
