@@ -150,6 +150,17 @@ jobs:
           BYOK_KEY="${{ secrets.BYOK_ENCRYPTION_KEY }}"
           [[ -z "$BYOK_KEY" ]] && BYOK_KEY="$(openssl rand -base64 32)"
 
+          # Wire CORS origin when known. First deploy has no frontend yet —
+          # the agent boots with the default and the CORS step below patches
+          # it; later redeploys reuse the live frontend URL automatically.
+          FRONTEND_URL_VAL="${{ secrets.FRONTEND_URL }}"
+          if [[ -z "$FRONTEND_URL_VAL" ]]; then
+            FRONTEND_URL_VAL="$(gcloud run services describe nexus-frontend \
+              --project="${{ env.PROJECT_ID }}" \
+              --region="${{ env.REGION }}" \
+              --format='value(status.url)' 2>/dev/null || true)"
+          fi
+
           AGENT_ENV_VARS=(
             "APP_ENV=production"
             "MODEL_PROVIDER=bynara"
@@ -182,6 +193,9 @@ jobs:
             "REQUIRE_BYOK=${{ secrets.REQUIRE_BYOK || 'true' }}"
             "SHARED_ACCESS_CODE=${{ secrets.SHARED_ACCESS_CODE }}"
           )
+          if [[ -n "$FRONTEND_URL_VAL" ]]; then
+            AGENT_ENV_VARS+=("FRONTEND_URL=${FRONTEND_URL_VAL}")
+          fi
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
           # Deploy agent container. If previous revisions have incompatible secret bindings,
