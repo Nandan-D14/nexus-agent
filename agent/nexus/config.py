@@ -358,6 +358,14 @@ class Settings(BaseSettings):
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
 
+    @field_validator("frontend_url")
+    @classmethod
+    def default_empty_frontend_url(cls, v: str) -> str:
+        # An explicitly empty FRONTEND_URL (e.g. unset CI secret interpolated
+        # as "") must not crash Cloud Run startup; fall back to the default
+        # and let startup validation warn about it.
+        return v.strip() or "http://localhost:3000"
+
     @field_validator("jwt_secret")
     @classmethod
     def pad_jwt_secret(cls, v: str) -> str:
@@ -400,8 +408,16 @@ def validate_startup_settings() -> None:
         issues.append("JWT_SECRET must be at least 32 bytes for HS256")
     if parsed_frontend.scheme not in {"http", "https"} or not parsed_frontend.netloc:
         issues.append("FRONTEND_URL must be a valid absolute http(s) URL")
-    if settings.is_production and parsed_frontend.scheme != "https":
-        issues.append("FRONTEND_URL must use https in production")
+    elif settings.is_production and parsed_frontend.scheme != "https":
+        # The agent deploys before the frontend URL is known (CORS origin is
+        # patched after the frontend deploys), so a non-https/default
+        # FRONTEND_URL must not crash startup and fail the Cloud Run revision
+        # health check. Warn until the real https origin is wired.
+        logger.warning(
+            "FRONTEND_URL should use https in production (got %s); "
+            "CORS will be patched post-deploy",
+            settings.frontend_url,
+        )
     if not settings.firebase_project_id and not settings.firebase_auth_emulator_host:
         issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
     if not settings.require_byok and not settings.e2b_api_key:
