@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import json
 import logging
 from typing import Any
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DOC_MIME_TYPE = "application/vnd.google-apps.document"
+SHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
 
 
 def _escape_drive_query(value: str) -> str:
@@ -96,6 +99,27 @@ class GoogleDriveClient:
             metadata=metadata,
             body=(content or "").encode("utf-8"),
             content_type="text/plain; charset=UTF-8",
+            fields="id,name,mimeType,webViewLink,parents",
+        )
+
+    async def create_google_sheet(
+        self,
+        *,
+        title: str,
+        headers: list[str],
+        rows: list[list[Any]],
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "name": title.strip()[:120] or "CoComputer Sheet",
+            "mimeType": SHEET_MIME_TYPE,
+        }
+        if parent_id:
+            metadata["parents"] = [parent_id]
+        return await self._multipart_upload(
+            metadata=metadata,
+            body=spreadsheet_csv_bytes(headers, rows),
+            content_type="text/csv; charset=UTF-8",
             fields="id,name,mimeType,webViewLink,parents",
         )
 
@@ -234,3 +258,14 @@ async def get_google_drive_client_from_context() -> GoogleDriveClient | None:
 
 async def decode_base64_upload(content_base64: str) -> bytes:
     return base64.b64decode(content_base64)
+
+
+def spreadsheet_csv_bytes(headers: list[Any] | None, rows: list[list[Any]] | None) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    header_row = [str(item) for item in (headers or [])]
+    if header_row:
+        writer.writerow(header_row)
+    for row in rows or []:
+        writer.writerow(["" if cell is None else str(cell) for cell in row])
+    return buffer.getvalue().encode("utf-8-sig")

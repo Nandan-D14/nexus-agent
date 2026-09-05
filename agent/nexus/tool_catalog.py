@@ -51,7 +51,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
 CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
     "gmail": frozenset({"gmail_search", "gmail_read", "gmail_send"}),
     "google_drive": frozenset(
-        {"search_drive", "read_drive_file", "create_drive_doc", "upload_drive_file"}
+        {"search_drive", "read_drive_file", "create_drive_doc", "create_drive_sheet", "upload_drive_file"}
     ),
     "google_calendar": frozenset(
         {
@@ -118,7 +118,8 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
 # Always callable so the agent can still plan, ask, and work with files/skills.
 ALWAYS_ALLOWED: frozenset[str] = frozenset(
     {
-        "ask_user",
+        "ask_choice",
+        "suggest_options",
         "prepare_task_workspace",
         "initialize_task_state",
         "update_task_state",
@@ -140,6 +141,7 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "await_subagents",
         "request_background_task",
         "extract_pdf_text",
+        "extract_document_text",
         "generate_pdf_report",
         "generate_excel_report",
         "generate_docx_report",
@@ -149,6 +151,9 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "propose_workflow_template",
         "update_workflow_template",
         "publish_workflow_template",
+        "schedules_create",
+        "schedules_list",
+        "schedules_pause",
     }
 )
 

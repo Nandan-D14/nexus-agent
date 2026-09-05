@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nexus.storage import download_artifact_as_data_uri, parse_gcs_object_url
+from nexus.storage import download_artifact_as_data_uri, parse_gcs_object_url, preview_artifact_gcs_location, preview_media_type
 from nexus.routers.tasks import download_artifact_by_id, download_artifact_content
 
 
@@ -184,3 +184,79 @@ class RouterContentProxyTests(IsolatedAsyncioTestCase):
             bucket_name="test-bucket",
             blob_name="sess/run/q1-sales.xlsx",
         )
+
+    @patch("nexus.routers.tasks.get_history_repository")
+    @patch("nexus.routers.tasks.download_artifact_bytes")
+    async def test_content_proxies_preview_sibling(
+        self,
+        mock_download_bytes: MagicMock,
+        mock_get_history_repo: MagicMock,
+    ) -> None:
+        mock_artifact = MagicMock()
+        mock_artifact.artifact_id = "artifact-deck"
+        mock_artifact.title = "review.pptx"
+        mock_artifact.session_id = "sess"
+        mock_artifact.run_id = "run"
+        mock_artifact.url = "https://storage.googleapis.com/test-bucket/sess/run/outputs/review.pptx"
+        mock_artifact.metadata = {
+            "gcs_bucket": "test-bucket",
+            "gcs_blob": "sess/run/outputs/review.pptx",
+            "preview_url": "https://storage.googleapis.com/test-bucket/sess/run/outputs/review.html",
+            "preview_path": "outputs/review.html",
+            "preview_content_type": "text/html; charset=utf-8",
+        }
+
+        mock_history_repo = MagicMock()
+        mock_history_repo.get_artifact_for_owner = AsyncMock(return_value=mock_artifact)
+        mock_get_history_repo.return_value = mock_history_repo
+        mock_download_bytes.return_value = (b"<html>deck</html>", "application/octet-stream")
+
+        mock_user = MagicMock()
+        mock_user.uid = "user-123"
+
+        response = await download_artifact_content(
+            artifact_id="artifact-deck",
+            user=mock_user,
+            sibling="preview",
+        )
+
+        self.assertEqual(response.body, b"<html>deck</html>")
+        self.assertTrue(str(response.media_type).startswith("text/html"))
+        self.assertIn("review.html", response.headers["Content-Disposition"])
+        mock_download_bytes.assert_called_once_with(
+            bucket_name="test-bucket",
+            blob_name="sess/run/outputs/review.html",
+        )
+
+
+class PreviewSiblingLocationTests(TestCase):
+    def test_preview_location_from_gcs_url(self) -> None:
+        self.assertEqual(
+            preview_artifact_gcs_location(
+                session_id="sess",
+                run_id="run",
+                metadata={
+                    "preview_url": "https://storage.googleapis.com/bucket/sess/run/outputs/deck.html",
+                    "gcs_bucket": "bucket",
+                    "preview_path": "outputs/deck.html",
+                },
+            ),
+            ("bucket", "sess/run/outputs/deck.html"),
+        )
+
+    def test_preview_location_from_path_when_url_missing(self) -> None:
+        self.assertEqual(
+            preview_artifact_gcs_location(
+                session_id="sess",
+                run_id="run",
+                metadata={
+                    "gcs_bucket": "bucket",
+                    "preview_path": "outputs/scope.pdf",
+                },
+            ),
+            ("bucket", "sess/run/outputs/scope.pdf"),
+        )
+
+    def test_preview_media_type_from_path(self) -> None:
+        self.assertEqual(preview_media_type("outputs/deck.html", None), "text/html; charset=utf-8")
+        self.assertEqual(preview_media_type("outputs/scope.pdf", None), "application/pdf")

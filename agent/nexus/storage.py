@@ -86,6 +86,48 @@ def artifact_storage_metadata(session_id: str, run_id: str, relative_path: str) 
         "gcs_blob": artifact_blob_name(session_id, run_id, relative_path),
     }
 
+
+def preview_artifact_gcs_location(
+    *,
+    session_id: str | None,
+    run_id: str | None,
+    metadata: dict | None,
+    preview_url: str | None = None,
+) -> Optional[tuple[str, str]]:
+    """GCS location for an Office HTML/PDF preview sibling, not the source file."""
+    meta = metadata or {}
+    url = preview_url if isinstance(preview_url, str) else meta.get("preview_url")
+    if isinstance(url, str) and url:
+        parsed = parse_gcs_object_url(url)
+        if parsed:
+            return parsed
+    preview_path = meta.get("preview_path")
+    bucket = meta.get("gcs_bucket")
+    if (
+        isinstance(preview_path, str)
+        and preview_path.strip()
+        and isinstance(bucket, str)
+        and bucket.strip()
+        and session_id
+        and run_id
+    ):
+        return bucket.strip(), artifact_blob_name(session_id, run_id, preview_path)
+    return None
+
+
+def preview_media_type(preview_path: str | None, declared: str | None = None) -> str:
+    explicit = (declared or "").split(";")[0].strip()
+    if explicit:
+        return explicit
+    lower = (preview_path or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if lower.endswith(".html") or lower.endswith(".htm"):
+        return "text/html; charset=utf-8"
+    if lower.endswith(".pdf"):
+        return "application/pdf"
+    guessed, _ = mimetypes.guess_type(lower)
+    return guessed or "application/octet-stream"
+
+
 def parse_gcs_object_url(url: str) -> Optional[tuple[str, str]]:
     """Extract (bucket, blob) from a Google Cloud Storage HTTPS URL."""
     if not url or "storage.googleapis.com" not in url:

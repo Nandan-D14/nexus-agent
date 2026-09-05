@@ -220,13 +220,20 @@ class SandboxFiles(SandboxComponent):
             raise_sandbox_io_error(path, result.get("stderr"), action="read file")
         return base64.b64decode(str(result.get("stdout") or ""))
 
-    def read_text_file(self, path: str) -> str:
-        """Read UTF-8 text from a sandbox file."""
+    def read_text_file(self, path: str, *, max_chars: int = 0) -> str:
+        """Read UTF-8 text from a sandbox file.
+
+        ``max_chars`` truncates inside the sandbox rather than after transfer,
+        so an oversized file never has to fit through stdout in the first place.
+        """
         path_b64 = base64.b64encode(path.encode("utf-8")).decode("ascii")
+        limit = max(0, int(max_chars))
         script = (
-            "import base64, pathlib; "
+            "import base64, pathlib, sys; "
             f"path = base64.b64decode('{path_b64}').decode('utf-8'); "
-            "print(pathlib.Path(path).read_text(encoding='utf-8'))"
+            f"limit = {limit}; "
+            "text = pathlib.Path(path).read_text(encoding='utf-8'); "
+            "sys.stdout.write(text if limit <= 0 else text[:limit])"
         )
         result = self.run_command(f"python3 -c {shlex.quote(script)}", timeout=30)
         if _coerce_exit_code(result.get("exit_code", -1)) != 0:

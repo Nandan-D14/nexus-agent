@@ -69,10 +69,15 @@ async def lifespan(app: FastAPI):
         get_task_queue(),
     )
     await stale_run_sweeper.start()
+    from nexus.schedule_ticker import ScheduleTicker
+
+    schedule_ticker = ScheduleTicker()
+    await schedule_ticker.start()
 
     yield
 
     # Stop the sandbox sweeper
+    await schedule_ticker.stop()
     await stale_run_sweeper.stop()
     await sweeper.stop()
 
@@ -171,6 +176,7 @@ from nexus.routers import (
     library_router,
     users_router,
     tasks_router,
+    schedules_router,
     worker_router,
 )
 
@@ -185,4 +191,5 @@ app.include_router(sessions_router)
 app.include_router(library_router)
 app.include_router(users_router)
 app.include_router(tasks_router)
+app.include_router(schedules_router)
 app.include_router(worker_router)

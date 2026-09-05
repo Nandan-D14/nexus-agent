@@ -16,21 +16,46 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+def _offered_subprotocols(ws: WebSocket) -> list[str]:
+    protocol_header = ws.headers.get("sec-websocket-protocol", "")
+    if not protocol_header:
+        return []
+    return [part.strip() for part in protocol_header.split(",") if part.strip()]
+
+
 def _ticket_candidates(ws: WebSocket) -> list[tuple[str, str | None]]:
+    candidates: list[tuple[str, str | None]] = []
     query_ticket = str(ws.query_params.get("ticket") or "").strip()
     if query_ticket:
-        return [(query_ticket, None)]
-
-    protocol_header = ws.headers.get("sec-websocket-protocol", "")
-    return [
-        (candidate, candidate)
-        for candidate in (part.strip() for part in protocol_header.split(","))
-        if candidate
-    ]
+        candidates.append((query_ticket, None))
+    candidates.extend((candidate, candidate) for candidate in _offered_subprotocols(ws))
+    return candidates
 
 
-async def _reject_ws(ws: WebSocket, *, code: int, reason: str, message: str) -> None:
-    await ws.accept()
+def _negotiated_subprotocol(ws: WebSocket, accepted: str | None = None) -> str | None:
+    """Return a protocol the browser offered so accept() can echo it.
+
+    Browsers fail the handshake when they send Sec-WebSocket-Protocol and the
+    server accepts without selecting one of those values. Query-string tickets
+    authenticate first and carry subprotocol=None, so success must still echo
+    an offered protocol when the client sent one.
+    """
+    if accepted:
+        return accepted
+    offered = _offered_subprotocols(ws)
+    return offered[0] if offered else None
+
+
+async def _reject_ws(
+    ws: WebSocket,
+    *,
+    code: int,
+    reason: str,
+    message: str,
+    subprotocol: str | None = None,
+) -> None:
+    await ws.accept(subprotocol=_negotiated_subprotocol(ws, subprotocol))
     await ws.send_json({"type": "error", "code": reason, "message": message})
     await ws.close(code=code, reason=message[:120])
 
@@ -69,6 +94,7 @@ async def websocket_endpoint(
             code=4429,
             reason="WS_RATE_LIMITED",
             message="Too many reconnect attempts. Wait a minute, then try again.",
+            subprotocol=accepted_subprotocol,
         )
         return
     try:
@@ -79,6 +105,7 @@ async def websocket_endpoint(
             code=4403,
             reason="WS_FORBIDDEN",
             message="Could not load account settings. Retry in a moment.",
+            subprotocol=accepted_subprotocol,
         )
         return
 
@@ -93,6 +120,7 @@ async def websocket_endpoint(
             code=4004,
             reason="WS_SESSION_UNAVAILABLE",
             message="Session not found or unavailable. Resume or create a new session.",
+            subprotocol=accepted_subprotocol,
         )
         return
 
@@ -104,6 +132,7 @@ async def websocket_endpoint(
                 code=4004,
                 reason="WS_SESSION_UNAVAILABLE",
                 message="Session not found or unavailable. Resume or create a new session.",
+                subprotocol=accepted_subprotocol,
             )
             return
         workspace_state = await history_repository.get_workspace_state(valid_uid)
@@ -137,5 +166,5 @@ async def websocket_endpoint(
         ws=ws,
         session=session,
         session_manager=session_manager,
-        subprotocol=accepted_subprotocol,
+        subprotocol=_negotiated_subprotocol(ws, accepted_subprotocol),
     )

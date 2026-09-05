@@ -557,7 +557,11 @@ def build_genai_client(
     extra_headers: dict[str, str] | None = None,
     retry_options: types.HttpRetryOptions | None = None,
 ) -> Client:
-    http_options_kwargs: dict[str, Any] = {}
+    # Without an explicit deadline the genai client waits forever, so a provider
+    # that accepts the connection and then stalls hangs the whole agent turn.
+    http_options_kwargs: dict[str, Any] = {
+        "timeout": int(max(1.0, float(settings.model_request_timeout_seconds)) * 1000)
+    }
     if extra_headers:
         http_options_kwargs["headers"] = extra_headers
     if api_version:
@@ -565,9 +569,9 @@ def build_genai_client(
     if retry_options is not None:
         http_options_kwargs["retry_options"] = retry_options
 
-    client_kwargs: dict[str, Any] = {}
-    if http_options_kwargs:
-        client_kwargs["http_options"] = types.HttpOptions(**http_options_kwargs)
+    client_kwargs: dict[str, Any] = {
+        "http_options": types.HttpOptions(**http_options_kwargs)
+    }
 
     if runtime_config.use_vertex_ai:
         return Client(

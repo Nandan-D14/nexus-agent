@@ -202,7 +202,7 @@ def get_last_screenshot_b64() -> str | None:
     return img
 
 
-from nexus.tools.base import normalized_tool
+from nexus.tools.base import normalized_tool, reraise_if_sandbox_dead
 
 @normalized_tool(needs_sandbox=True)
 def take_screenshot() -> dict:
@@ -406,6 +406,7 @@ def take_screenshot() -> dict:
         }
 
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("take_screenshot failed: %s", e)
         return {
             "status": "error",

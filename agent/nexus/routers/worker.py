@@ -41,3 +41,15 @@ async def run_task_from_queue(
         claim_token=payload.claim_token,
     )
     return {"status": result.status, "summary": result.summary}
+
+
+@router.post("/internal/schedules/tick")
+async def tick_schedules(
+    x_worker_token: str | None = Header(default=None, alias="X-Worker-Token"),
+):
+    if not settings.task_worker_enabled:
+        raise HTTPException(status_code=503, detail="Durable task worker is disabled")
+    _validate_worker_token(x_worker_token)
+    from nexus.schedule_dispatch import tick_due_schedules
+
+    return await tick_due_schedules()

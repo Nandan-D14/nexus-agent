@@ -9,6 +9,7 @@ from .sessions import router as sessions_router
 from .library import router as library_router
 from .users import router as users_router
 from .tasks import router as tasks_router
+from .schedules import router as schedules_router
 from .worker import router as worker_router
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "library_router",
     "users_router",
     "tasks_router",
+    "schedules_router",
     "worker_router",
 ]

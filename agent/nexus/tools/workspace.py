@@ -672,7 +672,15 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
                 error_code="NOT_FOUND",
                 suggested_alternatives=["list_workspace_files", "prepare_task_workspace"],
             )
-        content = sandbox.read_text_file(absolute_path)
+        # Read one char past the cap so a file sitting exactly on the limit is
+        # not mislabelled as truncated.
+        limit = max(0, int(settings.workspace_file_read_max_chars))
+        content = sandbox.read_text_file(
+            absolute_path, max_chars=limit + 1 if limit else 0
+        )
+        truncated = bool(limit) and len(content) > limit
+        if truncated:
+            content = content[:limit]
         normalized_relative = _normalize_relative_path(relative_path)
         await emit_sandbox_event({
             "type": "sandbox_editor",
@@ -681,12 +689,19 @@ async def read_workspace_file(relative_path: str) -> dict[str, Any]:
             "action": "read",
             "content": clip_editor_content(content),
         })
+        summary = f"Read {normalized_relative} ({len(content)} chars)"
+        if truncated:
+            summary += (
+                f" — truncated at {limit} chars. Use run_command with sed/grep "
+                "to read a specific range."
+            )
         return tool_success(
-            f"Read {normalized_relative} ({len(content)} chars)",
+            summary,
             workspace_path=workspace_path,
             workspace_file=absolute_path,
             relative_path=normalized_relative,
             content=content,
+            truncated=truncated,
         )
     except Exception as exc:
         return tool_error(

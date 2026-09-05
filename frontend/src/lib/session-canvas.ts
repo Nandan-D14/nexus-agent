@@ -9,6 +9,8 @@ import {
   isHtmlArtifact,
   isOfficeArtifact,
   isPdfArtifact,
+  isCodePath,
+  isMarkdownPath,
 } from "@/lib/artifact-url";
 
 /** Big session objects that belong on the right-hand canvas, not in chat. */
@@ -35,14 +37,17 @@ const CANVAS_KINDS = new Set([
   "html",
   "markdown",
   "plan",
+  "file",
 ]);
 
-const CANVAS_FILE_EXT = /\.(md|markdown|html|pdf|docx|xlsx|xls|csv|pptx|txt)$/i;
+const CANVAS_FILE_EXT =
+  /\.(md|markdown|html|htm|pdf|docx|xlsx|xls|csv|pptx|txt|py|pyw|ts|tsx|js|jsx|mjs|cjs|json|css|scss|go|rs|java|kt|swift|rb|php|yml|yaml|toml|sh|bash|sql|c|cc|cpp|h|hpp|cs|xml|vue|svelte|lua|r|ipynb)$/i;
 const TEXT_FILE_EXT = /\.(md|markdown|txt)$/i;
-const OUTPUT_DOC_EXT = /\.(md|markdown|html|txt)$/i;
+const CODE_FILE_EXT =
+  /\.(py|pyw|ts|tsx|js|jsx|mjs|cjs|json|css|scss|go|rs|java|kt|swift|rb|php|c|cc|cpp|h|hpp|cs|sql|sh|bash|yml|yaml|toml|xml)$/i;
 
-/** Skip short conversational notes; this surface is for full reports, research, and structured deliverables. */
-const MIN_CANVAS_FILE_CHARS = 1000;
+/** Skip empty files; this surface is for reports, decks, and written deliverables. */
+const MIN_CANVAS_FILE_CHARS = 1;
 
 function artifactName(artifact: Pick<RunArtifact, "title" | "path">): string {
   return `${artifact.title || ""} ${artifact.path || ""}`.replace(/\\/g, "/");
@@ -54,7 +59,12 @@ function looksLikePlanName(value: string): boolean {
 
 export function isCanvasWorkspacePath(path: string): boolean {
   const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
-  return normalized.startsWith("outputs/") && OUTPUT_DOC_EXT.test(normalized);
+  if (!normalized.startsWith("outputs/")) return false;
+  return (
+    CANVAS_FILE_EXT.test(normalized) ||
+    isMarkdownPath(normalized) ||
+    isCodePath(normalized)
+  );
 }
 
 export function isCanvasWorkspaceWrite(
@@ -80,15 +90,26 @@ export function isCanvasArtifact(
     return true;
   }
   const path = (artifact.path || "").replace(/\\/g, "/");
-  if (path.startsWith("outputs/") && CANVAS_FILE_EXT.test(path)) return true;
-  if (CANVAS_FILE_EXT.test(artifact.title || "")) return true;
+  if (path.startsWith("outputs/") && (CANVAS_FILE_EXT.test(path) || isCodePath(path) || isMarkdownPath(path))) {
+    return true;
+  }
+  if (CANVAS_FILE_EXT.test(artifact.title || "") || isCodePath(artifact.title || "") || isMarkdownPath(artifact.title || "")) {
+    return true;
+  }
   return false;
 }
 
 export function canvasKindForPath(path: string): SessionCanvasKind {
   const name = path.replace(/\\/g, "/");
   if (looksLikePlanName(name)) return "plan";
-  if (TEXT_FILE_EXT.test(name)) return "file";
+  if (
+    TEXT_FILE_EXT.test(name) ||
+    CODE_FILE_EXT.test(name) ||
+    isMarkdownPath(name) ||
+    isCodePath(name)
+  ) {
+    return "file";
+  }
   return "document";
 }
 
@@ -103,7 +124,9 @@ export function canvasKindForArtifact(
   if (looksLikePlanName(artifactName(artifact))) return "plan";
   if (artifact.kind === "markdown" || artifact.kind === "file") return "file";
   const path = (artifact.path || artifact.title || "").replace(/\\/g, "/");
-  if (TEXT_FILE_EXT.test(path)) return "file";
+  if (TEXT_FILE_EXT.test(path) || CODE_FILE_EXT.test(path) || isMarkdownPath(path) || isCodePath(path)) {
+    return "file";
+  }
   return "document";
 }
 

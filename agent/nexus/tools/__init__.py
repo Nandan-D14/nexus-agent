@@ -33,6 +33,7 @@ from nexus.tools.workspace import (
 )
 from nexus.tools.docs import (
     extract_pdf_text,
+    extract_document_text,
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
@@ -46,6 +47,7 @@ from nexus.tools.integrations import (
     search_drive,
     read_drive_file,
     create_drive_doc,
+    create_drive_sheet,
     upload_drive_file,
     github_search_repos,
     github_read_file,
@@ -82,6 +84,7 @@ from nexus.tools.templates import (
     update_workflow_template,
     publish_workflow_template,
 )
+from nexus.tools.schedules import schedules_create, schedules_list, schedules_pause
 
 ALL_TOOLS = [
     prepare_task_workspace,
@@ -98,6 +101,7 @@ ALL_TOOLS = [
     web_search,
     scrape_web_page,
     extract_pdf_text,
+    extract_document_text,
     generate_pdf_report,
     generate_excel_report,
     generate_docx_report,
@@ -109,6 +113,7 @@ ALL_TOOLS = [
     search_drive,
     read_drive_file,
     create_drive_doc,
+    create_drive_sheet,
     upload_drive_file,
     github_search_repos,
     github_read_file,
@@ -156,4 +161,7 @@ ALL_TOOLS = [
     propose_workflow_template,
     update_workflow_template,
     publish_workflow_template,
+    schedules_create,
+    schedules_list,
+    schedules_pause,
 ]

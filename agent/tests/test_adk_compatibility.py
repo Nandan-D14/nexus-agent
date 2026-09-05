@@ -74,7 +74,7 @@ def test_planner_tool_declarations_survive_adk_upgrade() -> None:
         for tool in planner.tools
     }
 
-    assert {"terminal_worker", "desktop_worker", "ask_user", "web_search", "run_command", "propose_workflow_template", "update_workflow_template", "publish_workflow_template"} <= names
+    assert {"terminal_worker", "desktop_worker", "ask_choice", "suggest_options", "web_search", "run_command", "propose_workflow_template", "update_workflow_template", "publish_workflow_template"} <= names
     assert "take_screenshot" not in names
     worker_tools = [
         tool for tool in planner.tools if getattr(tool, "name", "") in {"terminal_worker", "desktop_worker"}
@@ -155,6 +155,8 @@ class _Snapshot:
 class _EventCollection:
     def __init__(self) -> None:
         self.docs: dict[str, dict] = {}
+        self._descending = False
+        self._limit: int | None = None
 
     def document(self, key: str):
         collection = self
@@ -165,15 +167,24 @@ class _EventCollection:
 
         return _EventDoc()
 
-    def order_by(self, field: str):
+    def order_by(self, field: str, direction: str = "ASCENDING"):
         assert field == "timestamp"
+        self._descending = str(direction).upper().endswith("DESCENDING")
+        return self
+
+    def limit(self, count: int):
+        self._limit = int(count)
         return self
 
     def stream(self):
-        return [
-            _Snapshot(data)
-            for data in sorted(self.docs.values(), key=lambda item: item.get("timestamp", 0))
-        ]
+        ordered = sorted(
+            self.docs.values(),
+            key=lambda item: item.get("timestamp", 0),
+            reverse=self._descending,
+        )
+        if self._limit is not None:
+            ordered = ordered[: self._limit]
+        return [_Snapshot(data) for data in ordered]
 
 
 class _SessionDoc:

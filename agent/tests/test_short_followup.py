@@ -28,7 +28,7 @@ from nexus.orchestrator import (
 
 class ShortFollowupHelpersTests(TestCase):
     def test_confirmations_are_short(self) -> None:
-        for text in ("continue", "create it", "do it.", "ok", "go ahead", "try again"):
+        for text in ("continue", "create it", "do it.", "ok", "go ahead", "try again", "continue and give ppt"):
             self.assertTrue(is_short_followup(text), text)
 
     def test_real_requests_are_not_short(self) -> None:
@@ -74,6 +74,10 @@ class ShortFollowupHelpersTests(TestCase):
         self.assertFalse(should_recover_website("MISSING_ARTIFACT", "generate a pdf report"))
         self.assertTrue(is_deliverable_demand("where the fuck is my website"))
         self.assertTrue(is_deliverable_demand("where is my website"))
+        self.assertTrue(is_deliverable_demand("where is ppt or slide"))
+        self.assertTrue(is_deliverable_demand("show me the presentation"))
+        self.assertTrue(is_deliverable_demand("give ppt"))
+        self.assertTrue(is_deliverable_demand("continue and give ppt"))
         self.assertFalse(is_deliverable_demand("do you have git and git cli"))
         self.assertTrue(looks_like_website_request(
             "Create a modern marketing website for my product"
@@ -83,6 +87,11 @@ class ShortFollowupHelpersTests(TestCase):
             '<section class="section features" id="features">'
         ))
         self.assertTrue(looks_like_unpublished_markup("Invoice card details: LEDGERLINE"))
+        self.assertTrue(
+            looks_like_unpublished_markup(
+                "def kicker(slide, text, x=0.9, y=1.28):\n    box w=8 h=0.3; teal bar"
+            )
+        )
         html = extract_html_dump(
             "Invoice card:\n\n"
             '<section class="hero"><div class="wrap">'
@@ -157,6 +166,98 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
         self.assertIn(
             "marketing website",
             fake._run_agent_tracked.call_args.kwargs["completion_request"].lower(),
+        )
+
+    async def test_where_is_ppt_expands_prior_presentation_task(self) -> None:
+        fake = SimpleNamespace(
+            session=SimpleNamespace(id="s1"),
+            history_repository=SimpleNamespace(
+                get_session_messages=AsyncMock(
+                    return_value=[
+                        {
+                            "role": "user",
+                            "text": "Create a modern premium 8-slide startup presentation",
+                        },
+                        {"role": "user", "text": "where is ppt or slide"},
+                    ]
+                )
+            ),
+            _send_json=AsyncMock(),
+            _persist_message=AsyncMock(),
+            _build_turn_input=AsyncMock(return_value="TURN_INPUT"),
+            _run_agent_tracked=AsyncMock(),
+            _seed_context="",
+        )
+
+        await NexusOrchestrator.handle_text_input(fake, "where is ppt or slide")
+
+        model_text = fake._build_turn_input.call_args.args[0]
+        self.assertIn("[CONTINUE TASK]", model_text)
+        self.assertIn("8-slide startup presentation", model_text)
+        self.assertIn("generate_*_report", model_text)
+        self.assertIn(
+            "8-slide startup presentation",
+            fake._run_agent_tracked.call_args.kwargs["completion_request"],
+        )
+
+    async def test_continue_and_give_ppt_expands_prior_presentation_task(self) -> None:
+        fake = SimpleNamespace(
+            session=SimpleNamespace(id="s1"),
+            history_repository=SimpleNamespace(
+                get_session_messages=AsyncMock(
+                    return_value=[
+                        {
+                            "role": "user",
+                            "text": "Create a modern premium 8-slide startup presentation",
+                        },
+                        {"role": "user", "text": "continue and give ppt"},
+                    ]
+                )
+            ),
+            _send_json=AsyncMock(),
+            _persist_message=AsyncMock(),
+            _build_turn_input=AsyncMock(return_value="TURN_INPUT"),
+            _run_agent_tracked=AsyncMock(),
+            _seed_context="",
+        )
+
+        await NexusOrchestrator.handle_text_input(fake, "continue and give ppt")
+
+        model_text = fake._build_turn_input.call_args.args[0]
+        self.assertIn("[CONTINUE TASK]", model_text)
+        self.assertIn("8-slide startup presentation", model_text)
+        self.assertIn("generate_*_report", model_text)
+        self.assertIn(
+            "8-slide startup presentation",
+            fake._run_agent_tracked.call_args.kwargs["completion_request"],
+        )
+
+    async def test_continue_preserves_prior_task_when_history_is_empty(self) -> None:
+        fake = SimpleNamespace(
+            session=SimpleNamespace(id="s1"),
+            history_repository=SimpleNamespace(
+                get_session_messages=AsyncMock(return_value=[])
+            ),
+            _send_json=AsyncMock(),
+            _persist_message=AsyncMock(),
+            _build_turn_input=AsyncMock(return_value="TURN_INPUT"),
+            _run_agent_tracked=AsyncMock(),
+            _seed_context="",
+            _outstanding_task="Create a modern premium 8-slide startup presentation",
+        )
+        await NexusOrchestrator.handle_text_input(fake, "continue")
+        # The bare confirmation must not clobber the tracked deliverable,
+        # and verification must still see it via completion_request.
+        self.assertEqual(
+            fake._outstanding_task,
+            "Create a modern premium 8-slide startup presentation",
+        )
+        self.assertEqual(
+            fake._run_agent_tracked.call_args.kwargs["completion_request"],
+            "Create a modern premium 8-slide startup presentation",
+        )
+        self.assertIn(
+            "[CONTINUE TASK]", fake._build_turn_input.call_args.args[0]
         )
 
     async def test_full_prompt_is_unchanged(self) -> None:

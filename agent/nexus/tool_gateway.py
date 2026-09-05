@@ -46,6 +46,7 @@ import logging
 import time
 from typing import Any, Callable
 
+from nexus import run_progress
 from nexus.policy import ToolPolicyDecision, evaluate_tool_policy
 
 logger = logging.getLogger(__name__)
@@ -294,8 +295,10 @@ def _approval_description(tool_name: str, decision: ToolPolicyDecision) -> str:
 
 async def _await_background_task_approval(tool_name: str, decision: ToolPolicyDecision) -> bool | None:
     try:
-        from nexus.tools._context import get_bg_task_manager
+        from nexus.tools._context import get_bg_task_manager, get_skip_confirmations
 
+        if get_skip_confirmations():
+            return True
         manager = get_bg_task_manager()
     except Exception:
         manager = None
@@ -320,8 +323,12 @@ async def _await_durable_approval(
             get_production_task_repository,
             get_run_id,
             get_send_json,
+            get_skip_confirmations,
             get_task_id,
         )
+
+        if get_skip_confirmations():
+            return True
 
         repository = get_production_task_repository()
         task_id = get_task_id()
@@ -379,6 +386,14 @@ async def _await_durable_approval(
         },
     )
     if send_json is not None:
+        logger.info(
+            "approval_requested tool=%s task=%s approval=%s risk=%s hash=%s",
+            tool_name,
+            task_id,
+            approval.approval_id,
+            approval.risk,
+            action_hash,
+        )
         await send_json(
             {
                 "type": "permission_request",
@@ -389,6 +404,8 @@ async def _await_durable_approval(
                 "estimated_seconds": int(APPROVAL_TIMEOUT_SECONDS),
                 "agent": "policy",
                 "risk": approval.risk,
+                "tool": tool_name,
+                "action_hash": action_hash,
             }
         )
 
@@ -400,6 +417,14 @@ async def _await_durable_approval(
             owner_id=owner_id,
         )
         if current and current.status in {"approved", "denied"}:
+            logger.info(
+                "approval_resolved tool=%s task=%s approval=%s approved=%s hash=%s",
+                tool_name,
+                task_id,
+                approval.approval_id,
+                bool(current.approved),
+                action_hash,
+            )
             if not current.approved:
                 return False
             consume_action = getattr(
@@ -417,18 +442,7 @@ async def _await_durable_approval(
             )
             return consumed is not None
         await asyncio.sleep(APPROVAL_POLL_SECONDS)
-    # #region agent log
-    try:
-        import json as _dbg_json
-        from pathlib import Path as _DbgPath
-        import urllib.request
-        _payload = _dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"F","location":"tool_gateway.py:_await_durable_approval","message":"approval timed out","data":{"tool":tool_name,"task_id":task_id,"approval_id":getattr(approval,"approval_id",None)},"timestamp":int(__import__("time").time()*1000)})+"\n"
-        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_payload)
-        req = urllib.request.Request("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", data=_payload.encode("utf-8"), headers={"Content-Type":"application/json","X-Debug-Session-Id":"2a93a8"}, method="POST")
-        urllib.request.urlopen(req, timeout=0.3)
-    except Exception:
-        pass
-    # #endregion
+
     try:
         from nexus.tools._context import mark_tool_approval_timed_out
 
@@ -443,11 +457,20 @@ async def _await_durable_approval(
                     "task_id": approval.approval_id,
                     "approval_id": approval.approval_id,
                     "approved": False,
+                    "status": "timed_out",
                     "reason": "timeout",
+                    "action_hash": action_hash,
                 }
             )
         except Exception:
             logger.debug("Failed to emit approval timeout for %s", tool_name, exc_info=True)
+    logger.warning(
+        "approval_timed_out tool=%s task=%s approval=%s hash=%s",
+        tool_name,
+        task_id,
+        approval.approval_id,
+        action_hash,
+    )
     try:
         await repository.resolve_approval(
             task_id=task_id,
@@ -524,6 +547,16 @@ def _resolve_resource_locks():
         return None
 
 
+def _progress_run_id() -> str | None:
+    """Run id for liveness tracking, or None outside a bound turn."""
+    from nexus.tools._context import get_run_id
+
+    try:
+        return get_run_id() or None
+    except Exception:
+        return None
+
+
 def gated_tool(func: Callable) -> Callable:
     """Wrap a tool callable so every invocation passes policy enforcement.
 
@@ -536,13 +569,48 @@ def gated_tool(func: Callable) -> Callable:
     is_async = asyncio.iscoroutinefunction(func)
 
     async def _invoke_underlying(*args: Any, **kwargs: Any) -> Any:
-        if is_async:
-            return await func(*args, **kwargs)
-        # Keep sync tools off the event-loop thread when they may block on I/O.
-        return await asyncio.to_thread(func, *args, **kwargs)
+        # The stall watchdogs read silence as a hang. A tool that legitimately
+        # runs for minutes (sandbox provisioning, playwright install) must not
+        # look identical to a wedged model stream, so bracket the call.
+        run_id = _progress_run_id()
+        run_progress.tool_started(run_id)
+        try:
+            if is_async:
+                return await func(*args, **kwargs)
+            # Keep sync tools off the event-loop thread when they may block on I/O.
+            return await asyncio.to_thread(func, *args, **kwargs)
+        finally:
+            run_progress.tool_finished(run_id)
 
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        # #region agent log
+        if tool_name in {"generate_pptx_report", "terminal_worker", "read_skill"}:
+            try:
+                import json as _dbg_json
+                import time as _dbg_time
+                with open(
+                    r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
+                    "a",
+                    encoding="utf-8",
+                ) as _dbg_f:
+                    _dbg_f.write(
+                        _dbg_json.dumps(
+                            {
+                                "sessionId": "993e46",
+                                "runId": "pre-fix",
+                                "hypothesisId": "H4",
+                                "location": "tool_gateway.py:gated_tool",
+                                "message": "pptx-path tool invoked",
+                                "data": {"tool": tool_name},
+                                "timestamp": int(_dbg_time.time() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+        # #endregion
         blocked = _check_tool_allowlist(tool_name, func)
         if blocked is not None:
             return blocked
@@ -550,36 +618,35 @@ def gated_tool(func: Callable) -> Callable:
         if budget_block is not None:
             return budget_block
         args_view = _bind_args(func, args, kwargs)
+        unattended: frozenset[str] = frozenset()
+        try:
+            from nexus.tools._context import get_unattended_tools
+
+            unattended = get_unattended_tools()
+        except Exception:
+            unattended = frozenset()
         decision = evaluate_tool_policy(
             tool_name,
             args_view,
             autonomy_mode=_resolve_autonomy_mode(),
+            allowed_unattended_tools=unattended,
         )
         _log_decision(tool_name, decision, args_view)
-        # #region agent log
-        try:
-            import json as _dbg_json
-            from pathlib import Path as _DbgPath
-            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"tool_gateway.py:gated_tool","message":"policy decision","data":{"tool":tool_name,"action":decision.action,"risk":decision.risk,"reason":decision.reason,"autonomy":_resolve_autonomy_mode()},"timestamp":int(__import__("time").time()*1000)})+"\n")
-        except Exception:
-            pass
-        # #endregion
         if decision.action == "deny":
             return _denied_result(tool_name, decision)
         if decision.action == "require_approval":
-            from nexus.tools._context import tool_approval_timed_out
+            from nexus.tools._context import get_skip_confirmations, tool_approval_timed_out
 
-            if tool_approval_timed_out(tool_name):
+            if get_skip_confirmations():
+                logger.info(
+                    "Auto-approving tool %s because skip_confirmations is active for this scheduled task",
+                    tool_name,
+                )
+                approved = True
+            elif tool_approval_timed_out(tool_name):
                 return _approval_expired_result(tool_name, decision)
-            approved = await _await_approval(tool_name, decision, args_view)
-            # #region agent log
-            try:
-                import json as _dbg_json
-                from pathlib import Path as _DbgPath
-                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"tool_gateway.py:require_approval","message":"approval outcome","data":{"tool":tool_name,"approved":repr(approved),"approved_type":type(approved).__name__},"timestamp":int(__import__("time").time()*1000)})+"\n")
-            except Exception:
-                pass
-            # #endregion
+            else:
+                approved = await _await_approval(tool_name, decision, args_view)
             if approved is True:
                 warning = _check_verification_warning(tool_name)
                 if warning:

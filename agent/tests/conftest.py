@@ -12,6 +12,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+sys.modules.setdefault(
+    "redis",
+    SimpleNamespace(Redis=object, from_url=lambda *args, **kwargs: None),
+)
 
 import pytest
 

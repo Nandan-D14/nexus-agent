@@ -15,9 +15,11 @@ from google.adk.sessions.base_session_service import (
     GetSessionConfig,
     ListSessionsResponse,
 )
+from google.cloud import firestore
 from pydantic import ValidationError
 import time
 
+from nexus.config import settings
 from nexus.firebase import get_firestore_client
 
 logger = logging.getLogger(__name__)
@@ -168,10 +170,29 @@ class FirestoreSessionService(BaseSessionService):
             
         data = doc.to_dict()
         embedded_events = data.get("events") if isinstance(data.get("events"), list) else []
+        # Read only the newest slice. Streaming the whole subcollection makes
+        # every turn of a long session pay for its entire history, and the
+        # trimmer discards most of it before the model call anyway. Trimming at
+        # the query keeps a long thread from timing out or exhausting memory
+        # before the budget logic ever runs.
+        limit = max(
+            1,
+            int(
+                (config.num_recent_events if config and config.num_recent_events else 0)
+                or settings.adk_session_event_load_limit
+            ),
+        )
         event_docs = await asyncio.to_thread(
-            lambda: list(doc_ref.collection("events").order_by("timestamp").stream())
+            lambda: list(
+                doc_ref.collection("events")
+                .order_by("timestamp", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+                .stream()
+            )
         )
         if event_docs:
+            # Query order is newest-first; ADK expects chronological order.
+            event_docs.reverse()
             data["events"] = [event_doc.to_dict() or {} for event_doc in event_docs]
         else:
             data["events"] = embedded_events

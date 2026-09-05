@@ -44,11 +44,15 @@ const WORKFLOW_TOOLS = new Set([
   "publish_html_artifact",
   "publish_app_preview",
   "render_ui",
-  "ask_user",
+  "ask_choice",
+  "suggest_options",
   "propose_workflow_template",
   "update_workflow_template",
   "publish_workflow_template",
   "request_background_task",
+  "schedules_create",
+  "schedules_list",
+  "schedules_pause",
 ]);
 const SKILL_TOOLS = new Set(["read_skill", "read_skill_file"]);
 const SUBAGENT_TOOLS = new Set([
@@ -75,6 +79,7 @@ export function isWorkflowVisualTool(tool = ""): boolean {
 }
 
 export function classifyAgentTool(tool = ""): AgentToolProvider {
+  if (tool.startsWith("schedules_")) return "workflow";
   if (tool.startsWith("gmail_")) return "gmail";
   if (tool.startsWith("calendar_")) return "calendar";
   if (tool.startsWith("tasks_")) return "tasks";
@@ -139,7 +144,9 @@ export function displayAgentToolName(tool = ""): string {
     generate_docx_report: "Generate Document",
     generate_pptx_report: "Generate Slides",
     save_as_artifact: "Save Artifact",
-    ask_user: "Ask User",
+    ask_choice: "Clarifying Choice",
+    suggest_options: "Suggested Options",
+    ask_user: "Clarifying Choice",
     propose_workflow_template: "Propose Template",
     update_workflow_template: "Update Template",
     publish_workflow_template: "Publish Template",
@@ -198,7 +205,8 @@ export function providerLabel(provider: AgentToolProvider, tool?: string): strin
     if (tool === "render_ui") return "C1 Visual";
     if (tool === "publish_html_artifact") return "HTML Artifact";
     if (tool === "publish_app_preview") return "App Preview";
-    if (tool === "ask_user") return "Question";
+    if (tool === "ask_choice" || tool === "ask_user") return "Choice";
+    if (tool === "suggest_options") return "Suggestions";
     if (
       tool === "propose_workflow_template" ||
       tool === "update_workflow_template" ||
@@ -224,7 +232,8 @@ export function toolActionLabel(tool = ""): string {
   if (tool === "generate_docx_report") return "Generating document";
   if (tool === "generate_pptx_report") return "Generating slides";
   if (tool === "save_as_artifact") return "Saving artifact";
-  if (tool === "ask_user") return "Asking user";
+  if (tool === "ask_choice" || tool === "ask_user") return "Asking choice";
+  if (tool === "suggest_options") return "Suggesting options";
   if (tool === "propose_workflow_template") return "Drafting template";
   if (tool === "update_workflow_template") return "Updating template";
   if (tool === "publish_workflow_template") return "Publishing template";

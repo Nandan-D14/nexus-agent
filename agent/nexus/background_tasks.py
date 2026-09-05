@@ -90,6 +90,7 @@ class BackgroundTaskManager:
             "estimated_seconds": estimated_seconds,
             "agent": agent,
         })
+        logger.info("approval_requested task=%s agent=%s", task_id, agent)
 
         try:
             approved = await asyncio.wait_for(future, timeout=120.0)
@@ -104,6 +105,7 @@ class BackgroundTaskManager:
             })
 
         task.approved = approved
+        logger.info("approval_resolved task=%s approved=%s", task_id, approved)
         if self._on_permission_resolved:
             try:
                 await self._on_permission_resolved(task, approved)

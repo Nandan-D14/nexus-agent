@@ -179,6 +179,24 @@ export type WsMessage = WsEventMeta & (
       source_session_id?: string | null;
     }
   | {
+      type: "elicitation_request";
+      elicitation_id: string;
+      question_id?: string;
+      mode: "choice" | "suggestion";
+      question?: string;
+      options?: string[];
+      allow_free_text?: boolean;
+      title?: string;
+      items?: Array<{ name: string; description: string; action_label?: string }>;
+      timeout_seconds?: number;
+    }
+  | {
+      type: "elicitation_resolved";
+      elicitation_id: string;
+      question_id?: string;
+      answered: boolean;
+    }
+  | {
       type: "user_question";
       question_id: string;
       question: string;
@@ -195,6 +213,8 @@ export type WsMessage = WsEventMeta & (
       approval_id?: string;
       durable_task_id?: string;
       risk?: string;
+      action_hash?: string;
+      tool?: string;
     }
   // Durable twin of permission_request, written to the task event log by the
   // approval store. In worker-executed runs this is the ONLY approval signal
@@ -206,6 +226,8 @@ export type WsMessage = WsEventMeta & (
       description?: string;
       risk?: string;
       metadata?: Record<string, unknown>;
+      action_hash?: string;
+      tool?: string;
     }
   | {
       type: "approval_resolved";
@@ -213,6 +235,7 @@ export type WsMessage = WsEventMeta & (
       approved: boolean;
       status?: string;
       action_hash?: string;
+      decided_at?: number;
     }
   // Durable worker died before (or instead of) producing a normal completion.
   // Without this the client keeps waiting on a run that can never report back.
@@ -339,6 +362,7 @@ export type WsCommand =
       workspace_path?: string;
     }
   | { type: "permission_response"; task_id: string; approved: boolean }
+  | { type: "elicitation_response"; elicitation_id: string; answer: string }
   | { type: "user_question_response"; question_id: string; answer: string }
   | { type: "ping" };
 

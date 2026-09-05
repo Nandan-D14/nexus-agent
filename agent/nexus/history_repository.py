@@ -691,8 +691,21 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         """Return artifacts from *all* runs in a session, newest first."""
         return await asyncio.to_thread(self._list_session_artifacts_sync, session_id, limit)
 
-    async def get_artifact_for_owner(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
-        return await asyncio.to_thread(self._get_artifact_for_owner_sync, owner_id, artifact_id)
+    async def get_artifact_for_owner(
+        self,
+        owner_id: str,
+        artifact_id: str,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> StoredArtifact | None:
+        return await asyncio.to_thread(
+            self._get_artifact_for_owner_sync,
+            owner_id,
+            artifact_id,
+            session_id,
+            run_id,
+        )
 
     async def list_owner_library_artifacts(
         self,
@@ -1554,20 +1567,59 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         payload = transactional_create(transaction)
         return self._build_stored_artifact(session_id, run_id, artifact_id, payload)
 
-    def _get_artifact_for_owner_sync(self, owner_id: str, artifact_id: str) -> StoredArtifact | None:
-        docs = (
-            self._db.collection_group("artifacts")
-            .where(filter=FieldFilter("ownerId", "==", owner_id))
-            .where(filter=FieldFilter("artifactId", "==", artifact_id))
-            .limit(1)
-            .stream()
-        )
-        for doc in docs:
-            data = doc.to_dict() or {}
-            session_id = str(data.get("sessionId") or "")
-            run_id = str(data.get("runId") or "")
-            if session_id and run_id:
-                return self._build_stored_artifact(session_id, run_id, doc.id, data)
+    def _get_artifact_for_owner_sync(
+        self,
+        owner_id: str,
+        artifact_id: str,
+        session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> StoredArtifact | None:
+        # Direct document read when the client already knows the session/run.
+        # Avoids the collection-group query that needs a composite index which
+        # is easy to miss in a new environment — and is the path the preview
+        # pane actually has the IDs for.
+        if session_id and run_id:
+            doc = (
+                self._db.collection("sessions")
+                .document(session_id)
+                .collection("runs")
+                .document(run_id)
+                .collection("artifacts")
+                .document(artifact_id)
+                .get()
+            )
+            if doc.exists:
+                data = doc.to_dict() or {}
+                if data.get("ownerId") == owner_id or not data.get("ownerId"):
+                    session_doc = self._db.collection("sessions").document(session_id).get()
+                    session_data = session_doc.to_dict() or {}
+                    if session_data.get("ownerId") == owner_id:
+                        return self._build_stored_artifact(
+                            session_id, run_id, doc.id, data
+                        )
+
+        try:
+            docs = (
+                self._db.collection_group("artifacts")
+                .where(filter=FieldFilter("ownerId", "==", owner_id))
+                .where(filter=FieldFilter("artifactId", "==", artifact_id))
+                .limit(1)
+                .stream()
+            )
+            for doc in docs:
+                data = doc.to_dict() or {}
+                found_session_id = str(data.get("sessionId") or "")
+                found_run_id = str(data.get("runId") or "")
+                if found_session_id and found_run_id:
+                    return self._build_stored_artifact(
+                        found_session_id, found_run_id, doc.id, data
+                    )
+        except Exception:
+            logger.warning(
+                "Collection-group artifact lookup failed for %s; falling back",
+                artifact_id,
+                exc_info=True,
+            )
         return None
 
     def _list_run_artifacts_sync(self, session_id: str, run_id: str, limit: int) -> list[StoredArtifact]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ import shlex
 import textwrap
 from typing import Any
 
+from nexus.document_design import PDF_REPORT_CSS, normalize_slides, pptx_generator_source
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 from nexus.tools._context import (
     get_artifact_callback,
@@ -30,6 +32,45 @@ from nexus.storage import artifact_storage_metadata, upload_artifact_async
 logger = logging.getLogger(__name__)
 
 _HTML_DATA_URI_LIMIT_BYTES = 500_000
+
+# #region agent log
+def _dbg_pptx_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    payload = {
+        "sessionId": "993e46",
+        "runId": "post-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(__import__("time").time() * 1000),
+    }
+    line = json.dumps(payload)
+    try:
+        with open(
+            r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
+            data=line.encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Debug-Session-Id": "993e46",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1).read()
+    except Exception:
+        pass
+# #endregion
+
 
 # Prepended to sandbox generator scripts so missing packages self-heal
 # when boot-time provisioning was skipped or failed silently.
@@ -83,27 +124,8 @@ def _html_preview_text(html_content: str) -> str:
     return compact[:240] if compact else "Interactive HTML artifact ready."
 
 
-def _normalize_slides(slides: list[Any] | None) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for item in slides or []:
-        if isinstance(item, str):
-            title = item.strip()
-            if title:
-                normalized.append({"title": title, "bullets": []})
-            continue
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or item.get("heading") or "").strip()
-        raw_bullets = item.get("bullets") or item.get("points") or item.get("body") or []
-        if isinstance(raw_bullets, str):
-            bullets = [line.strip() for line in raw_bullets.splitlines() if line.strip()]
-        elif isinstance(raw_bullets, list):
-            bullets = [str(part).strip() for part in raw_bullets if str(part).strip()]
-        else:
-            bullets = []
-        if title or bullets:
-            normalized.append({"title": title or "Slide", "bullets": bullets})
-    return normalized
+def _normalize_slides(slides: list[Any] | None, *, deck_title: str = "") -> list[dict[str, Any]]:
+    return normalize_slides(slides, deck_title=deck_title)
 
 
 def _artifact_payload(artifact) -> dict[str, Any]:
@@ -279,6 +301,155 @@ except Exception as exc:
         },
     }
 
+_OFFICE_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".csv"}
+
+
+@normalized_tool(needs_sandbox=True)
+async def extract_document_text(path: str, max_chars: int = 12000) -> dict[str, Any]:
+    """Extract readable text from a .docx, .xlsx, .pptx, or .csv file.
+
+    Use this on Office uploads before trying to reason about them. The full text
+    is also written under sources/document_text/ so search_sources can find it.
+
+    Args:
+        path: Workspace-relative or absolute path to the document.
+        max_chars: Maximum characters to return inline (1000-30000).
+
+    Returns:
+        NormalizedToolResult with a text excerpt and the extracted-text path.
+    """
+    sandbox = get_sandbox()
+    source_path = _resolve_workspace_or_absolute_path(path)
+    extension = os.path.splitext(source_path)[1].lower()
+    if extension not in _OFFICE_EXTENSIONS:
+        return tool_error(
+            f"{extension or 'This file type'} is not supported by "
+            "extract_document_text. Use extract_pdf_text for PDFs or "
+            "read_workspace_file for plain text.",
+            error_code="UNSUPPORTED_FORMAT",
+            suggested_alternatives=["extract_pdf_text", "read_workspace_file"],
+        )
+
+    max_chars = max(1000, min(int(max_chars or 12000), 30000))
+    output_dir = f"{get_workspace_path().rstrip('/')}/sources/document_text"
+    sandbox.ensure_directory(output_dir)
+    base_name = os.path.basename(source_path).rsplit(".", 1)[0] or "document"
+    output_path = f"{output_dir}/{base_name}.txt"
+
+    script = f"""
+import json
+import sys
+from pathlib import Path
+
+source = Path({source_path!r})
+out_path = Path({output_path!r})
+max_chars = {max_chars!r}
+suffix = source.suffix.lower()
+
+def from_docx(path):
+    import docx
+    document = docx.Document(str(path))
+    blocks = [p.text for p in document.paragraphs if p.text.strip()]
+    for table_index, table in enumerate(document.tables, start=1):
+        blocks.append(f"--- Table {{table_index}} ---")
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                blocks.append(" | ".join(cells))
+    return "\\n".join(blocks)
+
+def from_xlsx(path):
+    import openpyxl
+    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    blocks = []
+    for sheet in workbook.worksheets:
+        blocks.append(f"--- Sheet: {{sheet.title}} ---")
+        for row in sheet.iter_rows(values_only=True):
+            cells = ["" if value is None else str(value) for value in row]
+            if any(cell.strip() for cell in cells):
+                blocks.append(" | ".join(cells))
+    workbook.close()
+    return "\\n".join(blocks)
+
+def from_pptx(path):
+    from pptx import Presentation
+    presentation = Presentation(str(path))
+    blocks = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        blocks.append(f"--- Slide {{index}} ---")
+        for shape in slide.shapes:
+            text = getattr(shape, "text", "")
+            if text and text.strip():
+                blocks.append(text.strip())
+    return "\\n".join(blocks)
+
+def from_csv(path):
+    return path.read_text(encoding="utf-8", errors="replace")
+
+extractors = {{
+    ".docx": from_docx,
+    ".xlsx": from_xlsx,
+    ".pptx": from_pptx,
+    ".csv": from_csv,
+}}
+
+try:
+    text = (extractors[suffix](source) or "").strip()
+    if not text:
+        raise RuntimeError("The document contains no extractable text.")
+    out_path.write_text(text, encoding="utf-8")
+    print(json.dumps({{
+        "status": "success",
+        "source_path": str(source),
+        "text_path": str(out_path),
+        "format": suffix.lstrip("."),
+        "char_count": len(text),
+        "text_excerpt": text[:max_chars],
+        "truncated": len(text) > max_chars,
+    }}))
+except Exception as exc:
+    print(json.dumps({{
+        "status": "error",
+        "message": str(exc),
+        "source_path": str(source),
+    }}))
+    sys.exit(1)
+"""
+
+    script_path = f"/tmp/extract_document_text_{get_run_id()}.py"
+    sandbox.write_text_file(script_path, script)
+    result = sandbox.run_command(f"python3 {shlex.quote(script_path)}", timeout=120)
+    stdout = str(result.get("stdout") or "").strip()
+    sandbox.run_command(f"rm -f {shlex.quote(script_path)}", timeout=10)
+
+    if result.get("exit_code") != 0:
+        return tool_error(
+            f"Document text extraction failed: {result.get('stderr') or stdout}",
+            error_code="EXTRACTION_FAILED",
+            retryable=False,
+        )
+    try:
+        payload = json.loads(stdout)
+    except Exception:
+        return tool_error(
+            "Document text extraction returned invalid output.",
+            error_code="EXTRACTION_FAILED",
+        )
+    if payload.get("status") != "success":
+        return tool_error(
+            str(payload.get("message") or "Document text extraction failed."),
+            error_code="EXTRACTION_FAILED",
+        )
+    return tool_success(
+        f"Extracted {payload.get('format')} text to {payload.get('text_path')}",
+        detail=payload,
+        source_path=payload.get("source_path"),
+        text_path=payload.get("text_path"),
+        char_count=payload.get("char_count"),
+        truncated=payload.get("truncated"),
+    )
+
+
 @normalized_tool(needs_sandbox=True)
 async def generate_pdf_report(
     title: str,
@@ -288,8 +459,11 @@ async def generate_pdf_report(
     """
     Generate a professional PDF report from Markdown content.
 
+    Use structured markdown: H2 sections, short paragraphs, tables, and
+    bullet lists. Do not wrap the whole report in a single code block.
+
     Args:
-        title: The title of the report (will appear at the top).
+        title: The title of the report (appears on a dark cover band).
         markdown_content: The body of the report in Markdown format.
         filename: Optional desired filename (e.g., 'analysis.pdf').
     """
@@ -317,76 +491,10 @@ import json, os, sys, pathlib
 title = {repr(title)}
 md_path = {repr(md_temp)}
 out_path = {repr(output_path)}
+CSS_TEMPLATE = {json.dumps(PDF_REPORT_CSS)}
 
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 md_text = pathlib.Path(md_path).read_text(encoding="utf-8")
-
-CSS_TEMPLATE = \"\"\"
-@page {{
-    size: A4;
-    margin: 2.5cm 2cm;
-    @bottom-center {{
-        content: "Page " counter(page) " of " counter(pages);
-        font-size: 9pt;
-        color: #888;
-    }}
-}}
-body {{
-    font-family: 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif;
-    font-size: 11pt;
-    line-height: 1.6;
-    color: #1a1a1a;
-}}
-h1 {{
-    font-size: 22pt;
-    color: #111;
-    border-bottom: 2px solid #333;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-}}
-h2 {{
-    font-size: 16pt;
-    color: #222;
-    border-bottom: 1px solid #ccc;
-    padding-bottom: 4px;
-    margin-top: 24px;
-}}
-h3 {{ font-size: 13pt; color: #333; margin-top: 18px; }}
-table {{
-    border-collapse: collapse;
-    width: 100%;
-    margin: 12px 0;
-}}
-th, td {{
-    border: 1px solid #ccc;
-    padding: 6px 10px;
-    text-align: left;
-    font-size: 10pt;
-}}
-th {{ background-color: #f0f0f0; font-weight: bold; }}
-code {{
-    background-color: #f4f4f4;
-    padding: 2px 5px;
-    border-radius: 3px;
-    font-size: 10pt;
-}}
-pre {{
-    background-color: #f4f4f4;
-    padding: 12px;
-    border-radius: 6px;
-    overflow-x: auto;
-    font-size: 10pt;
-    line-height: 1.4;
-}}
-blockquote {{
-    border-left: 3px solid #ccc;
-    margin: 12px 0;
-    padding: 8px 16px;
-    color: #555;
-}}
-ul, ol {{ padding-left: 24px; }}
-li {{ margin-bottom: 4px; }}
-\"\"\"
 
 def try_weasyprint(md_text, title, out_path):
     import markdown2
@@ -398,7 +506,10 @@ def try_weasyprint(md_text, title, out_path):
     )
     full_html = f\"\"\"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{{title}}</title></head>
-<body><h1>{{title}}</h1>{{html_body}}</body></html>\"\"\"
+<body>
+<header class="cover"><p class="kicker">Report</p><h1>{{title}}</h1></header>
+{{html_body}}
+</body></html>\"\"\"
     HTML(string=full_html).write_pdf(out_path, stylesheets=[CSS(string=CSS_TEMPLATE)])
     return True
 
@@ -807,7 +918,10 @@ async def generate_excel_report(
     sheet_name: str = "Report",
 ) -> dict[str, Any]:
     """
-    Generate an Excel (.xlsx) spreadsheet from tabular data.
+    Generate a styled Excel (.xlsx) workbook from tabular data.
+
+    Use for local spreadsheets. If the user asked for a Google Sheet and Drive
+    is connected, call create_drive_sheet instead.
 
     Args:
         title: Report title (written as the first row in bold).
@@ -855,30 +969,63 @@ ws.title = data["sheet_name"]
 # Title row
 ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(data["headers"]), 1))
 title_cell = ws.cell(row=1, column=1, value=data["title"])
-title_cell.font = Font(bold=True, size=14, color="1F4E79")
-title_cell.alignment = Alignment(horizontal="center")
+title_cell.font = Font(bold=True, size=16, color="F5F5F4", name="Calibri")
+title_cell.fill = PatternFill(start_color="0B0B0E", end_color="0B0B0E", fill_type="solid")
+title_cell.alignment = Alignment(horizontal="left", vertical="center")
+ws.row_dimensions[1].height = 28
+
+accent = PatternFill(start_color="2DD4BF", end_color="2DD4BF", fill_type="solid")
+ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max(len(data["headers"]), 1))
+ws.cell(row=2, column=1).fill = accent
+ws.row_dimensions[2].height = 6
 
 # Header row
-header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-header_font = Font(bold=True, color="FFFFFF", size=11)
+header_fill = PatternFill(start_color="0B0B0E", end_color="0B0B0E", fill_type="solid")
+header_font = Font(bold=True, color="2DD4BF", size=11, name="Calibri")
 thin_border = Border(
-    left=Side(style="thin"), right=Side(style="thin"),
-    top=Side(style="thin"), bottom=Side(style="thin"),
+    left=Side(style="thin", color="D6D3D1"), right=Side(style="thin", color="D6D3D1"),
+    top=Side(style="thin", color="D6D3D1"), bottom=Side(style="thin", color="D6D3D1"),
 )
 for col_idx, header in enumerate(data["headers"], 1):
     cell = ws.cell(row=3, column=col_idx, value=header)
     cell.font = header_font
     cell.fill = header_fill
-    cell.alignment = Alignment(horizontal="center")
+    cell.alignment = Alignment(horizontal="left", vertical="center")
     cell.border = thin_border
+ws.row_dimensions[3].height = 22
 
-# Data rows
+def coerce(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    text = str(value).strip()
+    if not text:
+        return ""
+    compact = text.replace(",", "")
+    try:
+        if compact.count(".") == 1 and compact.replace(".", "", 1).lstrip("-").isdigit():
+            return float(compact)
+        if compact.lstrip("-").isdigit():
+            return int(compact)
+    except Exception:
+        return value
+    return value
+
+body_font = Font(name="Calibri", size=11, color="1C1917")
+alt_fill = PatternFill(start_color="FAFAF9", end_color="FAFAF9", fill_type="solid")
 for row_idx, row_data in enumerate(data["rows"], 4):
     for col_idx, value in enumerate(row_data, 1):
-        cell = ws.cell(row=row_idx, column=col_idx, value=value)
+        cell = ws.cell(row=row_idx, column=col_idx, value=coerce(value))
+        cell.font = body_font
         cell.border = thin_border
+        cell.alignment = Alignment(vertical="center")
         if row_idx % 2 == 0:
-            cell.fill = PatternFill(start_color="F2F7FB", end_color="F2F7FB", fill_type="solid")
+            cell.fill = alt_fill
+
+ws.freeze_panes = "A4"
+if data["headers"]:
+    last_col = ws.cell(row=3, column=len(data["headers"])).column_letter
+    ws.auto_filter.ref = f"A3:{{last_col}}{{max(3, ws.max_row)}}"
+ws.sheet_view.showGridLines = False
 
 # Auto-size columns
 for col_idx in range(1, len(data["headers"]) + 1):
@@ -886,7 +1033,7 @@ for col_idx in range(1, len(data["headers"]) + 1):
         (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(3, ws.max_row + 1)),
         default=10,
     )
-    ws.column_dimensions[ws.cell(row=3, column=col_idx).column_letter].width = min(max_len + 4, 50)
+    ws.column_dimensions[ws.cell(row=3, column=col_idx).column_letter].width = min(max(max_len + 4, 12), 42)
 
 wb.save(out_path)
 size = os.path.getsize(out_path)
@@ -969,6 +1116,9 @@ async def generate_docx_report(
     """
     Generate a Word (.docx) document from Markdown content.
 
+    Write the body as real markdown with H2 sections, short paragraphs, and
+    lists. The tool applies professional typography; do not invent .docx bytes.
+
     Args:
         title: The title of the document.
         markdown_content: The body in Markdown format.
@@ -996,6 +1146,9 @@ from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
 title = {repr(title)}
 md_path = {repr(md_temp)}
 out_path = {repr(output_path)}
@@ -1004,12 +1157,45 @@ os.makedirs(os.path.dirname(out_path), exist_ok=True)
 md_text = pathlib.Path(md_path).read_text(encoding="utf-8")
 
 doc = Document()
+for section in doc.sections:
+    section.top_margin = Inches(1.0)
+    section.bottom_margin = Inches(0.9)
+    section.left_margin = Inches(1.05)
+    section.right_margin = Inches(1.05)
+
+def set_run_font(run, name="Calibri", size=11, bold=False, color=None):
+    run.font.name = name
+    try:
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), name)
+    except Exception:
+        pass
+    run.font.size = Pt(size)
+    run.bold = bold
+    if color is not None:
+        run.font.color.rgb = color
+
+styles = doc.styles
+normal = styles["Normal"]
+normal.font.name = "Calibri"
+normal.font.size = Pt(11)
+normal.font.color.rgb = RGBColor(0x1C, 0x19, 0x17)
 
 # Style the title
 title_para = doc.add_heading(title, level=0)
-title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+title_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 for run in title_para.runs:
-    run.font.color.rgb = RGBColor(31, 78, 121)
+    set_run_font(run, size=26, bold=True, color=RGBColor(0x0B, 0x0B, 0x0E))
+accent = doc.add_paragraph()
+accent_run = accent.add_run(" ")
+pPr = accent._p.get_or_add_pPr()
+pBdr = OxmlElement("w:pBdr")
+bottom = OxmlElement("w:bottom")
+bottom.set(qn("w:val"), "single")
+bottom.set(qn("w:sz"), "12")
+bottom.set(qn("w:space"), "1")
+bottom.set(qn("w:color"), "2DD4BF")
+pBdr.append(bottom)
+pPr.append(pBdr)
 
 # Parse markdown line by line
 for line in md_text.splitlines():
@@ -1017,11 +1203,17 @@ for line in md_text.splitlines():
     if not stripped:
         doc.add_paragraph("")
     elif stripped.startswith("### "):
-        doc.add_heading(stripped[4:], level=3)
+        heading = doc.add_heading(stripped[4:], level=3)
+        for run in heading.runs:
+            run.font.color.rgb = RGBColor(0x44, 0x40, 0x3C)
     elif stripped.startswith("## "):
-        doc.add_heading(stripped[3:], level=2)
+        heading = doc.add_heading(stripped[3:], level=2)
+        for run in heading.runs:
+            run.font.color.rgb = RGBColor(0x0B, 0x0B, 0x0E)
     elif stripped.startswith("# "):
-        doc.add_heading(stripped[2:], level=1)
+        heading = doc.add_heading(stripped[2:], level=1)
+        for run in heading.runs:
+            run.font.color.rgb = RGBColor(0x0B, 0x0B, 0x0E)
     elif stripped.startswith("- ") or stripped.startswith("* "):
         doc.add_paragraph(stripped[2:], style="List Bullet")
     elif re.match(r"^\\d+\\.\\s", stripped):
@@ -1055,7 +1247,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
     sandbox.write_text_file(script_path, docx_script)
 
     res = sandbox.run_command(f"python3 {script_path}", timeout=60)
-    sandbox.run_command(f"rm -f {shlex.quote(script_path)} {shlex.quote(md_temp)}", timeout=10)
+    sandbox.run_command(f"rm -f {shlex.quote(script_path)}", timeout=10)
 
     if res.get("exit_code") != 0:
         return {
@@ -1084,6 +1276,7 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
         pdf_relative_path = f"outputs/{pdf_filename}"
         pdf_output_path = f"{get_workspace_path().rstrip('/')}/{pdf_relative_path}"
         pdf_gcs_url: str | None = None
+        pdf_ready = False
         try:
             pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib
@@ -1091,13 +1284,14 @@ import json, os, sys, pathlib
 title = {repr(title)}
 md_path = {repr(md_temp)}
 out_path = {repr(pdf_output_path)}
+CSS_TEMPLATE = {json.dumps(PDF_REPORT_CSS)}
 
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 md_text = pathlib.Path(md_path).read_text(encoding="utf-8")
 
 def try_weasyprint(md_text, title, out_path):
     import markdown2
-    from weasyprint import HTML
+    from weasyprint import HTML, CSS
     html_body = markdown2.markdown(
         md_text,
         extras=["fenced-code-blocks", "tables", "break-on-newline",
@@ -1105,8 +1299,11 @@ def try_weasyprint(md_text, title, out_path):
     )
     full_html = f\"\"\"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{{title}}</title></head>
-<body><h1>{{title}}</h1>{{html_body}}</body></html>\"\"\"
-    HTML(string=full_html).write_pdf(out_path)
+<body>
+<header class="cover"><p class="kicker">Document</p><h1>{{title}}</h1></header>
+{{html_body}}
+</body></html>\"\"\"
+    HTML(string=full_html).write_pdf(out_path, stylesheets=[CSS(string=CSS_TEMPLATE)])
     return True
 
 try:
@@ -1121,6 +1318,7 @@ except Exception as e:
             sandbox.run_command(f"rm -f {shlex.quote(pdf_script_path)}", timeout=10)
             if pdf_res.get("exit_code") == 0:
                 pdf_content = sandbox.read_binary_file(pdf_output_path)
+                pdf_ready = True
                 pdf_gcs_url = await upload_artifact_async(
                     session_id=session_id,
                     run_id=run_id,
@@ -1129,6 +1327,7 @@ except Exception as e:
                 )
         except Exception:
             logger.warning("Failed to generate PDF sibling for DOCX preview", exc_info=True)
+        sandbox.run_command(f"rm -f {shlex.quote(md_temp)}", timeout=10)
 
         artifact = await history_repo.create_artifact(
             session_id=session_id,
@@ -1144,7 +1343,8 @@ except Exception as e:
                 "size": payload.get("size", 0),
                 "role": "deliverable",
                 **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
-                **({"preview_path": pdf_relative_path} if pdf_gcs_url else {}),
+                **({"preview_path": pdf_relative_path} if pdf_ready else {}),
+                **({"preview_content_type": "application/pdf"} if pdf_ready else {}),
             },
         )
         await _notify_artifact_created(artifact)
@@ -1177,11 +1377,28 @@ async def generate_pptx_report(
     slides: list[dict[str, Any]] | None = None,
     filename: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a PowerPoint (.pptx) deck and an HTML preview sibling.
+    """Generate a widescreen PowerPoint deck with a modern dark design system.
+
+    The tool applies near-black backgrounds, strong type, and a single teal
+    accent. You write the content and pick layouts; do not invent PPTX bytes.
+
+    Each slide is an object:
+    - layout: title | section | content | split | stats | quote | closing
+    - kicker: optional short eyebrow (e.g. "Q3 Review")
+    - title: headline, under 8 words
+    - subtitle: optional supporting line
+    - bullets: 3-5 short lines for content/closing slides
+    - left / right: bullet lists for split slides
+    - stats: up to 4 objects {value, label} for KPI slides
+    - quote / attribution: for quote slides
+    - footnote: optional footer
+
+    Start with a title slide, use section dividers between chapters, and end
+    with a closing slide. Prefer generate_pptx_report over python-pptx scripts.
 
     Args:
-        title: Deck title used on the first slide when needed.
-        slides: Slides as objects with ``title`` and ``bullets`` (list of strings).
+        title: Deck title used on the cover when the first slide has no kicker.
+        slides: Slide objects as described above. Legacy {title, bullets} still works.
         filename: Optional desired filename (e.g. 'pitch.pptx').
     """
     sandbox = get_sandbox()
@@ -1189,7 +1406,7 @@ async def generate_pptx_report(
     run_id = get_run_id()
     history_repo = get_history_repository()
 
-    normalized = _normalize_slides(slides)
+    normalized = _normalize_slides(slides, deck_title=title)
     if not normalized:
         return {
             "status": "error",
@@ -1197,6 +1414,23 @@ async def generate_pptx_report(
             "detail": None,
             "error_code": "INVALID_SLIDES",
         }
+    if title.strip() and not any(item.get("layout") == "title" for item in normalized):
+        normalized = [
+            {
+                "layout": "title",
+                "kicker": "",
+                "title": title.strip(),
+                "subtitle": "",
+                "bullets": [],
+                "left": [],
+                "right": [],
+                "stats": [],
+                "quote": "",
+                "attribution": "",
+                "footnote": "",
+            },
+            *normalized,
+        ]
 
     if not filename:
         filename = f"deck_{run_id[:8]}.pptx"
@@ -1216,97 +1450,80 @@ async def generate_pptx_report(
         "slides": normalized,
     }))
 
-    pptx_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
-import html as html_lib
-import json, os
-from pptx import Presentation
-from pptx.util import Inches, Pt
-
-data = json.loads(open({repr(data_path)}, encoding="utf-8").read())
-out_path = {repr(output_path)}
-html_path = {repr(html_output_path)}
-os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-slides = data.get("slides") or []
-prs = Presentation()
-prs.slide_width = Inches(13.333)
-prs.slide_height = Inches(7.5)
-layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
-for item in slides:
-    slide = prs.slides.add_slide(layout)
-    title_text = str(item.get("title") or "Slide")
-    try:
-        slide.shapes.title.text = title_text
-    except Exception:
-        box = slide.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(12), Inches(1))
-        box.text_frame.paragraphs[0].text = title_text
-    bullets = [str(b) for b in (item.get("bullets") or []) if str(b).strip()]
-    body = None
-    title_shape = getattr(slide.shapes, "title", None)
-    for shape in slide.shapes:
-        if not shape.has_text_frame:
-            continue
-        if title_shape is not None and shape == title_shape:
-            continue
-        body = shape.text_frame
-        break
-    if body is None:
-        body_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(11.6), Inches(5))
-        body = body_box.text_frame
-    body.clear()
-    if not bullets:
-        body.paragraphs[0].text = ""
-    for idx, bullet in enumerate(bullets):
-        paragraph = body.paragraphs[0] if idx == 0 else body.add_paragraph()
-        paragraph.text = bullet
-        paragraph.level = 0
-        paragraph.font.size = Pt(20)
-prs.save(out_path)
-
-sections = []
-for item in slides:
-    heading = html_lib.escape(str(item.get("title") or "Slide"))
-    items = "".join(
-        f"<li>{{html_lib.escape(str(b))}}</li>" for b in (item.get("bullets") or []) if str(b).strip()
-    )
-    list_html = f"<ul>{{items}}</ul>" if items else ""
-    sections.append(f'<section class="slide"><h1>{{heading}}</h1>{{list_html}}</section>')
-deck_title = html_lib.escape(str(data.get("title") or "Slides"))
-html_doc = (
-    "<!DOCTYPE html><html lang=\\"en\\"><head><meta charset=\\"utf-8\\">"
-    "<meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1\\">"
-    f"<title>{{deck_title}}</title>"
-    "<style>body{{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:#0f172a;color:#f8fafc}}"
-    ".slide{{min-height:100vh;padding:56px 72px;box-sizing:border-box;border-bottom:1px solid #1e293b;"
-    "display:flex;flex-direction:column;justify-content:center}}"
-    "h1{{font-size:2.25rem;margin:0 0 1.25rem;letter-spacing:-0.02em}}"
-    "ul{{margin:0;padding-left:1.25rem;font-size:1.2rem;line-height:1.6}}"
-    "li{{margin:0.35rem 0}}</style></head><body>"
-    + "".join(sections)
-    + "</body></html>"
-)
-open(html_path, "w", encoding="utf-8").write(html_doc)
-print(json.dumps({{
-    "status": "success",
-    "path": out_path,
-    "html_path": html_path,
-    "size": os.path.getsize(out_path),
-    "html_size": os.path.getsize(html_path),
-    "slide_count": len(slides),
-}}))
-""")
-
+    generator_source = pptx_generator_source()
+    bootstrap_path = f"/tmp/_pptx_deps_{run_id}.py"
     script_path = f"/tmp/gen_pptx_{run_id}.py"
-    sandbox.write_text_file(script_path, pptx_script)
+    sandbox.write_text_file(bootstrap_path, _SANDBOX_DEPS_BOOTSTRAP)
+    sandbox.write_text_file(script_path, generator_source)
 
-    res = sandbox.run_command(f"python3 {script_path}", timeout=60)
-    sandbox.run_command(f"rm -f {shlex.quote(script_path)} {shlex.quote(data_path)}", timeout=10)
+    # #region agent log
+    _dbg_compile = "ok"
+    try:
+        compile(generator_source, script_path, "exec")
+    except SyntaxError as _dbg_exc:
+        _dbg_compile = f"{_dbg_exc.msg}: line {_dbg_exc.lineno}"
+    _dbg_pptx_log(
+        "H1",
+        "docs.py:generate_pptx_report:compose",
+        "sandbox pptx generator as standalone file",
+        {
+            "line_count": len(generator_source.splitlines()),
+            "future_import_line": next(
+                (
+                    i + 1
+                    for i, line in enumerate(generator_source.splitlines())
+                    if "from __future__ import" in line
+                ),
+                None,
+            ),
+            "compile": _dbg_compile,
+            "mode": "argv",
+            "slide_count": len(normalized),
+            "filename": filename,
+            "preview": generator_source.splitlines()[:14],
+        },
+    )
+    # #endregion
+
+    sandbox.run_command(f"python3 {shlex.quote(bootstrap_path)}", timeout=240)
+    res = sandbox.run_command(
+        "python3 "
+        f"{shlex.quote(script_path)} {shlex.quote(data_path)} "
+        f"{shlex.quote(output_path)} {shlex.quote(html_output_path)}",
+        timeout=90,
+    )
+    sandbox.run_command(
+        f"rm -f {shlex.quote(script_path)} {shlex.quote(data_path)} {shlex.quote(bootstrap_path)}",
+        timeout=10,
+    )
+
+    # #region agent log
+    _dbg_pptx_log(
+        "H1",
+        "docs.py:generate_pptx_report:sandbox",
+        "sandbox python3 gen_pptx result",
+        {
+            "exit_code": res.get("exit_code"),
+            "stderr": str(res.get("stderr") or "")[:800],
+            "stdout": str(res.get("stdout") or "")[:400],
+            "filename": filename,
+            "syntax_error": "from __future__" in str(res.get("stderr") or ""),
+        },
+    )
+    # #endregion
 
     if res.get("exit_code") != 0:
+        stderr_text = str(res.get("stderr") or res.get("stdout") or "")
+        error_code = (
+            "PPTX_GENERATOR_TEMPLATE_SYNTAX_ERROR"
+            if "from __future__" in stderr_text
+            else "PPTX_GENERATOR_FAILED"
+        )
         return {
             "status": "error",
-            "summary": f"PPTX generation failed: {res.get('stderr') or res.get('stdout')}",
+            "summary": f"PPTX generation failed: {stderr_text}",
             "detail": res,
+            "error_code": error_code,
         }
 
     try:
@@ -1325,8 +1542,10 @@ print(json.dumps({{
         )
 
         html_gcs_url: str | None = None
+        html_ready = False
         try:
             html_content = sandbox.read_binary_file(html_output_path)
+            html_ready = True
             html_gcs_url = await upload_artifact_async(
                 session_id=session_id,
                 run_id=run_id,
@@ -1351,9 +1570,9 @@ print(json.dumps({{
                 "slide_count": len(normalized),
                 "role": "deliverable",
                 **({"preview_url": html_gcs_url} if html_gcs_url else {}),
-                **({"preview_path": html_relative_path} if html_gcs_url else {}),
-                **({"preview_content_type": "text/html; charset=utf-8"} if html_gcs_url else {}),
-                **({"render_mode": "iframe"} if html_gcs_url else {}),
+                **({"preview_path": html_relative_path} if html_ready else {}),
+                **({"preview_content_type": "text/html; charset=utf-8"} if html_ready else {}),
+                **({"render_mode": "iframe"} if html_ready else {}),
             },
         )
         await _notify_artifact_created(artifact)

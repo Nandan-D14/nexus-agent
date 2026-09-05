@@ -6,6 +6,8 @@
 export { DocumentViewerModal } from "./document-viewer-modal";
 export { ArtifactPreview } from "./artifact-preview";
 export { ArtifactAttachmentCard } from "./attachment-card";
+export { CodePreview } from "./code-preview";
+export { MarkdownPreview } from "./markdown-preview";
 export {
   ArtifactIcon,
   ArtifactIconTile,

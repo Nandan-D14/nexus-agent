@@ -574,22 +574,22 @@ def test_jwt_secret_at_least_32_bytes() -> None:
     assert len(settings.jwt_secret.encode("utf-8")) >= 32
 
 
-# ── Durable ask_user answers ─────────────────────────────────
+# ── Durable elicitation answers ──────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_await_question_answer_resolves_from_durable_events(monkeypatch) -> None:
     from nexus.orchestrator import NexusOrchestrator
 
-    monkeypatch.setattr(settings, "ask_user_timeout_seconds", 5.0)
+    monkeypatch.setattr(settings, "elicitation_timeout_seconds", 5.0)
 
     class FakeRepo:
         async def list_events(self, *, task_id, owner_id, after_seq=0, limit=100, **kwargs):
             return [
                 SimpleNamespace(
                     seq=1,
-                    event_type="user_question_response",
-                    payload={"question_id": "q_1", "answer": "blue"},
+                    event_type="elicitation_response",
+                    payload={"elicitation_id": "el_1", "answer": "blue"},
                 )
             ]
 
@@ -600,7 +600,7 @@ async def test_await_question_answer_resolves_from_durable_events(monkeypatch) -
 
     future: asyncio.Future = asyncio.get_running_loop().create_future()
     answer = await asyncio.wait_for(
-        orchestrator._await_question_answer("q_1", future), timeout=4.0
+        orchestrator._await_elicitation_answer("el_1", future), timeout=4.0
     )
     assert answer == "blue"
 
@@ -609,7 +609,7 @@ async def test_await_question_answer_resolves_from_durable_events(monkeypatch) -
 async def test_await_question_answer_uses_live_future_without_durable(monkeypatch) -> None:
     from nexus.orchestrator import NexusOrchestrator
 
-    monkeypatch.setattr(settings, "ask_user_timeout_seconds", 2.0)
+    monkeypatch.setattr(settings, "elicitation_timeout_seconds", 2.0)
 
     orchestrator = NexusOrchestrator.__new__(NexusOrchestrator)
     orchestrator._durable_task_id = None
@@ -620,5 +620,5 @@ async def test_await_question_answer_uses_live_future_without_durable(monkeypatc
     future: asyncio.Future = loop.create_future()
     loop.call_later(0.05, future.set_result, "green")
 
-    answer = await orchestrator._await_question_answer("q_2", future)
+    answer = await orchestrator._await_elicitation_answer("q_2", future)
     assert answer == "green"

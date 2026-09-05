@@ -113,6 +113,7 @@ gcloud run deploy nexus-agent \
   --timeout=3600 \
   --concurrency=10 \
   --allow-unauthenticated \
+  --session-affinity \
   "${AGENT_SECRET_FLAGS[@]}" \
   --set-env-vars="${AGENT_ENV_VARS_CSV}"
 
