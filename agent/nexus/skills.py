@@ -92,12 +92,16 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Create and edit spreadsheets, formulas, tables, and charts.",
         "trigger": "Use for XLSX/CSV work, financial tables, formulas, and spreadsheet exports.",
         "instructions": (
-            "Build the table in structured data first, then export.\n"
-            "1. Confirm columns, units, and the output filename.\n"
-            "2. Preview CSV sources with scripts/csv_preview.py in this skill folder "
-            "(`/home/user/skills/spreadsheet-work/scripts/csv_preview.py`) when the sandbox is up.\n"
-            "3. Use generate_excel_report for XLSX deliverables; keep formulas/notes explicit.\n"
-            "4. Read references/sheet-checklist.md before finishing.\n"
+            "Build a clean table, then export.\n"
+            "1. Confirm columns, units, filename, and whether the user wants "
+            "a local .xlsx or a Google Sheet.\n"
+            "2. Google Sheet + Drive connected → create_drive_sheet(title, headers, rows). "
+            "Local Excel / spreadsheet / CSV export → generate_excel_report. "
+            "Never dump a wall of numbers into chat as the deliverable.\n"
+            "3. Header names must be unique and human-readable; include units in the "
+            "column name when needed (Revenue USD, Duration days).\n"
+            "4. Preview CSV sources with scripts/csv_preview.py when the sandbox is up.\n"
+            "5. Read references/sheet-checklist.md before finishing.\n"
             "Call read_skill_file for resource files instead of guessing their contents."
         ),
         "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker"],
@@ -109,10 +113,13 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "description": "Draft, edit, summarize, and format documents.",
         "trigger": "Use for DOCX, Markdown, reports, summaries, and written deliverables.",
         "instructions": (
-            "Draft in Markdown, then convert to the requested format.\n"
-            "1. Confirm audience, filename, and whether the output is PDF, DOCX, or Markdown.\n"
-            "2. Outline headings, then write the body.\n"
-            "3. Convert with generate_pdf_report or generate_docx_report; never invent file bytes.\n"
+            "Draft in Markdown, then convert. The generator applies professional type; "
+            "you own structure and writing quality.\n"
+            "1. Confirm audience, filename, and format: PDF, DOCX, or Google Doc.\n"
+            "2. Outline H2 sections first. Write short paragraphs, real headings, "
+            "tables for comparisons, and a one-line takeaway at the top of each section.\n"
+            "3. Google Doc + Drive connected → create_drive_doc. "
+            "PDF → generate_pdf_report. Word → generate_docx_report. Never invent file bytes.\n"
             "4. Save with save_as_artifact. Read references/deliverable-checklist.md before finishing.\n"
             "Skill files mount at `/home/user/skills/document-work/`. "
             "Call read_skill_file(skill_id, path) for bundled resources."
@@ -123,15 +130,21 @@ DEFAULT_AGENT_SKILLS: list[dict[str, Any]] = [
         "skill_id": "presentation-work",
         "name": "Presentation Work",
         "category": "Documents",
-        "description": "Create slide decks, outlines, and presentation content.",
-        "trigger": "Use for PPTX, slide plans, pitch decks, and visual summaries.",
+        "description": "Create beautiful slide decks, pitch PPTX, and visual summaries.",
+        "trigger": "Use for PPTX, PPT, slides, pitch decks, presentations, and visual summaries.",
         "instructions": (
-            "Keep slides scannable and organize content into strong sections.\n"
-            "1. Confirm audience, filename, and slide count before generating.\n"
-            "2. Outline each slide as a title plus short bullets.\n"
-            "3. Call generate_pptx_report(title, slides=[{title, bullets}], filename) "
-            "instead of inventing PPTX bytes. The tool also emits an HTML preview for Canvas.\n"
-            "4. Save extra supporting files with save_as_artifact if needed."
+            "The generator applies a modern dark widescreen theme. You write the narrative "
+            "and pick layouts — never draw slides in python-pptx or LibreOffice.\n"
+            "1. Call read_skill_file('presentation-work', 'references/deck-playbook.md').\n"
+            "2. Outline 6-12 slides before generating. Every deck needs a title slide, "
+            "section dividers for chapters, and a closing slide.\n"
+            "3. Call generate_pptx_report(title, slides=[...], filename). Each slide: "
+            "layout (title|section|content|split|stats|quote|closing), kicker, title, "
+            "subtitle, bullets (max 5, under 12 words), left/right, stats [{value, label}], "
+            "quote/attribution.\n"
+            "4. Google Slides: still generate PPTX (design is in the file). Upload with "
+            "upload_drive_file only if the user asked to put it in Drive.\n"
+            "Do not dump the outline as the answer. Build the file."
         ),
         "agent_scope": ["nexus_planner", "terminal_worker", "desktop_worker", "writer"],
     },

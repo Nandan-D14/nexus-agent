@@ -11,9 +11,13 @@ import { TodoList } from "@/components/todo-list";
 import { ArtifactPreview } from "@/components/artifacts/artifact-preview";
 import { ArtifactIconTile, artifactBadge } from "@/components/artifacts/artifact-icon";
 import { DocumentViewerModal } from "@/components/artifacts/document-viewer-modal";
+import { CodePreview } from "@/components/artifacts/code-preview";
 import { MarkdownPreview } from "@/components/artifacts/markdown-preview";
 import {
   downloadArtifactFile,
+  downloadTextFile,
+  isCodePath,
+  isMarkdownPath,
   previewKind,
   resolveArtifactUrl,
 } from "@/lib/artifact-url";
@@ -40,9 +44,24 @@ type Props = {
 
 function isTextLikeDocument(doc: SessionCanvasDocument): boolean {
   if (doc.markdown) return true;
-  const path = `${doc.path || ""} ${doc.title || ""}`.toLowerCase();
-  if (/\.(md|markdown|txt|html)$/i.test(path)) return true;
+  const path = doc.path || "";
+  const title = doc.title || "";
+  if (/\.(md|markdown|txt|html)$/i.test(path) || /\.(md|markdown|txt|html)$/i.test(title)) {
+    return true;
+  }
+  if (isCodePath(path) || isCodePath(title) || isMarkdownPath(path) || isMarkdownPath(title)) {
+    return true;
+  }
   return doc.kind === "file" || doc.kind === "plan";
+}
+
+function isCodeDocument(doc: SessionCanvasDocument): boolean {
+  const path = doc.path || "";
+  const title = doc.title || "";
+  const code = isCodePath(path) || isCodePath(title);
+  const markdown = isMarkdownPath(path) || isMarkdownPath(title);
+  const html = /\.html?$/i.test(path) || /\.html?$/i.test(title);
+  return code && !markdown && !html;
 }
 
 function HtmlFrame({ html, title }: { html: string; title: string }) {
@@ -136,6 +155,16 @@ function TextCanvasBody({ doc }: { doc: SessionCanvasDocument }) {
     );
   }
 
+  if (isCodeDocument(doc)) {
+    return (
+      <CodePreview
+        content={text}
+        filename={doc.title}
+        className="relative min-h-0 flex-1"
+      />
+    );
+  }
+
   return <MarkdownPreview content={text} />;
 }
 
@@ -200,16 +229,27 @@ export function SessionCanvas({ artifacts = [] }: Props) {
   );
 
   const handleDownload = useCallback(async () => {
-    if (!active?.artifact) return;
-    setDownloading(true);
-    try {
-      await downloadArtifactFile(active.artifact);
-    } catch (e) {
-      console.error("Download failed", e);
-    } finally {
-      setDownloading(false);
+    if (active?.artifact) {
+      setDownloading(true);
+      try {
+        await downloadArtifactFile(active.artifact);
+      } catch (e) {
+        console.error("Download failed", e);
+      } finally {
+        setDownloading(false);
+      }
+      return;
     }
-  }, [active?.artifact]);
+    if (active?.markdown) {
+      const name = active.title || "document.md";
+      const mime = isCodeDocument(active)
+        ? "text/plain;charset=utf-8"
+        : /\.html?$/i.test(name)
+          ? "text/html;charset=utf-8"
+          : "text/markdown;charset=utf-8";
+      downloadTextFile(name, active.markdown, mime);
+    }
+  }, [active]);
 
   if (!active) {
     return (
@@ -277,7 +317,7 @@ export function SessionCanvas({ artifacts = [] }: Props) {
               <ExternalLink className="h-4 w-4" />
             </a>
           ) : null}
-          {active.artifact ? (
+          {active.artifact || active.markdown ? (
             <button
               type="button"
               onClick={handleDownload}

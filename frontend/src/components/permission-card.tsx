@@ -6,7 +6,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { Check, Clock, CornerDownLeft, LayoutGrid, X } from "lucide-react";
+import { ChatMarkdown } from "@/components/chat-markdown";
 import { cx } from "@/utils/cx";
 
 type Props = {
@@ -21,6 +22,14 @@ type Props = {
   /** Restored/live settled outcome. */
   decision?: "approved" | "denied" | "timed_out";
   timedOut?: boolean;
+  /** Policy risk tier (low/medium/high) shown under the description. */
+  risk?: string;
+  /** Opaque fingerprint of the exact approved args. */
+  actionHash?: string;
+  /** Tool that requested approval, for log lines. */
+  tool?: string;
+  /** Epoch ms when the decision landed. */
+  decidedAt?: number;
   onRespond: (
     taskId: string,
     approved: boolean,
@@ -36,7 +45,16 @@ function formatCountdown(seconds: number): string {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
-/** ApprovalCard chrome — human-in-the-loop approve / deny. */
+function formatTime(ts?: number): string | null {
+  if (!ts || !Number.isFinite(ts)) return null;
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return null;
+  }
+}
+
+/** Approval card — same card language as ElicitationUI (ask_choice / suggest_options). */
 export function PermissionCard({
   taskId,
   approvalId,
@@ -47,13 +65,18 @@ export function PermissionCard({
   issuedAt,
   decision,
   timedOut: timedOutProp = false,
+  risk,
+  actionHash,
+  tool,
+  decidedAt,
   onRespond,
 }: Props) {
   const [response, setResponse] = useState<"approved" | "denied" | null>(() =>
     decision === "approved" ? "approved" : decision === "denied" ? "denied" : null,
   );
   const [submitting, setSubmitting] = useState(false);
-  const [open, setOpen] = useState(true);
+  const [dismissed, setDismissed] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [localTimedOut, setLocalTimedOut] = useState(
     () => decision === "timed_out" || timedOutProp,
   );
@@ -132,10 +155,10 @@ export function PermissionCard({
       if (!visible) return;
 
       const key = e.key.toLowerCase();
-      if (key === "y") {
+      if (key === "y" || key === "1") {
         e.preventDefault();
         handleRespond(true);
-      } else if (key === "n") {
+      } else if (key === "n" || key === "2") {
         e.preventDefault();
         handleRespond(false);
       }
@@ -146,150 +169,201 @@ export function PermissionCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- respond only while unresolved
   }, [frozen, taskId, approvalId, durableTaskId]);
 
-  if (!open) {
+  if (dismissed && !frozen) {
     return (
       <button
         type="button"
-        onClick={() => setOpen(true)}
-        className="rounded-lg bg-background-primary-default px-3 py-2 text-[12.5px] font-medium text-text-primary shadow-card transition-colors duration-150 hover:bg-background-primary-hover"
+        onClick={() => setDismissed(false)}
+        className="flex items-center gap-1.5 rounded-lg border border-border/70 bg-zinc-900/90 px-3 py-1.5 text-[12px] font-medium text-zinc-300 shadow-sm transition-colors hover:bg-zinc-800"
       >
-        Open approval
+        <LayoutGrid className="size-3.5 text-indigo-400" />
+        <span>Show approval</span>
       </button>
     );
   }
 
+  const subtitle = [
+    agent || "policy",
+    risk ? `risk: ${risk}` : null,
+    tool ? tool.replace(/_/g, " ") : null,
+  ]
+    .filter(Boolean)
+    .join(" • ");
+  const decidedLabel = formatTime(decidedAt);
+  const shortHash =
+    actionHash && actionHash.length > 10
+      ? `${actionHash.slice(0, 10)}…`
+      : actionHash || null;
+
+  const options = [
+    { label: "Approve", value: true, num: 1, shortcut: "Y" },
+    { label: "Deny", value: false, num: 2, shortcut: "N" },
+  ] as const;
+
   return (
     <div
       ref={cardRef}
-      className="flex w-full max-w-80 flex-col items-stretch animate-fade-up"
+      tabIndex={frozen ? -1 : 0}
+      onKeyDown={(e) => {
+        if (frozen) return;
+        if (e.target instanceof HTMLInputElement) return;
+        const num = Number(e.key);
+        if (num === 1) {
+          e.preventDefault();
+          handleRespond(true);
+        } else if (num === 2) {
+          e.preventDefault();
+          handleRespond(false);
+        }
+      }}
+      className="flex w-full max-w-[32rem] flex-col items-stretch outline-none animate-fade-up"
     >
-      <div className="w-full self-start overflow-hidden rounded-xl border border-separator-border bg-background-primary-default shadow-card">
+      <div className="w-full overflow-hidden rounded-2xl border border-zinc-800 bg-[#18181b] p-4 text-zinc-100 shadow-xl dark:border-zinc-800/80">
+        {/* Header bar — mirrors ElicitationUI */}
+        <div className="flex items-start justify-between gap-3 pb-3">
+          <div className="flex-1 pr-2">
+            <div className="text-[14.5px] font-medium leading-snug text-zinc-100">
+              <ChatMarkdown content={description || "Approval required to continue."} />
+            </div>
+            {subtitle ? (
+              <div className="mt-1 text-[12px] text-zinc-400">{subtitle}</div>
+            ) : null}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 pt-0.5">
+            {!frozen && remaining <= 60 && (
+              <span className="flex items-center gap-1 font-mono text-[11px] font-medium text-amber-400">
+                <Clock className="size-3" />
+                {formatCountdown(remaining)}
+              </span>
+            )}
+            {!frozen && (
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setDismissed(true)}
+                className="flex size-5 items-center justify-center rounded text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Pending: numbered Approve / Deny rows */}
+        {!sent && !timedOut ? (
+          <div className="flex flex-col gap-1.5 pt-1" role="radiogroup" aria-label="Approval choice">
+            {options.map((option, index) => {
+              const on = response === (option.value ? "approved" : "denied");
+              const isFocused = focusedIndex === index;
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  disabled={frozen}
+                  onClick={() => handleRespond(option.value)}
+                  onMouseEnter={() => setFocusedIndex(index)}
+                  onMouseLeave={() => setFocusedIndex(null)}
+                  className={cx(
+                    "group flex min-h-10 items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition-all",
+                    on
+                      ? "bg-zinc-800 border border-zinc-700 text-white shadow-sm"
+                      : "bg-zinc-900/50 hover:bg-zinc-800/60 text-zinc-200 border border-transparent",
+                    frozen && !on && "opacity-50 cursor-default hover:bg-zinc-900/50",
+                  )}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span
+                      className={cx(
+                        "flex size-6 shrink-0 items-center justify-center rounded-md font-mono text-[11.5px] font-semibold",
+                        on
+                          ? "bg-zinc-700 text-white"
+                          : "bg-zinc-800/80 text-zinc-400 group-hover:text-zinc-200",
+                      )}
+                    >
+                      {option.num}
+                    </span>
+                    <span className="text-[13.5px] truncate font-normal">{option.label}</span>
+                  </div>
+
+                  {on ? (
+                    <Check className="size-3.5 text-emerald-400 shrink-0" />
+                  ) : isFocused && !frozen ? (
+                    <CornerDownLeft className="size-3.5 text-zinc-400 shrink-0 transition-opacity opacity-80" />
+                  ) : (
+                    <kbd className="rounded px-1 text-[10px] font-medium text-zinc-500">
+                      {option.shortcut}
+                    </kbd>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {/* Resolved: keep full context (fixes "Approved / policy" losing description) */}
         {sent ? (
-          <div className="flex h-37 flex-col items-center justify-center gap-2 px-4 py-8">
+          <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-4">
             <span
               className={cx(
                 "flex size-6 items-center justify-center rounded-full text-white animate-pop-in",
                 response === "approved" ? "bg-emerald-500" : "bg-red-500",
               )}
             >
-              <Check className="size-3" strokeWidth={3} aria-hidden />
+              {response === "approved" ? (
+                <Check className="size-3" strokeWidth={3} aria-hidden />
+              ) : (
+                <X className="size-3" strokeWidth={3} aria-hidden />
+              )}
             </span>
             <span className="text-[13px] font-medium text-text-primary animate-fade-up">
               {response === "approved" ? "Approved" : "Denied"}
             </span>
-            {agent ? (
-              <span className="text-[12px] text-text-tertiary">{agent}</span>
+            {subtitle ? (
+              <span className="text-[12px] text-zinc-400">{subtitle}</span>
             ) : null}
           </div>
-        ) : timedOut ? (
-          <div className="flex h-37 flex-col items-center justify-center gap-2 px-4 py-8">
-            <span className="flex size-6 items-center justify-center rounded-full bg-background-secondary-default text-text-tertiary animate-pop-in">
-              <Check className="size-3" strokeWidth={3} aria-hidden />
+        ) : null}
+
+        {timedOut ? (
+          <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-4">
+            <span className="flex size-6 items-center justify-center rounded-full bg-zinc-800 text-zinc-400 animate-pop-in">
+              <Clock className="size-3" aria-hidden />
             </span>
-            <span className="text-[13px] font-medium text-text-secondary animate-fade-up">
+            <span className="text-[13px] font-medium text-zinc-400 animate-fade-up">
               Approval timed out
             </span>
+            {subtitle ? (
+              <span className="text-[12px] text-zinc-500">{subtitle}</span>
+            ) : null}
           </div>
-        ) : (
-          <div className="px-3.5 pt-3.5 pb-2">
-            <div className="flex items-start justify-between gap-3">
-              <span className="min-w-0 flex-1 text-[13px] font-medium text-text-primary">
-                {description}
-              </span>
-              <button
-                type="button"
-                aria-label="Dismiss"
-                onClick={() => setOpen(false)}
-                className="flex size-6 shrink-0 items-center justify-center rounded-[5px] text-text-tertiary transition-colors duration-100 hover:bg-background-primary-hover hover:text-text-primary"
-              >
-                <X className="size-3.5" strokeWidth={2.2} aria-hidden />
-              </button>
-            </div>
+        ) : null}
 
-            <div className="mt-2 flex flex-col gap-0.5" role="radiogroup" aria-label="Approval choice">
-              {(
-                [
-                  { label: "Approve", value: true, shortcut: "Y" },
-                  { label: "Deny", value: false, shortcut: "N" },
-                ] as const
-              ).map((option) => {
-                const on = response === (option.value ? "approved" : "denied");
-                return (
-                  <button
-                    key={option.label}
-                    type="button"
-                    role="radio"
-                    aria-checked={on}
-                    disabled={frozen}
-                    onClick={() => handleRespond(option.value)}
-                    className="-mx-1.5 flex items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors duration-100 hover:bg-background-primary-hover disabled:cursor-not-allowed"
-                  >
-                    <span
-                      className={cx(
-                        "flex size-4 shrink-0 items-center justify-center rounded-full transition-colors duration-200",
-                        on
-                          ? "bg-text-primary text-background-primary-default"
-                          : "text-transparent shadow-[inset_0_0_0_1.5px_var(--color-separator-border-strong)]",
-                      )}
-                    >
-                      <span
-                        className="size-1.5 rounded-full bg-background-primary-default transition-transform duration-200"
-                        style={{ transform: on ? "scale(1)" : "scale(0)" }}
-                      />
-                    </span>
-                    <span
-                      className={cx(
-                        "flex-1 text-[13px] transition-colors duration-200",
-                        on ? "text-text-primary" : "text-text-secondary",
-                      )}
-                    >
-                      {option.label}
-                    </span>
-                    <kbd className="rounded px-1 text-[10px] font-medium text-text-tertiary">
-                      {option.shortcut}
-                    </kbd>
-                  </button>
-                );
-              })}
-            </div>
+        {/* Resolved footer note — mirrors ElicitationUI "Selected:" row */}
+        {sent && response && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-zinc-800/80 pt-2 text-[11.5px] text-zinc-400">
+            <span className="flex items-center gap-1.5">
+              <Check className="size-3.5 text-emerald-400" />
+              <span>
+                Selected: {response === "approved" ? "Approved" : "Denied"}
+              </span>
+            </span>
+            {decidedLabel ? <span>• {decidedLabel}</span> : null}
+            {shortHash ? (
+              <span className="font-mono" title={actionHash}>
+                • {shortHash}
+              </span>
+            ) : null}
           </div>
         )}
-
-        <div className="flex items-center justify-between border-t border-separator-border px-2.5 py-2">
-          <span className="flex items-center gap-2">
-            <span
-              className="flex size-6 items-center justify-center rounded-[5px] text-text-tertiary opacity-35"
-              aria-hidden
-            >
-              <ChevronLeft className="size-3.5" strokeWidth={2.2} />
-            </span>
-            <span className="flex items-center gap-1" aria-hidden>
-              <span
-                className="rounded-full"
-                style={{
-                  width: 9,
-                  height: 9,
-                  border: "2.5px solid var(--color-text-primary)",
-                }}
-              />
-            </span>
-            <span
-              className="flex size-6 items-center justify-center rounded-[5px] text-text-tertiary opacity-35"
-              aria-hidden
-            >
-              <ChevronRight className="size-3.5" strokeWidth={2.2} />
-            </span>
-          </span>
-
-          {!frozen ? (
-            <span
-              className="font-mono text-[11px] tabular-nums text-text-tertiary"
-              aria-live="polite"
-            >
-              {formatCountdown(remaining)}
-            </span>
-          ) : null}
-        </div>
+        {timedOut && (
+          <div className="mt-3 flex items-center gap-1.5 border-t border-zinc-800/80 pt-2 text-[11.5px] text-zinc-500">
+            <Clock className="size-3.5 text-zinc-500" />
+            <span>Timed out — continue with a safe default</span>
+          </div>
+        )}
       </div>
     </div>
   );

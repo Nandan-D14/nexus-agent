@@ -22,7 +22,12 @@ import {
   browserPopupRedirectResolver,
   type Auth,
 } from "firebase/auth";
-import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import {
+  connectFirestoreEmulator,
+  getFirestore,
+  initializeFirestore,
+  type Firestore,
+} from "firebase/firestore";
 
 const requiredEnvVars = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -70,8 +75,26 @@ function initAuth(firebaseApp: FirebaseApp): Auth {
   }
 }
 
+const forceLongPolling =
+  process.env.NEXT_PUBLIC_FIRESTORE_FORCE_LONG_POLLING === "true";
+
+function initDb(firebaseApp: FirebaseApp): Firestore {
+  if (typeof window === "undefined") {
+    return getFirestore(firebaseApp);
+  }
+  try {
+    return initializeFirestore(firebaseApp, {
+      ...(forceLongPolling
+        ? { experimentalForceLongPolling: true }
+        : { experimentalAutoDetectLongPolling: true }),
+    });
+  } catch {
+    return getFirestore(firebaseApp);
+  }
+}
+
 export const auth = initAuth(app);
-export const db = getFirestore(app);
+export const db = initDb(app);
 
 const recoverableFirestoreErrorCodes = new Set([
   "unavailable",

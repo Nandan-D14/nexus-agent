@@ -8,6 +8,7 @@
 import {
   Database,
   File,
+  FileCode,
   FileSpreadsheet,
   FileText,
   FileType,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
 import {
+  isCodeArtifact,
   isCsvArtifact,
   isHtmlArtifact,
   isMarkdownArtifact,
@@ -38,6 +40,7 @@ const ACCENTS: Record<string, ArtifactAccent> = {
   csv: { icon: "text-teal-400", tile: "bg-teal-500/10 border-teal-500/20" },
   presentation: { icon: "text-orange-400", tile: "bg-orange-500/10 border-orange-500/20" },
   markdown: { icon: "text-violet-400", tile: "bg-violet-500/10 border-violet-500/20" },
+  code: { icon: "text-lime-400", tile: "bg-lime-500/10 border-lime-500/20" },
   html: { icon: "text-amber-400", tile: "bg-amber-500/10 border-amber-500/20" },
   image: { icon: "text-sky-400", tile: "bg-sky-500/10 border-sky-500/20" },
   data: { icon: "text-emerald-400", tile: "bg-emerald-500/10 border-emerald-500/20" },
@@ -52,6 +55,7 @@ function artifactFamily(artifact: ArtifactLike): keyof typeof ACCENTS {
   if (isSpreadsheetArtifact(artifact)) return "spreadsheet";
   if (isPresentationArtifact(artifact)) return "presentation";
   if (isMarkdownArtifact(artifact) || isPlainTextArtifact(artifact)) return "markdown";
+  if (isCodeArtifact(artifact)) return "code";
   if (isHtmlArtifact(artifact)) return "html";
   if (artifact.kind === "document") return "document";
   if (artifact.kind === "data" || artifact.kind === "json") {
@@ -89,6 +93,8 @@ export function artifactBadge(artifact: ArtifactLike): string {
       return "PPTX";
     case "markdown":
       return isPlainTextArtifact(artifact) ? "TXT" : "MD";
+    case "code":
+      return (artifact.path || artifact.title || "CODE").replace(/\\/g, "/").split(".").pop()?.toUpperCase() || "CODE";
     case "html":
       return "HTML";
     case "image":
@@ -121,6 +127,8 @@ export function ArtifactIcon({
       return <Presentation className={cls} />;
     case "markdown":
       return <FileText className={cls} />;
+    case "code":
+      return <FileCode className={cls} />;
     case "document":
       return <FileType className={cls} />;
     case "html":

@@ -453,7 +453,68 @@ async def _supersede_paused_durable_run(
         return False
 
 
-async def _stop_durable_run(*, session: Session, task_id: str, send_json) -> None:
+async def _enforce_durable_stop(
+    *, session: Session, task_id: str, run_id: str, send_json
+) -> None:
+    """Force a stopped run terminal if its worker does not honor the cancel.
+
+    A live lease normally means a worker owns the run and its cancel watcher
+    will finish it. That assumption fails exactly when the user is most likely
+    to press stop: the worker is wedged, so it never observes the flag, yet its
+    heartbeat keeps the lease alive and blocks every later prompt.
+
+    Settling the run here is safe even if the worker is healthy — ``renew_lease``
+    only renews runs still in ``running``, so the next heartbeat fails and the
+    worker cancels its own execution.
+    """
+    await asyncio.sleep(max(1.0, float(settings.durable_stop_grace_seconds)))
+    repo = get_production_task_repository()
+    try:
+        run = await repo.get_run(
+            task_id=task_id, run_id=run_id, owner_id=session.owner_id
+        )
+    except Exception:
+        logger.warning(
+            "Failed to re-check stopped durable run %s/%s",
+            task_id,
+            run_id,
+            exc_info=True,
+        )
+        return
+    if run is None or str(getattr(run, "status", "") or "") in TERMINAL_TASK_STATUSES:
+        await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
+        return
+
+    logger.warning(
+        "Durable run %s/%s ignored a stop request — settling it so session %s stays usable",
+        task_id,
+        run_id,
+        session.id,
+    )
+    reason = "Stopped by user."
+    await _settle_abandoned_run(
+        repo,
+        session=session,
+        task_id=task_id,
+        run_id=run_id,
+        error_code="RUN_STOPPED_BY_USER",
+        reason=reason,
+    )
+    await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
+    await send_json(
+        {
+            "type": "worker_finished",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "cancelled",
+            "summary": reason,
+        }
+    )
+
+
+async def _stop_durable_run(
+    *, session: Session, task_id: str, send_json, track=None
+) -> None:
     """Honor the stop button for a durable run, and never leave it wedged.
 
     ``request_cancel`` only raises a flag on the task; some live worker has to
@@ -500,7 +561,18 @@ async def _stop_durable_run(*, session: Session, task_id: str, send_json) -> Non
         await _clear_stuck_cancel_request(repo, session=session, task_id=task_id)
         return
     if lease_is_live(getattr(run, "lease_expires_at", None)):
-        # A worker owns this run and its cancel watcher will finish it.
+        # A worker owns this run, so give its cancel watcher a chance to finish
+        # cleanly — but verify, because a wedged worker never will.
+        enforcement = _enforce_durable_stop(
+            session=session,
+            task_id=task_id,
+            run_id=str(run_id),
+            send_json=send_json,
+        )
+        if track is not None:
+            track(asyncio.create_task(enforcement))
+        else:
+            await enforcement
         return
 
     reason = "Stopped by user."
@@ -781,14 +853,7 @@ async def _try_start_durable_text_run(
             "queue": enqueue.__dict__,
         }
     )
-    # #region agent log
-    try:
-        import json as _dbg_json
-        from pathlib import Path as _DbgPath
-        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"ws_handler.py:run_queued","message":"durable run queued","data":{"task_id":task.task_id,"run_id":run.run_id,"provider":getattr(enqueue,"provider",None),"queued":getattr(enqueue,"queued",None)},"timestamp":int(__import__("time").time()*1000)})+"\n")
-    except Exception:
-        pass
-    # #endregion
+
     logger.info(
         "Durable run queued for session %s task %s run %s via %s",
         session.id,
@@ -995,6 +1060,20 @@ async def handle_websocket(
                         continue
 
                     msg_type = data.get("type", "")
+                    if msg_type == "ping":
+                        _touch_session()
+                        await _safe_send_json({"type": "pong"})
+                        # Hold the sandbox TTL open while the user is watching a
+                        # live turn. The orchestrator keepalive covers the turn
+                        # itself; this additionally covers an attached client
+                        # observing a durable run driven by another instance.
+                        if orchestrator.has_active_agent_turn() or _has_active_bg_task():
+                            try:
+                                session.sandbox.extend_timeout()
+                            except Exception:
+                                logger.debug("Ping sandbox keepalive failed", exc_info=True)
+                        continue
+
                     if msg_type in {"text_input", "analyze_screen", "start_voice", "start_desktop", "restart_sandbox"}:
                         if not action_rate_limiter.is_allowed(session.owner_id):
                             await _safe_send_json(
@@ -1151,6 +1230,7 @@ async def handle_websocket(
                                 session=session,
                                 task_id=durable_task_id,
                                 send_json=_safe_send_json,
+                                track=_track,
                             )
 
                     elif msg_type == "permission_response":
@@ -1186,14 +1266,14 @@ async def handle_websocket(
                                     approved,
                                 )
 
-                    elif msg_type == "user_question_response":
+                    elif msg_type in {"elicitation_response", "user_question_response"}:
                         _touch_session()
-                        question_id = data.get("question_id", "")
-                        answer = data.get("answer", "")
-                        if question_id:
-                            orchestrator.handle_user_question_response(question_id, answer)
+                        elicitation_id = str(data.get("elicitation_id") or data.get("question_id") or "").strip()
+                        answer = str(data.get("answer") or "").strip()
+                        if elicitation_id:
+                            orchestrator.handle_elicitation_response(elicitation_id, answer)
                             # Mirror the answer into the durable event log so a
-                            # detached worker run can pick it up (its ask_user
+                            # detached worker run can pick it up (its elicitation
                             # future lives in another orchestrator instance).
                             durable_task_id = getattr(session, "task_id", None)
                             if isinstance(durable_task_id, str) and durable_task_id.startswith("task_"):
@@ -1202,27 +1282,19 @@ async def handle_websocket(
                                         task_id=durable_task_id,
                                         owner_id=session.owner_id,
                                         run_id=getattr(session, "current_run_id", None),
-                                        event_type="user_question_response",
+                                        event_type="elicitation_response",
                                         payload={
-                                            "question_id": str(question_id),
-                                            "answer": str(answer or ""),
+                                            "elicitation_id": elicitation_id,
+                                            "question_id": elicitation_id,
+                                            "answer": answer,
                                         },
                                     )
                                 except Exception:
                                     logger.warning(
-                                        "Failed to persist durable question answer for task %s",
+                                        "Failed to persist durable elicitation answer for task %s",
                                         durable_task_id,
                                         exc_info=True,
                                     )
-
-                    elif msg_type == "ping":
-                        await _safe_send_json({"type": "pong"})
-                        if orchestrator.has_active_agent_turn() or _has_active_bg_task():
-                            _touch_session()
-                            try:
-                                session.sandbox.extend_timeout()
-                            except Exception:
-                                pass
 
                     else:
                         logger.debug("Unknown message type: %s", msg_type)

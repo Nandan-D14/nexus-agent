@@ -17,6 +17,7 @@ with a safety margin, and it avoids orphaning tool responses.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any
 
 from google.genai import types
@@ -80,32 +81,157 @@ def _has_function_call(content) -> bool:
     )
 
 
-def _drop_leading_orphan_tool_results(kept: list) -> list:
-    """Drop leading tool-response turns whose matching call was trimmed.
+def _tool_part_keys(content, attribute: str) -> Counter[tuple[str, str]]:
+    """Return stable ids (or names) for function-call/response parts."""
+    values = [
+        getattr(part, attribute, None)
+        for part in (getattr(content, "parts", None) or [])
+    ]
+    tools = [value for value in values if value is not None]
+    if tools and all(str(getattr(tool, "id", "") or "").strip() for tool in tools):
+        return Counter(("id", str(getattr(tool, "id"))) for tool in tools)
+    return Counter(
+        ("name", str(getattr(tool, "name", "") or ""))
+        for tool in tools
+    )
 
-    A ``function_response`` with no preceding ``function_call`` in-context makes
-    the model API reject the request, so strip any such orphans at the front.
-    """
-    index = 0
-    while index < len(kept) - 1 and _has_function_response(kept[index]):
-        index += 1
-    return kept[index:]
 
-
-def _drop_trailing_orphan_tool_calls(kept: list) -> list:
-    """Drop trailing ``function_call`` turns that have no following response.
-
-    A turn-cap break can leave a bare ``function_call`` at the tail with no
-    matching ``function_response``; the next API call rejects that. Strip such
-    trailing orphans so the resend stays valid.
-    """
-    while (
-        len(kept) > 1
-        and _has_function_call(kept[-1])
-        and not _has_function_response(kept[-1])
+def _tool_turns_match(call_content, response_content) -> bool:
+    calls = _tool_part_keys(call_content, "function_call")
+    responses = _tool_part_keys(response_content, "function_response")
+    if not calls or not responses:
+        return False
+    if all(kind == "id" for kind, _ in calls) and all(
+        kind == "id" for kind, _ in responses
     ):
-        kept = kept[:-1]
-    return kept
+        return calls == responses
+    call_names = _tool_part_keys(call_content, "function_call")
+    response_names = _tool_part_keys(response_content, "function_response")
+    # One side may have ids while the other does not. Compare names then.
+    if any(kind == "id" for kind, _ in call_names):
+        call_names = Counter(
+            ("name", str(getattr(part.function_call, "name", "") or ""))
+            for part in (getattr(call_content, "parts", None) or [])
+            if getattr(part, "function_call", None) is not None
+        )
+    if any(kind == "id" for kind, _ in response_names):
+        response_names = Counter(
+            ("name", str(getattr(part.function_response, "name", "") or ""))
+            for part in (getattr(response_content, "parts", None) or [])
+            if getattr(part, "function_response", None) is not None
+        )
+    return call_names == response_names
+
+
+def _unanswered_function_calls(call_content, response_content) -> list | None:
+    """Return calls missing responses, or None when responses do not belong."""
+    calls = [
+        part.function_call
+        for part in (getattr(call_content, "parts", None) or [])
+        if getattr(part, "function_call", None) is not None
+    ]
+    responses = [
+        part.function_response
+        for part in (getattr(response_content, "parts", None) or [])
+        if getattr(part, "function_response", None) is not None
+    ]
+    if not calls or not responses:
+        return None
+    use_ids = all(str(getattr(tool, "id", "") or "").strip() for tool in calls + responses)
+
+    def key(tool) -> str:
+        field = "id" if use_ids else "name"
+        return str(getattr(tool, field, "") or "")
+
+    remaining = Counter(key(call) for call in calls)
+    for response in responses:
+        response_key = key(response)
+        if remaining[response_key] <= 0:
+            return None
+        remaining[response_key] -= 1
+
+    unanswered = []
+    for call in calls:
+        call_key = key(call)
+        if remaining[call_key] > 0:
+            unanswered.append(call)
+            remaining[call_key] -= 1
+    return unanswered
+
+
+def _interrupted_response_part(call) -> types.Part:
+    return types.Part(
+        function_response=types.FunctionResponse(
+            id=getattr(call, "id", None),
+            name=str(getattr(call, "name", "") or ""),
+            response={
+                "status": "error",
+                "error_code": "TOOL_INTERRUPTED",
+                "summary": (
+                    "Tool execution was interrupted before a result was recorded. "
+                    "Verify state before retrying."
+                ),
+                "retryable": True,
+            },
+        )
+    )
+
+
+def _repair_unpaired_tool_turns(contents: list) -> list:
+    """Heal interrupted tool turns anywhere in model context.
+
+    A process restart can persist an assistant ``function_call`` but not its
+    response. Once the user sends another message, that orphan is no longer at
+    the tail, so a trailing-only repair misses it and providers reject every
+    later turn with "Missing tool result". Keep the call and inject a matching
+    error response so the model knows the side effect is unverified and can
+    safely retry. Valid call/response pairs must be adjacent in model history.
+    """
+    repaired: list = []
+    index = 0
+    while index < len(contents):
+        content = contents[index]
+        if _has_function_call(content):
+            next_content = contents[index + 1] if index + 1 < len(contents) else None
+            if next_content is not None and _has_function_response(next_content):
+                unanswered = _unanswered_function_calls(content, next_content)
+                if unanswered is not None:
+                    if not unanswered:
+                        repaired.extend((content, next_content))
+                    else:
+                        repaired.extend(
+                            (
+                                content,
+                                types.Content(
+                                    role=getattr(next_content, "role", None) or "user",
+                                    parts=[
+                                        *(getattr(next_content, "parts", None) or []),
+                                        *[
+                                            _interrupted_response_part(call)
+                                            for call in unanswered
+                                        ],
+                                    ],
+                                ),
+                            )
+                        )
+                    index += 2
+                    continue
+            interrupted_parts = [
+                _interrupted_response_part(part.function_call)
+                for part in (getattr(content, "parts", None) or [])
+                if getattr(part, "function_call", None) is not None
+            ]
+            repaired.append(content)
+            if interrupted_parts:
+                repaired.append(types.Content(role="user", parts=interrupted_parts))
+            index += 1
+            continue
+        if _has_function_response(content):
+            index += 1
+            continue
+        repaired.append(content)
+        index += 1
+    return repaired
 
 
 # Groq on-demand TPM for small SKUs is ~8k; stay under that including tokenizer slack.
@@ -131,11 +257,13 @@ _CORE_TOOL_NAMES = _NEVER_DROP_TOOLS | frozenset({
     "scrape_web_page",
     "publish_html_artifact",
     "publish_app_preview",
-    "ask_user",
+    "ask_choice",
+    "suggest_options",
     "generate_pdf_report",
     "generate_docx_report",
     "save_as_artifact",
     "extract_pdf_text",
+    "extract_document_text",
     "take_screenshot",
 })
 
@@ -191,6 +319,43 @@ def _decl_drop_rank(name: str) -> int:
     return 10
 
 
+def _filter_tools_to_allowlist(tools: list) -> tuple[list, list[str]]:
+    """Hide declarations the gateway would refuse to execute anyway.
+
+    The allowlist was only enforced at call time, so the model still saw every
+    tool and could burn a whole turn picking one that comes back as
+    ``TOOL_NOT_SELECTED``. Removing them from the schema makes the user's tool
+    selection actually steer the model, and shrinks the prompt as a side effect.
+    """
+    from nexus.tool_catalog import is_tool_allowed
+    from nexus.tools._context import get_tool_allowlist
+
+    allowlist = get_tool_allowlist()
+    if allowlist is None:
+        return tools, []
+
+    current = list(tools)
+    hidden: list[str] = []
+    for tool_index in range(len(current) - 1, -1, -1):
+        decls = list(getattr(current[tool_index], "function_declarations", None) or [])
+        if not decls:
+            continue
+        kept = []
+        for decl in decls:
+            name = str(getattr(decl, "name", "") or "")
+            if name and not is_tool_allowed(name, allowlist):
+                hidden.append(name)
+            else:
+                kept.append(decl)
+        if len(kept) == len(decls):
+            continue
+        if kept:
+            current[tool_index].function_declarations = kept
+        else:
+            current.pop(tool_index)
+    return current, hidden
+
+
 def _prune_tools_to_budget(tools: list, budget: int) -> tuple[list, list[str]]:
     """Drop lowest-priority function declarations until tool schemas fit ``budget``."""
     current = list(tools)
@@ -226,12 +391,37 @@ def make_context_trimmer(runtime_config: Any | None = None):
 
     def before_model_callback(callback_context, llm_request):
         contents = list(getattr(llm_request, "contents", None) or [])
+        repaired_contents = _repair_unpaired_tool_turns(contents)
+        if repaired_contents != contents:
+            logger.warning(
+                "Repaired unpaired tool history before model call (%d -> %d messages)",
+                len(contents),
+                len(repaired_contents),
+            )
+            llm_request.contents = repaired_contents
+            contents = repaired_contents
         sys_tok = _estimate_system_tokens(llm_request)
         content_tok = sum(_estimate_tokens_for_content(c) for c in contents)
         limit, budget = _input_token_budget(runtime_config)
         cfg = getattr(llm_request, "config", None)
         tools = getattr(cfg, "tools", None) if cfg else None
         tool_list = list(tools) if isinstance(tools, list) else []
+
+        # Apply the user's tool selection to the schema, not just to execution.
+        # Runs before budgeting so the pruner only has to consider real options.
+        if cfg is not None and tool_list:
+            try:
+                tool_list, hidden_tools = _filter_tools_to_allowlist(tool_list)
+            except Exception:
+                # Never brick a turn over schema filtering; the gateway still gates.
+                logger.debug("Tool allowlist filtering failed", exc_info=True)
+                hidden_tools = []
+            if hidden_tools:
+                cfg.tools = tool_list
+                logger.info(
+                    "Hid %d unselected tool schemas from the model", len(hidden_tools)
+                )
+
         tool_tok = _estimate_tokens_for_tools(tool_list)
         if not settings.enforce_context_budget:
             return None
@@ -267,12 +457,10 @@ def make_context_trimmer(runtime_config: Any | None = None):
         kept.reverse()
         if not kept:
             kept = [contents[-1]]
-        kept = _drop_leading_orphan_tool_results(kept)
-        # Repair a bare trailing function_call (e.g. left by a turn-cap break)
-        # that has no matching function_response, which would 400 the resend.
-        kept = _drop_trailing_orphan_tool_calls(kept)
+        # Trimming may split a formerly valid tool pair at the budget boundary.
+        kept = _repair_unpaired_tool_turns(kept)
 
-        if len(kept) < len(contents):
+        if kept != contents:
             note = types.Content(
                 role="user",
                 parts=[types.Part(text=_TRIM_NOTE)],

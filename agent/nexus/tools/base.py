@@ -50,6 +50,21 @@ class NormalizedToolResult(TypedDict, total=False):
     retryable: bool
 
 
+def reraise_if_sandbox_dead(exc: BaseException) -> None:
+    """Let a dead-sandbox fault escape a tool body.
+
+    Tool bodies that catch bare ``Exception`` swallow ``SandboxDeadError``,
+    which silently disables the reconnect-and-retry-once path in
+    ``normalized_tool``. Call this first in such handlers so the decorator can
+    rebuild the sandbox instead of handing the model a generic tool error for
+    a machine that no longer exists.
+    """
+    from nexus.sandbox import SandboxDeadError
+
+    if isinstance(exc, SandboxDeadError):
+        raise exc
+
+
 def tool_error(
     message: str,
     *,

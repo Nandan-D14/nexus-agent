@@ -118,6 +118,111 @@ class ContextTrimmerTests(TestCase):
             )
             self.assertFalse(has_fr, "orphan tool response leaked into trimmed context")
 
+    def test_heals_interrupted_tool_call_before_new_user_message(self) -> None:
+        """A restart can leave call -> new user, not a trailing orphan."""
+        call = types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="call_interrupted",
+                        name="terminal_worker",
+                        args={"request": "build slides"},
+                    )
+                )
+            ],
+        )
+        latest = _text_content("user", "continue")
+        req = _request([_text_content("user", "create a deck"), call, latest])
+
+        make_context_trimmer()(None, req)
+
+        self.assertEqual(req.contents[-1].parts[0].text, "continue")
+        call_index = next(
+            index
+            for index, content in enumerate(req.contents)
+            if any(
+                getattr(part, "function_call", None) is not None
+                for part in (content.parts or [])
+            )
+        )
+        response = req.contents[call_index + 1].parts[0].function_response
+        self.assertEqual(response.id, "call_interrupted")
+        self.assertEqual(response.name, "terminal_worker")
+        self.assertEqual(response.response["error_code"], "TOOL_INTERRUPTED")
+
+    def test_preserves_complete_tool_call_response_pair(self) -> None:
+        call = types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="call_ok",
+                        name="terminal_worker",
+                        args={"request": "build slides"},
+                    )
+                )
+            ],
+        )
+        response = types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id="call_ok",
+                        name="terminal_worker",
+                        response={"status": "success"},
+                    )
+                )
+            ],
+        )
+        req = _request([_text_content("user", "create a deck"), call, response])
+
+        make_context_trimmer()(None, req)
+
+        self.assertEqual(req.contents, [_text_content("user", "create a deck"), call, response])
+
+    def test_heals_only_missing_parallel_tool_response(self) -> None:
+        call = types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="call_ok", name="read_file", args={"path": "a.txt"}
+                    )
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="call_missing", name="read_file", args={"path": "b.txt"}
+                    )
+                ),
+            ],
+        )
+        response = types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id="call_ok",
+                        name="read_file",
+                        response={"status": "success"},
+                    )
+                )
+            ],
+        )
+        req = _request([_text_content("user", "read both"), call, response])
+
+        make_context_trimmer()(None, req)
+
+        responses = [
+            part.function_response
+            for part in req.contents[-1].parts
+            if getattr(part, "function_response", None) is not None
+        ]
+        self.assertEqual([item.id for item in responses], ["call_ok", "call_missing"])
+        self.assertEqual(responses[0].response["status"], "success")
+        self.assertEqual(responses[1].response["error_code"], "TOOL_INTERRUPTED")
+
     def test_groq_budget_prunes_mcp_tools_on_first_turn(self):
         with patch.object(settings, "model_context_limit", 262144):
             fat = types.FunctionDeclaration(

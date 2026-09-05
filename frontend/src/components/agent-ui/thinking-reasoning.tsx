@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatMarkdown } from "@/components/chat-markdown";
+import { formatDuration } from "@/components/agent-ui/activity-log";
 import { cx } from "@/utils/cx";
 
 const COLLAPSE_BEAT_MS = 360;
@@ -29,7 +30,7 @@ type Props = {
 };
 
 /**
- * AICSS Thinking + Reasoning — shimmer while active, then "Thought for Ns".
+ * AICSS Thinking + Reasoning — shimmer while active, then "Thought for 19m 47s".
  * Driven by real agent_thinking chunks (no fake SENTENCES).
  */
 export function ThinkingReasoning({
@@ -52,9 +53,10 @@ export function ThinkingReasoning({
     [chunks],
   );
 
-  const elapsedS = useMemo(() => {
+  const elapsedLabel = useMemo(() => {
     const end = isActive ? liveNow : (endedAt ?? liveNow);
-    return Math.max(1, Math.round((end - startedAt) / 1000));
+    const ms = Math.max(1000, end - startedAt);
+    return formatDuration(ms) || "1s";
   }, [isActive, liveNow, endedAt, startedAt]);
 
   useEffect(() => {
@@ -127,7 +129,7 @@ export function ThinkingReasoning({
       >
         {done ? (
           <span className="text-body-medium text-text-secondary">
-            <span className="text-text-primary">Thought</span> for {elapsedS}s
+            <span className="text-text-primary">Thought</span> for {elapsedLabel}
           </span>
         ) : (
           <span className="text-body-medium agent-progress-loading-text">

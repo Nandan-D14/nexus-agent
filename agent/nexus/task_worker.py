@@ -15,6 +15,7 @@ from typing import Any
 from nexus.agent_turn_runner import AgentTurnRequest, AgentTurnRunner
 from nexus.config import settings
 from nexus.dependencies import get_production_task_repository, get_session_manager
+from nexus import run_progress
 from nexus.production_tasks import TERMINAL_TASK_STATUSES, lease_is_live
 
 
@@ -51,14 +52,7 @@ class TaskWorker:
             worker_id=self.worker_id,
             claim_token=claim_token,
         )
-        # #region agent log
-        try:
-            import json as _dbg_json
-            from pathlib import Path as _DbgPath
-            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"task_worker.py:claim","message":"claim_run result","data":{"task_id":task_id,"run_id":run_id,"claimed":bool(claimed),"worker_id":self.worker_id},"timestamp":int(__import__("time").time()*1000)})+"\n")
-        except Exception:
-            pass
-        # #endregion
+
         if not claimed:
             # A skipped claim produces no events at all, so the UI would wait on
             # a run that will never execute. Record why it was rejected and, when
@@ -149,15 +143,7 @@ class TaskWorker:
                 verification_code = str(
                     (result.verification or {}).get("error_code") or ""
                 )
-                # #region agent log
-                try:
-                    import json as _dbg_json
-                    from pathlib import Path as _DbgPath
-                    _payload = _dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"task_worker.py:after_execute","message":"durable run pause-or-fail branch","data":{"status":result.status,"verification_code":verification_code,"retryable":bool(result.retryable),"summary":str(result.summary or "")[:240]},"timestamp":int(__import__("time").time()*1000)})+"\n"
-                    _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_payload)
-                except Exception:
-                    pass
-                # #endregion
+
                 if verification_code == "APPROVAL_EXPIRED":
                     await self._finish_failed(
                         repo=repo,
@@ -420,16 +406,33 @@ class TaskWorker:
                 max(1, int(settings.task_worker_lease_seconds) // 2),
             ),
         )
-        while True:
-            await asyncio.sleep(interval)
-            renewed = await repo.renew_lease(
-                task_id=task_id,
-                run_id=run_id,
-                worker_id=self.worker_id,
-                claim_generation=claim_generation,
-            )
-            if not renewed:
-                raise RuntimeError("Durable worker lost its lease generation.")
+        stall_timeout = float(settings.durable_run_stall_timeout_seconds or 0)
+        run_progress.start_tracking(run_id)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+
+                # Renewing the lease asserts that work is happening. Every
+                # recovery path trusts that assertion, so stop asserting it once
+                # the agent has gone quiet — otherwise a wedged worker holds the
+                # session hostage until the process dies.
+                if run_progress.is_stalled(run_id, stall_timeout):
+                    raise RuntimeError(
+                        "Durable worker made no progress for more than "
+                        f"{stall_timeout:.0f}s; releasing the lease so the run "
+                        "can be recovered."
+                    )
+
+                renewed = await repo.renew_lease(
+                    task_id=task_id,
+                    run_id=run_id,
+                    worker_id=self.worker_id,
+                    claim_generation=claim_generation,
+                )
+                if not renewed:
+                    raise RuntimeError("Durable worker lost its lease generation.")
+        finally:
+            run_progress.stop_tracking(run_id)
 
     async def _wait_for_durable_subagents(
         self,
@@ -597,7 +600,7 @@ class TaskWorker:
                 emit_user_transcript=not bool(
                     metadata.get("user_transcript_recorded")
                 ),
-                autonomy_mode=str(
+                autonomy_mode="auto" if metadata.get("skip_confirmations") else str(
                     execution_payload.get("autonomy_mode")
                     or getattr(task, "autonomy_mode", "")
                     or settings.default_autonomy_mode
@@ -613,6 +616,14 @@ class TaskWorker:
                     else {}
                 )
                 or {},
+                skip_confirmations=bool(metadata.get("skip_confirmations")),
+                allowed_unattended_tools=[
+                    str(item)
+                    for item in metadata.get("allowed_unattended_tools", [])
+                    if str(item).strip()
+                ]
+                if metadata.get("skip_confirmations")
+                else [],
             )
         )
         return WorkerRunResult(

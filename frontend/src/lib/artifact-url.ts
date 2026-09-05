@@ -13,7 +13,7 @@ import { authenticatedFetch } from "@/lib/api-client";
 
 const DOWNLOAD_TIMEOUT_MS = 8000;
 const CONTENT_TIMEOUT_MS = 20000;
-const SANDBOX_TIMEOUT_MS = 5000;
+const SANDBOX_TIMEOUT_MS = 45000;
 
 export function isPdfArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
   if (artifact.kind === "pdf" || artifact.kind === "pdf_report") return true;
@@ -53,8 +53,20 @@ export function isDeliverableArtifact(
   return !isSourceArtifact(artifact);
 }
 
-export function isHtmlArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
-  return artifact.kind === "html" || artifact.metadata?.render_mode === "iframe";
+export function isHtmlArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (artifact.kind === "html") return true;
+  if (
+    artifact.kind === "presentation" ||
+    artifact.kind === "document" ||
+    artifact.kind === "spreadsheet"
+  ) {
+    return false;
+  }
+  const path = (artifact.path || artifact.title || "").replace(/\\/g, "/").toLowerCase();
+  if (/\.(pptx|ppt|docx|doc|xlsx|xls)$/.test(path)) return false;
+  return artifact.metadata?.render_mode === "iframe";
 }
 
 export function isOfficeArtifact(artifact: Pick<RunArtifact, "kind" | "metadata">): boolean {
@@ -82,6 +94,41 @@ const CSV_EXT = /\.csv$/i;
 const MARKDOWN_EXT = /\.(md|markdown)$/i;
 const TEXT_EXT = /\.txt$/i;
 const PPT_EXT = /\.(pptx|ppt)$/i;
+const CODE_EXT =
+  /\.(py|pyw|ts|tsx|js|jsx|mjs|cjs|json|css|scss|less|go|rs|java|kt|kts|swift|rb|php|c|cc|cpp|cxx|h|hpp|cs|sql|sh|bash|zsh|yml|yaml|toml|xml|graphql|gql|vue|svelte|r|lua|pl|ex|exs|erl|hs|scala|dart|proto|tf|ini|cfg|conf|env|dockerignore|gitignore|makefile|mk|cmake|gradle|ipynb)$/i;
+
+const CODE_LANG_BY_EXT: Record<string, string> = {
+  py: "python",
+  pyw: "python",
+  ts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  jsx: "jsx",
+  mjs: "javascript",
+  cjs: "javascript",
+  json: "json",
+  css: "css",
+  scss: "scss",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  kt: "kotlin",
+  rb: "ruby",
+  php: "php",
+  c: "c",
+  cpp: "cpp",
+  h: "c",
+  cs: "csharp",
+  sql: "sql",
+  sh: "bash",
+  bash: "bash",
+  yml: "yaml",
+  yaml: "yaml",
+  toml: "toml",
+  xml: "xml",
+  vue: "javascript",
+  r: "r",
+};
 
 function artifactFileName(
   artifact: Pick<RunArtifact, "path" | "title">,
@@ -150,13 +197,66 @@ export function isPlainTextArtifact(
   return contentType === "text/plain" || contentType.startsWith("text/plain");
 }
 
+export function fileExtension(
+  artifact: Pick<RunArtifact, "path" | "title">,
+): string {
+  const name = (
+    (artifact.path || "").replace(/\\/g, "/").split("/").pop() ||
+    artifact.title ||
+    ""
+  ).toLowerCase();
+  const match = /\.([a-z0-9]+)$/i.exec(name);
+  return match ? match[1].toLowerCase() : "";
+}
+
+export function isCodeArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (isMarkdownArtifact(artifact) || isHtmlArtifact(artifact) || isPlainTextArtifact(artifact)) {
+    return false;
+  }
+  const path = (artifact.path || "").replace(/\\/g, "/");
+  const name = artifactFileName(artifact);
+  if (CODE_EXT.test(path) || CODE_EXT.test(name)) return true;
+  const contentType = String(artifact.metadata?.content_type ?? "").toLowerCase();
+  return (
+    contentType.includes("javascript") ||
+    contentType.includes("typescript") ||
+    contentType.includes("json") ||
+    contentType.includes("x-python") ||
+    contentType.includes("x-sh")
+  );
+}
+
+export function isCodePath(path: string): boolean {
+  return CODE_EXT.test(path.replace(/\\/g, "/"));
+}
+
+export function isMarkdownPath(path: string): boolean {
+  return MARKDOWN_EXT.test(path.replace(/\\/g, "/"));
+}
+
+export function codeLanguageForPath(path: string): string {
+  const name = path.replace(/\\/g, "/").split("/").pop() || path;
+  const ext = fileExtension({ path: name, title: name });
+  return CODE_LANG_BY_EXT[ext] || ext || "text";
+}
+
+export function codeLanguageForArtifact(
+  artifact: Pick<RunArtifact, "path" | "title">,
+): string {
+  return codeLanguageForPath(artifact.path || artifact.title || "");
+}
+
 function officeSiblingPreviewKind(
   artifact: Pick<RunArtifact, "metadata">,
 ): "html" | "pdf" | "none" {
   const previewUrl = artifact.metadata?.preview_url;
-  if (typeof previewUrl !== "string" || !previewUrl) return "none";
-  const previewType = String(artifact.metadata?.preview_content_type ?? "").toLowerCase();
   const previewPath = String(artifact.metadata?.preview_path ?? "").toLowerCase();
+  const hasSibling =
+    (typeof previewUrl === "string" && previewUrl.length > 0) || previewPath.length > 0;
+  if (!hasSibling) return "none";
+  const previewType = String(artifact.metadata?.preview_content_type ?? "").toLowerCase();
   if (
     artifact.metadata?.render_mode === "iframe" ||
     previewType.includes("html") ||
@@ -169,22 +269,26 @@ function officeSiblingPreviewKind(
 }
 
 /** How an artifact renders inside the document viewer. */
-export type PreviewKind = "pdf" | "image" | "html" | "sheet" | "markdown" | "none";
+export type PreviewKind = "pdf" | "image" | "html" | "sheet" | "markdown" | "code" | "none";
 
 type PreviewArtifact = Pick<RunArtifact, "kind" | "metadata" | "path" | "title">;
 
 /**
  * Single source of truth for viewer rendering, card thumbnails, and previewability.
  * Spreadsheets parse in-browser. Office files otherwise use an HTML or PDF sibling
- * when `preview_url` is set; without one they fall back to download-only.
+ * fetched same-origin (never a GCS URL). Markdown renders. Source files use a code view.
  */
 export function previewKind(artifact: PreviewArtifact): PreviewKind {
   if (artifact.kind === "image" || artifact.kind === "screenshot") return "image";
   if (isPdfArtifact(artifact)) return "pdf";
   if (isSpreadsheetArtifact(artifact)) return "sheet";
   if (isMarkdownArtifact(artifact) || isPlainTextArtifact(artifact)) return "markdown";
+  if (isPresentationArtifact(artifact) || isOfficeArtifact(artifact)) {
+    const sibling = officeSiblingPreviewKind(artifact);
+    if (sibling !== "none") return sibling;
+  }
   if (isHtmlArtifact(artifact)) return "html";
-  if (isOfficeArtifact(artifact)) return officeSiblingPreviewKind(artifact);
+  if (isCodeArtifact(artifact)) return "code";
   return "none";
 }
 
@@ -193,12 +297,13 @@ export function canInlinePreview(artifact: PreviewArtifact): boolean {
 }
 
 export function getPreviewUrl(artifact: RunArtifact): string | null {
-  // Office: use the HTML/PDF sibling for preview when present
   if (isOfficeArtifact(artifact) && !isPdfArtifact(artifact) && !isSpreadsheetArtifact(artifact)) {
     const previewUrl = artifact.metadata?.preview_url;
-    if (typeof previewUrl === "string" && previewUrl) return previewUrl;
+    if (typeof previewUrl === "string" && previewUrl) {
+      return durableInlineUrl(previewUrl);
+    }
   }
-  return artifact.url || null;
+  return durableInlineUrl(artifact.url);
 }
 
 function dataURItoBlob(dataURI: string): Blob {
@@ -233,19 +338,80 @@ async function fetchWithTimeout(
   }
 }
 
-async function fetchArtifactContentBlobUrl(artifactId: string): Promise<string | null> {
+async function fetchArtifactContentBlobUrl(
+  artifact: RunArtifact,
+  options?: { sibling?: "preview" },
+): Promise<string | null> {
+  const params = new URLSearchParams();
+  if (artifact.session_id) params.set("session_id", artifact.session_id);
+  if (artifact.run_id) params.set("run_id", artifact.run_id);
+  if (options?.sibling) params.set("sibling", options.sibling);
+  const query = params.toString();
   const res = await fetchWithTimeout(
-    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+    `/api/v1/artifacts/${encodeURIComponent(artifact.artifact_id)}/content${query ? `?${query}` : ""}`,
     CONTENT_TIMEOUT_MS,
   );
   if (!res?.ok) return null;
   try {
-    const blob = await res.blob();
-    if (!blob.size) return null;
+    const raw = await res.blob();
+    if (!raw.size) return null;
+    const mime =
+      options?.sibling === "preview"
+        ? siblingPreviewMime(artifact, raw.type)
+        : blobMimeForArtifact(artifact, raw.type);
+    const blob = mime && raw.type !== mime ? new Blob([raw], { type: mime }) : raw;
     return URL.createObjectURL(blob);
   } catch {
     return null;
   }
+}
+
+function siblingPreviewMime(
+  artifact: Pick<RunArtifact, "metadata">,
+  fallback: string,
+): string {
+  const declared = String(artifact.metadata?.preview_content_type ?? "").split(";")[0].trim();
+  if (declared) return declared;
+  const path = String(artifact.metadata?.preview_path ?? "").toLowerCase();
+  if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html;charset=utf-8";
+  if (path.endsWith(".pdf")) return "application/pdf";
+  if (fallback && fallback !== "application/octet-stream") return fallback;
+  return "text/html;charset=utf-8";
+}
+
+function hasOfficePreviewSibling(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+): boolean {
+  if (isSpreadsheetArtifact(artifact) || isPdfArtifact(artifact)) return false;
+  if (!isOfficeArtifact(artifact) && !isPresentationArtifact(artifact)) return false;
+  const previewUrl = artifact.metadata?.preview_url;
+  const previewPath = artifact.metadata?.preview_path;
+  return (
+    (typeof previewUrl === "string" && previewUrl.length > 0) ||
+    (typeof previewPath === "string" && previewPath.length > 0)
+  );
+}
+
+function blobMimeForArtifact(
+  artifact: Pick<RunArtifact, "kind" | "metadata" | "path" | "title">,
+  fallback: string,
+): string {
+  const declared = String(artifact.metadata?.content_type ?? "").split(";")[0].trim();
+  if (declared) return declared;
+  if (isPdfArtifact(artifact)) return "application/pdf";
+  if (isCsvArtifact(artifact)) return "text/csv";
+  if (isSpreadsheetArtifact(artifact)) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (isPresentationArtifact(artifact)) {
+    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  }
+  if (isMarkdownArtifact(artifact)) return "text/markdown;charset=utf-8";
+  if (isPlainTextArtifact(artifact) || isCodeArtifact(artifact)) {
+    return "text/plain;charset=utf-8";
+  }
+  if (fallback && fallback !== "application/octet-stream") return fallback;
+  return fallback || "application/octet-stream";
 }
 
 function isGcsUrl(url: string | null | undefined): boolean {
@@ -255,9 +421,13 @@ function isGcsUrl(url: string | null | undefined): boolean {
 /**
  * Ask the backend for a fresh signed / data URI URL for an artifact.
  */
-export async function fetchFreshArtifactUrl(artifactId: string): Promise<string | null> {
+export async function fetchFreshArtifactUrl(artifactId: string, artifact?: RunArtifact): Promise<string | null> {
+  const params = new URLSearchParams();
+  if (artifact?.session_id) params.set("session_id", artifact.session_id);
+  if (artifact?.run_id) params.set("run_id", artifact.run_id);
+  const query = params.toString();
   const res = await fetchWithTimeout(
-    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download${query ? `?${query}` : ""}`,
     DOWNLOAD_TIMEOUT_MS,
   );
   if (!res?.ok) return null;
@@ -272,22 +442,62 @@ export async function fetchFreshArtifactUrl(artifactId: string): Promise<string 
 async function downloadFromWorkspaceSandbox(
   sessionId: string,
   path: string,
+  runId?: string | null,
 ): Promise<string | null> {
-  const relative = path.includes("/Workspaces/")
+  let relative = path.includes("/Workspaces/")
     ? path.split("/Workspaces/").pop() || path
     : path.replace(/^\/home\/user\/CoComputer\/Workspaces\/?/, "");
+  relative = relative.replace(/^\/+/, "");
+  // Drop a leading sessionId[/runId] prefix so the backend joins onto the
+  // run workspace instead of nesting those ids a second time.
+  const sessionPrefix = `${sessionId}/`;
+  if (relative.startsWith(sessionPrefix)) {
+    relative = relative.slice(sessionPrefix.length);
+  }
+  if (runId && relative.startsWith(`${runId}/`)) {
+    relative = relative.slice(runId.length + 1);
+  }
 
+  const params = new URLSearchParams({ relative_path: relative });
+  if (runId) params.set("run_id", runId);
   const res = await fetchWithTimeout(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/download?relative_path=${encodeURIComponent(relative)}`,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/download?${params.toString()}`,
     SANDBOX_TIMEOUT_MS,
   );
   if (!res?.ok) return null;
   try {
-    const blob = await res.blob();
+    const raw = await res.blob();
+    if (!raw.size) return null;
+    const mime = mimeFromFilename(relative, raw.type);
+    const blob = mime && raw.type !== mime ? new Blob([raw], { type: mime }) : raw;
     return URL.createObjectURL(blob);
   } catch {
     return null;
   }
+}
+
+function mimeFromFilename(path: string, fallback: string): string {
+  const name = path.replace(/\\/g, "/").split("/").pop() || "";
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  const map: Record<string, string> = {
+    html: "text/html;charset=utf-8",
+    htm: "text/html;charset=utf-8",
+    pdf: "application/pdf",
+    md: "text/markdown;charset=utf-8",
+    markdown: "text/markdown;charset=utf-8",
+    txt: "text/plain;charset=utf-8",
+    csv: "text/csv",
+    json: "application/json",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  };
+  if (map[ext]) return map[ext];
+  if (fallback && fallback !== "application/octet-stream") return fallback;
+  return fallback || "application/octet-stream";
 }
 
 function toBlobUrlIfDataUri(url: string): string {
@@ -333,9 +543,15 @@ export function durableInlineUrl(url: string | null | undefined): string | null 
 
 function usableInlineSrc(url: string | null | undefined): string | null {
   if (!url) return null;
+  if (isGcsUrl(url)) return null;
   if (url.startsWith("data:")) return toBlobUrlIfDataUri(url);
   if (url.startsWith("blob:") || url.startsWith("http")) return url;
   return null;
+}
+
+/** Same-origin, blob, or data URLs that can be used in an iframe/object/img. */
+export function usablePreviewSrc(url: string | null | undefined): string | null {
+  return usableInlineSrc(url);
 }
 
 /**
@@ -348,39 +564,39 @@ export async function resolveArtifactUrl(
   forPreviewOrOptions: boolean | ResolveArtifactOptions = false,
 ): Promise<string | null> {
   const { forPreview, allowSandbox } = normalizeResolveOptions(forPreviewOrOptions);
-  // Permanent non-GCS URLs (Drive, http(s) CDN, etc.)
+
+  if (forPreview && hasOfficePreviewSibling(artifact)) {
+    const sibling = await fetchArtifactContentBlobUrl(artifact, { sibling: "preview" });
+    if (sibling) return sibling;
+    const previewPath = String(artifact.metadata?.preview_path || "").trim();
+    if (allowSandbox && previewPath && artifact.session_id) {
+      const sandboxPreview = await downloadFromWorkspaceSandbox(
+        artifact.session_id,
+        previewPath,
+        artifact.run_id,
+      );
+      if (sandboxPreview) return sandboxPreview;
+    }
+  }
+
   if (
     artifact.url &&
-    !artifact.url.includes("storage.googleapis.com") &&
+    !isGcsUrl(artifact.url) &&
     !artifact.url.startsWith("data:")
   ) {
-    if (forPreview) {
-      const preview = getPreviewUrl(artifact);
-      if (preview && preview !== artifact.url) {
-        const src = usableInlineSrc(preview);
-        if (src) return src;
-      }
-    }
-    return artifact.url;
+    const src = usableInlineSrc(artifact.url);
+    if (src && !forPreview) return src;
+    if (src && forPreview && !hasOfficePreviewSibling(artifact)) return src;
   }
 
   if (artifact.url?.startsWith("data:")) {
     return toBlobUrlIfDataUri(artifact.url);
   }
 
-  // Office artifacts: use the HTML/PDF preview sibling when available
-  if (forPreview) {
-    const officePreview = getPreviewUrl(artifact);
-    if (officePreview && officePreview !== artifact.url) {
-      const src = usableInlineSrc(officePreview);
-      if (src) return src;
-    }
-  }
-
-  const contentUrl = await fetchArtifactContentBlobUrl(artifact.artifact_id);
+  const contentUrl = await fetchArtifactContentBlobUrl(artifact);
   if (contentUrl) return contentUrl;
 
-  const fresh = await fetchFreshArtifactUrl(artifact.artifact_id);
+  const fresh = await fetchFreshArtifactUrl(artifact.artifact_id, artifact);
   if (fresh && !isGcsUrl(fresh)) {
     return toBlobUrlIfDataUri(fresh);
   }
@@ -389,11 +605,39 @@ export async function resolveArtifactUrl(
     const sandboxUrl = await downloadFromWorkspaceSandbox(
       artifact.session_id,
       artifact.path,
+      artifact.run_id,
     );
     if (sandboxUrl) return sandboxUrl;
   }
 
-  return artifact.url || null;
+  // A GCS URL cannot be fetched from the browser (CORS) or shown in an
+  // <object>/<iframe>. Returning it made the preview look like a generic
+  // load failure. Prefer nothing so the UI can show a download action.
+  return usableInlineSrc(artifact.url);
+}
+
+export function downloadFilename(artifact: Pick<RunArtifact, "title" | "path" | "artifact_id">): string {
+  const fromPath = (artifact.path || "").replace(/\\/g, "/").split("/").pop();
+  if (fromPath && fromPath.includes(".")) return fromPath;
+  const title = (artifact.title || "").trim();
+  if (title && /\.[A-Za-z0-9]+$/.test(title)) return title;
+  return title || `artifact-${artifact.artifact_id.slice(0, 8)}`;
+}
+
+export function triggerBlobDownload(url: string, filename: string): void {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+export function downloadTextFile(filename: string, content: string, mime = "text/plain;charset=utf-8"): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  triggerBlobDownload(url, filename);
+  URL.revokeObjectURL(url);
 }
 
 /**
@@ -403,36 +647,25 @@ export async function downloadArtifactFile(
   artifact: RunArtifact,
   options?: ResolveArtifactOptions,
 ): Promise<boolean> {
-  const url = await resolveArtifactUrl(artifact, options);
+  const url = await resolveArtifactUrl(artifact, {
+    forPreview: false,
+    allowSandbox: options?.allowSandbox ?? true,
+  });
   if (!url) return false;
 
-  const filename =
-    artifact.title ||
-    artifact.path?.split("/").pop() ||
-    `artifact-${artifact.artifact_id.slice(0, 8)}`;
+  const filename = downloadFilename(artifact);
 
   if (url.startsWith("blob:") || url.startsWith("data:")) {
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    triggerBlobDownload(url, filename);
     return true;
   }
 
-  // Fetch through our API again and force a blob download when possible
   try {
     const res = await fetch(url);
     if (res.ok) {
       const blob = await res.blob();
       const blobUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = blobUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      triggerBlobDownload(blobUrl, filename);
       URL.revokeObjectURL(blobUrl);
       return true;
     }

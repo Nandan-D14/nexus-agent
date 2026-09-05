@@ -17,6 +17,7 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from nexus.config import settings
 from nexus.tracing import (
     monotonic_ms,
     safe_origin,
@@ -176,12 +177,28 @@ class McpRemoteClient:
         headers: dict[str, str] | None = None,
         timeout_seconds: float = 30.0,
         read_timeout_seconds: float = 120.0,
+        connect_timeout_seconds: float | None = None,
     ) -> None:
         self.url = url
         self.bearer_token = bearer_token
         self.headers = dict(headers or {})
         self.timeout_seconds = timeout_seconds
         self.read_timeout_seconds = read_timeout_seconds
+        # A server that is simply down should not spend the connect budget of a
+        # server that is merely slow: the planner runs one tool per step, so a
+        # dead connector otherwise eats a large slice of the turn.
+        self.connect_timeout_seconds = (
+            float(settings.mcp_connect_timeout_seconds)
+            if connect_timeout_seconds is None
+            else float(connect_timeout_seconds)
+        )
+
+    def _timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            self.timeout_seconds,
+            connect=min(self.connect_timeout_seconds, self.timeout_seconds),
+            read=self.read_timeout_seconds,
+        )
 
     def _headers(self) -> dict[str, str]:
         headers = dict(self.headers)
@@ -225,7 +242,7 @@ class McpRemoteClient:
         try:
             async with httpx.AsyncClient(
                 headers=self._headers(),
-                timeout=httpx.Timeout(self.timeout_seconds, read=self.read_timeout_seconds),
+                timeout=self._timeout(),
                 follow_redirects=True,
                 event_hooks=self._event_hooks(operation="discover"),
             ) as http_client:
@@ -282,7 +299,7 @@ class McpRemoteClient:
         try:
             async with httpx.AsyncClient(
                 headers=self._headers(),
-                timeout=httpx.Timeout(self.timeout_seconds, read=self.read_timeout_seconds),
+                timeout=self._timeout(),
                 follow_redirects=True,
                 event_hooks=self._event_hooks(operation="call_tool", tool_name=tool_name),
             ) as http_client:
@@ -332,6 +349,42 @@ def pretty_json(value: Any, limit: int = 2000) -> str:
     return text[:limit]
 
 
+_MAX_SCHEMA_DESCRIPTION_CHARS = 900
+
+
+def _describe_mcp_arguments(description: str, input_schema: Any) -> str:
+    """Append the remote tool's argument contract to its description.
+
+    Every MCP tool reaches ADK with the same opaque ``arguments: dict``
+    signature, so the schema is the only thing that tells the model which keys
+    to send. Rendered compactly to stay affordable across many connectors.
+    """
+    if not isinstance(input_schema, dict):
+        return description
+    properties = input_schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return description
+
+    required = input_schema.get("required")
+    required_set = {str(item) for item in required} if isinstance(required, list) else set()
+
+    fields: list[str] = []
+    for key, spec in properties.items():
+        spec = spec if isinstance(spec, dict) else {}
+        field_type = str(spec.get("type") or "any")
+        detail = f"{key} ({field_type}"
+        detail += ", required)" if str(key) in required_set else ")"
+        summary = str(spec.get("description") or "").strip()
+        if summary:
+            detail += f": {summary}"
+        fields.append(detail)
+
+    rendered = "; ".join(fields)
+    if len(rendered) > _MAX_SCHEMA_DESCRIPTION_CHARS:
+        rendered = rendered[: _MAX_SCHEMA_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return f"{description}\n\nArguments (pass as the `arguments` object): {rendered}"
+
+
 def build_mcp_adk_tools(
     connections: list["StoredIntegrationConnection"],
 ) -> list[Callable[..., Awaitable[dict[str, Any]]]]:
@@ -371,6 +424,10 @@ def build_mcp_adk_tools(
                 suffix += 1
             used_names.add(public_name)
             description = str(raw_tool.get("description") or "Call a remote MCP tool.")
+            # ADK derives the schema from the Python signature, which is only
+            # `arguments: dict`. Without the remote schema the model has to guess
+            # field names, so fold it into the description where it can see it.
+            description = _describe_mcp_arguments(description, raw_tool.get("input_schema"))
 
             async def _call_mcp_tool(
                 arguments: dict[str, Any] | None = None,

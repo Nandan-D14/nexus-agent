@@ -89,6 +89,7 @@ import {
   isInflightRunStatus,
   reduceWorkingLogMessage,
   permissionDecisionsFromRunSteps,
+  permissionItemsFromRunSteps,
   extractTodoItemsFromHistory,
   mergeChatItemsByTimestamp,
   upsertTemplateDraftItem,
@@ -329,6 +330,16 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }
   }, [isLoading, toast]);
 
+  const handleRefreshToken = useCallback(async () => {
+    if (!sessionData?.session_id) return null;
+    const fresh = await refreshTicket(sessionData.session_id);
+    if (fresh) {
+      setSessionData((prev) => (prev ? { ...prev, ws_ticket: fresh } : prev));
+      return fresh;
+    }
+    return null;
+  }, [refreshTicket, sessionData?.session_id]);
+
   const {
     sendBinary,
     sendJson,
@@ -341,6 +352,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   } = useWebSocket(shouldConnectWs ? wsUrl : null, {
     ticket: sessionData?.ws_ticket ?? null,
     durableTaskId,
+    onRefreshToken: handleRefreshToken,
   });
   useEffect(() => {
     const id = "connection-lost";
@@ -462,48 +474,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
     const ts = Date.now();
-    // #region agent log
-    if (
-      msg.type === "run_queued" ||
-      msg.type === "run_busy" ||
-      msg.type === "worker_claimed" ||
-      msg.type === "worker_finished" ||
-      msg.type === "worker_failed" ||
-      msg.type === "enqueue_rejected" ||
-      msg.type === "error" ||
-      msg.type === "verification_result" ||
-      msg.type === "permission_request" ||
-      msg.type === "approval_resolved" ||
-      msg.type === "run_status" ||
-      msg.type === "agent_complete"
-    ) {
-      fetch("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "2a93a8",
-        },
-        body: JSON.stringify({
-          sessionId: "2a93a8",
-          hypothesisId: "E",
-          location: "session-workspace.tsx:handleLastMessage",
-          message: "ws frame",
-          data: {
-            type: msg.type,
-            code: (msg as { code?: string }).code,
-            error_code: (msg as { error_code?: string }).error_code,
-            verified: (msg as { verified?: boolean }).verified,
-            status: (msg as { status?: string }).status,
-            run_status: (msg as { run?: { status?: string } }).run?.status,
-            error: (msg as { error?: string }).error,
-            message: (msg as { message?: string }).message,
-            phase,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
+
     // "pong" is a keepalive the client itself triggers, so it must not count as
     // agent progress — otherwise the stall watchdog would never fire.
     if (msg.type !== "pong") {
@@ -903,6 +874,23 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         applyWorkingLogChat();
         break;
 
+      case "elicitation_request":
+        setPhase("idle");
+        setAgentStatus(
+          (msg as { mode?: string }).mode === "suggestion"
+            ? "Suggestions ready for your review..."
+            : "Waiting for your choice...",
+        );
+        applyWorkingLogChat();
+        break;
+
+      case "elicitation_resolved":
+        applyWorkingLogChat();
+        if (!(msg as { answered?: boolean }).answered) {
+          setAgentStatus("");
+        }
+        break;
+
       case "user_question":
         setPhase("idle");
         setAgentStatus("Waiting for your answer...");
@@ -1222,23 +1210,12 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       if (idleMs < AGENT_STALL_TIMEOUT_MS) {
         return;
       }
-      // #region agent log
-      fetch("http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "2a93a8",
-        },
-        body: JSON.stringify({
-          sessionId: "2a93a8",
-          hypothesisId: "E",
-          location: "session-workspace.tsx:stallWatchdog",
-          message: "stall watchdog fired",
-          data: { idleMs, phase },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+
+      // Unlocking locally is not enough: the durable run is still non-terminal
+      // server-side, so the next prompt would come straight back as run_busy.
+      // Asking the server to stop settles it, which is what actually frees the
+      // session.
+      sendJson({ type: "stop_agent" });
       markTurnInFlight(false);
       setPhase("done");
       setAgentStatus("");
@@ -1249,7 +1226,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }, AGENT_STALL_POLL_MS);
 
     return () => clearInterval(interval);
-  }, [phase, viewMode]);
+  }, [phase, viewMode, sendJson, markTurnInFlight]);
 
   useEffect(() => {
     if (isNewSession || viewMode !== "live" || !streamUrl) {
@@ -1509,6 +1486,39 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         seedDurableCursor(durableLastSeq);
       } else {
         hydratedTodos = extractTodoItemsFromHistory(messages);
+      }
+
+      // Fallback: run-step permission rows survive even when durable events are
+      // truncated, so approvals still appear in both the card timeline and the
+      // activity log (via the synthetic approval events in TurnBlock).
+      try {
+        const fallbackPerms = permissionItemsFromRunSteps(steps || []);
+        const hasCard = (taskId: string) =>
+          durableChatItems.some(
+            (item) =>
+              item.kind === "permission" &&
+              (item.task_id === taskId || item.approval_id === taskId),
+          );
+        for (const perm of fallbackPerms) {
+          if (hasCard(perm.taskId)) continue;
+          durableChatItems = [
+            ...durableChatItems,
+            {
+              kind: "permission",
+              task_id: perm.taskId,
+              approval_id: perm.taskId,
+              description: perm.description,
+              estimated_seconds: perm.estimatedSeconds,
+              agent: perm.agent,
+              resolved: Boolean(perm.decision),
+              decision: perm.decision,
+              decided_at: perm.decidedAt,
+              ts: perm.ts,
+            },
+          ];
+        }
+      } catch {
+        // Fallback is best-effort; durable events remain source of truth.
       }
 
       const nextChatItems = mergeChatItemsByTimestamp(
@@ -2346,6 +2356,24 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     [sendJson],
   );
 
+  const handleElicitationRespond = useCallback(
+    (elicitationId: string, answer: string) => {
+      setChatItems((prev) =>
+        prev.map((item) =>
+          item.kind === "elicitation" &&
+          (item.elicitation_id === elicitationId || item.question_id === elicitationId)
+            ? { ...item, answered: true, timedOut: false, answer }
+            : item,
+        ),
+      );
+      setAgentStatus("");
+      markTurnInFlight(true);
+      setPhase("acting");
+      sendJson({ type: "elicitation_response", elicitation_id: elicitationId, answer });
+    },
+    [sendJson],
+  );
+
   const handleStopAgent = useCallback(() => {
     sendJson({ type: "stop_agent" });
     // Do NOT claim the run is done here: a durable run lives on a worker and only
@@ -2674,6 +2702,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                       statusLabel={agentStatus}
                       onPermissionRespond={handlePermissionRespond}
                       onQuestionRespond={handleQuestionRespond}
+                      onElicitationRespond={handleElicitationRespond}
                       onTemplateDraftChange={handleTemplateDraftChange}
                       onAppPreviewOpen={handleOpenAppPreview}
                       footer={

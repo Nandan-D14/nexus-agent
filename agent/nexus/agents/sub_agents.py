@@ -39,6 +39,7 @@ from nexus.tools.integrations import (
     search_drive,
     read_drive_file,
     create_drive_doc,
+    create_drive_sheet,
     upload_drive_file,
     gmail_search,
     gmail_read,
@@ -64,6 +65,7 @@ from nexus.tools.workspace import (
     list_workspace_files,
 )
 from nexus.tools.docs import (
+    extract_document_text,
     extract_pdf_text,
     generate_docx_report,
     generate_excel_report,
@@ -79,6 +81,7 @@ GOOGLE_WORKSPACE_TOOLS = [
     search_drive,
     read_drive_file,
     create_drive_doc,
+    create_drive_sheet,
     upload_drive_file,
     gmail_search,
     gmail_read,
@@ -267,7 +270,7 @@ Rules:
 - Use background=True for processes that open a window and then continue with terminal evidence first.
 - Chain dependent commands with && when helpful.
 - Keep output concise and relevant instead of dumping huge logs.
-- Never run destructive commands.
+- Sandbox shell commands never need approval. Never take irreversible external actions without asking first.
 
 You should solve as much as possible from the terminal before asking for vision."""
 
@@ -378,6 +381,7 @@ Do:
 - file creation and edits in the workspace, data exports
 - reading uploaded PDFs with extract_pdf_text (never cat PDFs or base64 dumps)
 - generating documents with generate_pdf_report, generate_excel_report, generate_docx_report, or generate_pptx_report, and promoting files with save_as_artifact
+- For slides, call generate_pptx_report with layouted slides (title, section, content, split, stats, quote, closing). Do not write python-pptx or LibreOffice macros.
 - publishing a live app preview with publish_app_preview after a Vite/Next/Flask (or similar) server is bound to 0.0.0.0 in the current workspace. Vite needs server.allowedHosts: true or the Preview iframe is blank.
 
 Workflow:
@@ -391,7 +395,7 @@ Workflow:
    Use status=success only when the requested state is verified. Put unfinished steps in remaining_work. On timeout or tool failure still return this JSON (status=error, error_code set) — never prose.
 
 Rules:
-- Never run destructive commands.
+- Sandbox shell commands never need approval. Never take irreversible external actions without asking first.
 - On a tool error, read the message and suggested_alternatives, fix your arguments, retry.
   Return a clear failure summary only after real attempts.
 - If a tool says the sandbox is restarting, or returns SANDBOX_RECONNECT_FAILED, retry the same command. Do not return status=blocked with invented codes such as SANDBOX_NOT_RUNNING. Do not tell the planner to start a new session — recovery stays in this session.
@@ -468,6 +472,7 @@ def create_terminal_worker(
             read_workspace_file,
             list_workspace_files,
             extract_pdf_text,
+            extract_document_text,
             generate_pdf_report,
             generate_excel_report,
             generate_docx_report,
@@ -624,6 +629,7 @@ def _create_code_agent(
             run_command,
             take_screenshot,
             extract_pdf_text,
+            extract_document_text,
             generate_pdf_report,
             publish_html_artifact,
             publish_app_preview,

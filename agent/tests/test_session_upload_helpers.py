@@ -33,6 +33,14 @@ class SafeWorkspacePathTests(TestCase):
         )
         self.assertEqual(result, "outputs/report.pdf")
 
+    def test_safe_workspace_relative_path_strips_session_run_relative_prefix(self) -> None:
+        result = files._safe_workspace_relative_path(
+            "session-123/964068555373/outputs/report.pdf",
+            session_id="session-123",
+            run_id="964068555373",
+        )
+        self.assertEqual(result, "outputs/report.pdf")
+
     def test_safe_workspace_relative_path_strips_absolute_session_prefix(self) -> None:
         result = files._safe_workspace_relative_path(
             "/home/user/CoComputer/Workspaces/session-123/outputs/report.pdf",

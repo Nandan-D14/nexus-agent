@@ -209,6 +209,8 @@ class ApprovalStore(BoundProductionStore):
                 "approved": approved,
                 "status": updates["status"],
                 "action_hash": metadata.get("action_hash"),
+                "tool": metadata.get("tool"),
+                "decided_at": int(now.timestamp() * 1000),
             },
             run_id,
             True,

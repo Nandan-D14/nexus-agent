@@ -29,7 +29,17 @@ const cls = (base: string, on?: boolean) => base + (on ? " " + styles.on : "");
 
 function CheckIcon({ on }: { on?: boolean }) {
   return (
-    <svg className={cls(styles.todoIcon, on)} viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+    <svg
+      className={
+        cls(styles.todoIcon, on) +
+        " absolute inset-0 h-4 w-4 transition-opacity duration-200 " +
+        (on ? "text-emerald-500 opacity-100" : "text-text-tertiary opacity-0")
+      }
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden
+    >
       <path
         d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
         fill="none"
@@ -45,7 +55,11 @@ function CheckIcon({ on }: { on?: boolean }) {
 function ArrowIcon({ on }: { on?: boolean }) {
   return (
     <svg
-      className={cls(styles.todoIcon + " " + styles.strong, on)}
+      className={
+        cls(styles.todoIcon + " " + styles.strong, on) +
+        " absolute inset-0 h-4 w-4 text-blue-500 transition-opacity duration-200 " +
+        (on ? "opacity-100" : "opacity-0")
+      }
       viewBox="0 0 24 24"
       width="16"
       height="16"
@@ -65,7 +79,17 @@ function ArrowIcon({ on }: { on?: boolean }) {
 
 function DashedIcon({ on }: { on?: boolean }) {
   return (
-    <svg className={cls(styles.todoIcon, on)} viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+    <svg
+      className={
+        cls(styles.todoIcon, on) +
+        " absolute inset-0 h-4 w-4 text-text-tertiary transition-opacity duration-200 " +
+        (on ? "opacity-100" : "opacity-0")
+      }
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden
+    >
       <circle
         cx="12"
         cy="12"
@@ -159,15 +183,15 @@ export const TodoList = memo(function TodoList({
   const pct = Math.round((completed / total) * 100);
 
   return (
-    <div className={styles.todo}>
+    <div className={styles.todo + " mb-3 w-full text-text-primary select-none"}>
       <button
         type="button"
-        className={styles.todoHead}
+        className={styles.todoHead + " flex w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1.5 text-left"}
         aria-expanded={!collapsed}
         aria-label="Toggle to-dos"
         onClick={() => setCollapsed((c) => !c)}
       >
-        <span className={styles.todoHeadIcon}>
+        <span className={styles.todoHeadIcon + " relative inline-flex h-5 w-5 shrink-0 items-center justify-center"}>
           {allDone ? (
             <FilledCheckIcon />
           ) : running ? (
@@ -218,15 +242,15 @@ export const TodoList = memo(function TodoList({
             />
           </svg>
         </span>
-        <span className={styles.todoTitle}>To-dos</span>
-        <span className={styles.todoCount}>
+        <span className={styles.todoTitle + " text-sm font-medium text-text-primary"}>To-dos</span>
+        <span className={styles.todoCount + " text-text-tertiary tabular-nums"}>
           <RollingCount value={`${completed}/${total}`} />
         </span>
       </button>
 
-      <div className={styles.todoCollapsible + (collapsed ? " " + styles.isCollapsed : "")}>
-        <div className={styles.todoInner}>
-          <ul className={styles.todoList}>
+      <div className={styles.todoCollapsible + (collapsed ? " " + styles.isCollapsed : "") + " grid"}>
+        <div className={styles.todoInner + " min-h-0 overflow-hidden"}>
+          <ul className={styles.todoList + " m-0 flex list-none flex-col gap-0.5 p-0 pt-1 pl-1"}>
             {items.map((item, i) => {
               const done = item.status === "done";
               const active = item.status === "in_progress";
@@ -235,20 +259,32 @@ export const TodoList = memo(function TodoList({
                   key={`${item.title}-${i}`}
                   className={
                     styles.todoItem +
-                    (done ? " " + styles.done : active ? " " + styles.active : "")
+                    (done ? " " + styles.done : active ? " " + styles.active : "") +
+                    " flex items-start gap-2.5 rounded-md px-2 py-1.5"
                   }
                   style={{ ["--i" as string]: i } as CSSProperties}
                 >
-                  <span className={styles.todoIconWrap}>
+                  <span className={styles.todoIconWrap + " relative mt-0.5 h-4 w-4 shrink-0"}>
                     <DashedIcon on={!done && !active} />
                     <ArrowIcon on={active} />
                     <CheckIcon on={done} />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <span className={styles.todoLabel} data-label={item.title}>
+                    <span
+                      className={
+                        styles.todoLabel +
+                        " block min-w-0 flex-1 text-[0.8125rem] leading-[1.35] text-text-secondary " +
+                        (done ? "text-text-tertiary line-through" : active ? "font-medium text-text-primary" : "")
+                      }
+                      data-label={item.title}
+                    >
                       {item.title}
                     </span>
-                    {item.note ? <div className={styles.todoNote}>{item.note}</div> : null}
+                    {item.note ? (
+                      <div className={styles.todoNote + " mt-0.5 text-xs leading-snug text-text-tertiary"}>
+                        {item.note}
+                      </div>
+                    ) : null}
                   </div>
                 </li>
               );

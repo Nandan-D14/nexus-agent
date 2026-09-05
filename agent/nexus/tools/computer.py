@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import logging
 
-from nexus.tools.base import normalized_tool, tool_error, tool_success
+from nexus.tools.base import (
+    normalized_tool,
+    reraise_if_sandbox_dead,
+    tool_error,
+    tool_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,7 @@ def move_mouse(x: int, y: int) -> dict:
             x=x, y=y, action="move_mouse",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("move_mouse failed: %s", e)
         return tool_error(f"Move mouse to ({x}, {y}) failed: {e}")
 
@@ -73,6 +79,7 @@ def left_click(x: int, y: int) -> dict:
             x=x, y=y, action="left_click",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("left_click failed: %s", e)
         return tool_error(f"Left click at ({x}, {y}) failed: {e}")
 
@@ -98,6 +105,7 @@ def right_click(x: int, y: int) -> dict:
             x=x, y=y, action="right_click",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("right_click failed: %s", e)
         return tool_error(f"Right click at ({x}, {y}) failed: {e}")
 
@@ -123,6 +131,7 @@ def double_click(x: int, y: int) -> dict:
             x=x, y=y, action="double_click",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("double_click failed: %s", e)
         return tool_error(f"Double click at ({x}, {y}) failed: {e}")
 
@@ -148,6 +157,7 @@ def triple_click(x: int, y: int) -> dict:
             x=x, y=y, action="triple_click",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("triple_click failed: %s", e)
         return tool_error(f"Triple click at ({x}, {y}) failed: {e}")
 
@@ -175,6 +185,7 @@ def type_text(text: str) -> dict:
             char_count=len(text), action="type_text",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("type_text failed: %s", e)
         return tool_error(f"Type text failed: {e}")
 
@@ -210,6 +221,7 @@ def press_key(key: str) -> dict:
             key=key, action="press_key",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("press_key failed: %s", e)
         return tool_error(f"Press key '{key}' failed: {e}")
 
@@ -235,6 +247,7 @@ def scroll_screen(direction: str, amount: int = 3) -> dict:
             direction=direction, amount=amount, action="scroll_screen",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("scroll_screen failed: %s", e)
         return tool_error(
             f"Scroll {direction} failed: {e}",
@@ -268,5 +281,6 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> dict:
             action="drag",
         )
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("drag failed: %s", e)
         return tool_error(f"Drag from ({from_x},{from_y}) to ({to_x},{to_y}) failed: {e}")

@@ -61,6 +61,32 @@
   }
 }
 
+/* Running-loader shine — opacity/brightness pulse synced to the
+ * agent-progress-loading-text sweep (3.4s) so the ring loader and the
+ * "Working…" text shine together. */
+@keyframes ai-loader-shine {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.agent-loading-shine {
+  animation: ai-loader-shine 3.4s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-loading-shine {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* Agent answer reveal (Beautiful UI Streaming Text polish) */
 @keyframes text-reveal-fade {
   from {

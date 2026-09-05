@@ -10,6 +10,7 @@ import * as XLSX from "xlsx";
 import { Loader2 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
 import { isCsvArtifact, resolveArtifactUrl } from "@/lib/artifact-url";
+import { authenticatedFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
 const ROW_CAP = 2000;
@@ -47,8 +48,11 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
     resolveArtifactUrl(artifact, { forPreview: false })
       .then(async (url) => {
         if (cancelled) return;
-        if (!url || url.includes("storage.googleapis.com")) throw new Error("missing url");
-        const res = await fetch(url);
+        if (!url) throw new Error("missing url");
+        const res =
+          url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("http")
+            ? await fetch(url)
+            : await authenticatedFetch(url);
         if (!res.ok) throw new Error("fetch failed");
         const buffer = await res.arrayBuffer();
         const workbook = XLSX.read(buffer, { type: "array" });

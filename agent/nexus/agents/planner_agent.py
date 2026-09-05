@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _WORKER_DEADLINE_SUMMARY = (
     "A model or storage request timed out. Try a narrower request or split it into steps."
 )
+_MISSING_TOOL_RESULT_MARKER = "missing tool result"
 
 
 def _worker_deadline_result(worker_name: str, detail: str = "") -> dict[str, Any]:
@@ -54,6 +55,22 @@ def _worker_deadline_result(worker_name: str, detail: str = "") -> dict[str, Any
     }
 
 
+def _worker_interrupted_result(worker_name: str, detail: str = "") -> dict[str, Any]:
+    return {
+        "status": "error",
+        "summary": (
+            f"{worker_name} was interrupted before its tool result was recorded."
+        ),
+        "evidence": [detail[:2000]] if detail.strip() else [],
+        "artifacts": [],
+        "remaining_work": [
+            f"Verify workspace state, then retry {worker_name} once."
+        ],
+        "retryable": True,
+        "error_code": "WORKER_TOOL_INTERRUPTED",
+    }
+
+
 def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
     """Require a stable evidence contract from AgentTool workers."""
     payload: Any = result
@@ -61,6 +78,8 @@ def _parse_worker_result(result: Any, worker_name: str) -> dict[str, Any]:
         text = result.strip()
         if is_remote_deadline_error(text):
             return _worker_deadline_result(worker_name, text)
+        if _MISSING_TOOL_RESULT_MARKER in text.casefold():
+            return _worker_interrupted_result(worker_name, text)
         # Try to locate JSON inside fenced code block first
         fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if fenced_match:
@@ -160,7 +179,7 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
 
 1. TOOLS OR NOT.
    - Answer directly, no tools, when: small talk (hi/thanks), definitions, general knowledge you already know, opinions, brainstorming, drafting from pasted text, translation of pasted text, restating or reformatting what the user already gave you, meta questions about your own capabilities.
-   - Use tools when: any current fact (score, price, news, weather, release, status), any date-sensitive claim, any URL the user gave, any file/repo/desktop/connector action, any deliverable file (HTML, PDF, XLSX, DOCX), any request that says "search / look up / find / research / cite / compare / open / run / build / create".
+   - Use tools when: any current fact (score, price, news, weather, release, status), any date-sensitive claim, any URL the user gave, any file/repo/desktop/connector action, any deliverable file (HTML, PDF, XLSX, DOCX, PPTX, Google Sheet), any request that says "search / look up / find / research / cite / compare / open / run / build / create".
    - When unsure between the two, prefer ONE cheap web_search over guessing.
 
 2. EVIDENCE OR CONTEXT.
@@ -176,8 +195,10 @@ You never hand off control. Workers (terminal_worker, desktop_worker) and subage
    - live web app             → write the project under the active workspace (the Files tab is the source of truth). In vite.config set `server: { host: true, allowedHosts: true }`. Start with `npm run dev -- --host 0.0.0.0` (background=True), then publish_app_preview(port, title). Do not tell the user to look at the desktop.
    - PDF                      → terminal_worker with a brief that says "call generate_pdf_report(title=..., markdown_content=..., filename=...)". Include the full markdown body in the brief. Do not draft PDF bytes or base64 inline.
    - XLSX                     → terminal_worker with a brief that says "call generate_excel_report(...)".
+   - Google Sheet             → create_drive_sheet(title, headers, rows) when Drive is connected; otherwise generate_excel_report.
    - DOCX                     → terminal_worker with a brief that says "call generate_docx_report(...)".
-   - PPTX                     → terminal_worker with a brief that says "call generate_pptx_report(title=..., slides=[{title, bullets}], filename=...)".
+   - Google Doc               → create_drive_doc when Drive is connected; otherwise generate_docx_report.
+   - PPTX / slides / PPT      → read_skill("presentation-work") then terminal_worker with generate_pptx_report(title, slides=[{layout, kicker, title, subtitle, bullets, left, right, stats, quote}], filename). Use layouts title/section/content/split/stats/quote/closing. Do not write python-pptx yourself.
    - promote existing file    → terminal_worker with a brief that says "call save_as_artifact(path, title)".
    - code changes / repo work → terminal_worker with a scoped brief (files, commands, expected outcome).
    - GUI / browser action     → desktop_worker with a scoped brief (URL, elements, verification).
@@ -202,8 +223,9 @@ h. terminal_worker(request=...)                      — batched shell, repo wor
 i. desktop_worker(request=...)                       — GUI/browser: clicks, forms, logins, screenshots, Playwright.
 j. invoke_subagent + get_subagent_result / await_subagents — independent parallel background work (research fan-out, bulk drafting).
 k. request_background_task                           — user-visible long-running work needing durable resume.
-l. ask_user                                          — LAST resort. One focused question. Only when a required input is genuinely missing (path, account, irreversible confirmation). Prefer options=[2-5 short choices] when the user is picking an approach; include "Something else" if they might need to type a custom answer. Omit options for values that must be typed (path, id, email). Never re-ask what the current thread already answered.
+l. ask_choice / suggest_options                      — Elicitation and suggestions. When you need the user's preference before you can proceed (not general chat), call `ask_choice` instead of asking in plain text. Only call it when the answer changes what you do next. One question at a time, max 4 options, short labels (2–6 words). Never call it if the answer is already inferable from context — that's lazy, not careful. When 2+ tools/integrations could fulfill a request and none is already active, call `suggest_options` so the user picks — don't silently choose one for them.
 m. propose_workflow_template / update_workflow_template / publish_workflow_template — save this conversation as a reusable workflow. Propose a draft, wait for confirm/edit/dismiss. Never start a new session after proposing.
+n. schedules_create / schedules_list / schedules_pause — standing CoComputer jobs that run later or on a cadence. Prefer these for "every weekday at 9 AM, …" over Google Calendar events.
 
 # Typed action loop and worker briefs
 
@@ -231,7 +253,7 @@ After every result, consume its evidence, artifacts, remaining_work, and retryab
 
 # Connectors
 
-Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file, github_* (including github_clone_repo, github_create_repo, github_push for clone/create/push — never put tokens in run_command), Exa MCP search/fetch (mcp__exa__*), tavily_search, tinyfish_web_agent, Treg MCP (mcp__treg__*) for SEO/SERP/backlinks/enrichment/ads — not for ordinary web search. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop.
+Prefer native connector tools over browser flows when the user has them connected: gmail_*, calendar_*, tasks_*, search_drive / read_drive_file / create_drive_doc / create_drive_sheet, github_* (including github_clone_repo, github_create_repo, github_push for clone/create/push — never put tokens in run_command), Exa MCP search/fetch (mcp__exa__*), tavily_search, tinyfish_web_agent, Treg MCP (mcp__treg__*) for SEO/SERP/backlinks/enrichment/ads — not for ordinary web search. If a connector returns AUTH_REQUIRED, fall back to the suggested alternative — do not clarify-loop. For recurring or delayed agent work ("every Monday at 8 AM, research competitors"), use schedules_create instead of calendar_create.
 
 # Rules
 
@@ -242,7 +264,7 @@ Prefer native connector tools over browser flows when the user has them connecte
 - The worker call budget is enforced per turn. One shell command → run_command. Several dependent commands → ONE terminal_worker brief. Never scan the whole filesystem (find /) or dump env for secrets.
 - Before invoking background work, list existing subagents and reuse recovered records; do not duplicate work after a retry or restart. Use only researcher, coder, or writer subagent types.
 - If subagents were invoked, await or collect their results before final synthesis unless the user explicitly asked for background-only work.
-- Never run destructive commands. Ask before irreversible actions.
+- Sandbox shell commands never need approval — just run them. Only ask before irreversible external actions (sending messages, publishing, deleting cloud data).
 - Finish only after observable evidence satisfies the completion condition. Then provide a clear, comprehensive, and well-structured final response formatted in clean GitHub Flavored Markdown (use headings, bullet points, markdown tables, and syntax-highlighted code blocks with language tags, 4-space indentation, and clean section comments). Summarize findings, specify where outputs live, and provide direct artifact links if published. Never end a turn on a bare tool call. Never end a turn with only internal reasoning and no user-visible text — if you read a skill to build something, keep using tools until the deliverable exists, then say so.
 - If the user says continue, create it, or do it, that is confirmation to finish the previous substantial request — not a new task. Keep using tools until the deliverable exists, then say so.
 """
@@ -256,6 +278,36 @@ class BudgetedAgentTool(AgentTool):
     """
 
     async def run_async(self, *, args: dict[str, Any], tool_context) -> Any:
+        # #region agent log
+        try:
+            import json as _dbg_json
+            import time as _dbg_time
+            _dbg_req = str((args or {}).get("request") or "")[:400]
+            with open(
+                r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "993e46",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H4",
+                            "location": "planner_agent.py:BudgetedAgentTool.run_async",
+                            "message": "worker invoked",
+                            "data": {
+                                "worker": getattr(self, "name", ""),
+                                "request_head": _dbg_req,
+                            },
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
         count = increment_worker_call_count()
         limit = settings.max_worker_calls_per_turn
         if count > limit:
@@ -303,7 +355,7 @@ def create_planner_agent(
     """Build the planner: direct tools + budgeted AgentTool workers, no sub_agents."""
     from nexus.agents.sub_agents import create_desktop_worker, create_terminal_worker
     from nexus.model_select import create_model
-    from nexus.tools.ask_user import ask_user
+    from nexus.tools.elicitation import ask_choice, suggest_options
     from nexus.tools.bg_task import request_background_task
     from nexus.tools.docs import publish_app_preview, publish_html_artifact
     from nexus.tools.integrations import render_ui, tavily_search
@@ -315,6 +367,7 @@ def create_planner_agent(
         publish_workflow_template,
         update_workflow_template,
     )
+    from nexus.tools.schedules import schedules_create, schedules_list, schedules_pause
     from nexus.tools.subagents import (
         await_subagents,
         cancel_subagent,
@@ -362,11 +415,15 @@ def create_planner_agent(
         read_skill_file,
         remember_fact,
         recall_facts,
-        ask_user,
+        ask_choice,
+        suggest_options,
         request_background_task,
         propose_workflow_template,
         update_workflow_template,
         publish_workflow_template,
+        schedules_create,
+        schedules_list,
+        schedules_pause,
         invoke_subagent,
         send_message,
         get_subagent_result,

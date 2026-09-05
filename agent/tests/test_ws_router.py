@@ -113,3 +113,34 @@ async def test_websocket_accepts_ticket_subprotocol(monkeypatch) -> None:
     handle_websocket.assert_awaited_once()
     assert handle_websocket.await_args.kwargs["session"] is live_session
     assert handle_websocket.await_args.kwargs["subprotocol"] == "ticket-from-header"
+
+
+@pytest.mark.asyncio
+async def test_websocket_echoes_offered_protocol_when_query_ticket_authenticates(monkeypatch) -> None:
+    """Browsers fail the handshake if they offered a protocol and accept() omits it."""
+    ws = FakeWebSocket(
+        query_params={"ticket": "ticket-from-query"},
+        headers={"sec-websocket-protocol": "client-jwt-proto"},
+    )
+    live_session = SimpleNamespace(
+        id="session-123",
+        owner_id="firebase-uid",
+        status="ready",
+        runtime_config=object(),
+    )
+    session_manager = SimpleNamespace(
+        validate_ticket=lambda ticket: ("session-123", "firebase-uid"),
+        get_session=AsyncMock(return_value=live_session),
+    )
+    history_repository = SimpleNamespace(get_user_settings=AsyncMock(return_value={}))
+    handle_websocket = AsyncMock()
+
+    monkeypatch.setattr(ws_router, "get_session_manager", lambda: session_manager)
+    monkeypatch.setattr(ws_router, "get_ws_connect_limiter", lambda: SimpleNamespace(check=lambda uid: True))
+    monkeypatch.setattr(ws_router, "get_history_repository", lambda: history_repository)
+    monkeypatch.setattr(ws_router, "handle_websocket", handle_websocket)
+
+    await ws_router.websocket_endpoint(ws, "session-123")
+
+    handle_websocket.assert_awaited_once()
+    assert handle_websocket.await_args.kwargs["subprotocol"] == "client-jwt-proto"

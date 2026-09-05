@@ -41,6 +41,7 @@ class AgentSkillsPromptTests(TestCase):
         skills = {skill["skill_id"]: skill for skill in list_agent_skills(None)}
         self.assertIn("references/deliverable-checklist.md", skills["document-work"]["resources"])
         self.assertIn("scripts/csv_preview.py", skills["spreadsheet-work"]["resources"])
+        self.assertIn("references/deck-playbook.md", skills["presentation-work"]["resources"])
 
 
 class ReadSkillToolTests(IsolatedAsyncioTestCase):

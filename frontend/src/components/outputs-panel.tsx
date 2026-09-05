@@ -81,7 +81,7 @@ export function OutputsPanel({
   useEffect(() => {
     deliverables.forEach((artifact) => {
       const kind = previewKind(artifact);
-      if (kind === "none" || kind === "sheet" || kind === "markdown") return;
+      if (kind === "none" || kind === "sheet" || kind === "markdown" || kind === "code") return;
       if (freshUrls[artifact.artifact_id] || fetchedIds.current.has(artifact.artifact_id)) {
         return;
       }

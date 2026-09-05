@@ -140,9 +140,11 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["detail"]["filename"], "sales.xlsx")
         self.assertEqual(result["detail"]["artifact_id"], "artifact_abc")
 
-        # Verify openpyxl generation was invoked
         commands = self.sandbox.commands_run
         self.assertTrue(any("python3 /tmp/gen_xlsx_" in cmd for cmd in commands))
+        script_files = [k for k in self.sandbox.files if "gen_xlsx_" in k]
+        self.assertTrue(script_files)
+        ast.parse(self.sandbox.files[script_files[0]])
 
     async def test_generate_docx_report_success(self) -> None:
         result = await generate_docx_report(
@@ -173,15 +175,28 @@ class DocsToolTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["detail"]["preview_url"], "https://gcs/url")
 
         commands = self.sandbox.commands_run
-        self.assertTrue(any("python3 /tmp/gen_pptx_" in cmd for cmd in commands))
+        self.assertTrue(any("/tmp/_pptx_deps_" in cmd for cmd in commands))
+        self.assertTrue(
+            any(
+                "python3 /tmp/gen_pptx_" in cmd and "_pptx_data_" in cmd and ".pptx" in cmd
+                for cmd in commands
+            )
+        )
         script_files = [k for k in self.sandbox.files if "gen_pptx_" in k]
         self.assertTrue(script_files)
         script = self.sandbox.files[script_files[0]]
-        self.assertIn("python-pptx", script)
         self.assertIn("from pptx import Presentation", script)
-        ast.parse(script)
+        compile(script, script_files[0], "exec")
+        self.assertIn("2DD4BF", script)
+        self.assertIn("DATA_PATH", script)
+        self.assertIn("modern-dark", script)
+        self.assertNotIn("import importlib, subprocess, sys", script)
 
-        self.mock_history_repo.create_artifact.assert_awaited()
+        data_files = [k for k in self.sandbox.files if "_pptx_data_" in k]
+        self.assertTrue(data_files)
+        payload = json.loads(self.sandbox.files[data_files[0]])
+        self.assertEqual(payload["slides"][0]["layout"], "title")
+        self.assertEqual(payload["slides"][0]["title"], "Design Review")
         create_kwargs = self.mock_history_repo.create_artifact.await_args.kwargs
         self.assertEqual(create_kwargs["kind"], "presentation")
         self.assertEqual(create_kwargs["metadata"]["preview_url"], "https://gcs/url")

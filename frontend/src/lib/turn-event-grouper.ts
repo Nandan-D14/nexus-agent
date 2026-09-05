@@ -66,7 +66,7 @@ export type ToolInvocation = {
 export type GroupedEvent =
   | ToolInvocation
   | { kind: "screenshot"; image_b64?: string; analysis?: string; ts: number }
-  | { kind: "error"; message: string; code?: string; ts: number }
+  | { kind: "error"; message: string; code?: string; count: number; ts: number }
   | {
       kind: "retry";
       reason: string;
@@ -77,6 +77,18 @@ export type GroupedEvent =
       ts: number;
     }
   | { kind: "thinking"; text: string; ts: number }
+  | {
+      kind: "approval";
+      approvalId: string;
+      description: string;
+      agent?: string;
+      risk?: string;
+      tool?: string;
+      decision: "pending" | "approved" | "denied" | "timed_out";
+      actionHash?: string;
+      decidedAt?: number;
+      ts: number;
+    }
   | {
       kind: "bg_progress";
       taskId?: string;
@@ -101,6 +113,8 @@ export type TaskGroup = {
   status: "running" | "completed" | "failed";
   steps: GroupedEvent[];
   ts: number;
+  /** Timestamp of the last step, so the UI can show total elapsed time. */
+  endTs: number;
 };
 
 export type GenerativeUiSegment = {
@@ -177,6 +191,8 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
   const segments: TurnEventSegment[] = [];
   const pendingTools = new Map<string, ToolInvocation[]>();
   const pendingToolsByStep = new Map<string, ToolInvocation>();
+  /** Identical errors within a task collapse into one counted row. */
+  const errorSteps = new Map<string, Extract<GroupedEvent, { kind: "error" }>>();
   let currentTask: TaskGroup | null = null;
   let taskIndex = 0;
 
@@ -189,8 +205,39 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
       (s) => s.kind !== "tool_invocation" || s.status !== "running",
     );
     currentTask.status = anyFailed ? "failed" : allDone ? "completed" : "running";
+    currentTask.endTs = currentTask.steps.reduce((latest, step) => {
+      const stepEnd =
+        step.kind === "tool_invocation" ? (step.result?.ts ?? step.callTs) : step.ts;
+      return Math.max(latest, stepEnd);
+    }, currentTask.ts);
     segments.push({ kind: "task_group", data: currentTask, ts: currentTask.ts });
+    errorSteps.clear();
     currentTask = null;
+  }
+
+  /**
+   * Repeats of the same failure (a retried step that keeps hitting the same
+   * wall) collapse onto one row with a count instead of stacking identical
+   * lines, which they did whenever another step landed in between.
+   */
+  function pushError(message: string, code: string | undefined, ts: number) {
+    const task = currentTask;
+    if (!task) return;
+    const key = `${code ?? ""}::${message}`;
+    const existing = errorSteps.get(key);
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+    const step: Extract<GroupedEvent, { kind: "error" }> = {
+      kind: "error",
+      message,
+      code,
+      count: 1,
+      ts,
+    };
+    errorSteps.set(key, step);
+    task.steps.push(step);
   }
 
   for (const event of events) {
@@ -298,6 +345,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       // Always record thinking as a step — including the first event that opens
@@ -328,6 +376,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       const args =
@@ -415,6 +464,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       currentTask.steps.push({
@@ -442,14 +492,14 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
-      currentTask.steps.push({
-        kind: "error",
-        message: String(event.error || "MCP request failed"),
-        code: typeof event.error_type === "string" ? event.error_type : "MCP_HTTP_ERROR",
-        ts: event.ts,
-      });
+      pushError(
+        String(event.error || "MCP request failed"),
+        typeof event.error_type === "string" ? event.error_type : "MCP_HTTP_ERROR",
+        event.ts,
+      );
       continue;
     }
 
@@ -462,6 +512,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       currentTask.steps.push({
@@ -482,6 +533,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       const complete = event.type === "bg_task_complete";
@@ -514,6 +566,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       const status =
@@ -547,25 +600,14 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
-      const message = String(event.message || "Failed");
-      const code = typeof event.code === "string" ? event.code : undefined;
-      const lastStep = currentTask.steps[currentTask.steps.length - 1];
-      if (
-        lastStep &&
-        lastStep.kind === "error" &&
-        lastStep.message === message &&
-        lastStep.code === code
-      ) {
-        continue;
-      }
-      currentTask.steps.push({
-        kind: "error",
-        message,
-        code,
-        ts: event.ts,
-      });
+      pushError(
+        String(event.message || "Failed"),
+        typeof event.code === "string" ? event.code : undefined,
+        event.ts,
+      );
       continue;
     }
 
@@ -578,6 +620,7 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
           status: "running",
           steps: [],
           ts: event.ts,
+          endTs: event.ts,
         };
       }
       currentTask.steps.push({
@@ -586,6 +629,116 @@ export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
         to: String(event.to || ""),
         ts: event.ts,
       });
+      continue;
+    }
+
+    if (event.type === "permission_request" || event.type === "approval_requested") {
+      if (!currentTask) {
+        taskIndex++;
+        currentTask = {
+          id: `task-${taskIndex}-${event.ts}`,
+          title: "Awaiting approval",
+          status: "running",
+          steps: [],
+          ts: event.ts,
+          endTs: event.ts,
+        };
+      }
+      const rawId =
+        typeof event.approval_id === "string" && event.approval_id
+          ? event.approval_id
+          : typeof event.task_id === "string" && event.task_id
+            ? event.task_id
+            : `approval-${event.ts}`;
+      const meta =
+        event.metadata && typeof event.metadata === "object" && !Array.isArray(event.metadata)
+          ? (event.metadata as Record<string, unknown>)
+          : {};
+      const description =
+        (typeof event.description === "string" && event.description.trim()) ||
+        "Approval required to continue.";
+      currentTask.steps.push({
+        kind: "approval",
+        approvalId: String(rawId),
+        description: sanitizeDisplayText(description) || "Approval required to continue.",
+        agent: typeof event.agent === "string" ? event.agent : "policy",
+        risk:
+          typeof event.risk === "string"
+            ? event.risk
+            : typeof meta.risk === "string"
+              ? String(meta.risk)
+              : undefined,
+        tool:
+          typeof event.tool === "string"
+            ? String(event.tool)
+            : typeof meta.tool === "string"
+              ? String(meta.tool)
+              : undefined,
+        decision: "pending",
+        actionHash:
+          typeof event.action_hash === "string"
+            ? String(event.action_hash)
+            : typeof meta.action_hash === "string"
+              ? String(meta.action_hash)
+              : undefined,
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (event.type === "approval_resolved") {
+      const rawId =
+        typeof event.approval_id === "string" && event.approval_id
+          ? String(event.approval_id)
+          : typeof event.task_id === "string" && event.task_id
+            ? String(event.task_id)
+            : null;
+      const approved = event.approved === true;
+      const statusText =
+        typeof event.status === "string" ? event.status.toLowerCase() : "";
+      const timedOut =
+        statusText.includes("timeout") ||
+        statusText.includes("expired") ||
+        (typeof event.reason === "string" &&
+          String(event.reason).toLowerCase().includes("timeout"));
+      const decision = timedOut ? "timed_out" : approved ? "approved" : "denied";
+      let matched = false;
+      if (rawId && currentTask) {
+        for (const step of currentTask.steps) {
+          if (step.kind === "approval" && step.approvalId === rawId) {
+            step.decision = decision;
+            step.decidedAt = event.ts;
+            if (typeof event.action_hash === "string") {
+              step.actionHash = String(event.action_hash);
+            }
+            matched = true;
+            break;
+          }
+        }
+      }
+      if (!matched) {
+        if (!currentTask) {
+          taskIndex++;
+          currentTask = {
+            id: `task-${taskIndex}-${event.ts}`,
+            title: "Approval resolved",
+            status: "running",
+            steps: [],
+            ts: event.ts,
+            endTs: event.ts,
+          };
+        }
+        currentTask.steps.push({
+          kind: "approval",
+          approvalId: rawId ?? `approval-${event.ts}`,
+          description: "Approval resolved",
+          decision,
+          decidedAt: event.ts,
+          actionHash:
+            typeof event.action_hash === "string" ? String(event.action_hash) : undefined,
+          ts: event.ts,
+        });
+      }
       continue;
     }
   }

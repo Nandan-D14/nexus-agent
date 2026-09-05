@@ -593,6 +593,39 @@ async def create_drive_doc(title: str, content: str) -> dict[str, Any]:
 
 
 @normalized_tool
+async def create_drive_sheet(
+    title: str,
+    headers: list[str],
+    rows: list[list[str]] | None = None,
+) -> dict[str, Any]:
+    """Create a Google Sheet in the connected user's Drive.
+
+    Use this when the user asked for a Google Sheet (not a local .xlsx).
+    Pass a clear header row and data rows. For a local Excel file instead,
+    call generate_excel_report.
+
+    Args:
+        title: Spreadsheet title shown in Drive.
+        headers: Column header names.
+        rows: Data rows; each row is a list of cell values.
+    """
+    client = await get_google_drive_client_from_context()
+    if not client:
+        return tool_error(_DRIVE_NOT_CONNECTED, error_code="AUTH_REQUIRED")
+    if not headers:
+        return tool_error("headers are required.", error_code="INVALID_INPUT")
+    created = await client.create_google_sheet(
+        title=title,
+        headers=headers,
+        rows=rows or [],
+    )
+    return tool_success(
+        f"Created Google Sheet: {title}",
+        file=created,
+    )
+
+
+@normalized_tool
 async def upload_drive_file(filename: str, content_base64: str, mime_type: str = "application/octet-stream") -> dict[str, Any]:
     """Upload a base64-encoded file to the connected user's Google Drive.
 
