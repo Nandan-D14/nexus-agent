@@ -351,7 +351,14 @@ async function fetchArtifactContentBlobUrl(
     `/api/v1/artifacts/${encodeURIComponent(artifact.artifact_id)}/content${query ? `?${query}` : ""}`,
     CONTENT_TIMEOUT_MS,
   );
-  if (!res?.ok) return null;
+  if (!res) {
+    lastResolveError = "NETWORK";
+    return null;
+  }
+  if (!res.ok) {
+    lastResolveError = await parseArtifactErrorCode(res);
+    return null;
+  }
   try {
     const raw = await res.blob();
     if (!raw.size) return null;
@@ -430,7 +437,14 @@ export async function fetchFreshArtifactUrl(artifactId: string, artifact?: RunAr
     `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download${query ? `?${query}` : ""}`,
     DOWNLOAD_TIMEOUT_MS,
   );
-  if (!res?.ok) return null;
+  if (!res) {
+    lastResolveError = "NETWORK";
+    return null;
+  }
+  if (!res.ok) {
+    lastResolveError = await parseArtifactErrorCode(res);
+    return null;
+  }
   try {
     const body = (await res.json()) as { url?: string };
     return body.url ?? null;
@@ -464,7 +478,14 @@ async function downloadFromWorkspaceSandbox(
     `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/download?${params.toString()}`,
     SANDBOX_TIMEOUT_MS,
   );
-  if (!res?.ok) return null;
+  if (!res) {
+    lastResolveError = "NETWORK";
+    return null;
+  }
+  if (!res.ok) {
+    lastResolveError = res.status === 410 ? "SANDBOX_EPHEMERAL" : "LIVE_SESSION_NOT_FOUND";
+    return null;
+  }
   try {
     const raw = await res.blob();
     if (!raw.size) return null;
@@ -513,21 +534,58 @@ export type ResolveArtifactOptions = {
   /** Prefer the PDF preview sibling for Office artifacts. */
   forPreview?: boolean;
   /**
-   * Fall back to the live session sandbox. Library and other historical
-   * views must leave this off — those sandboxes are gone and the API 400s.
+   * Fall back to the live session sandbox. Durable GCS is the truth for all
+   * sessions (Manus-style); sandboxes are ephemeral and pause after ~5m.
+   * Defaults to false so history/library never hit LIVE_SESSION_NOT_FOUND.
+   * Pass true only for the active live file browser.
    */
   allowSandbox?: boolean;
 };
+
+export type ArtifactResolveError =
+  | "ARTIFACT_DOC_NOT_FOUND"
+  | "ARTIFACT_BLOB_MISSING"
+  | "ARTIFACT_PREVIEW_MISSING"
+  | "SANDBOX_EPHEMERAL"
+  | "LIVE_SESSION_NOT_FOUND"
+  | "NETWORK"
+  | null;
+
+let lastResolveError: ArtifactResolveError = null;
+
+export function getLastArtifactResolveError(): ArtifactResolveError {
+  return lastResolveError;
+}
+
+async function parseArtifactErrorCode(res: Response): Promise<ArtifactResolveError> {
+  try {
+    const body = (await res.clone().json()) as unknown;
+    if (typeof body === "object" && body !== null) {
+      const detail = (body as Record<string, unknown>).detail;
+      if (typeof detail === "object" && detail !== null) {
+        const code = (detail as Record<string, unknown>).code;
+        if (typeof code === "string" && code) return code as ArtifactResolveError;
+      }
+      const code = (body as Record<string, unknown>).code;
+      if (typeof code === "string" && code) return code as ArtifactResolveError;
+    }
+  } catch {
+    // non-JSON error body
+  }
+  if (res.status === 410) return "ARTIFACT_BLOB_MISSING";
+  if (res.status === 404) return "ARTIFACT_DOC_NOT_FOUND";
+  return "NETWORK";
+}
 
 function normalizeResolveOptions(
   forPreviewOrOptions: boolean | ResolveArtifactOptions = false,
 ): Required<ResolveArtifactOptions> {
   if (typeof forPreviewOrOptions === "boolean") {
-    return { forPreview: forPreviewOrOptions, allowSandbox: true };
+    return { forPreview: forPreviewOrOptions, allowSandbox: false };
   }
   return {
     forPreview: forPreviewOrOptions.forPreview ?? false,
-    allowSandbox: forPreviewOrOptions.allowSandbox ?? true,
+    allowSandbox: forPreviewOrOptions.allowSandbox ?? false,
   };
 }
 
@@ -556,13 +614,15 @@ export function usablePreviewSrc(url: string | null | undefined): string | null 
 
 /**
  * Resolve a working preview/download URL.
- * Prefer the authenticated download API for GCS-backed artifacts.
+ * Durable-first (Manus-style): same-origin /content proxy from immutable GCS
+ * for all sessions. Live sandbox is opt-in only and never required.
  * @param forPreviewOrOptions - `true` for preview, or `{ forPreview, allowSandbox }`
  */
 export async function resolveArtifactUrl(
   artifact: RunArtifact,
   forPreviewOrOptions: boolean | ResolveArtifactOptions = false,
 ): Promise<string | null> {
+  lastResolveError = null;
   const { forPreview, allowSandbox } = normalizeResolveOptions(forPreviewOrOptions);
 
   if (forPreview && hasOfficePreviewSibling(artifact)) {
@@ -649,7 +709,7 @@ export async function downloadArtifactFile(
 ): Promise<boolean> {
   const url = await resolveArtifactUrl(artifact, {
     forPreview: false,
-    allowSandbox: options?.allowSandbox ?? true,
+    allowSandbox: options?.allowSandbox ?? false,
   });
   if (!url) return false;
 
@@ -727,6 +787,10 @@ export function artifactFromToolResult(
         ? detail.preview_url
         : undefined;
 
+    const relativePath =
+      typeof detail.relative_path === "string" && detail.relative_path
+        ? detail.relative_path
+        : null;
     return {
       artifact_id: artifactId,
       run_id: fallbacks?.runId || "",
@@ -738,9 +802,10 @@ export function artifactFromToolResult(
         tool,
       preview: typeof parsed.summary === "string" ? parsed.summary : "",
       created_at: new Date().toISOString(),
-      path: typeof detail.path === "string" ? detail.path : null,
+      path: typeof detail.path === "string" ? detail.path : relativePath,
       url: typeof detail.url === "string" ? detail.url : null,
       metadata: {
+        ...(relativePath ? { relative_path: relativePath } : {}),
         content_type:
           kind === "pdf_report"
             ? "application/pdf"
