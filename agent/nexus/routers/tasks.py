@@ -22,9 +22,12 @@ from nexus.dependencies import (
 from nexus.policy import evaluate_tool_policy, normalize_autonomy_mode
 from nexus.production_tasks import DurableApproval, DurableTask, DurableTaskEvent, DurableTaskRun
 from nexus.storage import (
+    _DOWNLOAD_URL_EXPIRATION_SECONDS,
+    candidate_artifact_blobs,
     download_artifact_as_data_uri,
     download_artifact_bytes,
     generate_artifact_signed_url,
+    get_artifact_bucket_name,
     parse_gcs_object_url,
     preview_artifact_gcs_location,
     preview_media_type,
@@ -405,12 +408,69 @@ def _optional_query_text(value: Any) -> str | None:
 
 
 def _artifact_gcs_location(artifact) -> tuple[str, str] | None:
+    """Primary GCS location (stored blob or legacy GCS URL)."""
     metadata = artifact.metadata or {}
     bucket = metadata.get("gcs_bucket")
     blob = metadata.get("gcs_blob")
     if isinstance(bucket, str) and bucket.strip() and isinstance(blob, str) and blob.strip():
         return bucket.strip(), blob.strip()
     return parse_gcs_object_url(getattr(artifact, "url", None) or "")
+
+
+def _artifact_gcs_candidates(artifact) -> list[tuple[str, str]]:
+    """All (bucket, blob) candidates: stored > immutable > legacy > GCS URL.
+
+    Guarantees pre-immutable artifacts (same filename overwrites) still resolve
+    via legacy path, while new immutable blobs are tried first. Legacy signed
+    URLs may point at another env bucket - honor their bucket explicitly.
+    """
+    from nexus.storage import _clean_relative_path
+
+    metadata = dict(artifact.metadata or {}) if isinstance(getattr(artifact, "metadata", None), dict) else {}
+    _sid = getattr(artifact, "session_id", None)
+    _rid = getattr(artifact, "run_id", None)
+    _aid = getattr(artifact, "artifact_id", None)
+    session_id = _sid.strip() if isinstance(_sid, str) and _sid.strip() else None
+    run_id = _rid.strip() if isinstance(_rid, str) and _rid.strip() else None
+    artifact_id = _aid.strip() if isinstance(_aid, str) and _aid.strip() else None
+    # Prefer explicit relative_path; fall back to filename from path/title.
+    relative = metadata.get("relative_path")
+    if not isinstance(relative, str) or not relative.strip():
+        raw_path = (getattr(artifact, "path", None) or "").replace("\\", "/")
+        candidate = raw_path.split("/")[-1] if raw_path else ""
+        if not candidate:
+            candidate = str(getattr(artifact, "title", None) or "")
+        # If path was absolute sandbox path, keep outputs/... tail.
+        if "/outputs/" in raw_path:
+            candidate = "outputs/" + raw_path.split("/outputs/")[-1]
+        elif "/uploads/" in raw_path:
+            candidate = "uploads/" + raw_path.split("/uploads/")[-1]
+        relative = candidate
+    try:
+        relative = _clean_relative_path(relative or "")
+    except Exception:
+        relative = ""
+    bucket = metadata.get("gcs_bucket")
+    bucket_name = bucket.strip() if isinstance(bucket, str) and bucket.strip() else get_artifact_bucket_name()
+    blobs = candidate_artifact_blobs(session_id, run_id, relative or None, artifact_id, metadata)
+    out: list[tuple[str, str]] = [(bucket_name, b) for b in blobs]
+    # Also honor a parsable legacy GCS URL (may be another bucket).
+    parsed = parse_gcs_object_url(getattr(artifact, "url", None) or "")
+    if parsed and all(blob != parsed[1] or bkt != parsed[0] for bkt, blob in out):
+        out.append(parsed)
+    return out
+
+
+def _download_first_candidate(
+    candidates: list[tuple[str, str]],
+) -> tuple[bytes, str, str] | None:
+    """Try candidates via download_artifact_bytes (mock-friendly)."""
+    for bucket_name, blob_name in candidates:
+        payload = download_artifact_bytes(bucket_name=bucket_name, blob_name=blob_name)
+        if payload is not None:
+            content, mime = payload
+            return content, mime, blob_name
+    return None
 
 
 def _content_disposition_filename(artifact, blob_name: str | None = None) -> str:
@@ -438,30 +498,28 @@ async def download_artifact_by_id(
         run_id=run_id,
     )
     if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    
+        raise HTTPException(status_code=404, detail={"code": "ARTIFACT_DOC_NOT_FOUND", "message": "Artifact not found. It may predate durable storage."})
+
     # Return permanent URLs (Google Drive, data URIs) directly without GCS signing
     if artifact.url and "storage.googleapis.com" not in artifact.url:
         return {
             "artifact_id": artifact.artifact_id,
             "url": artifact.url,
-            "expires_in_seconds": 900,
+            "expires_in_seconds": _DOWNLOAD_URL_EXPIRATION_SECONDS,
+            "durable": False,
         }
 
-    location = _artifact_gcs_location(artifact)
-
-    # If artifact has GCS metadata or a GCS URL, try to fetch it
-    if location:
-        bucket, blob = location
-        url = generate_artifact_signed_url(bucket_name=bucket, blob_name=blob)
+    for bucket_name, blob in _artifact_gcs_candidates(artifact):
+        url = generate_artifact_signed_url(bucket_name=bucket_name, blob_name=blob)
         if not url:
             # Signed URL failed — fall back to downloading the blob directly
-            url = download_artifact_as_data_uri(bucket_name=bucket, blob_name=blob)
+            url = download_artifact_as_data_uri(bucket_name=bucket_name, blob_name=blob)
         if url:
             return {
                 "artifact_id": artifact.artifact_id,
                 "url": url,
-                "expires_in_seconds": 900,
+                "expires_in_seconds": _DOWNLOAD_URL_EXPIRATION_SECONDS,
+                "durable": True,
             }
 
     # Artifact has no durable storage — it was created before GCS was fixed,
@@ -472,13 +530,12 @@ async def download_artifact_by_id(
             "artifact_id": artifact.artifact_id,
             "url": artifact.url,
             "expires_in_seconds": 0,
+            "durable": False,
         }
 
     raise HTTPException(
-        status_code=404,
-        detail="This artifact was created before cloud storage was configured. "
-               "The original sandbox has expired and the file data is no longer available. "
-               "Future artifacts will be stored durably."
+        status_code=410,
+        detail={"code": "ARTIFACT_BLOB_MISSING", "message": "Original file is no longer available - the sandbox expired before durable storage. Please regenerate."},
     )
 
 
@@ -490,7 +547,11 @@ async def download_artifact_content(
     run_id: str | None = Query(default=None),
     sibling: str | None = Query(default=None),
 ):
-    """Same-origin byte proxy so the browser never fetch()es GCS (no CORS)."""
+    """Same-origin byte proxy so the browser never fetch()es GCS (no CORS).
+
+    Durable-first: serves exact original bytes from GCS for all sessions,
+    independent of live sandbox state. Sandboxes are ephemeral execution only.
+    """
     session_id = _optional_query_text(session_id)
     run_id = _optional_query_text(run_id)
     sibling = _optional_query_text(sibling)
@@ -502,26 +563,23 @@ async def download_artifact_content(
         run_id=run_id,
     )
     if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail={"code": "ARTIFACT_DOC_NOT_FOUND", "message": "Artifact not found."})
 
     metadata = artifact.metadata or {}
     want_preview = (sibling or "").lower() == "preview"
-    location = (
-        preview_artifact_gcs_location(
+    if want_preview:
+        location = preview_artifact_gcs_location(
             session_id=getattr(artifact, "session_id", None) or session_id,
             run_id=getattr(artifact, "run_id", None) or run_id,
             metadata=metadata,
+            artifact_id=getattr(artifact, "artifact_id", None),
         )
-        if want_preview
-        else _artifact_gcs_location(artifact)
-    )
-    if location:
-        bucket, blob = location
-        payload = download_artifact_bytes(bucket_name=bucket, blob_name=blob)
-        if payload is not None:
-            content, mime = payload
-            filename = _content_disposition_filename(artifact, blob)
-            if want_preview:
+        if location:
+            bucket, blob = location
+            payload = download_artifact_bytes(bucket_name=bucket, blob_name=blob)
+            if payload is not None:
+                content, mime = payload
+                filename = _content_disposition_filename(artifact, blob)
                 mime = preview_media_type(
                     str(metadata.get("preview_path") or blob),
                     str(metadata.get("preview_content_type") or ""),
@@ -529,23 +587,39 @@ async def download_artifact_content(
                 preview_name = str(metadata.get("preview_path") or "").replace("\\", "/").rsplit("/", 1)[-1]
                 if preview_name:
                     filename = preview_name
-            else:
-                declared = str(metadata.get("content_type") or "").strip()
-                if declared:
-                    mime = declared
-            return Response(
-                content=content,
-                media_type=mime,
-                headers={
-                    "Content-Disposition": f'inline; filename="{filename}"',
-                    "Cache-Control": "private, max-age=60",
-                },
-            )
+                return Response(
+                    content=content,
+                    media_type=mime,
+                    headers={
+                        "Content-Disposition": f'inline; filename="{filename}"',
+                        "Cache-Control": "private, max-age=60",
+                        "ETag": f'"{artifact.artifact_id}-preview"',
+                    },
+                )
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ARTIFACT_PREVIEW_MISSING", "message": "Preview not available. Download the original file."},
+        )
+
+    hit = _download_first_candidate(_artifact_gcs_candidates(artifact))
+    if hit is not None:
+        content, mime, blob = hit
+        filename = _content_disposition_filename(artifact, blob)
+        declared = str(metadata.get("content_type") or "").strip()
+        if declared:
+            mime = declared
+        return Response(
+            content=content,
+            media_type=mime,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Cache-Control": "private, max-age=60",
+                "ETag": f'"{artifact.artifact_id}"',
+            },
+        )
 
     raise HTTPException(
-        status_code=404,
-        detail="This artifact was created before cloud storage was configured. "
-               "The original sandbox has expired and the file data is no longer available. "
-               "Future artifacts will be stored durably.",
+        status_code=410,
+        detail={"code": "ARTIFACT_BLOB_MISSING", "message": "Original file is no longer available - the sandbox expired before durable storage. Please regenerate."},
     )
 

@@ -272,13 +272,26 @@ export function displayStepTitle(title: string, tool?: string, stepType?: string
   return title || `${stepType || "workflow"} step`;
 }
 
+function mergeArtifactIds(prev: RunArtifact, next: RunArtifact): RunArtifact {
+  // Never clobber durable IDs with empty strings on rehydration - the
+  // backend fast path needs session_id+run_id to avoid index queries.
+  return {
+    ...next,
+    session_id: next.session_id || prev.session_id || "",
+    run_id: next.run_id || prev.run_id || "",
+    path: next.path || prev.path || null,
+    url: next.url || prev.url || null,
+    metadata: { ...(prev.metadata || {}), ...(next.metadata || {}) },
+  };
+}
+
 export function upsertRunArtifact(prev: RunArtifact[], nextArtifact: RunArtifact): RunArtifact[] {
   const existingIndex = prev.findIndex((artifact) => artifact.artifact_id === nextArtifact.artifact_id);
   if (existingIndex === -1) {
     return [nextArtifact, ...prev];
   }
   const updated = [...prev];
-  updated[existingIndex] = nextArtifact;
+  updated[existingIndex] = mergeArtifactIds(prev[existingIndex], nextArtifact);
   return updated;
 }
 
@@ -367,7 +380,7 @@ export function upsertArtifact(prev: RunArtifact[], artifact: RunArtifact): RunA
     return [artifact, ...prev];
   }
   const updated = [...prev];
-  updated[existingIndex] = artifact;
+  updated[existingIndex] = mergeArtifactIds(prev[existingIndex], artifact);
   return updated;
 }
 

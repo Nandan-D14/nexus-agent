@@ -91,3 +91,26 @@
 - `agent/nexus/tools/*.py` - executable actions in sandbox.
 - `frontend/src/app/api/[...path]/route.ts` - frontend API proxy to backend.
 - `deploy/gcp/deploy.sh` - Cloud Build + Artifact Registry + Cloud Run deployment flow.
+
+## 4) Artifact Durability (Manus-style - all file types)
+
+Sandboxes (E2B) are ephemeral execution only: idle pause ~5m
+(`idle_sandbox_pause_seconds`), destroy ~120m (`session_timeout_minutes`).
+Delivered files (xlsx/csv/pdf/docx/pptx/html/md/images) are permanent:
+
+- Create: `tools/docs.py` pre-generates `artifact_id`, uploads immutable bytes
+  to GCS `nexus-artifacts-{env}/{session}/{run}/{artifact_id}/{file}`
+  (`storage.py:artifact_blob_name_for`), then writes Firestore doc with
+  `gcs_bucket/gcs_blob/relative_path`. Upload failure ->
+  `ARTIFACT_PERSISTENCE_FAILED`, never a sandbox-only deliverable.
+- Serve: `GET /artifacts/{id}/content` (same-origin proxy, no CORS) and
+  `/artifacts/{id}/download` (fresh 1h signed URL) try stored > immutable >
+  legacy blobs. `GET /sessions/{id}/files/download` is live-only (410
+  `SANDBOX_EPHEMERAL` with hint to durable API).
+- Read: `history_repository._get_artifact_for_owner_sync` tries session doc,
+  then `users/{owner}/tasks/...` mirrors, then collection-group
+  (`firestore.indexes.json` must be deployed). Never gates on parent session.
+- Frontend: `artifact-url.ts:resolveArtifactUrl` is durable-first,
+  `allowSandbox=false` by default. Sheets/CSVs parse in-browser via `xlsx`.
+  Office previews use immutable `preview_gcs_blob` siblings.
+- See `docs/ARTIFACT_DURABILITY_RUNBOOK.md`.
