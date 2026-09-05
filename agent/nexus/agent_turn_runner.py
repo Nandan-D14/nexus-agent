@@ -16,7 +16,11 @@ from nexus.orchestrator import NexusOrchestrator
 from nexus.production_tasks import map_history_status_to_durable
 from nexus.runtime_config import resolve_session_runtime_config
 from nexus.task_budget import TaskBudgetGuard
-from nexus.tools._context import set_task_budget_guard
+from nexus.tools._context import (
+    clear_unattended_tools,
+    set_task_budget_guard,
+    set_unattended_tools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,8 @@ class AgentTurnRequest:
     autonomy_mode: str = "manual"
     budget: dict[str, Any] = field(default_factory=dict)
     checkpoint: dict[str, Any] = field(default_factory=dict)
+    allowed_unattended_tools: list[str] = field(default_factory=list)
+    skip_confirmations: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,10 +71,15 @@ class AgentTurnRunner:
                 user_settings = await history_repository.get_user_settings(request.owner_id)
             except Exception:
                 logger.warning("Failed to load user settings for durable task %s", request.task_id, exc_info=True)
+        skip_confirm = bool(getattr(request, "skip_confirmations", False))
+        from nexus.tools._context import set_skip_confirmations
+
+        set_skip_confirmations(skip_confirm)
+
         runtime_config = resolve_session_runtime_config(user_settings)
         runtime_config = replace(
             runtime_config,
-            autonomy_mode=request.autonomy_mode,
+            autonomy_mode="auto" if skip_confirm else request.autonomy_mode,
         )
         prior_budget = (
             request.checkpoint.get("budget")
@@ -80,6 +91,13 @@ class AgentTurnRunner:
             checkpoint=prior_budget,
         )
         set_task_budget_guard(budget_guard)
+        unattended_items = [
+            str(item) for item in request.allowed_unattended_tools if str(item).strip()
+        ]
+        if skip_confirm and not unattended_items:
+            set_unattended_tools(frozenset(["*"]))
+        else:
+            set_unattended_tools(frozenset(unattended_items))
 
         session = await self.session_manager.get_session(request.session_id)
         if not session or session.owner_id != request.owner_id or getattr(session, "runtime_config", None) is None:
@@ -139,9 +157,23 @@ class AgentTurnRunner:
             emit_user_transcript = (
                 request.emit_user_transcript and not resume_context
             )
+            input_text = request.input_text
+            if skip_confirm:
+                directive = (
+                    "[UNATTENDED SCHEDULED TASK - AUTO-APPROVAL ACTIVE]\n"
+                    "This task is running on an automated schedule with skip confirmations enabled.\n"
+                    "- DO NOT ask questions or call ask_choice / suggest_options. The user is not available to answer.\n"
+                    "- DO NOT ask for confirmation or approval. All permissions and approvals are automatically granted.\n"
+                    "- Make reasonable assumptions and proceed autonomously to complete the work.\n\n"
+                )
+                if not resume_context:
+                    input_text = directive + request.input_text
+                else:
+                    resume_context = directive + resume_context
+
             turn_task = asyncio.create_task(
                 orchestrator.handle_text_input(
-                    request.input_text,
+                    input_text,
                     connector_ids=request.connector_ids,
                     tool_ids=request.tool_ids,
                     uploaded_files=request.uploaded_files,
@@ -250,6 +282,7 @@ class AgentTurnRunner:
                 checkpoint=checkpoint,
             )
         finally:
+            clear_unattended_tools()
             set_task_budget_guard(None)
             cancel_watcher.cancel()
             try:

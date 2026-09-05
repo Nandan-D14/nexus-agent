@@ -58,7 +58,7 @@ def _blocked_binary_dump(command: str) -> bool:
     return bool(_BINARY_DUMP_RE.search(command or ""))
 
 
-from nexus.tools.base import normalized_tool
+from nexus.tools.base import normalized_tool, reraise_if_sandbox_dead
 
 @normalized_tool(needs_sandbox=True)
 async def run_command(command: str, background: bool = False, cwd: str | None = None) -> dict:
@@ -91,6 +91,34 @@ async def run_command(command: str, background: bool = False, cwd: str | None = 
             target_cwd = "~"
 
     visible_command = redact_command_text(command)
+    # #region agent log
+    try:
+        import json as _dbg_json
+        import time as _dbg_time
+        _dbg_cmd = (command or "").lower()
+        if any(token in _dbg_cmd for token in ("pptx", "python-pptx", "from __future__", "gen_pptx")):
+            with open(
+                r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg_f:
+                _dbg_f.write(
+                    _dbg_json.dumps(
+                        {
+                            "sessionId": "993e46",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H2",
+                            "location": "bash.py:run_command",
+                            "message": "pptx-related shell command",
+                            "data": {"command": (command or "")[:600]},
+                            "timestamp": int(_dbg_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+    except Exception:
+        pass
+    # #endregion
     await emit_sandbox_event({
         "type": "sandbox_terminal",
         "phase": "start",
@@ -208,6 +236,7 @@ async def run_command(command: str, background: bool = False, cwd: str | None = 
         })
         return compact
     except Exception as e:
+        reraise_if_sandbox_dead(e)
         logger.error("run_command failed: %s", e)
         error_text = str(e)
         await emit_sandbox_event({

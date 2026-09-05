@@ -126,6 +126,14 @@ class Settings(BaseSettings):
     task_queue_local_fallback: bool = True
     task_worker_auth_token: str = ""
     task_worker_lease_seconds: int = 600
+    # A renewed lease is treated everywhere as proof that a worker is making
+    # progress, so the heartbeat stops renewing after this much agent silence.
+    # Must exceed the slowest legitimate single step (sandbox provisioning and
+    # playwright installs run up to 300s without emitting an agent event).
+    durable_run_stall_timeout_seconds: int = 600
+    # How long the stop button waits for a leased worker to honor a cancel
+    # before the run is settled anyway. A wedged worker never observes the flag.
+    durable_stop_grace_seconds: int = 25
     task_worker_heartbeat_interval_seconds: int = 120
     task_worker_max_attempts: int = 3
     task_worker_retry_base_seconds: int = 10
@@ -149,11 +157,26 @@ class Settings(BaseSettings):
     deep_research_workflow_enabled: bool = False
     deep_research_workflow_max_sources: int = 6
     task_event_replay_limit: int = 200
+    # Newest ADK events loaded per turn. The context trimmer keeps far fewer
+    # than this, so reading the full subcollection only costs latency and memory
+    # that grows without bound as a session gets longer.
+    adk_session_event_load_limit: int = 400
+    # Cap on a single workspace file read. Drive, GitHub and PDF reads already
+    # truncate; an uncapped local read is the remaining way one tool result can
+    # blow the context window in a single call.
+    workspace_file_read_max_chars: int = 64_000
+    # Connect deadline for remote MCP servers. The planner runs one tool per
+    # step, so a server that is down must fail fast rather than spend the full
+    # request budget before the agent can try something else.
+    mcp_connect_timeout_seconds: float = 10.0
     default_autonomy_mode: str = "manual"  # manual | auto
     default_task_budget_credits: int = 1_000
     default_task_max_runtime_minutes: int = 60
     default_task_max_tool_calls: int = 80
     idle_sandbox_pause_seconds: int = 300
+    schedule_tick_interval_seconds: int = 30
+    schedule_dispatch_lock_seconds: int = 120
+    max_active_schedules: int = 20
 
     # GCP Cloud Tasks
     gcp_tasks_project_id: str = ""
@@ -166,6 +189,10 @@ class Settings(BaseSettings):
     sandbox_resolution_w: int = 1324
     sandbox_resolution_h: int = 968
     sandbox_timeout_seconds: int = 3600
+    # How often a running turn refreshes the sandbox TTL. Without this the VM
+    # only gets extended at turn start and on sandbox tool use, so a long turn
+    # that stays out of the sandbox outlives the machine it is driving.
+    sandbox_keepalive_interval_seconds: int = 300
     sandbox_create_retries: int = 3
     sandbox_create_retry_backoff_seconds: float = 2.0
     sandbox_create_retry_max_seconds: float = 10.0
@@ -203,6 +230,10 @@ class Settings(BaseSettings):
     # Hard ceiling for a single agent turn. When exceeded the turn is stopped
     # and reported as failed so the client never waits on a wedged run.
     agent_turn_timeout_seconds: float = 1_800.0
+    # Abort a turn that emits no agent event and runs no tool for this long.
+    # Guards against a provider that accepts the stream then stops sending;
+    # without it the only bound is agent_turn_timeout_seconds (30 minutes).
+    turn_stall_timeout_seconds: float = 300.0
     # How long a queued turn waits for the previous turn on the same session
     # before it is rejected with a clear error instead of hanging.
     turn_queue_wait_seconds: float = 900.0
@@ -283,7 +314,7 @@ class Settings(BaseSettings):
     routing_model: str = "tencent-hy3"
     routing_fallback_model: str = "tencent-hy3"
     max_worker_calls_per_turn: int = 20
-    ask_user_timeout_seconds: float = 300.0
+    elicitation_timeout_seconds: float = 300.0
 
     # Context builder + memory (production stack Layers 1 and 4)
     memory_enabled: bool = True

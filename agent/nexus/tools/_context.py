@@ -71,6 +71,10 @@ _current_task_budget_guard: contextvars.ContextVar[Optional["TaskBudgetGuard"]] 
 _current_tool_allowlist: contextvars.ContextVar[Optional[frozenset[str]]] = (
     contextvars.ContextVar("_current_tool_allowlist", default=None)
 )
+_current_unattended_tools: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "_current_unattended_tools",
+    default=frozenset(),
+)
 _timed_out_tool_approvals: contextvars.ContextVar[Optional[set[str]]] = (
     contextvars.ContextVar("_timed_out_tool_approvals", default=None)
 )
@@ -79,27 +83,29 @@ _ensure_sandbox_callback: contextvars.ContextVar[Optional[Callable[[], Awaitable
     contextvars.ContextVar("_ensure_sandbox_callback", default=None)
 )
 
-# question, optional multiple-choice labels
-AskUserCallback = Callable[..., Awaitable[Optional[str]]]
+# elicitation callback: mode="choice" | "suggestion", kwargs
+ElicitationCallback = Callable[..., Awaitable[Optional[str]]]
 
-_ask_user_callback: contextvars.ContextVar[Optional["AskUserCallback"]] = (
-    contextvars.ContextVar("_ask_user_callback", default=None)
+_elicitation_callback: contextvars.ContextVar[Optional["ElicitationCallback"]] = (
+    contextvars.ContextVar("_elicitation_callback", default=None)
 )
+
+
+def set_elicitation_callback(callback: "ElicitationCallback | None") -> contextvars.Token:
+    """Set the async callback that presents choices/suggestions and awaits the answer."""
+    return _elicitation_callback.set(callback)
+
+
+def get_elicitation_callback() -> "ElicitationCallback | None":
+    """Retrieve the elicitation callback for the current execution context."""
+    return _elicitation_callback.get()
+
+
 # Mutable single-element list so increments inside the same turn context are visible
 # across tool invocations without re-setting the contextvar.
 _worker_call_counter: contextvars.ContextVar[Optional[list[int]]] = (
     contextvars.ContextVar("_worker_call_counter", default=None)
 )
-
-
-def set_ask_user_callback(callback: "AskUserCallback | None") -> contextvars.Token:
-    """Set the async callback that asks the user a question and awaits the answer."""
-    return _ask_user_callback.set(callback)
-
-
-def get_ask_user_callback() -> "AskUserCallback | None":
-    """Retrieve the ask-user callback for the current execution context."""
-    return _ask_user_callback.get()
 
 
 def reset_worker_call_count() -> None:
@@ -326,6 +332,40 @@ def get_tool_allowlist() -> frozenset[str] | None:
 def clear_tool_allowlist() -> None:
     """Reset the per-turn tool allowlist to unrestricted."""
     _current_tool_allowlist.set(None)
+
+
+def set_unattended_tools(tools: frozenset[str] | None) -> contextvars.Token:
+    """Bind tools that may skip approval on a scheduled unattended run."""
+    return _current_unattended_tools.set(tools or frozenset())
+
+
+def get_unattended_tools() -> frozenset[str]:
+    """Return the scheduled unattended-tool allowlist for this turn."""
+    return _current_unattended_tools.get()
+
+
+def clear_unattended_tools() -> None:
+    _current_unattended_tools.set(frozenset())
+
+
+_current_skip_confirmations: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_current_skip_confirmations",
+    default=False,
+)
+
+
+def set_skip_confirmations(val: bool) -> contextvars.Token:
+    """Bind whether skip confirmations / auto-approval is active for this turn."""
+    return _current_skip_confirmations.set(bool(val))
+
+
+def get_skip_confirmations() -> bool:
+    """Return whether skip confirmations / auto-approval is active."""
+    return _current_skip_confirmations.get()
+
+
+def clear_skip_confirmations() -> None:
+    _current_skip_confirmations.set(False)
 
 
 def reset_timed_out_tool_approvals() -> None:

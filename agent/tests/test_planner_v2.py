@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from google.adk.tools.agent_tool import AgentTool
 
 from nexus.agent import create_planner_agent
-from nexus.agents.planner_agent import BudgetedAgentTool
+from nexus.agents.planner_agent import BudgetedAgentTool, _parse_worker_result
 from nexus.agents.sub_agents import create_desktop_worker, create_terminal_worker
 from nexus.config import settings
 from nexus.runtime_config import SessionRuntimeConfig
@@ -78,7 +78,8 @@ class PlannerV2ShapeTests(TestCase):
         self.assertNotIn("take_screenshot", tool_names)
         self.assertIn("terminal_worker", tool_names)
         self.assertIn("desktop_worker", tool_names)
-        self.assertIn("ask_user", tool_names)
+        self.assertIn("ask_choice", tool_names)
+        self.assertIn("suggest_options", tool_names)
         self.assertIn("publish_html_artifact", tool_names)
         self.assertIn("publish_app_preview", tool_names)
         self.assertIn("invoke_subagent", tool_names)
@@ -101,7 +102,8 @@ class PlannerV2ShapeTests(TestCase):
         instruction = self.planner.instruction.lower()
         self.assertIn("terminal_worker", instruction)
         self.assertIn("desktop_worker", instruction)
-        self.assertIn("ask_user", instruction)
+        self.assertIn("ask_choice", instruction)
+        self.assertIn("suggest_options", instruction)
         self.assertIn("propose_workflow_template", instruction)
         self.assertIn("read_skill", instruction)
         self.assertIn("do not stop at raw search results", instruction)
@@ -138,6 +140,17 @@ class PlannerV2ShapeTests(TestCase):
         self.assertIn("never run find /", instruction)
         self.assertIn("api keys", instruction)
         self.assertIn("this json", instruction)
+
+    def test_missing_tool_result_becomes_typed_worker_interrupt(self) -> None:
+        result = _parse_worker_result(
+            "Error: Missing tool result (tool execution may have been interrupted "
+            "before a response was recorded).",
+            "terminal_worker",
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "WORKER_TOOL_INTERRUPTED")
+        self.assertTrue(result["retryable"])
 
     def test_desktop_worker_surface_is_gui_only(self) -> None:
         tool_names = _tool_names(self.desktop)

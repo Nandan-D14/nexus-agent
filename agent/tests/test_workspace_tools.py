@@ -69,8 +69,9 @@ class FakeSandbox:
         else:
             self.files[normalized] = content
 
-    def read_text_file(self, path: str) -> str:
-        return self.files[path.replace("\\", "/")]
+    def read_text_file(self, path: str, *, max_chars: int = 0) -> str:
+        content = self.files[path.replace("\\", "/")]
+        return content if max_chars <= 0 else content[:max_chars]
 
     def path_exists(self, path: str) -> bool:
         normalized = path.replace("\\", "/")

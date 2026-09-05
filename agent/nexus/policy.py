@@ -25,6 +25,8 @@ _EXTERNAL_SIDE_EFFECT_TOOLS = {
     "vyora_start_call",
     "upload_drive_file",
     "create_drive_doc",
+    "create_drive_sheet",
+    "schedules_create",
 }
 
 _SENSITIVE_READ_TOOLS = {
@@ -92,15 +94,81 @@ def evaluate_tool_policy(
     *,
     autonomy_mode: str | None = None,
     untrusted_input_in_scope: bool = False,
+    allowed_unattended_tools: frozenset[str] | set[str] | None = None,
 ) -> ToolPolicyDecision:
     """Return the policy decision for a tool call before execution.
 
     Manual mode still allows low-risk local work. Auto Mode removes approval for
     medium-risk actions, but high-impact external/destructive actions remain gated.
+    Scheduled runs may skip approval for an explicit unattended allowlist.
     """
+    from nexus.schedules import NEVER_UNATTENDED_TOOLS, slack_mcp_unattended_allowed
+
     normalized_tool = (tool_name or "").strip()
     mode = normalize_autonomy_mode(autonomy_mode)
     args = args or {}
+    allowed = {str(item).strip() for item in (allowed_unattended_tools or set()) if str(item).strip()}
+
+    if normalized_tool == "run_command":
+        command = str(args.get("command") or "")
+        if _SECRET_EXFIL_RE.search(command):
+            return ToolPolicyDecision(
+                "deny",
+                "Command appears to read or expose credentials/secrets.",
+                "blocked",
+            )
+        if _UNBOUNDED_FIND_RE.search(command):
+            return ToolPolicyDecision(
+                "deny",
+                "Unbounded filesystem walk (find /) is not allowed. Search a specific directory.",
+                "blocked",
+            )
+        # Sandbox commands never require approval: the sandbox is an isolated
+        # E2B VM, so even destructive-looking commands only affect disposable
+        # state. Risk is still labeled for log visibility.
+        if _DESTRUCTIVE_COMMAND_RE.search(command):
+            return ToolPolicyDecision(
+                "allow",
+                "Sandbox command allowed without approval.",
+                "high",
+            )
+        if re.search(r"(?is)\bgit\s+push\b", command):
+            return ToolPolicyDecision(
+                "allow",
+                "Sandbox git push allowed without approval.",
+                "high",
+            )
+        return ToolPolicyDecision("allow", "Low-risk shell command.", "medium")
+
+    if normalized_tool in NEVER_UNATTENDED_TOOLS:
+        if normalized_tool.startswith("mcp__"):
+            pass
+        elif normalized_tool in _EXTERNAL_SIDE_EFFECT_TOOLS:
+            return ToolPolicyDecision(
+                "require_approval",
+                "External side-effect tools require user confirmation.",
+                "high",
+            )
+
+    try:
+        from nexus.tools._context import get_skip_confirmations
+
+        skip_conf = get_skip_confirmations()
+    except Exception:
+        skip_conf = False
+
+    unattended_ok = (
+        skip_conf
+        or "*" in allowed
+        or normalized_tool in allowed
+        or slack_mcp_unattended_allowed(normalized_tool, allowed)
+    )
+    if unattended_ok and normalized_tool not in NEVER_UNATTENDED_TOOLS:
+        return ToolPolicyDecision(
+            "allow",
+            "Allowed by scheduled unattended-tool auto-approval.",
+            "low",
+        )
 
     if normalized_tool.startswith("mcp__"):
         remote_name = normalized_tool.rsplit("__", 1)[-1]
@@ -121,34 +189,6 @@ def evaluate_tool_policy(
             "Read-only MCP call allowed in Auto Mode.",
             "low",
         )
-
-    if normalized_tool == "run_command":
-        command = str(args.get("command") or "")
-        if _SECRET_EXFIL_RE.search(command):
-            return ToolPolicyDecision(
-                "deny",
-                "Command appears to read or expose credentials/secrets.",
-                "blocked",
-            )
-        if _UNBOUNDED_FIND_RE.search(command):
-            return ToolPolicyDecision(
-                "deny",
-                "Unbounded filesystem walk (find /) is not allowed. Search a specific directory.",
-                "blocked",
-            )
-        if _DESTRUCTIVE_COMMAND_RE.search(command):
-            return ToolPolicyDecision(
-                "require_approval",
-                "Command can modify or destroy system state.",
-                "high",
-            )
-        if re.search(r"(?is)\bgit\s+push\b", command):
-            return ToolPolicyDecision(
-                "require_approval",
-                "git push publishes to a remote repository.",
-                "high",
-            )
-        return ToolPolicyDecision("allow", "Low-risk shell command.", "medium")
 
     if normalized_tool in _EXTERNAL_SIDE_EFFECT_TOOLS:
         return ToolPolicyDecision(

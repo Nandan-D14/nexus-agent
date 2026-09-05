@@ -71,8 +71,9 @@ class _FileSandbox:
         else:
             self.files[path] = content
 
-    def read_text_file(self, path: str) -> str:
-        return self.files[path]
+    def read_text_file(self, path: str, *, max_chars: int = 0) -> str:
+        content = self.files[path]
+        return content if max_chars <= 0 else content[:max_chars]
 
     def path_exists(self, path: str) -> bool:
         return path in self.files

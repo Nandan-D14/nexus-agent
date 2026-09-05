@@ -225,6 +225,32 @@ jobs:
           echo "AGENT_URL=${AGENT_URL}" >> $GITHUB_ENV
           echo "AGENT_WS_URL=${AGENT_WS_URL}" >> $GITHUB_ENV
 
+          gcloud services enable cloudscheduler.googleapis.com --project="${{ env.PROJECT_ID }}" 2>/dev/null || true
+          SCHEDULER_HEADERS="X-Worker-Token=${TOKEN_VAL},Content-Type=application/json"
+          if gcloud scheduler jobs describe cocomputer-schedule-tick \
+            --project="${{ env.PROJECT_ID }}" \
+            --location="${{ env.REGION }}" >/dev/null 2>&1; then
+            gcloud scheduler jobs update http cocomputer-schedule-tick \
+              --project="${{ env.PROJECT_ID }}" \
+              --location="${{ env.REGION }}" \
+              --schedule="* * * * *" \
+              --uri="${AGENT_URL}/internal/schedules/tick" \
+              --http-method=POST \
+              --headers="${SCHEDULER_HEADERS}" \
+              --message-body="{}" \
+              --attempt-deadline=60s || true
+          else
+            gcloud scheduler jobs create http cocomputer-schedule-tick \
+              --project="${{ env.PROJECT_ID }}" \
+              --location="${{ env.REGION }}" \
+              --schedule="* * * * *" \
+              --uri="${AGENT_URL}/internal/schedules/tick" \
+              --http-method=POST \
+              --headers="${SCHEDULER_HEADERS}" \
+              --message-body="{}" \
+              --attempt-deadline=60s || true
+          fi
+
       - name: 'Build and Push Frontend Image'
         run: |-
           FRONTEND_IMAGE="${{ env.AR_REPO }}/nexus-frontend:${{ github.sha }}"

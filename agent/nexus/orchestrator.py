@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -30,6 +31,7 @@ from nexus.billing import calculate_screenshot_credits, calculate_usage_credits
 from nexus.history_repository import FirestoreHistoryRepository
 from nexus.mcp_client import build_mcp_adk_tools, redact_sensitive
 from nexus.runtime_config import SessionRuntimeConfig
+from nexus import run_progress
 from nexus.resilience import is_remote_deadline_error
 from nexus.sandbox import SandboxDeadError
 from nexus.skills import build_enabled_skills_prompt
@@ -37,7 +39,7 @@ from nexus.tools._context import (
     reset_timed_out_tool_approvals,
     reset_worker_call_count,
     set_artifact_callback,
-    set_ask_user_callback,
+    set_elicitation_callback,
     set_bg_task_manager,
     set_ensure_sandbox_callback,
     set_history_repository,
@@ -103,44 +105,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_LOG_PATHS = (
-    r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log",
-    r"C:\Users\nanda\OneDrive\Desktop\co-computer\.cursor\debug-2a93a8.log",
-)
+# Uploads that are binaries the model cannot read directly and that
+# `search_sources` cannot index until their text is extracted.
+_OFFICE_UPLOAD_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
 
-
+# #region agent log
 def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    payload = {
+        "sessionId": "993e46",
+        "runId": "post-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
     try:
         import json as _dbg_json
-        from pathlib import Path as _DbgPath
-        import urllib.request
 
-        payload = {
-            "sessionId": "2a93a8",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        line = _dbg_json.dumps(payload) + "\n"
-        for path in _DEBUG_LOG_PATHS:
-            try:
-                _DbgPath(path).open("a", encoding="utf-8").write(line)
-            except Exception:
-                pass
-        req = urllib.request.Request(
-            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
-            data=line.encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-Debug-Session-Id": "2a93a8",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=0.3)
+        line = _dbg_json.dumps(payload)
+        with open(
+            r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(line + "\n")
     except Exception:
         pass
+# #endregion
 
 # Nudge sent when the model produced no user-visible closing text.
 # Allow tools: "create it" after a skill read still needs file/worker work.
@@ -165,15 +157,32 @@ _SHORT_FOLLOWUP_RE = re.compile(
     r")(?:\s*[.!,])*$",
     re.IGNORECASE,
 )
+# "continue and give ppt" is still a confirmation of the prior task — but only
+# when the message is short. A long "continue <new instructions>..." turn is a
+# substantial request in its own right and must not be swallowed into a
+# history reconstruction that buries the new details.
+_SHORT_FOLLOWUP_PREFIX_RE = re.compile(
+    r"^(?:continue|retry|resume|try\s+again)\b",
+    re.IGNORECASE,
+)
+_SHORT_FOLLOWUP_PREFIX_MAX_CHARS = 80
 _CREATE_OR_BUILD_RE = re.compile(
-    r"\b(create|build|make|landing|vite|react|website|webpage|prototype|app)\b",
+    r"\b(create|generate|build|make|export|produce|design|landing|vite|react|"
+    r"website|webpage|prototype|app|pdf|xlsx|spreadsheet|docx|document|pptx?|"
+    r"presentation|slides?|deck|report|artifact)\b",
     re.IGNORECASE,
 )
 
 
 def is_short_followup(text: str) -> bool:
     """Return True when *text* is a confirmation, not a new request."""
-    return bool(_SHORT_FOLLOWUP_RE.match(str(text or "").strip()))
+    stripped = str(text or "").strip()
+    if _SHORT_FOLLOWUP_RE.match(stripped):
+        return True
+    return bool(
+        len(stripped) <= _SHORT_FOLLOWUP_PREFIX_MAX_CHARS
+        and _SHORT_FOLLOWUP_PREFIX_RE.match(stripped)
+    )
 
 
 _TASK_INQUIRY_RE = re.compile(
@@ -216,14 +225,18 @@ def should_recover_website(error_code: str, request: str) -> bool:
 
 
 _DELIVERABLE_DEMAND_RE = re.compile(
-    r"\bwhere\b.{0,80}\b(website|webpage|site|page|preview|\bapp\b)\b"
-    r"|\b(show|give|open)\s+me\s+(the\s+)?(website|site|preview|page)\b",
+    r"\bwhere\b.{0,80}\b(website|webpage|site|page|preview|app|pptx?|"
+    r"presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|"
+    r"artifact|file)\b"
+    r"|\b(show|give|open|send|share)\s+(me\s+)?(the\s+)?(website|webpage|site|"
+    r"page|preview|app|pptx?|ppt|presentation|slides?|deck|pdf|xlsx|"
+    r"spreadsheet|docx|document|report|artifact|file)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
 
 def is_deliverable_demand(text: str) -> bool:
-    """Return True when the user is demanding the unpublished website/preview."""
+    """Return True when the user is demanding a missing deliverable."""
     return bool(_DELIVERABLE_DEMAND_RE.search(str(text or "").strip()))
 
 
@@ -250,6 +263,11 @@ def looks_like_unpublished_markup(text: str) -> bool:
             "css: custom",
             "grid-template-columns",
             "one more consideration",
+            "def kicker",
+            "python-pptx",
+            "add_textbox",
+            "slide.shapes",
+            "teal bar",
         )
     )
 
@@ -313,8 +331,10 @@ def format_continue_task(goal: str, confirmation: str) -> str:
         f"{goal.strip()}\n"
         "If this is a website, landing page, or React/Vite app, write the files "
         "in the workspace, run the dev server bound to 0.0.0.0, and call "
-        "publish_app_preview.\n"
-        "Then reply with a short status and the preview URL.\n"
+        "publish_app_preview. If this is a PDF/XLSX/DOCX/PPTX, call "
+        "terminal_worker with the matching generate_*_report tool and publish or "
+        "save the resulting artifact.\n"
+        "Then reply with a short status and the artifact or preview link.\n"
         "Do not stop after thinking. Do not finish empty.\n"
         "[END CONTINUE TASK]"
     )
@@ -489,8 +509,9 @@ class NexusOrchestrator:
         self._budget_stop_reason: str = ""
         self._turn_started_monotonic: float = 0.0
         self._workspace_path: str | None = None
-        # ask_user: question_id -> future resolved by the user's ws reply
-        self._pending_user_questions: dict[str, asyncio.Future] = {}
+        # Elicitation: question_id / elicitation_id -> future resolved by user's reply
+        self._pending_elicitations: dict[str, asyncio.Future] = {}
+        self._pending_user_questions = self._pending_elicitations
         # WebSocket I/O is delegated to a bound collaborator (built lazily so
         # instances created via __new__ in tests still resolve it).
         self._delegates = None
@@ -538,7 +559,7 @@ class NexusOrchestrator:
         set_subagent_supervisor(self._subagent_supervisor)
         set_subagent_resource_locks(self._subagent_supervisor.resource_locks)
         set_ensure_sandbox_callback(lambda: self._ensure_sandbox_ready("tool_use"))
-        set_ask_user_callback(self._ask_user_and_wait)
+        set_elicitation_callback(self._elicitation_and_wait)
         self._bind_workspace_context()
         if not lazy_sandbox:
             workspace_root_ready = await self._ensure_session_workspace_root()
@@ -811,7 +832,13 @@ class NexusOrchestrator:
                 if conn.connector_type == "mcp_remote_http" and conn.private.get("tools"):
                     for tool_info in conn.private["tools"]:
                         tool_name = tool_info.get("name", "")
-                        params_obj = tool_info.get("parameters") or {}
+                        # Discovery persists the schema as `input_schema`; reading
+                        # `parameters` listed every MCP tool with no arguments.
+                        params_obj = (
+                            tool_info.get("input_schema")
+                            or tool_info.get("parameters")
+                            or {}
+                        )
                         props = params_obj.get("properties", {}) if isinstance(params_obj, dict) else {}
                         param_names = ", ".join(props.keys()) if isinstance(props, dict) else ""
                         mcp_tool_meta.append({"name": tool_name, "parameters": param_names})
@@ -856,6 +883,7 @@ class NexusOrchestrator:
                 calendar_list,
                 calendar_update,
                 create_drive_doc,
+                create_drive_sheet,
                 gmail_read,
                 gmail_search,
                 gmail_send,
@@ -867,7 +895,7 @@ class NexusOrchestrator:
             )
 
             tools.extend([
-                search_drive, read_drive_file, create_drive_doc, upload_drive_file,
+                search_drive, read_drive_file, create_drive_doc, create_drive_sheet, upload_drive_file,
                 gmail_search, gmail_read, gmail_send,
                 tasks_list, tasks_create,
                 calendar_list, calendar_get, calendar_create, calendar_update, calendar_delete,
@@ -1060,9 +1088,23 @@ class NexusOrchestrator:
 
         completion_request = original_request
         goal = original_request.strip()
+        previous_task = str(getattr(self, "_outstanding_task", "") or "").strip()
         should_expand = is_short_followup(original_request) or is_deliverable_demand(
             original_request
         )
+        # #region agent log
+        _agent_debug_log(
+            "H8",
+            "orchestrator.py:handle_text_input",
+            "followup expansion decision",
+            {
+                "original": original_request[:180],
+                "is_short_followup": is_short_followup(original_request),
+                "is_deliverable_demand": is_deliverable_demand(original_request),
+                "should_expand": should_expand,
+            },
+        )
+        # #endregion
         if should_expand:
             messages: list[dict[str, Any]] = []
             repo = getattr(self, "history_repository", None)
@@ -1082,8 +1124,42 @@ class NexusOrchestrator:
                 seed = str(getattr(self, "_seed_context", "") or "").strip()
                 if seed:
                     goal = seed
+            if (
+                is_short_followup(goal)
+                and not is_deliverable_demand(goal)
+                and previous_task
+                and not is_short_followup(previous_task)
+            ):
+                # History lookup came back empty (or echoed the confirmation):
+                # keep driving the previous substantial task so the model
+                # prompt and verification still know the deliverable is owed.
+                # (Demands like "give ppt" name the object themselves and need
+                # no fallback.)
+                goal = previous_task
             if goal and goal.strip().casefold() != original_request.strip().casefold():
                 model_text = f"{format_continue_task(goal, original_request)}\n\n{model_text}"
+                completion_request = goal
+                # #region agent log
+                _agent_debug_log(
+                    "H8",
+                    "orchestrator.py:handle_text_input:expanded",
+                    "expanded continue task",
+                    {
+                        "goal_head": goal[:240],
+                        "completion_request_head": str(completion_request)[:240],
+                    },
+                )
+                # #endregion
+        if (
+            is_short_followup(goal)
+            and not is_deliverable_demand(goal)
+            and previous_task
+            and not is_short_followup(previous_task)
+        ):
+            # Never let a bare confirmation ("continue") clobber the tracked
+            # task — verification relies on it to keep the artifact owed.
+            goal = previous_task
+            if completion_request.strip().casefold() == original_request.strip().casefold():
                 completion_request = goal
         self._outstanding_task = goal
 
@@ -1104,95 +1180,168 @@ class NexusOrchestrator:
         """Route a permission_response from the frontend to the bg task manager."""
         self.bg_task_manager.handle_permission_response(task_id, approved)
 
-    async def _ask_user_and_wait(
+    async def _elicitation_and_wait(
         self,
-        question: str,
-        options: list[str] | None = None,
+        mode: str = "choice",
+        **kwargs: Any,
     ) -> str | None:
-        """ask_user tool callback: surface a question card and await the reply."""
-        import uuid as _uuid
+        """Elicitation callback: surface choice/suggestion card and await reply."""
+        from nexus.tools._context import get_skip_confirmations
 
-        from nexus.tools.ask_user import (
-            format_ask_user_history_text,
-            normalize_ask_user_options,
+        if get_skip_confirmations():
+            if mode == "choice":
+                opts = kwargs.get("options") or []
+                return opts[0] if opts else "Proceed"
+            elif mode == "suggestion":
+                items = kwargs.get("items") or []
+                return items[0]["name"] if items else "Proceed"
+            return "Proceed"
+
+        import uuid as _uuid
+        from nexus.tools.elicitation import (
+            format_choice_history_text,
+            format_suggestion_history_text,
         )
 
-        question_id = f"q_{_uuid.uuid4().hex[:10]}"
+        # Cap at one open card at a time — back-to-back ask_choice turns into
+        # an interrogation, so reject the second call and let the model proceed
+        # with its best assumption instead of stacking cards.
+        if self._pending_elicitations:
+            pending_ids = sorted(self._pending_elicitations.keys())
+            logger.warning(
+                "elicitation_rejected_back_to_back mode=%s pending=%s",
+                mode,
+                ",".join(pending_ids),
+            )
+            return None
+
+        elicitation_id = f"el_{_uuid.uuid4().hex[:10]}"
         future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending_user_questions[question_id] = future
-        choices = normalize_ask_user_options(options)
-        persist_text = format_ask_user_history_text(question, choices)
-        payload: dict[str, Any] = {
-            "type": "user_question",
-            "question_id": question_id,
-            "question": question,
-            "timeout_seconds": settings.ask_user_timeout_seconds,
-        }
-        if choices:
-            payload["options"] = choices
+        self._pending_elicitations[elicitation_id] = future
+
+        timeout = getattr(settings, "elicitation_timeout_seconds", 300.0)
+
+        if mode == "suggestion":
+            title = str(kwargs.get("title") or "Connectors that could help")
+            items = list(kwargs.get("items") or [])
+            persist_text = format_suggestion_history_text(title, items)
+            payload: dict[str, Any] = {
+                "type": "elicitation_request",
+                "elicitation_id": elicitation_id,
+                "question_id": elicitation_id,
+                "mode": "suggestion",
+                "title": title,
+                "items": items,
+                "timeout_seconds": timeout,
+            }
+            step_type = "suggest_options"
+            step_title = "Suggested integrations"
+            step_detail = title
+            metadata = {
+                "elicitation_id": elicitation_id,
+                "mode": "suggestion",
+                "title": title,
+                "items": items,
+            }
+        else:
+            question = str(kwargs.get("question") or "")
+            options = list(kwargs.get("options") or [])
+            allow_free_text = bool(kwargs.get("allow_free_text", True))
+            persist_text = format_choice_history_text(question, options)
+            payload = {
+                "type": "elicitation_request",
+                "elicitation_id": elicitation_id,
+                "question_id": elicitation_id,
+                "mode": "choice",
+                "question": question,
+                "options": options,
+                "allow_free_text": allow_free_text,
+                "timeout_seconds": timeout,
+            }
+            step_type = "ask_choice"
+            step_title = "Waiting for your choice"
+            step_detail = question
+            metadata = {
+                "elicitation_id": elicitation_id,
+                "mode": "choice",
+                "question": question,
+                "options": options,
+                "allow_free_text": allow_free_text,
+            }
 
         await self._send_json(payload)
-        await self._persist_message(role="agent", source="ask_user", text=persist_text)
+        await self._persist_message(role="agent", source=step_type, text=persist_text)
+        logger.info(
+            "elicitation_requested id=%s mode=%s detail=%s",
+            elicitation_id,
+            mode,
+            step_detail[:200] if isinstance(step_detail, str) else step_detail,
+        )
         step_id = await self._create_step(
-            step_type="ask_user",
-            title="Waiting for your answer",
-            detail=question,
+            step_type=step_type,
+            title=step_title,
+            detail=step_detail,
             source=getattr(self, "_active_agent", "nexus_planner"),
-            metadata={
-                "question_id": question_id,
-                "question": question,
-                **({"options": choices} if choices else {}),
-            },
+            metadata=metadata,
         )
 
         try:
-            answer = await self._await_question_answer(question_id, future)
+            answer = await self._await_elicitation_answer(elicitation_id, future)
         except asyncio.TimeoutError:
+            logger.warning("elicitation_timed_out id=%s mode=%s", elicitation_id, mode)
             await self._fail_step(
                 step_id,
-                detail="No answer before timeout.",
-                error="ask_user timed out",
+                detail="No response before timeout.",
+                error="Elicitation timed out",
                 status="cancelled",
             )
             await self._send_json({
-                "type": "user_question_resolved",
-                "question_id": question_id,
+                "type": "elicitation_resolved",
+                "elicitation_id": elicitation_id,
+                "question_id": elicitation_id,
                 "answered": False,
             })
             return None
         finally:
-            self._pending_user_questions.pop(question_id, None)
+            self._pending_elicitations.pop(elicitation_id, None)
 
         answer_text = str(answer or "").strip()
-        await self._persist_message(role="user", source="ask_user_response", text=answer_text)
+        await self._persist_message(role="user", source="elicitation_response", text=answer_text)
+        logger.info(
+            "elicitation_resolved id=%s mode=%s selected=%s",
+            elicitation_id,
+            mode,
+            answer_text[:200],
+        )
         await self._complete_step(
             step_id,
-            detail=f"Q: {question}\nA: {answer_text}",
-            metadata={"question_id": question_id, "answer": answer_text},
+            detail=f"Prompt: {step_detail}\nSelected: {answer_text}",
+            metadata={"elicitation_id": elicitation_id, "answer": answer_text},
         )
         await self._send_json({
-            "type": "user_question_resolved",
-            "question_id": question_id,
+            "type": "elicitation_resolved",
+            "elicitation_id": elicitation_id,
+            "question_id": elicitation_id,
             "answered": True,
         })
         return answer_text
 
-    def handle_user_question_response(self, question_id: str, answer: str) -> None:
-        """Resolve a pending ask_user future from a frontend reply."""
-        future = self._pending_user_questions.get(str(question_id or "").strip())
+
+    def handle_elicitation_response(self, elicitation_id: str, answer: str) -> None:
+        """Resolve a pending elicitation future from a frontend reply."""
+        future = self._pending_elicitations.get(str(elicitation_id or "").strip())
         if future is None or future.done():
-            logger.info("Ignoring stale user_question_response %s", question_id)
+            logger.info("Ignoring stale elicitation_response %s", elicitation_id)
             return
         future.set_result(str(answer or ""))
 
-    async def _await_question_answer(self, question_id: str, future: asyncio.Future) -> str:
-        """Wait for an ask_user answer via the live WS future or the durable event log.
+    def handle_user_question_response(self, question_id: str, answer: str) -> None:
+        """Resolve a pending question/elicitation future from a frontend reply."""
+        self.handle_elicitation_response(question_id, answer)
 
-        Durable (worker-owned) runs have no live WebSocket: the user's reply
-        lands as a ``user_question_response`` event on the durable task, so we
-        poll the event log alongside the in-process future.
-        """
-        timeout = settings.ask_user_timeout_seconds
+    async def _await_elicitation_answer(self, elicitation_id: str, future: asyncio.Future) -> str:
+        """Wait for an elicitation answer via the live WS future or the durable event log."""
+        timeout = getattr(settings, "elicitation_timeout_seconds", 300.0)
         if not (self._durable_task_id and self.production_task_repository is not None):
             return await asyncio.wait_for(future, timeout=timeout)
 
@@ -1216,15 +1365,23 @@ class NexusOrchestrator:
                     limit=100,
                 )
             except Exception:
-                logger.debug("Durable question poll failed", exc_info=True)
+                logger.debug("Durable elicitation poll failed", exc_info=True)
                 continue
             for event in events:
                 last_seq = max(last_seq, int(getattr(event, "seq", 0) or 0))
-                if getattr(event, "event_type", "") != "user_question_response":
+                ev_type = getattr(event, "event_type", "")
+                if ev_type not in {"elicitation_response", "user_question_response"}:
                     continue
                 payload = getattr(event, "payload", None) or {}
-                if str(payload.get("question_id") or "") == question_id:
+                if (
+                    str(payload.get("elicitation_id") or "") == elicitation_id
+                    or str(payload.get("question_id") or "") == elicitation_id
+                ):
                     return str(payload.get("answer") or "")
+
+    async def _await_question_answer(self, question_id: str, future: asyncio.Future) -> str:
+        """Backward compatible wrapper for _await_elicitation_answer."""
+        return await self._await_elicitation_answer(question_id, future)
 
     async def handle_user_utterance(self, text: str) -> None:
         """Called when Gemini Live produces a final user transcript."""
@@ -1741,6 +1898,12 @@ class NexusOrchestrator:
                 line += f" drive={drive_link}"
             if mime_type == "application/pdf" or name.lower().endswith(".pdf") or path.lower().endswith(".pdf"):
                 line += " [PDF: use extract_pdf_text(path=...) before reading; do not cat/base64 dump it]"
+            elif _OFFICE_UPLOAD_SUFFIXES.intersection(
+                {os.path.splitext(candidate.lower())[1] for candidate in (name, path) if candidate}
+            ):
+                # Office files are binaries: reading them directly returns
+                # mojibake, and retrieval cannot index them until extraction.
+                line += " [Office file: use extract_document_text(path=...) before reading; do not cat it]"
             lines.append(line)
         return "\n".join(lines)
 
@@ -2322,6 +2485,9 @@ class NexusOrchestrator:
             mcp_tools=getattr(self, "_integration_tools", None) or None,
         )
         set_tool_allowlist(allowlist)
+        keepalive_task: asyncio.Task | None = None
+        stall_watchdog: asyncio.Task | None = None
+        self._stall_aborted = False
         try:
             # Persist ONLY the original user request in the user-visible step. The
             # composed `message` also carries the resume checkpoint, connector
@@ -2340,9 +2506,11 @@ class NexusOrchestrator:
                 },
             )
             await self._set_run_status("running")
+            keepalive_task = self._start_sandbox_keepalive()
             self._agent_task = asyncio.create_task(
                 self._run_agent(message, completion_request=completion_request)
             )
+            stall_watchdog = self._start_turn_stall_watchdog()
             turn_timeout = float(settings.agent_turn_timeout_seconds or 0)
             if turn_timeout > 0:
                 # asyncio.shield keeps `_agent_task` cancellable by stop_agent
@@ -2489,26 +2657,45 @@ class NexusOrchestrator:
             await self._set_run_status("cancelled")
             await self._finish_durable_run_if_bound("cancelled", summary=stop_reason)
         except asyncio.CancelledError:
-            cancel_reason = "WebSocket disconnected." if not self._ws_connected else "Stopped by user."
-            if self._ws_connected:
+            if getattr(self, "_stall_aborted", False):
+                cancel_reason = (
+                    "The model stopped responding partway through, so the request "
+                    "was ended. Please try again."
+                )
+            elif not self._ws_connected:
+                cancel_reason = "WebSocket disconnected."
+            else:
+                cancel_reason = "Stopped by user."
+            if getattr(self, "_stall_aborted", False):
+                logger.warning("Agent turn aborted after a stall for session %s", self.session.id)
+            elif self._ws_connected:
                 logger.info("Agent turn cancelled by user for session %s", self.session.id)
             else:
                 logger.info("Agent turn cancelled after WebSocket disconnect for session %s", self.session.id)
             self._active_agent = "nexus_orchestrator"
             self.last_turn_result = {
-                "status": "cancelled",
+                "status": "failed" if getattr(self, "_stall_aborted", False) else "cancelled",
                 "summary": cancel_reason,
                 "final_response": "",
             }
-            await self._fail_unfinished_tool_steps(status="cancelled", error=cancel_reason)
+            if getattr(self, "_stall_aborted", False):
+                await self._send_json({
+                    "type": "error",
+                    "code": "TURN_STALLED",
+                    "message": cancel_reason,
+                })
+            # A stall is a failure, not a user cancellation: settling it as
+            # `failed` keeps the durable record honest and lets retry policy see it.
+            terminal_status = "failed" if getattr(self, "_stall_aborted", False) else "cancelled"
+            await self._fail_unfinished_tool_steps(status=terminal_status, error=cancel_reason)
             await self._fail_step(
                 self._current_turn_step_id,
                 detail=cancel_reason,
                 error=cancel_reason,
-                status="cancelled",
+                status=terminal_status,
             )
-            await self._set_run_status("cancelled")
-            await self._finish_durable_run_if_bound("cancelled", summary=cancel_reason)
+            await self._set_run_status(terminal_status)
+            await self._finish_durable_run_if_bound(terminal_status, summary=cancel_reason)
         except Exception:
             logger.exception(
                 "Agent turn raised an unexpected error for session %s",
@@ -2538,6 +2725,11 @@ class NexusOrchestrator:
         finally:
             from nexus.tools._context import clear_tool_allowlist
 
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+            if stall_watchdog is not None:
+                stall_watchdog.cancel()
+            run_progress.stop_tracking(getattr(self.session, "current_run_id", None))
             clear_tool_allowlist()
             self._tool_step_ids = {}
             self._tool_trace_steps = {}
@@ -2572,6 +2764,72 @@ class NexusOrchestrator:
                     "failed",
                     summary="The request ended unexpectedly. Please try again.",
                 )
+
+    def _start_turn_stall_watchdog(self) -> asyncio.Task | None:
+        """Abort a turn that has gone completely quiet.
+
+        The only other bound on a turn is ``agent_turn_timeout_seconds`` (30
+        minutes), which is far too long to wait on a provider that accepted the
+        connection and then stopped sending chunks. Cancelling ``_agent_task``
+        routes through the existing CancelledError handler, so the client still
+        gets a terminal status instead of an indefinite thinking indicator.
+        """
+        timeout = float(settings.turn_stall_timeout_seconds or 0)
+        if timeout <= 0:
+            return None
+        run_id = getattr(self.session, "current_run_id", None)
+        if not run_id:
+            return None
+        run_progress.start_tracking(run_id)
+
+        async def _loop() -> None:
+            poll = max(5.0, min(30.0, timeout / 4))
+            while True:
+                await asyncio.sleep(poll)
+                if not run_progress.is_stalled(run_id, timeout):
+                    continue
+                task = self._agent_task
+                if task is None or task.done():
+                    return
+                logger.error(
+                    "Agent turn produced no activity for %.0fs in session %s — cancelling",
+                    timeout,
+                    self.session.id,
+                )
+                self._stop_requested = True
+                self._stall_aborted = True
+                task.cancel()
+                return
+
+        return asyncio.create_task(_loop())
+
+    def _start_sandbox_keepalive(self) -> asyncio.Task | None:
+        """Keep the sandbox TTL ahead of the turn for as long as the turn runs.
+
+        The E2B VM expires ``sandbox_timeout_seconds`` after its last refresh,
+        and the only other refreshes happen at turn start and on sandbox tool
+        use. A turn that spends a long stretch outside the sandbox (research,
+        a slow model) would otherwise outlive the machine it is driving. Durable
+        worker runs need this most: they have no client pings at all.
+        """
+        interval = float(settings.sandbox_keepalive_interval_seconds or 0)
+        if interval <= 0:
+            return None
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                sandbox = getattr(self.session, "sandbox", None)
+                if sandbox is None or not getattr(sandbox, "is_alive", False):
+                    continue
+                try:
+                    # A False return marks the client dead, which is what makes
+                    # the next sandbox tool reconnect instead of using a corpse.
+                    await asyncio.to_thread(sandbox.extend_timeout)
+                except Exception:
+                    logger.debug("Sandbox keepalive failed", exc_info=True)
+
+        return asyncio.create_task(_loop())
 
     async def _run_agent(
         self,
@@ -2696,15 +2954,7 @@ class NexusOrchestrator:
                 final_response=final_response,
                 persist_step=False,
             )
-            # #region agent log
-            try:
-                import json as _dbg_json
-                from pathlib import Path as _DbgPath
-                _tools = [str(getattr(r.decision, "action", "") or "") for r in self._action_ledger.records[-16:]]
-                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"C","location":"orchestrator.py:after_first_verify","message":"first verification","data":{"completion_request":str(completion_request if completion_request is not None else message)[:180],"outstanding_task":str(getattr(self,"_outstanding_task","") or "")[:180],"verified":bool(completion_verification.verified),"error_code":completion_verification.error_code,"n_artifacts":len(self._action_ledger.artifacts()),"tools":_tools,"publish_called":any(t in {"publish_html_artifact","publish_app_preview","scaffold_web_project"} for t in _tools),"response_prefix":str(final_response or "")[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-            except Exception:
-                pass
-            # #endregion
+
             _agent_debug_log(
                 "C",
                 "orchestrator.py:after_first_verify",
@@ -2771,6 +3021,8 @@ class NexusOrchestrator:
                         "You must produce and publish the deliverable now. "
                         "If this is a website, landing page, dashboard, or UI, call publish_html_artifact "
                         "(for self-contained HTML/CSS/JS) or write files in the workspace and call publish_app_preview (for a live dev server). "
+                        "If this is a PDF, XLSX, DOCX, PPTX, presentation, or slide deck, call terminal_worker "
+                        "with the matching generate_*_report tool and save or publish the returned artifact. "
                         "Do not return text advice, skill guidelines, or an explanation without publishing the artifact.\n"
                         "[END DIRECTIVE]"
                     )
@@ -2950,14 +3202,7 @@ class NexusOrchestrator:
                     failure_summary += "\nRemaining: " + "; ".join(
                         completion_verification.remaining_work[:4]
                     )
-                # #region agent log
-                try:
-                    import json as _dbg_json
-                    from pathlib import Path as _DbgPath
-                    _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:completion_fail","message":"emitting completion error","data":{"status":completion_verification.status,"error_code":completion_verification.error_code,"soft_veto":False,"summary":completion_verification.summary[:240]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-                except Exception:
-                    pass
-                # #endregion
+
                 await self._reconcile_todos_at_turn_end(mark_complete=False)
                 await self._send_json({
                     "type": "transcript",
@@ -3181,6 +3426,9 @@ class NexusOrchestrator:
         """Callback for each ADK agent event — stream to frontend."""
         if not hasattr(self, "_action_ledger"):
             self._action_ledger = ActionLedger()
+        # The durable lease is renewed only while this keeps firing, so a wedged
+        # turn releases its lease instead of blocking the session forever.
+        run_progress.mark_progress(getattr(self.session, "current_run_id", None))
         # Bail out early if stop was requested
         self._raise_if_agent_should_stop()
 
@@ -3345,29 +3593,10 @@ class NexusOrchestrator:
                             self._html_dump_buffer = (
                                 str(getattr(self, "_html_dump_buffer", "") or "") + clean
                             )
-                            # #region agent log
-                            try:
-                                import json as _dbg_json
-                                from pathlib import Path as _DbgPath
-                                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:agent_delta","message":"routing markup to reasoning","data":{"thought":bool(getattr(part,"thought",False)),"kind":kind,"is_final":bool(is_final),"prefix":clean[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-                            except Exception:
-                                pass
-                            # #endregion
                             await self._emit_reasoning(clean)
                             continue
                         if not self._streaming_active:
                             self._streaming_active = True
-                        # #region agent log
-                        try:
-                            import json as _dbg_json
-                            from pathlib import Path as _DbgPath
-                            _htmlish = "<" in clean and ("class=" in clean or "<section" in clean.lower() or "<div" in clean.lower())
-                            _planish = any(tok in clean.lower() for tok in ("invoice card", "one more consideration", "writing now", "css:", "bento"))
-                            if _htmlish or _planish or is_final or len(clean) > 80:
-                                _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"orchestrator.py:agent_delta","message":"streaming answer text","data":{"thought":bool(getattr(part,"thought",False)),"kind":kind,"is_final":bool(is_final),"htmlish":_htmlish,"planish":_planish,"prefix":clean[:140]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-                        except Exception:
-                            pass
-                        # #endregion
                         await self._send_json({
                             "type": "agent_delta",
                             "delta": clean,
@@ -3448,14 +3677,7 @@ class NexusOrchestrator:
                         fallback_summary=output_str,
                     )
                     self._action_ledger.finish(action_observation)
-                    # #region agent log
-                    try:
-                        import json as _dbg_json
-                        from pathlib import Path as _DbgPath
-                        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"E","location":"orchestrator.py:tool_result","message":"tool observation","data":{"tool":str(tool_name),"status":action_observation.status,"n_artifacts":len(action_observation.artifacts),"artifact_tool":str(tool_name) in {"publish_html_artifact","publish_app_preview","scaffold_web_project"},"error_code":action_observation.error_code},"timestamp":int(__import__("time").time()*1000)})+"\n")
-                    except Exception:
-                        pass
-                    # #endregion
+
                     result_metadata = self._build_tool_result_metadata(
                         tool_name=tool_name,
                         output_mapping=output_mapping,
@@ -3891,6 +4113,9 @@ class NexusOrchestrator:
             request=request,
             final_response=final_response,
             ledger=self._action_ledger,
+            # A bare "continue" never matches the artifact regex on its own;
+            # the expanded outstanding task keeps the deliverable owed.
+            outstanding_task=str(getattr(self, "_outstanding_task", "") or ""),
         )
         active_subagents = [
             record
@@ -3932,14 +4157,7 @@ class NexusOrchestrator:
             status=verification.status,
             error_code=verification.error_code,
         )
-        # #region agent log
-        try:
-            import json as _dbg_json
-            from pathlib import Path as _DbgPath
-            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"D","location":"orchestrator.py:_verify_turn_completion","message":"verification step","data":{"verified":bool(verification.verified),"error_code":verification.error_code,"soft_veto":bool(is_soft_veto),"persist_step":bool(persist_step),"will_fail_step":bool(persist_step) and not (verification.verified or is_soft_veto),"request":str(request or "")[:160]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-        except Exception:
-            pass
-        # #endregion
+
         if not persist_step:
             return verification
         await self._send_json(payload)
@@ -4912,28 +5130,43 @@ class NexusOrchestrator:
             logger.exception("Failed to create artifact for session %s", self.session.id)
 
     async def _on_permission_requested(self, task: BackgroundTask) -> str | None:
+        logger.info(
+            "approval_requested task=%s agent=%s desc=%s",
+            task.task_id,
+            task.agent,
+            task.description[:200] if isinstance(task.description, str) else task.description,
+        )
         return await self._create_step(
             step_type="permission_request",
             title=task.description,
             detail=f"Awaiting approval for a background task ({task.estimated_seconds}s estimate).",
             source=task.agent,
             external_ref=task.task_id,
-            metadata={"estimated_seconds": task.estimated_seconds},
+            metadata={
+                "estimated_seconds": task.estimated_seconds,
+                "agent": task.agent,
+                "description": task.description,
+            },
         )
 
     async def _on_permission_resolved(self, task: BackgroundTask, approved: bool) -> None:
+        logger.info(
+            "approval_resolved task=%s approved=%s",
+            task.task_id,
+            approved,
+        )
         if approved:
             await self._complete_step(
                 task.permission_step_id,
-                detail="Permission granted.",
-                metadata={"approved": True},
+                detail=f"Permission granted for: {task.description}",
+                metadata={"approved": True, "agent": task.agent},
             )
             return
         await self._fail_step(
             task.permission_step_id,
-            detail="Permission denied or timed out.",
+            detail=f"Permission denied or timed out for: {task.description}",
             error="Permission denied or timed out.",
-            metadata={"approved": False},
+            metadata={"approved": False, "agent": task.agent},
             status="cancelled",
         )
 

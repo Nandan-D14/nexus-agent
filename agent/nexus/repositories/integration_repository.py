@@ -817,6 +817,7 @@ class IntegrationRepository(FirestoreRepoBase):
                     {"name": "search_drive", "description": "Search Google Drive files."},
                     {"name": "read_drive_file", "description": "Read a Google Drive file."},
                     {"name": "create_drive_doc", "description": "Create a Google Docs document."},
+                    {"name": "create_drive_sheet", "description": "Create a Google Sheets spreadsheet."},
                     {"name": "upload_drive_file", "description": "Upload a file to Google Drive."},
                 ],
             },

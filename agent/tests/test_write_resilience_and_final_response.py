@@ -154,12 +154,14 @@ class _FakeRunner:
         self._scripts = scripts
         self.calls = 0
         self.messages = []
+        self.yielded = []
 
     async def run_async(self, *, user_id, session_id, new_message):
         self.messages.append(new_message)
         events = self._scripts[self.calls]
         self.calls += 1
         for event in events:
+            self.yielded.append(event)
             yield event
 
 
@@ -172,6 +174,7 @@ def _fake_session_service():
 
 class RunAgentTurnTests(IsolatedAsyncioTestCase):
     async def _run(self, runner, **kwargs):
+        max_turns = kwargs.pop("max_turns", 30)
         with patch("nexus.agent.get_agent_usage_source", return_value=("agent", "m")), \
              patch("nexus.agent.extract_token_usage_records", return_value=[]):
             return await run_agent_turn(
@@ -181,7 +184,7 @@ class RunAgentTurnTests(IsolatedAsyncioTestCase):
                 user_id="user-1",
                 message="summarize my emails",
                 runtime_config=SimpleNamespace(),
-                max_turns=30,
+                max_turns=max_turns,
                 **kwargs,
             )
 
@@ -281,6 +284,17 @@ class RunAgentTurnTests(IsolatedAsyncioTestCase):
             result = await self._run(runner)
         self.assertIsNone(result.response)
         self.assertEqual(runner.calls, 1)
+
+    async def test_turn_cap_waits_for_function_response(self) -> None:
+        first_call = _FakeEvent([_part(function_call=object())], final=False)
+        first_response = _FakeEvent([_part(function_response=object())], final=False)
+        second_call = _FakeEvent([_part(function_call=object())], final=False)
+        runner = _FakeRunner([[first_call, first_response, second_call]])
+
+        with patch.object(settings, "force_final_synthesis", False):
+            await self._run(runner, max_turns=1)
+
+        self.assertEqual(runner.yielded, [first_call, first_response])
 
 
 class _RaisingRunner:

@@ -19,7 +19,6 @@ import {
   isWorkflowVisualTool,
 } from "@/lib/agent-tool-classification";
 import type { WsMessage } from "@/lib/message-types";
-import { coerceAskUserOptions } from "@/lib/ask-user-options";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -62,9 +61,33 @@ export type ChatItem =
       resolved?: boolean;
       /** Restored/live outcome for the approval card chrome. */
       decision?: PermissionDecision;
+      /** Policy risk tier (low/medium/high) for log + card subtitle. */
+      risk?: string;
+      /** Opaque fingerprint of the exact approved args. */
+      action_hash?: string;
+      /** Tool that requested approval, for log lines. */
+      tool?: string;
+      /** Epoch ms when the decision landed. */
+      decided_at?: number;
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number }
+  | {
+      kind: "elicitation";
+      elicitation_id: string;
+      question_id?: string;
+      mode?: "choice" | "suggestion";
+      question?: string;
+      options?: string[];
+      allow_free_text?: boolean;
+      title?: string;
+      items?: Array<{ name: string; description: string; action_label?: string }>;
+      answer?: string;
+      answered?: boolean;
+      timedOut?: boolean;
+      timeout_seconds?: number;
+      ts: number;
+    }
   | {
       kind: "user_question";
       question_id: string;
@@ -452,21 +475,32 @@ export function mapStoredMessagesToChatItems(
       continue;
     }
 
-    // ask_user is stored as agent + source=ask_user; restore ApprovalCard in full mode.
-    if (message.role === "agent" && message.source === "ask_user") {
+    // Elicitations: ask_choice, suggest_options, ask_user
+    if (
+      message.role === "agent" &&
+      (message.source === "ask_choice" ||
+        message.source === "suggest_options" ||
+        message.source === "ask_user")
+    ) {
       if (mode === "transcript") {
-        // Durable hydrate supplies user_question cards; skip the plain agent bubble.
+        // Durable hydrate supplies elicitation cards; skip the plain agent bubble.
         continue;
       }
       const next = messages[index + 1];
       const answered =
-        next?.role === "user" && next.source === "ask_user_response";
+        next?.role === "user" &&
+        (next.source === "elicitation_response" || next.source === "ask_user_response");
       const timeoutSeconds = DEFAULT_ASK_USER_TIMEOUT_SECONDS;
       const elapsedSec = (Date.now() - ts) / 1000;
+      const isSuggestion = message.source === "suggest_options";
+
       items.push({
-        kind: "user_question",
-        question_id: `history-ask-${message.id}`,
-        question: message.text,
+        kind: "elicitation",
+        elicitation_id: `history-el-${message.id}`,
+        question_id: `history-el-${message.id}`,
+        mode: isSuggestion ? "suggestion" : "choice",
+        question: isSuggestion ? undefined : message.text,
+        title: isSuggestion ? message.text.split("\n")[0] : undefined,
         answer: answered ? next?.text : undefined,
         answered,
         timedOut: !answered && elapsedSec >= timeoutSeconds,
@@ -474,13 +508,16 @@ export function mapStoredMessagesToChatItems(
         ts,
       });
       if (answered) {
-        index += 1; // consume ask_user_response; card already marked answered
+        index += 1; // consume response; card already marked answered
       }
       continue;
     }
 
-    if (message.role === "user" && message.source === "ask_user_response") {
-      // Orphan response without a preceding ask_user card — keep as user text in full,
+    if (
+      message.role === "user" &&
+      (message.source === "elicitation_response" || message.source === "ask_user_response")
+    ) {
+      // Orphan response without a preceding elicitation card — keep as user text in full,
       // skip in transcript (durable path owns the card).
       if (mode === "transcript") {
         continue;
@@ -579,6 +616,51 @@ export function permissionDecisionsFromRunSteps(
     }
   }
   return decisions;
+}
+
+export type PermissionStepDetail = {
+  taskId: string;
+  description: string;
+  agent: string;
+  estimatedSeconds: number;
+  decision?: PermissionDecision;
+  decidedAt?: number;
+  ts: number;
+};
+
+/** Synthesize permission cards from run steps so approvals survive even when
+ * durable working-log events are truncated. Cards are deduped by task_id
+ * against live/durable cards via isPermissionCardFor. */
+export function permissionItemsFromRunSteps(steps: RunStep[]): PermissionStepDetail[] {
+  const out: PermissionStepDetail[] = [];
+  for (const step of steps) {
+    if (step.step_type !== "permission_request") continue;
+    const taskId = step.external_ref;
+    if (!taskId) continue;
+    const meta = step.metadata && typeof step.metadata === "object" ? step.metadata : {};
+    const estimatedRaw = (meta as Record<string, unknown>).estimated_seconds;
+    const estimatedSeconds =
+      typeof estimatedRaw === "number" && Number.isFinite(estimatedRaw) ? estimatedRaw : 120;
+    const approved = (meta as Record<string, unknown>).approved;
+    let decision: PermissionDecision | undefined;
+    if (approved === true || step.status === "completed") decision = "approved";
+    else if (approved === false || step.status === "cancelled" || step.status === "failed") {
+      const detail = `${step.detail || ""} ${step.error || ""}`.toLowerCase();
+      decision = detail.includes("timed out") ? "timed_out" : "denied";
+    }
+    const ts = step.created_at ? new Date(step.created_at).getTime() : Date.now();
+    const decidedAt = step.completed_at ? new Date(step.completed_at).getTime() : undefined;
+    out.push({
+      taskId,
+      description: step.title || step.detail || "Approval required to continue.",
+      agent: step.source || "policy",
+      estimatedSeconds,
+      decision,
+      decidedAt: Number.isFinite(decidedAt) ? decidedAt : undefined,
+      ts: Number.isFinite(ts) ? ts : Date.now(),
+    });
+  }
+  return out;
 }
 
 export type ReduceWorkingLogResult = {
@@ -721,6 +803,60 @@ export function reduceWorkingLogMessage(
         ],
       };
 
+    case "elicitation_request": {
+      const timeoutSeconds =
+        typeof msg.timeout_seconds === "number" && msg.timeout_seconds > 0
+          ? msg.timeout_seconds
+          : DEFAULT_ASK_USER_TIMEOUT_SECONDS;
+      const elapsedSec = (Date.now() - ts) / 1000;
+      return {
+        chatItems: [
+          ...prevChatItems,
+          {
+            kind: "elicitation",
+            elicitation_id: msg.elicitation_id,
+            question_id: msg.elicitation_id,
+            mode: msg.mode,
+            question: msg.question,
+            options: msg.options,
+            allow_free_text: msg.allow_free_text,
+            title: msg.title,
+            items: msg.items,
+            answered: false,
+            timedOut: elapsedSec >= timeoutSeconds,
+            timeout_seconds: timeoutSeconds,
+            ts,
+          },
+        ],
+      };
+    }
+
+    case "elicitation_resolved": {
+      return {
+        chatItems: prevChatItems.map((item) => {
+          if (
+            item.kind === "elicitation" &&
+            (item.elicitation_id === msg.elicitation_id ||
+              item.question_id === msg.elicitation_id)
+          ) {
+            return {
+              ...item,
+              answered: msg.answered,
+              timedOut: !msg.answered,
+            };
+          }
+          if (item.kind === "user_question" && item.question_id === msg.elicitation_id) {
+            return {
+              ...item,
+              answered: msg.answered,
+              timedOut: !msg.answered,
+            };
+          }
+          return item;
+        }),
+      };
+    }
+
     case "user_question": {
       const timeoutSeconds =
         typeof msg.timeout_seconds === "number" && msg.timeout_seconds > 0
@@ -731,10 +867,12 @@ export function reduceWorkingLogMessage(
         chatItems: [
           ...prevChatItems,
           {
-            kind: "user_question",
+            kind: "elicitation",
+            elicitation_id: msg.question_id,
             question_id: msg.question_id,
+            mode: "choice",
             question: msg.question,
-            options: coerceAskUserOptions(msg.options),
+            options: msg.options,
             answered: false,
             timedOut: elapsedSec >= timeoutSeconds,
             timeout_seconds: timeoutSeconds,
@@ -747,7 +885,8 @@ export function reduceWorkingLogMessage(
     case "user_question_resolved": {
       return {
         chatItems: prevChatItems.map((item) =>
-          item.kind === "user_question" && item.question_id === msg.question_id
+          (item.kind === "elicitation" && (item.elicitation_id === msg.question_id || item.question_id === msg.question_id)) ||
+          (item.kind === "user_question" && item.question_id === msg.question_id)
             ? {
                 ...item,
                 answered: msg.answered,
@@ -777,6 +916,9 @@ export function reduceWorkingLogMessage(
             description: msg.description,
             estimated_seconds: msg.estimated_seconds,
             agent: msg.agent,
+            risk: typeof msg.risk === "string" ? msg.risk : undefined,
+            action_hash: typeof msg.action_hash === "string" ? msg.action_hash : undefined,
+            tool: typeof msg.tool === "string" ? msg.tool : undefined,
             resolved: Boolean(decision) || timedOutByClock,
             decision: decision ?? (timedOutByClock ? "timed_out" : undefined),
             ts,
@@ -795,6 +937,9 @@ export function reduceWorkingLogMessage(
       const decision = permissionDecisions?.get(approvalId);
       const elapsedSec = (Date.now() - ts) / 1000;
       const timedOutByClock = !decision && elapsedSec >= DEFAULT_APPROVAL_TIMEOUT_SECONDS;
+      const meta = msg.metadata && typeof msg.metadata === "object" ? (msg.metadata as Record<string, unknown>) : {};
+      const metaActionHash = typeof meta.action_hash === "string" ? (meta.action_hash as string) : undefined;
+      const metaTool = typeof meta.tool === "string" ? (meta.tool as string) : undefined;
       return {
         chatItems: [
           ...prevChatItems,
@@ -806,6 +951,9 @@ export function reduceWorkingLogMessage(
             description: msg.description || "Approval required to continue.",
             estimated_seconds: DEFAULT_APPROVAL_TIMEOUT_SECONDS,
             agent: "policy",
+            risk: typeof msg.risk === "string" ? msg.risk : typeof meta.risk === "string" ? (meta.risk as string) : undefined,
+            action_hash: typeof msg.action_hash === "string" ? msg.action_hash : metaActionHash,
+            tool: typeof msg.tool === "string" ? msg.tool : metaTool,
             resolved: Boolean(decision) || timedOutByClock,
             decision: decision ?? (timedOutByClock ? "timed_out" : undefined),
             ts,
@@ -819,6 +967,10 @@ export function reduceWorkingLogMessage(
       if (!approvalId) {
         return { chatItems: prevChatItems };
       }
+      const decidedAt =
+        typeof msg.decided_at === "number" && Number.isFinite(msg.decided_at)
+          ? msg.decided_at
+          : Date.now();
       return {
         chatItems: prevChatItems.map((item) =>
           isPermissionCardFor(item, approvalId)
@@ -826,6 +978,8 @@ export function reduceWorkingLogMessage(
                 ...item,
                 resolved: true,
                 decision: msg.approved ? "approved" : "denied",
+                decided_at: decidedAt,
+                ...(typeof msg.action_hash === "string" ? { action_hash: msg.action_hash } : {}),
               }
             : item,
         ),
@@ -863,6 +1017,7 @@ export function reduceWorkingLogMessage(
           ...item,
           resolved: true,
           decision: nextDecision,
+          decided_at: item.decided_at ?? ts,
         };
       });
       return {

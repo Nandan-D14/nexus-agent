@@ -35,8 +35,10 @@ _PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset({
     "tasks_list",
     "calendar_list",
     "calendar_get",
+    "schedules_list",
     # Documents (read-only)
     "extract_pdf_text",
+    "extract_document_text",
     # Screen observation (read-only)
     "take_screenshot",
 })
@@ -69,6 +71,7 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     "calendar_update",
     "calendar_delete",
     "create_drive_doc",
+    "create_drive_sheet",
     "upload_drive_file",
     "github_create_issue",
     "github_create_repo",
@@ -78,6 +81,8 @@ _SEQUENTIAL_TOOLS: frozenset[str] = frozenset({
     # Background tasks
     "request_background_task",
     "schedule_monitoring_task",
+    "schedules_create",
+    "schedules_pause",
     # UI control
     "show_desktop_panel",
     "show_workflow_panel",

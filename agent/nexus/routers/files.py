@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import re
 from typing import Any
 import logging
@@ -23,6 +24,49 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _UNSAFE_PATH_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+
+_OFFICE_MIME = {
+    ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+    ".py": "text/x-python",
+    ".ts": "text/typescript",
+    ".tsx": "text/tsx",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript",
+    ".json": "application/json",
+    ".css": "text/css",
+    ".go": "text/x-go",
+    ".rs": "text/rust",
+    ".java": "text/x-java-source",
+    ".yml": "text/yaml",
+    ".yaml": "text/yaml",
+    ".toml": "application/toml",
+    ".sh": "text/x-sh",
+    ".sql": "application/sql",
+    ".xml": "application/xml",
+}
+
+
+def _mime_for_filename(name: str) -> str:
+    suffix = ""
+    if "." in name:
+        suffix = "." + name.rsplit(".", 1)[-1].lower()
+    if suffix in _OFFICE_MIME:
+        return _OFFICE_MIME[suffix]
+    guessed, _ = mimetypes.guess_type(name)
+    return guessed or "application/octet-stream"
 
 
 def _sanitize_relative_path_segment(part: str) -> str:
@@ -43,6 +87,14 @@ def _safe_workspace_relative_path(value: str, session_id: str | None = None, run
         session_root = derive_session_workspace_path(session_id).replace("\\", "/").rstrip("/")
         if raw.startswith(session_root):
             raw = raw[len(session_root):].lstrip("/")
+        # The UI often sends `sessionId/runId/outputs/file.xlsx` after
+        # splitting on `/Workspaces/`. That is still a workspace-absolute
+        # path; joining it onto the run root looks in a nested folder that
+        # does not exist, so the preview 404s.
+        if raw.startswith(f"{session_id}/"):
+            raw = raw[len(session_id) + 1 :]
+        if run_id and raw.startswith(f"{run_id}/"):
+            raw = raw[len(run_id) + 1 :]
 
 
     if not raw or raw.startswith("/") or ".." in raw.split("/"):
@@ -252,25 +304,33 @@ async def upload_session_file(
 async def download_session_file(
     session_id: str,
     relative_path: str = Query(...),
+    run_id: str | None = Query(default=None),
     user: AuthenticatedUser = Depends(require_current_user),
 ):
     session_manager = get_session_manager()
     session = await session_manager.get_session(session_id)
     if not session or session.owner_id != user.uid:
         raise HTTPException(status_code=404, detail="Live session not found")
-    if not session.current_run_id:
+    active_run_id = run_id or session.current_run_id
+    if not active_run_id:
         raise HTTPException(status_code=400, detail="Session does not have an active run")
-    
-    # Fail fast if the sandbox is not running/alive to avoid a 1-2 minute timeout hang
+
+    # Revive a paused/stale sandbox before declaring it gone. The previous
+    # fail-fast 410 ran *before* ensure_session_ready, so a live session whose
+    # VM had been paused (or whose in-memory handle was empty after a
+    # reconnect) could never serve a file that was still on disk.
+    await session_manager.ensure_session_ready(session_id)
+    session = await session_manager.get_session(session_id) or session
     if not session.sandbox or not session.sandbox.is_alive:
         raise HTTPException(
             status_code=410,
             detail="Sandbox container is not active. File cannot be retrieved from the workspace sandbox."
         )
 
-    await session_manager.ensure_session_ready(session_id)
-    filename = _safe_workspace_relative_path(relative_path, session_id=session.id, run_id=session.current_run_id)
-    workspace_path = derive_workspace_path(session.id, session.current_run_id)
+    filename = _safe_workspace_relative_path(
+        relative_path, session_id=session.id, run_id=active_run_id
+    )
+    workspace_path = derive_workspace_path(session.id, active_run_id)
     target_path = f"{workspace_path}/{filename}"
     try:
         content = session.sandbox.read_binary_file(target_path)
@@ -279,8 +339,8 @@ async def download_session_file(
     download_name = filename.rsplit("/", 1)[-1] or "download.bin"
     return Response(
         content=content,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+        media_type=_mime_for_filename(download_name),
+        headers={"Content-Disposition": f'inline; filename="{download_name}"'},
     )
 
 

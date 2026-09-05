@@ -9,11 +9,24 @@ import { useMemo, useRef, useEffect, useState, memo, type ReactNode } from "reac
 import { StreamingText } from "@/components/streaming-text";
 import { PermissionCard } from "@/components/permission-card";
 import {
-  AgentQuestionCard,
+  ActivityChip,
+  ActivityNode,
+  ActivityRail,
+  ActivityRow,
+  ActivityBlockRow,
+  ActivitySummaryChips,
+  Chevron,
+  ElicitationUI,
   ThinkingReasoning,
   ThinkingState,
   WebSearchCard,
+  formatAgentName,
+  formatDuration,
+  getAgentIcon,
+  getToolIcon,
   hasRealReasoning,
+  type ActivityStatus,
+  type SummaryChip,
 } from "@/components/agent-ui";
 import {
   collectSearchRefsFromEventSegments,
@@ -23,36 +36,31 @@ import {
 import { CocomputerMark } from "@/components/brand/cocomputer-logo";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  X,
-  ChevronDown,
-  ChevronRight,
-  Eye,
-  ExternalLink,
-  Terminal as TerminalIcon,
-  Globe,
-  Mail,
-  Calendar,
-  ListTodo,
-  Plug,
-  FileText,
-  Loader2,
-  MessageSquare,
+  AlertTriangle,
+  ArrowLeftRight,
   BookOpen,
   Bot,
-  LayoutGrid,
-  ArrowLeftRight,
-  Sparkles,
-  Layers,
-  Wrench,
+  Calendar,
   Check,
+  ChevronDown,
   Clipboard,
+  Eye,
+  ExternalLink,
+  FileText,
+  Globe,
+  Layers,
+  LayoutGrid,
+  MessageSquare,
+  RotateCw,
+  Terminal as TerminalIcon,
+  Wrench,
+  X,
 } from "lucide-react";
 import {
   classifyAgentTool,
   displayAgentToolName,
   formatGroupedToolLabel,
   toolActionLabel,
-  type AgentToolProvider,
 } from "@/lib/agent-tool-classification";
 import {
   groupTurnEvents,
@@ -77,6 +85,7 @@ import {
 import type { RunArtifact, UploadedInputFile } from "@/lib/message-types";
 import { userVisibleCaption } from "@/lib/session-utils";
 import { UploadedFilePreviewList } from "@/components/session/message-attachments";
+import { cx } from "@/utils/cx";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -95,9 +104,29 @@ type ChatItem =
       durable_task_id?: string;
       resolved?: boolean;
       decision?: "approved" | "denied" | "timed_out";
+      risk?: string;
+      action_hash?: string;
+      tool?: string;
+      decided_at?: number;
       ts: number;
     }
   | { kind: "delegation"; from: string; to: string; ts: number }
+  | {
+      kind: "elicitation";
+      elicitation_id: string;
+      question_id?: string;
+      mode?: "choice" | "suggestion";
+      question?: string;
+      options?: string[];
+      allow_free_text?: boolean;
+      title?: string;
+      items?: Array<{ name: string; description: string; action_label?: string }>;
+      answer?: string;
+      answered?: boolean;
+      timedOut?: boolean;
+      timeout_seconds?: number;
+      ts: number;
+    }
   | {
       kind: "user_question";
       question_id: string;
@@ -125,6 +154,7 @@ type Props = {
     durableTaskId?: string,
   ) => void;
   onQuestionRespond?: (questionId: string, answer: string) => void;
+  onElicitationRespond?: (elicitationId: string, answer: string) => void;
   onTemplateDraftChange?: (patch: TemplateDraftCardValue) => void;
   onAppPreviewOpen?: (preview: {
     url: string;
@@ -143,44 +173,11 @@ type Turn = {
   agentMessages: Extract<ChatItem, { kind: "message" }>[];
   permissions: Extract<ChatItem, { kind: "permission" }>[];
   delegations: Extract<ChatItem, { kind: "delegation" }>[];
-  questions: Extract<ChatItem, { kind: "user_question" }>[];
+  questions: (
+    | Extract<ChatItem, { kind: "user_question" }>
+    | Extract<ChatItem, { kind: "elicitation" }>
+  )[];
 };
-
-/* ------------------------------------------------------------------ */
-/*  Tool Icon Helper                                                   */
-/* ------------------------------------------------------------------ */
-
-function getToolIcon(provider: AgentToolProvider, className: string) {
-  switch (provider) {
-    case "terminal": return <TerminalIcon className={className} />;
-    case "browser": return <Globe className={className} />;
-    case "desktop": return <Eye className={className} />;
-    case "file": return <FileText className={className} />;
-    case "gmail": return <Mail className={className} />;
-    case "calendar": return <Calendar className={className} />;
-    case "tasks": return <ListTodo className={className} />;
-    case "skill": return <BookOpen className={className} />;
-    case "subagent": return <Bot className={className} />;
-    case "worker": return <Layers className={className} />;
-    case "workflow": return <LayoutGrid className={className} />;
-    case "mcp": return <Plug className={className} />;
-    default: return <Wrench className={className} />;
-  }
-}
-
-function formatAgentName(name: string): string {
-  const cleaned = name.replace(/^nexus_/i, "").replace(/_/g, " ");
-  return cleaned.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || name;
-}
-
-function getAgentIcon(name: string, className: string) {
-  const lower = name.toLowerCase();
-  if (lower.includes("planner")) return <Sparkles className={className} />;
-  if (lower.includes("orchestrator")) return <Bot className={className} />;
-  if (lower.includes("worker") || lower.includes("terminal") || lower.includes("desktop")) return <Layers className={className} />;
-  if (lower.includes("subagent")) return <Bot className={className} />;
-  return <Bot className={className} />;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Inline summary extraction                                          */
@@ -253,6 +250,7 @@ type TimelineItem =
   | { kind: "template_draft"; data: TemplateDraftSegment; ts: number }
   | { kind: "agentMessage"; text: string; ts: number }
   | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
+  | { kind: "elicitation"; data: Extract<ChatItem, { kind: "elicitation" }>; ts: number }
   | { kind: "user_question"; data: Extract<ChatItem, { kind: "user_question" }>; ts: number };
 
 /* ------------------------------------------------------------------ */
@@ -266,6 +264,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   statusLabel,
   onPermissionRespond,
   onQuestionRespond,
+  onElicitationRespond,
   onTemplateDraftChange,
   onAppPreviewOpen,
   footer,
@@ -325,7 +324,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
         currentTurn.permissions.push(item);
       } else if (item.kind === "delegation") {
         currentTurn.delegations.push(item);
-      } else if (item.kind === "user_question") {
+      } else if (item.kind === "user_question" || item.kind === "elicitation") {
         currentTurn.questions.push(item);
       }
     }
@@ -384,6 +383,7 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   isLastTurn={isLastTurn}
                   onPermissionRespond={onPermissionRespond}
                   onQuestionRespond={onQuestionRespond}
+                  onElicitationRespond={onElicitationRespond}
                   onTemplateDraftChange={onTemplateDraftChange}
                   onAppPreviewOpen={onAppPreviewOpen}
                 />
@@ -463,6 +463,7 @@ function TurnBlock({
   isLastTurn,
   onPermissionRespond,
   onQuestionRespond,
+  onElicitationRespond,
   onTemplateDraftChange,
   onAppPreviewOpen,
 }: {
@@ -471,11 +472,44 @@ function TurnBlock({
   isLastTurn: boolean;
   onPermissionRespond: Props["onPermissionRespond"];
   onQuestionRespond?: Props["onQuestionRespond"];
+  onElicitationRespond?: Props["onElicitationRespond"];
   onTemplateDraftChange?: Props["onTemplateDraftChange"];
   onAppPreviewOpen?: Props["onAppPreviewOpen"];
 }) {
-  // Build an interleaved timeline from event segments + messages + cards
-  const eventSegments = useMemo(() => groupTurnEvents(turn.events), [turn.events]);
+  // Build an interleaved timeline from event segments + messages + cards.
+  // Permissions are folded into the log grouper as synthetic approval events
+  // so the activity timeline shows them alongside tool calls (not just as a
+  // detached card). The full card still renders in the interleaved timeline.
+  const eventSegments = useMemo(() => {
+    const approvalEvents: Array<Record<string, unknown> & { type: string; ts: number }> = [];
+    for (const perm of turn.permissions) {
+      approvalEvents.push({
+        type: "permission_request",
+        ts: perm.ts,
+        task_id: perm.task_id,
+        approval_id: perm.approval_id ?? perm.task_id,
+        description: perm.description,
+        agent: perm.agent,
+        risk: perm.risk,
+        tool: perm.tool,
+        action_hash: perm.action_hash,
+        estimated_seconds: perm.estimated_seconds,
+      });
+      if (perm.resolved && perm.decision) {
+        approvalEvents.push({
+          type: "approval_resolved",
+          ts: (perm.decided_at ?? perm.ts) + 1,
+          task_id: perm.task_id,
+          approval_id: perm.approval_id ?? perm.task_id,
+          approved: perm.decision === "approved",
+          status: perm.decision,
+          action_hash: perm.action_hash,
+        });
+      }
+    }
+    const combined = [...turn.events, ...approvalEvents].sort((a, b) => a.ts - b.ts);
+    return groupTurnEvents(combined);
+  }, [turn.events, turn.permissions]);
 
   const turnSearchRefs = useMemo(
     () => collectSearchRefsFromEventSegments(eventSegments),
@@ -507,7 +541,11 @@ function TurnBlock({
       items.push({ kind: "permission", data: perm, ts: perm.ts });
     }
     for (const question of turn.questions) {
-      items.push({ kind: "user_question", data: question, ts: question.ts });
+      if (question.kind === "elicitation") {
+        items.push({ kind: "elicitation", data: question, ts: question.ts });
+      } else {
+        items.push({ kind: "user_question", data: question, ts: question.ts });
+      }
     }
 
     items.sort((a, b) => a.ts - b.ts);
@@ -655,7 +693,33 @@ function TurnBlock({
                 issuedAt={item.data.ts}
                 decision={item.data.decision}
                 timedOut={item.data.decision === "timed_out"}
+                risk={item.data.risk}
+                actionHash={item.data.action_hash}
+                tool={item.data.tool}
+                decidedAt={item.data.decided_at}
                 onRespond={onPermissionRespond}
+              />
+            </div>
+          );
+        }
+
+        if (item.kind === "elicitation") {
+          return (
+            <div key={`elicitation-${item.data.elicitation_id}`} className="py-1">
+              <ElicitationUI
+                elicitationId={item.data.elicitation_id}
+                mode={item.data.mode || "choice"}
+                question={item.data.question}
+                options={item.data.options}
+                allowFreeText={item.data.allow_free_text}
+                title={item.data.title}
+                items={item.data.items}
+                answer={item.data.answer}
+                answered={item.data.answered}
+                timedOut={item.data.timedOut}
+                timeoutSeconds={item.data.timeout_seconds}
+                issuedAt={item.data.ts}
+                onRespond={onElicitationRespond || onQuestionRespond}
               />
             </div>
           );
@@ -664,8 +728,9 @@ function TurnBlock({
         if (item.kind === "user_question") {
           return (
             <div key={`question-${item.data.question_id}`} className="py-1">
-              <AgentQuestionCard
-                questionId={item.data.question_id}
+              <ElicitationUI
+                elicitationId={item.data.question_id}
+                mode="choice"
                 question={item.data.question}
                 options={item.data.options}
                 answer={item.data.answer}
@@ -673,7 +738,7 @@ function TurnBlock({
                 timedOut={item.data.timedOut}
                 timeoutSeconds={item.data.timeout_seconds}
                 issuedAt={item.data.ts}
-                onRespond={onQuestionRespond}
+                onRespond={onElicitationRespond || onQuestionRespond}
               />
             </div>
           );
@@ -834,12 +899,44 @@ function AgentMessageCard({
 /*  Thought Accordion                                                  */
 /* ------------------------------------------------------------------ */
 
-function buildSummary(task: TaskGroup): string {
-  const hasThinking = task.steps.some(s => s.kind === "thinking");
-  const toolSteps = task.steps.filter(s => s.kind === "tool_invocation");
+type ToolInvocationStep = Extract<GroupedEvent, { kind: "tool_invocation" }>;
 
-  let viewedCount = 0;
-  let wroteCount = 0;
+function invocationDurationMs(invocation: ToolInvocationStep): number | undefined {
+  if (typeof invocation.result?.latencyMs === "number" && invocation.result.latencyMs > 0) {
+    return invocation.result.latencyMs;
+  }
+  if (invocation.result?.ts) {
+    const delta = invocation.result.ts - invocation.callTs;
+    return delta > 0 ? delta : undefined;
+  }
+  return undefined;
+}
+
+function invocationStatus(invocation: ToolInvocationStep): ActivityStatus {
+  if (invocation.status === "running") return "running";
+  if (invocation.status === "failed") return "failed";
+  return "ok";
+}
+
+function invocationChips(invocation: ToolInvocationStep) {
+  const errorCode = invocation.result?.errorCode;
+  const retryReason = invocation.result?.retryReason;
+  if (!errorCode && !retryReason) return undefined;
+  return (
+    <>
+      {errorCode ? (
+        <ActivityChip tone="danger" mono>
+          {errorCode}
+        </ActivityChip>
+      ) : null}
+      {retryReason ? <ActivityChip tone="warning">{retryReason}</ActivityChip> : null}
+    </>
+  );
+}
+
+function buildSummaryChips(task: TaskGroup): SummaryChip[] {
+  const iconClass = "size-3";
+  let fileCount = 0;
   let ranCount = 0;
   let fetchedCount = 0;
   let skillCount = 0;
@@ -847,37 +944,107 @@ function buildSummary(task: TaskGroup): string {
   let subagentCount = 0;
   let otherCount = 0;
 
-  for (const step of toolSteps) {
+  for (const step of task.steps) {
     if (step.kind !== "tool_invocation") continue;
-    const tool = step.tool;
-    const provider = classifyAgentTool(tool);
+    const provider = classifyAgentTool(step.tool);
     if (provider === "skill") skillCount++;
     else if (provider === "worker") workerCount++;
     else if (provider === "subagent") subagentCount++;
-    else if (tool === "read_workspace_file" || tool === "list_workspace_files") viewedCount++;
-    else if (tool === "write_workspace_file") wroteCount++;
+    else if (provider === "file") fileCount++;
     else if (provider === "terminal") ranCount++;
     else if (provider === "browser") fetchedCount++;
     else otherCount++;
   }
 
-  const hasHandoff = task.steps.some((s) => s.kind === "delegation");
-  const errorCount = task.steps.filter((s) => s.kind === "error").length;
-  const parts: string[] = [];
-  if (hasThinking) parts.push("Thought");
-  if (hasHandoff) parts.push("Handoff");
-  if (skillCount > 0) parts.push(`Read ${skillCount} skill(s)`);
-  if (workerCount > 0) parts.push(`Called ${workerCount} worker(s)`);
-  if (subagentCount > 0) parts.push(`Spawned ${subagentCount} subagent(s)`);
-  if (viewedCount > 0) parts.push(`Viewed ${viewedCount} file(s)`);
-  if (wroteCount > 0) parts.push(`Wrote ${wroteCount} file(s)`);
-  if (ranCount > 0) parts.push(`Ran ${ranCount} command(s)`);
-  if (fetchedCount > 0) parts.push(`Fetched ${fetchedCount} web(s)`);
-  if (otherCount > 0) parts.push(`Used ${otherCount} tool(s)`);
-  if (errorCount > 0) parts.push(errorCount === 1 ? "Error" : `${errorCount} errors`);
-  if (parts.length === 0) parts.push("Working");
-
-  return parts.join(", ");
+  const chips: SummaryChip[] = [];
+  const handoffCount = task.steps.filter((s) => s.kind === "delegation").length;
+  if (handoffCount > 0) {
+    chips.push({
+      key: "handoff",
+      icon: <ArrowLeftRight className={iconClass} />,
+      count: handoffCount,
+      label: handoffCount === 1 ? "Handoff" : `${handoffCount} handoffs`,
+    });
+  }
+  const approvalCount = task.steps.filter((s) => s.kind === "approval").length;
+  if (approvalCount > 0) {
+    chips.push({
+      key: "approval",
+      icon: <Check className={iconClass} />,
+      count: approvalCount,
+      label: approvalCount === 1 ? "1 approval" : `${approvalCount} approvals`,
+    });
+  }
+  if (skillCount > 0) {
+    chips.push({
+      key: "skill",
+      icon: <BookOpen className={iconClass} />,
+      count: skillCount,
+      label: skillCount === 1 ? "1 skill" : `${skillCount} skills`,
+    });
+  }
+  if (workerCount > 0) {
+    chips.push({
+      key: "worker",
+      icon: <Layers className={iconClass} />,
+      count: workerCount,
+      label: workerCount === 1 ? "1 worker" : `${workerCount} workers`,
+    });
+  }
+  if (subagentCount > 0) {
+    chips.push({
+      key: "subagent",
+      icon: <Bot className={iconClass} />,
+      count: subagentCount,
+      label: subagentCount === 1 ? "1 subagent" : `${subagentCount} subagents`,
+    });
+  }
+  if (fileCount > 0) {
+    chips.push({
+      key: "files",
+      icon: <FileText className={iconClass} />,
+      count: fileCount,
+      label: fileCount === 1 ? "1 file" : `${fileCount} files`,
+    });
+  }
+  if (ranCount > 0) {
+    chips.push({
+      key: "terminal",
+      icon: <TerminalIcon className={iconClass} />,
+      count: ranCount,
+      label: ranCount === 1 ? "1 command" : `${ranCount} commands`,
+    });
+  }
+  if (fetchedCount > 0) {
+    chips.push({
+      key: "web",
+      icon: <Globe className={iconClass} />,
+      count: fetchedCount,
+      label: fetchedCount === 1 ? "1 web lookup" : `${fetchedCount} web lookups`,
+    });
+  }
+  if (otherCount > 0) {
+    chips.push({
+      key: "tools",
+      icon: <Wrench className={iconClass} />,
+      count: otherCount,
+      label: otherCount === 1 ? "1 tool" : `${otherCount} tools`,
+    });
+  }
+  const errorCount = task.steps.reduce(
+    (n, s) => n + (s.kind === "error" ? s.count : 0),
+    0,
+  );
+  if (errorCount > 0) {
+    chips.push({
+      key: "errors",
+      icon: <AlertTriangle className={iconClass} />,
+      count: errorCount,
+      label: errorCount === 1 ? "1 error" : `${errorCount} errors`,
+      tone: "danger",
+    });
+  }
+  return chips;
 }
 
 function ThoughtAccordion({
@@ -888,12 +1055,18 @@ function ThoughtAccordion({
   isActive: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
-  const summary = useMemo(() => buildSummary(task), [task]);
+  const [now, setNow] = useState(() => Date.now());
+  const chips = useMemo(() => buildSummaryChips(task), [task]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isActive]);
 
   // Merge ALL thinking steps into one reasoning row, and group consecutive
   // identical tool invocations into counted rows (e.g. "Read 7 emails").
   const displayRows = useMemo(() => {
-    type ToolInvocationStep = Extract<GroupedEvent, { kind: "tool_invocation" }>;
     type Row =
       | {
           kind: "reasoning";
@@ -967,16 +1140,32 @@ function ThoughtAccordion({
 
   const lastStep = task.steps[task.steps.length - 1];
   const reasoningIsLive = isActive && lastStep?.kind === "thinking";
-  const hasToolSteps = displayRows.some(
-    (r) => r.kind === "step" || r.kind === "tool_group",
-  ) || task.steps.some((s) => s.kind === "delegation");
-  const hasReasoningRows = displayRows.some((r) => r.kind === "reasoning");
+  const hasToolSteps =
+    displayRows.some((r) => r.kind === "step" || r.kind === "tool_group") ||
+    task.steps.some((s) => s.kind === "delegation");
   const hasRunningTool = task.steps.some(
-    (s) => s.kind === "tool_invocation" && s.status === "running",
+    (s) =>
+      (s.kind === "tool_invocation" && s.status === "running") ||
+      (s.kind === "approval" && s.decision === "pending"),
   );
+  const hasFailed =
+    task.status === "failed" ||
+    task.steps.some(
+      (s) =>
+        s.kind === "error" ||
+        (s.kind === "tool_invocation" && s.status === "failed") ||
+        (s.kind === "approval" && s.decision === "denied"),
+    );
+  const headerStatus: ActivityStatus = isActive || hasRunningTool
+    ? "running"
+    : hasFailed
+      ? "failed"
+      : "ok";
+  const elapsedMs = Math.max(0, (isActive ? now : task.endTs) - task.ts);
+  const elapsedLabel = formatDuration(elapsedMs) || "0s";
 
   return (
-    <div className="w-full flex flex-col gap-3">
+    <div className="flex w-full max-w-xl flex-col gap-2">
       {displayRows.map((row) => {
         if (row.kind === "reasoning") {
           return (
@@ -996,23 +1185,33 @@ function ThoughtAccordion({
         <>
           <button
             type="button"
-            className="flex items-center gap-1.5 w-fit text-left select-none group py-0.5"
+            className="group/summary flex w-full items-center gap-2.5 py-0.5 text-left select-none"
             onClick={() => setExpanded(!expanded)}
+            aria-expanded={expanded}
           >
-            <span className="text-[14px] text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
-              {summary}
+            <ActivityNode status={headerStatus} />
+            <span
+              className={cx(
+                "shrink-0 text-body-medium",
+                isActive || hasRunningTool
+                  ? "agent-progress-loading-text"
+                  : "text-text-secondary",
+              )}
+            >
+              {isActive || hasRunningTool ? (
+                "Working…"
+              ) : (
+                <>
+                  Worked for <span className="text-text-primary">{elapsedLabel}</span>
+                </>
+              )}
             </span>
-            {expanded ? (
-              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
-            ) : (
-              <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-300 transition-colors" />
-            )}
-            {isActive && !hasReasoningRows && !hasRunningTool && (
-              <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
-            )}
-            {hasRunningTool && (
-              <Loader2 className="w-3 h-3 text-cyan-500 animate-spin ml-1" />
-            )}
+            <span className="min-w-0 flex-1" />
+            <ActivitySummaryChips chips={chips} />
+            <Chevron
+              open={expanded}
+              className="shrink-0 text-foreground-icon-tertiary"
+            />
           </button>
 
           <AnimatePresence>
@@ -1024,7 +1223,7 @@ function ThoughtAccordion({
                 transition={{ duration: 0.2 }}
                 className="overflow-hidden"
               >
-                <div className="flex flex-col gap-4 pt-3 pb-1 pl-1">
+                <ActivityRail className="pt-1 pb-1">
                   {displayRows.map((row) => {
                     if (row.kind === "step") {
                       return <StepRow key={row.key} item={row.item} />;
@@ -1040,7 +1239,7 @@ function ThoughtAccordion({
                     }
                     return null;
                   })}
-                </div>
+                </ActivityRail>
               </motion.div>
             )}
           </AnimatePresence>
@@ -1054,19 +1253,102 @@ function ThoughtAccordion({
 /*  Step Row dispatcher                                                */
 /* ------------------------------------------------------------------ */
 
+function ApprovalLogLine({
+  item,
+}: {
+  item: Extract<GroupedEvent, { kind: "approval" }>;
+}) {
+  const label =
+    item.decision === "approved"
+      ? "Approved"
+      : item.decision === "denied"
+        ? "Denied"
+        : item.decision === "timed_out"
+          ? "Approval timed out"
+          : "Awaiting approval";
+  const status =
+    item.decision === "denied"
+      ? "failed"
+      : item.decision === "pending"
+        ? "running"
+        : "ok";
+  const detail = item.description
+    ? item.description.length > 140
+      ? `${item.description.slice(0, 140)}…`
+      : item.description
+    : undefined;
+  const durationMs =
+    item.decidedAt && item.decidedAt > item.ts ? item.decidedAt - item.ts : undefined;
+  return (
+    <ActivityRow
+      status={status as ActivityStatus}
+      icon={
+        item.decision === "denied" ? (
+          <X className="size-3.5" />
+        ) : (
+          <Check className="size-3.5" />
+        )
+      }
+      label={label}
+      detail={detail}
+      durationMs={durationMs}
+      chips={
+        <>
+          {item.tool ? (
+            <ActivityChip tone="neutral">{item.tool.replace(/_/g, " ")}</ActivityChip>
+          ) : null}
+          {item.risk ? <ActivityChip tone="warning">{`risk: ${item.risk}`}</ActivityChip> : null}
+        </>
+      }
+    />
+  );
+}
+
 function StepRow({ item }: { item: GroupedEvent }) {
   if (item.kind === "tool_invocation") return <ToolLine invocation={item} />;
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
-  if (item.kind === "error") return <ErrorLine message={item.message} />;
+  if (item.kind === "approval") return <ApprovalLogLine item={item} />;
+  if (item.kind === "error") {
+    return <ErrorLine message={item.message} code={item.code} count={item.count} />;
+  }
   if (item.kind === "delegation") return <HandoffLogLine from={item.from} to={item.to} />;
+  if (item.kind === "retry") {
+    const badge = item.nextModel
+      ? `${item.model || "model"} → ${item.nextModel}`
+      : item.attempt != null
+        ? `attempt ${item.attempt}`
+        : undefined;
+    return (
+      <ActivityRow
+        status="retry"
+        icon={<RotateCw className="size-3.5" />}
+        label="Retry"
+        detail={item.reason}
+        durationMs={item.delayMs}
+        chips={badge ? <ActivityChip tone="warning">{badge}</ActivityChip> : undefined}
+      />
+    );
+  }
   if (item.kind === "bg_progress") {
     const suffix =
       typeof item.progress === "number" ? ` (${item.progress}%)` : "";
-    return <ProgressStatusLine message={`${item.message}${suffix}`} failed={item.complete && item.success === false} />;
+    return (
+      <ProgressStatusLine
+        message={`${item.message}${suffix}`}
+        failed={item.complete && item.success === false}
+        complete={item.complete}
+      />
+    );
   }
   if (item.kind === "subagent_status") {
     const label = item.role ? `${item.role}: ${item.detail}` : item.detail;
-    return <ProgressStatusLine message={label} failed={item.status === "failed"} />;
+    return (
+      <ProgressStatusLine
+        message={label}
+        failed={item.status === "failed"}
+        complete={item.status === "completed"}
+      />
+    );
   }
   return null;
 }
@@ -1076,85 +1358,69 @@ function ToolGroupLine({
   items,
 }: {
   tool: string;
-  items: Extract<GroupedEvent, { kind: "tool_invocation" }>[];
+  items: ToolInvocationStep[];
 }) {
   const [open, setOpen] = useState(false);
   const provider = classifyAgentTool(tool);
   const isRunning = items.some((item) => item.status === "running");
+  const isFailed = items.some((item) => item.status === "failed");
   const label = formatGroupedToolLabel(tool, items.length);
-  const icon = (() => {
-    if (provider === "gmail") return <Mail className="w-3.5 h-3.5" />;
-    if (provider === "calendar") return <Calendar className="w-3.5 h-3.5" />;
-    if (provider === "tasks") return <ListTodo className="w-3.5 h-3.5" />;
-    if (provider === "browser") return <Globe className="w-3.5 h-3.5" />;
-    if (provider === "terminal") return <TerminalIcon className="w-3.5 h-3.5" />;
-    if (provider === "skill") return <BookOpen className="w-3.5 h-3.5" />;
-    if (provider === "worker") return <Bot className="w-3.5 h-3.5" />;
-    if (tool.includes("file") || tool.includes("workspace")) {
-      return <FileText className="w-3.5 h-3.5" />;
-    }
-    return <Plug className="w-3.5 h-3.5" />;
-  })();
+  const durationMs = items.reduce((sum, item) => sum + (invocationDurationMs(item) ?? 0), 0);
+  const icon = tool.startsWith("schedules_")
+    ? <Calendar className="size-3.5" />
+    : getToolIcon(provider, "size-3.5");
 
   return (
-    <div className="flex flex-col gap-2">
-      <button
-        type="button"
-        className="flex items-center gap-2 text-[14px] min-w-0 text-left group"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="shrink-0 text-zinc-400 dark:text-zinc-600">{icon}</span>
-        <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium group-hover:text-zinc-700 dark:group-hover:text-zinc-200 transition-colors">
-          {label}
-        </span>
-        {open ? (
-          <ChevronDown className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        ) : (
-          <ChevronRight className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        )}
-        {isRunning ? (
-          <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />
-        ) : null}
-      </button>
-      {open ? (
-        <div className="flex flex-col gap-3 pl-5">
-          {items.map((item) => (
+    <>
+      <ActivityRow
+        status={isRunning ? "running" : isFailed ? "failed" : "ok"}
+        icon={icon}
+        label={label}
+        count={items.length}
+        durationMs={durationMs}
+        expandable
+        expanded={open}
+        onToggle={() => setOpen((value) => !value)}
+        tone={isFailed && !isRunning ? "danger" : "default"}
+      />
+      {open
+        ? items.map((item) => (
             <ToolLine key={`${item.tool}-${item.callTs}`} invocation={item} />
-          ))}
-        </div>
-      ) : null}
-    </div>
+          ))
+        : null}
+    </>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tool Line (flat text-style rendering)                              */
-/* ------------------------------------------------------------------ */
-
-function ToolLogLine({
-  icon,
-  label,
-  detail,
-  isRunning,
+function ToolDetailsPanel({
+  title,
+  args,
+  output,
 }: {
-  icon: ReactNode;
-  label: string;
-  detail?: string | null;
-  isRunning?: boolean;
+  title: string;
+  args: Record<string, unknown>;
+  output?: string;
 }) {
-  const truncated =
-    detail && detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
   return (
-    <div className="flex items-center gap-2 text-[14px] min-w-0">
-      <span className="shrink-0 text-zinc-400 dark:text-zinc-600">{icon}</span>
-      <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium">
-        {label}
-      </span>
-      {truncated ? (
-        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
+    <div className="overflow-hidden rounded-xl border border-separator-border bg-background-secondary-default/50">
+      <div className="border-b border-separator-border px-3 py-2 text-caption-1-medium text-text-secondary">
+        {title}
+      </div>
+      {Object.keys(args).length > 0 ? (
+        <div className="px-3 py-2">
+          <div className="mb-1 text-caption-2-medium text-text-tertiary">Input</div>
+          <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-caption-2-regular text-text-secondary">
+            {JSON.stringify(args, null, 2)}
+          </pre>
+        </div>
       ) : null}
-      {isRunning ? (
-        <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />
+      {output ? (
+        <div className="border-t border-separator-border px-3 py-2">
+          <div className="mb-1 text-caption-2-medium text-text-tertiary">Output</div>
+          <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-caption-2-regular text-text-secondary">
+            {output.length > 500 ? `${output.slice(0, 500)}\n...` : output}
+          </pre>
+        </div>
       ) : null}
     </div>
   );
@@ -1163,16 +1429,19 @@ function ToolLogLine({
 function ToolLine({
   invocation,
 }: {
-  invocation: Extract<GroupedEvent, { kind: "tool_invocation" }>;
+  invocation: ToolInvocationStep;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const provider = classifyAgentTool(invocation.tool);
   const actionLabel = toolActionLabel(invocation.tool);
-  const label = displayAgentToolName(invocation.tool);
-  const iconClass = "w-4 h-4";
+  const displayName = displayAgentToolName(invocation.tool);
   const isRunning = invocation.status === "running";
   const summary = getInlineSummary(invocation.tool, invocation.args);
   const output = invocation.result?.output;
+  const status = invocationStatus(invocation);
+  const durationMs = invocationDurationMs(invocation);
+  const chips = invocationChips(invocation);
+  const tone = invocation.status === "failed" ? "danger" as const : "default" as const;
 
   const parsedResults = resolveSearchResults(invocation.tool, {
     output,
@@ -1185,294 +1454,182 @@ function ToolLine({
         ? invocation.args.q
         : null;
 
-  // ── Skill ──
-  if (provider === "skill") {
+  if (parsedResults || provider === "browser") {
     return (
-      <ToolLogLine
-        icon={<BookOpen className={iconClass} />}
-        label={actionLabel}
-        detail={summary}
-        isRunning={isRunning}
-      />
+      <div className="flex min-w-0 items-start gap-2.5 py-0.5">
+        <ActivityNode status={status} />
+        <div className="min-w-0 flex-1">
+          <WebSearchCard
+            query={searchQuery || summary}
+            results={parsedResults || []}
+            isRunning={isRunning}
+          />
+        </div>
+      </div>
     );
   }
 
-  // ── Workers ──
+  let icon = invocation.tool.startsWith("schedules_")
+    ? <Calendar className="size-3.5" />
+    : getToolIcon(provider, "size-3.5");
+  let label = actionLabel;
+  let detail: string | null | undefined = summary;
+  let detailMono = false;
+
   if (provider === "worker") {
-    const WorkerIcon =
-      invocation.tool === "desktop_worker" ? Eye : TerminalIcon;
-    return (
-      <ToolLogLine
-        icon={<WorkerIcon className={iconClass} />}
-        label={actionLabel}
-        detail={summary}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── Subagents ──
-  if (provider === "subagent") {
-    return (
-      <ToolLogLine
-        icon={<Bot className={iconClass} />}
-        label={actionLabel}
-        detail={summary}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── C1 / artifacts (card renders outside the log accordion) ──
-  if (invocation.tool === "render_ui") {
-    return (
-      <ToolLogLine
-        icon={<LayoutGrid className={iconClass} />}
-        label={actionLabel}
-        detail={summary || "visual component"}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── Document generation tools: short log + collapsed JSON (card comes from artifact_created) ──
-  if (DOC_ARTIFACT_TOOLS.has(invocation.tool)) {
+    icon = invocation.tool === "desktop_worker"
+      ? <Eye className="size-3.5" />
+      : <TerminalIcon className="size-3.5" />;
+  } else if (provider === "skill") {
+    icon = <BookOpen className="size-3.5" />;
+  } else if (provider === "subagent") {
+    icon = <Bot className="size-3.5" />;
+  } else if (invocation.tool === "render_ui") {
+    icon = <LayoutGrid className="size-3.5" />;
+    detail = summary || "visual component";
+  } else if (invocation.tool === "ask_user") {
+    icon = <MessageSquare className="size-3.5" />;
+  } else if (DOC_ARTIFACT_TOOLS.has(invocation.tool)) {
+    icon = <FileText className="size-3.5" />;
     const fromResult = artifactFromToolResult(
       invocation.tool,
       invocation.result?.output,
     );
-    const detail =
-      summary ||
-      fromResult?.title ||
-      (isRunning ? "generating…" : "document");
-    return (
-      <div className="flex flex-col gap-1.5 max-w-xl">
-        <ToolLogLine
-          icon={<FileText className={iconClass} />}
-          label={actionLabel}
-          detail={detail}
-          isRunning={isRunning}
-        />
-        {!isRunning && (Object.keys(invocation.args).length > 0 || !!output) && (
-          <details className="ml-6 text-[12px] text-zinc-500">
-            <summary className="cursor-pointer select-none hover:text-zinc-300">
-              Details
-            </summary>
-            <div className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-              {Object.keys(invocation.args).length > 0 && (
-                <div className="px-3 py-2">
-                  <div className="text-[11px] text-zinc-400 mb-1 font-medium">Input</div>
-                  <pre className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
-                    {JSON.stringify(invocation.args, null, 2)}
-                  </pre>
-                </div>
-              )}
-              {output && (
-                <div className="px-3 py-2 border-t border-zinc-100 dark:border-zinc-800/60">
-                  <div className="text-[11px] text-zinc-400 mb-1 font-medium">Output</div>
-                  <pre className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
-                    {output.length > 500 ? output.slice(0, 500) + "\n..." : output}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </details>
-        )}
-      </div>
-    );
-  }
-
-  if (invocation.tool === "ask_user") {
-    return (
-      <ToolLogLine
-        icon={<MessageSquare className={iconClass} />}
-        label={actionLabel}
-        detail={summary}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── Terminal ──
-  if (provider === "terminal") {
-    const cmd = summary || "command";
-    const truncated = cmd.length > 70 ? cmd.slice(0, 70) + "..." : cmd;
-    return (
-      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
-        <TerminalIcon className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">Terminal</span>
-        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
-        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
-      </div>
-    );
-  }
-
-  // ── Files ──
-  if (provider === "file") {
-    const fileLabel =
+    detail = summary || fromResult?.title || (isRunning ? "generating…" : "document");
+  } else if (provider === "terminal") {
+    label = "Terminal";
+    detail = summary || "command";
+    detailMono = true;
+  } else if (provider === "file") {
+    label =
       invocation.tool === "write_workspace_file"
         ? "Writing file"
         : invocation.tool === "list_workspace_files"
           ? "Listing files"
           : "Reading file";
-    const path = summary || "file";
-    const truncated = path.length > 60 ? "..." + path.slice(-57) : path;
-    return (
-      <div className="flex items-center gap-2 text-[14px] font-mono min-w-0">
-        <FileText className="w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0" />
-        <span className="text-zinc-400 dark:text-zinc-500 select-none shrink-0">{fileLabel}</span>
-        <span className="text-zinc-600 dark:text-zinc-400 truncate">{truncated}</span>
-        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
-      </div>
-    );
+    detail = summary || "file";
+    detailMono = true;
   }
 
-  // ── Web search with results ──
-  if (parsedResults) {
-    return (
-      <WebSearchCard
-        query={searchQuery}
-        results={parsedResults}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── Web browser tool (no parsed results) ──
-  if (provider === "browser") {
-    return (
-      <WebSearchCard
-        query={searchQuery || summary}
-        results={[]}
-        isRunning={isRunning}
-      />
-    );
-  }
-
-  // ── Workflow / generic tool with expandable detail card ──
-  const hasDetails = Object.keys(invocation.args).length > 0 || !!output;
+  const hasDetails =
+    !isRunning &&
+    (DOC_ARTIFACT_TOOLS.has(invocation.tool) || provider === "workflow" || provider === "generic" || provider === "mcp") &&
+    (Object.keys(invocation.args).length > 0 || Boolean(output));
 
   return (
-    <div className="flex flex-col gap-2">
-      <button
-        onClick={() => hasDetails && setDetailsOpen(!detailsOpen)}
-        className={`flex items-center gap-2 text-[14px] min-w-0 text-left ${hasDetails ? "cursor-pointer" : "cursor-default"}`}
-      >
-        {getToolIcon(provider, "w-4 h-4 text-zinc-400 dark:text-zinc-600 shrink-0")}
-        <span className="text-zinc-500 dark:text-zinc-400 select-none shrink-0 font-medium">
-          {actionLabel}
-        </span>
-        {summary && summary !== label && (
-          <span className="text-zinc-600 dark:text-zinc-400 truncate max-w-[400px]">{summary}</span>
-        )}
-        {isRunning && <Loader2 className="w-3.5 h-3.5 text-cyan-500 animate-spin ml-1 shrink-0" />}
-      </button>
-
-      <AnimatePresence>
-        {detailsOpen && hasDetails && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="overflow-hidden ml-6"
-          >
-            <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-              {/* Card header */}
-              <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 text-[13px] font-medium text-zinc-600 dark:text-zinc-300">
-                {summary || label}
-              </div>
-
-              {/* Args */}
-              {Object.keys(invocation.args).length > 0 && (
-                <div className="px-4 py-3">
-                  <div className="text-[12px] text-zinc-400 dark:text-zinc-500 mb-1.5 font-medium">Input</div>
-                  <pre className="text-[12px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words leading-relaxed">
-                    {JSON.stringify(invocation.args, null, 2)}
-                  </pre>
-                </div>
-              )}
-
-              {/* Output */}
-              {output && (
-                <div className="px-4 py-3 border-t border-zinc-100 dark:border-zinc-800/60">
-                  <div className="text-[12px] text-zinc-400 dark:text-zinc-500 mb-1.5 font-medium">Output</div>
-                  <pre className="text-[12px] font-mono text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">
-                    {output.length > 500 ? output.slice(0, 500) + "\n..." : output}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+    <ActivityRow
+      status={status}
+      icon={icon}
+      label={label}
+      detail={detail && detail !== displayName ? detail : undefined}
+      detailMono={detailMono}
+      durationMs={durationMs}
+      chips={chips}
+      tone={tone}
+      expandable={hasDetails}
+      expanded={detailsOpen}
+      onToggle={hasDetails ? () => setDetailsOpen((value) => !value) : undefined}
+    >
+      {hasDetails ? (
+        <ToolDetailsPanel
+          title={summary || displayName}
+          args={invocation.args}
+          output={output}
+        />
+      ) : null}
+    </ActivityRow>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Error Line                                                         */
-/* ------------------------------------------------------------------ */
-
-function ErrorLine({ message }: { message: string }) {
+function ErrorLine({
+  message,
+  code,
+  count,
+}: {
+  message: string;
+  code?: string;
+  count?: number;
+}) {
   return (
-    <div className="flex items-start gap-2 text-[14px]">
-      <X className="w-4 h-4 text-red-400 dark:text-red-500 shrink-0 mt-0.5" />
-      <span className="text-red-500 dark:text-red-400">{message}</span>
-    </div>
+    <ActivityBlockRow
+      status="failed"
+      icon={<X className="size-3.5" />}
+      label={message}
+      tone="danger"
+      chips={
+        <>
+          {count && count > 1 ? (
+            <ActivityChip tone="danger">×{count}</ActivityChip>
+          ) : null}
+          {code ? (
+            <ActivityChip tone="danger" mono>
+              {code}
+            </ActivityChip>
+          ) : null}
+        </>
+      }
+    />
   );
 }
 
 function ProgressStatusLine({
   message,
   failed = false,
+  complete = false,
 }: {
   message: string;
   failed?: boolean;
+  complete?: boolean;
 }) {
+  const status: ActivityStatus = failed ? "failed" : complete ? "ok" : "running";
   return (
-    <div className="flex items-start gap-2 text-[14px] min-w-0">
-      <Bot className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${failed ? "text-red-400 dark:text-red-500" : "text-zinc-400 dark:text-zinc-500"}`} />
-      <span className={failed ? "text-red-500 dark:text-red-400" : "text-zinc-600 dark:text-zinc-400"}>
-        {message}
-      </span>
-    </div>
+    <ActivityRow
+      status={status}
+      icon={<Bot className="size-3.5" />}
+      label="Agent"
+      detail={message}
+      tone={failed ? "danger" : "default"}
+    />
   );
 }
-
-/* ------------------------------------------------------------------ */
-/*  Screenshot Card                                                    */
-/* ------------------------------------------------------------------ */
 
 function ScreenshotCard({
   item,
 }: {
   item: Extract<GroupedEvent, { kind: "screenshot" }>;
 }) {
+  const [open, setOpen] = useState(Boolean(item.analysis || item.image_b64));
+  const expandable = Boolean(item.analysis || item.image_b64);
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-[14px] text-zinc-400 dark:text-zinc-500 font-medium">
-        <Eye className="w-4 h-4" />
-        Vision Analysis
-      </div>
-      <div className="pl-6 space-y-3">
-        {item.analysis && (
-          <p className="text-[13px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            {item.analysis}
-          </p>
-        )}
-        {item.image_b64 && (
-          <div className="relative w-[160px] h-[100px] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 brightness-90 hover:brightness-100 transition">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={`data:image/png;base64,${item.image_b64}`}
-              className="object-cover w-full h-full"
-              alt="Screenshot"
-            />
-          </div>
-        )}
-      </div>
-    </div>
+    <ActivityRow
+      status="ok"
+      icon={<Eye className="size-3.5" />}
+      label="Vision"
+      detail={item.analysis ? "Screen analysis" : "Screenshot"}
+      expandable={expandable}
+      expanded={open}
+      onToggle={expandable ? () => setOpen((value) => !value) : undefined}
+    >
+      {expandable ? (
+        <div className="space-y-3">
+          {item.analysis ? (
+            <p className="text-body-2-regular leading-relaxed text-text-secondary">
+              {item.analysis}
+            </p>
+          ) : null}
+          {item.image_b64 ? (
+            <div className="relative h-[100px] w-[160px] overflow-hidden rounded-xl border border-separator-border brightness-90 transition hover:brightness-100">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`data:image/png;base64,${item.image_b64}`}
+                className="h-full w-full object-cover"
+                alt="Screenshot"
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </ActivityRow>
   );
 }
 
@@ -1494,40 +1651,46 @@ function AppPreviewChatCard({
           workspace_path: preview.workspacePath,
         })
       }
-      className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900"
+      className="flex w-full items-center gap-3 rounded-xl border border-card-border bg-background-secondary-default px-3 py-2.5 text-left transition-colors hover:border-border-button-hover hover:bg-background-secondary-hover"
     >
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-950 text-emerald-400">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500">
         <Globe className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-medium text-zinc-100">App preview</div>
-        <div className="truncate font-mono text-[11px] text-zinc-500">
+        <div className="text-body-2-medium text-text-primary">App preview</div>
+        <div className="truncate font-mono text-caption-1-regular text-text-tertiary">
           {preview.title}
           {preview.port ? ` · :${preview.port}` : ""}
         </div>
       </div>
-      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-foreground-icon-tertiary" />
     </button>
   );
 }
 
 function HandoffLogLine({ from, to }: { from: string; to: string }) {
   return (
-    <div className="flex items-center gap-2 text-[13px] min-w-0">
-      <span className="flex items-center gap-1 shrink-0">
-        <span className="flex size-5 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
-          {getAgentIcon(from, "w-3 h-3")}
+    <ActivityRow
+      status="ok"
+      icon={<ArrowLeftRight className="size-3.5" />}
+      label="Handoff"
+      detail={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span className="inline-flex items-center gap-1">
+            <span className="flex size-4 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-500">
+              {getAgentIcon(from, "size-2.5")}
+            </span>
+            <span>{formatAgentName(from)}</span>
+          </span>
+          <ArrowLeftRight className="size-2.5 text-foreground-icon-tertiary" />
+          <span className="inline-flex items-center gap-1">
+            <span className="flex size-4 items-center justify-center rounded-md bg-violet-500/10 text-violet-500">
+              {getAgentIcon(to, "size-2.5")}
+            </span>
+            <span>{formatAgentName(to)}</span>
+          </span>
         </span>
-        <span className="text-zinc-500 dark:text-zinc-400 font-medium">{formatAgentName(from)}</span>
-      </span>
-      <ArrowLeftRight className="w-3 h-3 text-zinc-400 dark:text-zinc-500 shrink-0" />
-      <span className="flex items-center gap-1 shrink-0">
-        <span className="flex size-5 items-center justify-center rounded-md bg-violet-500/10 text-violet-600 dark:text-violet-400">
-          {getAgentIcon(to, "w-3 h-3")}
-        </span>
-        <span className="text-zinc-500 dark:text-zinc-400 font-medium">{formatAgentName(to)}</span>
-      </span>
-      <span className="text-zinc-400 dark:text-zinc-500 text-[11px] ml-1 hidden sm:inline">handoff</span>
-    </div>
+      }
+    />
   );
 }

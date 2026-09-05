@@ -583,3 +583,28 @@ async def test_voice_loop_error_on_cleanup_does_not_send_ws_error(monkeypatch) -
         if isinstance(call.args[0], dict) and call.args[0].get("code") == "WS_ERROR"
     ]
     assert error_frames == []
+
+
+@pytest.mark.asyncio
+async def test_ping_message_responds_with_pong(monkeypatch) -> None:
+    FakeOrchestrator.active_on_disconnect = False
+    session = SimpleNamespace(id="session-123", owner_id="firebase-uid")
+    session_manager = SimpleNamespace(
+        history_repository=None,
+        activate_session=AsyncMock(),
+        destroy_session=AsyncMock(),
+        cancel_idle_pause=Mock(),
+        schedule_idle_pause=Mock(),
+    )
+    ws = FakeWebSocket(
+        [
+            {"text": json.dumps({"type": "ping"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    monkeypatch.setattr(ws_handler, "NexusOrchestrator", FakeOrchestrator)
+
+    await ws_handler.handle_websocket(ws, session, session_manager)
+
+    ws.send_json.assert_any_await({"type": "pong"})
+

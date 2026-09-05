@@ -25,6 +25,8 @@ from nexus.storage import (
     download_artifact_bytes,
     generate_artifact_signed_url,
     parse_gcs_object_url,
+    preview_artifact_gcs_location,
+    preview_media_type,
 )
 
 router = APIRouter()
@@ -392,6 +394,13 @@ async def preview_policy(
     }
 
 
+def _optional_query_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
+
+
 def _artifact_gcs_location(artifact) -> tuple[str, str] | None:
     metadata = artifact.metadata or {}
     bucket = metadata.get("gcs_bucket")
@@ -415,9 +424,16 @@ def _content_disposition_filename(artifact, blob_name: str | None = None) -> str
 async def download_artifact_by_id(
     artifact_id: str,
     user: AuthenticatedUser = Depends(require_current_user),
+    session_id: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
 ):
     history_repo = get_history_repository()
-    artifact = await history_repo.get_artifact_for_owner(user.uid, artifact_id)
+    artifact = await history_repo.get_artifact_for_owner(
+        user.uid,
+        artifact_id,
+        session_id=session_id,
+        run_id=run_id,
+    )
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     
@@ -467,29 +483,61 @@ async def download_artifact_by_id(
 async def download_artifact_content(
     artifact_id: str,
     user: AuthenticatedUser = Depends(require_current_user),
+    session_id: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    sibling: str | None = Query(default=None),
 ):
     """Same-origin byte proxy so the browser never fetch()es GCS (no CORS)."""
+    session_id = _optional_query_text(session_id)
+    run_id = _optional_query_text(run_id)
+    sibling = _optional_query_text(sibling)
     history_repo = get_history_repository()
-    artifact = await history_repo.get_artifact_for_owner(user.uid, artifact_id)
+    artifact = await history_repo.get_artifact_for_owner(
+        user.uid,
+        artifact_id,
+        session_id=session_id,
+        run_id=run_id,
+    )
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    location = _artifact_gcs_location(artifact)
+    metadata = artifact.metadata or {}
+    want_preview = (sibling or "").lower() == "preview"
+    location = (
+        preview_artifact_gcs_location(
+            session_id=getattr(artifact, "session_id", None) or session_id,
+            run_id=getattr(artifact, "run_id", None) or run_id,
+            metadata=metadata,
+        )
+        if want_preview
+        else _artifact_gcs_location(artifact)
+    )
     if location:
         bucket, blob = location
         payload = download_artifact_bytes(bucket_name=bucket, blob_name=blob)
-        if payload is None:
-            raise HTTPException(status_code=404, detail="Artifact file not found")
-        content, mime = payload
-        filename = _content_disposition_filename(artifact, blob)
-        return Response(
-            content=content,
-            media_type=mime,
-            headers={
-                "Content-Disposition": f'inline; filename="{filename}"',
-                "Cache-Control": "private, max-age=60",
-            },
-        )
+        if payload is not None:
+            content, mime = payload
+            filename = _content_disposition_filename(artifact, blob)
+            if want_preview:
+                mime = preview_media_type(
+                    str(metadata.get("preview_path") or blob),
+                    str(metadata.get("preview_content_type") or ""),
+                )
+                preview_name = str(metadata.get("preview_path") or "").replace("\\", "/").rsplit("/", 1)[-1]
+                if preview_name:
+                    filename = preview_name
+            else:
+                declared = str(metadata.get("content_type") or "").strip()
+                if declared:
+                    mime = declared
+            return Response(
+                content=content,
+                media_type=mime,
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                    "Cache-Control": "private, max-age=60",
+                },
+            )
 
     raise HTTPException(
         status_code=404,

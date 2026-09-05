@@ -13,8 +13,10 @@ import {
   isPresentationArtifact,
   previewKind,
   resolveArtifactUrl,
+  usablePreviewSrc,
 } from "@/lib/artifact-url";
 import { ArtifactIcon, artifactBadge } from "./artifact-icon";
+import { CodePreview } from "./code-preview";
 import { MarkdownPreview } from "./markdown-preview";
 import { SlidePreview } from "./slide-preview";
 import { SpreadsheetPreview } from "./spreadsheet-preview";
@@ -32,8 +34,8 @@ export function ArtifactPreview({
   className,
   onUrlChange,
 }: Props) {
-  const [url, setUrl] = useState<string | null>(initialUrl ?? null);
-  const [loading, setLoading] = useState(!initialUrl);
+  const [url, setUrl] = useState<string | null>(usablePreviewSrc(initialUrl));
+  const [loading, setLoading] = useState(!usablePreviewSrc(initialUrl));
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const onUrlChangeRef = useRef(onUrlChange);
@@ -44,17 +46,18 @@ export function ArtifactPreview({
   const presentation = isPresentationArtifact(artifact);
 
   useEffect(() => {
-    if (kind === "sheet" || kind === "markdown") {
+    if (kind === "sheet" || kind === "markdown" || kind === "code") {
       setUrl(null);
       setLoading(false);
       setError(null);
       onUrlChangeRef.current?.(null);
       return;
     }
-    if (initialUrl) {
-      setUrl(initialUrl);
+    const inlineSrc = usablePreviewSrc(initialUrl);
+    if (inlineSrc) {
+      setUrl(inlineSrc);
       setLoading(false);
-      onUrlChangeRef.current?.(initialUrl);
+      onUrlChangeRef.current?.(inlineSrc);
       return;
     }
     if (kind === "none") {
@@ -103,14 +106,29 @@ export function ArtifactPreview({
         <SpreadsheetPreview artifact={artifact} />
       ) : kind === "markdown" ? (
         <MarkdownPreview artifact={artifact} />
+      ) : kind === "code" ? (
+        <CodePreview artifact={artifact} />
       ) : loading ? (
         <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-400">
           <Loader2 className="h-4 w-4 animate-spin" />
           Loading preview…
         </div>
       ) : error ? (
-        <div className="flex h-full items-center justify-center px-6 text-center text-sm text-red-400">
-          {error}
+        <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+          <p className="text-sm text-red-400">{error}</p>
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {downloading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            Download
+          </button>
         </div>
       ) : kind === "none" ? (
         <div className="flex h-full flex-col items-center justify-center gap-5 px-6 text-center">
@@ -170,6 +188,22 @@ export function ArtifactPreview({
           sandbox="allow-scripts allow-forms allow-modals"
         />
       )}
+      {kind !== "none" && !error ? (
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={downloading}
+          className="absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2.5 py-1.5 text-[12px] font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-50"
+          title="Download"
+        >
+          {downloading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          Download
+        </button>
+      ) : null}
     </div>
   );
 }

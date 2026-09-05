@@ -8,11 +8,18 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { Download, ExternalLink, FileText, Loader2, Maximize2, Minimize2, X } from "lucide-react";
+import { Download, ExternalLink, FileCode, FileText, Loader2, Maximize2, Minimize2, X } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
-import { downloadArtifactFile, previewKind } from "@/lib/artifact-url";
+import {
+  downloadArtifactFile,
+  downloadTextFile,
+  isCodePath,
+  previewKind,
+  usablePreviewSrc,
+} from "@/lib/artifact-url";
 import { ArtifactIconTile, artifactBadge } from "./artifact-icon";
 import { ArtifactPreview } from "./artifact-preview";
+import { CodePreview } from "./code-preview";
 import { MarkdownPreview } from "./markdown-preview";
 
 type Props = {
@@ -59,15 +66,16 @@ function ViewerPanel({
   title?: string;
   onClose: () => void;
 }) {
-  const [url, setUrl] = useState<string | null>(initialUrl ?? null);
+  const [url, setUrl] = useState<string | null>(usablePreviewSrc(initialUrl));
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const title =
     artifact?.title || titleOverride || artifact?.kind.replace(/_/g, " ") || "Document";
-  const kind = artifact ? previewKind(artifact) : "markdown";
-  const wide = kind === "sheet" || kind === "html" || kind === "pdf";
+  const codeOnly = !artifact && isCodePath(titleOverride || title || "");
+  const kind = artifact ? previewKind(artifact) : codeOnly ? "code" : "markdown";
+  const wide = kind === "sheet" || kind === "html" || kind === "pdf" || kind === "code";
 
   useEffect(() => {
     const previous = document.body.style.overflow;
@@ -112,16 +120,27 @@ function ViewerPanel({
   }, []);
 
   const handleDownload = useCallback(async () => {
-    if (!artifact) return;
-    setDownloading(true);
-    try {
-      await downloadArtifactFile(artifact);
-    } catch (e) {
-      console.error("Download failed", e);
-    } finally {
-      setDownloading(false);
+    if (artifact) {
+      setDownloading(true);
+      try {
+        await downloadArtifactFile(artifact);
+      } catch (e) {
+        console.error("Download failed", e);
+      } finally {
+        setDownloading(false);
+      }
+      return;
     }
-  }, [artifact]);
+    if (markdown) {
+      const name = titleOverride || title || (codeOnly ? "file.txt" : "document.md");
+      const mime = codeOnly
+        ? "text/plain;charset=utf-8"
+        : /\.html?$/i.test(name)
+          ? "text/html;charset=utf-8"
+          : "text/markdown;charset=utf-8";
+      downloadTextFile(name, markdown, mime);
+    }
+  }, [artifact, codeOnly, markdown, title, titleOverride]);
 
   return (
     <motion.div
@@ -165,8 +184,8 @@ function ViewerPanel({
               iconClassName="w-[18px] h-[18px]"
             />
           ) : (
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-violet-500/20 bg-violet-500/10 text-violet-400">
-              <FileText className="h-[18px] w-[18px]" />
+            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${codeOnly ? "border-lime-500/20 bg-lime-500/10 text-lime-400" : "border-violet-500/20 bg-violet-500/10 text-violet-400"}`}>
+              {codeOnly ? <FileCode className="h-[18px] w-[18px]" /> : <FileText className="h-[18px] w-[18px]" />}
             </div>
           )}
           <div className="min-w-0 flex-1">
@@ -174,12 +193,12 @@ function ViewerPanel({
               {title}
             </div>
             <div className="mt-0.5 truncate text-[12px] text-text-secondary">
-              {artifact ? artifactBadge(artifact) : "Markdown"} · Last modified{" "}
+              {artifact ? artifactBadge(artifact) : codeOnly ? (title.split(".").pop() || "CODE").toUpperCase() : "Markdown"} · Last modified{" "}
               {formatModified(artifact?.created_at)}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {url && (
+            {url && !url.includes("storage.googleapis.com") && (
               <a
                 href={url}
                 target="_blank"
@@ -190,7 +209,7 @@ function ViewerPanel({
                 <ExternalLink className="h-4 w-4" />
               </a>
             )}
-            {artifact ? (
+            {(artifact || markdown) ? (
               <button
                 type="button"
                 onClick={handleDownload}
@@ -226,9 +245,15 @@ function ViewerPanel({
         {artifact ? (
           <ArtifactPreview
             artifact={artifact}
-            url={initialUrl}
+            url={usablePreviewSrc(initialUrl)}
             onUrlChange={setUrl}
             className="relative min-h-0 flex-1 bg-background-full"
+          />
+        ) : codeOnly ? (
+          <CodePreview
+            content={markdown || ""}
+            filename={title}
+            className="relative min-h-0 flex-1"
           />
         ) : (
           <MarkdownPreview content={markdown || ""} className="relative min-h-0 flex-1" />

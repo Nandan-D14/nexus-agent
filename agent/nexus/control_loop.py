@@ -659,8 +659,10 @@ class CompletionVerification:
 
 _ARTIFACT_REQUEST = re.compile(
     r"(?:\b(?:create|generate|build|make|export|produce|code|develop|design)\b.{0,50}"
-    r"\b(?:pdf|xlsx|spreadsheet|docx|document|html|report|artifact|file|website|webpage|site|landing|landing\s+page|prototype|app|application|dashboard|component)\b"
-    r"|\.pdf\b|\.xlsx\b|\.docx\b|\.html?\b|\blanding\s+page\b|\bweb\s+app\b|\breact\b|\bvite\b)",
+    r"\b(?:pdf|xlsx|spreadsheet|docx|document|pptx?|presentation|slides?|deck|html|report|artifact|file|website|webpage|site|landing|landing\s+page|prototype|app|application|dashboard|component)\b"
+    r"|\.pdf\b|\.xlsx\b|\.docx\b|\.pptx?\b|\.html?\b|\blanding\s+page\b|\bweb\s+app\b|\breact\b|\bvite\b"
+    r"|\bwhere\b.{0,80}\b(?:pptx?|presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|artifact|file|website|webpage|site|page|preview|app)\b"
+    r"|\b(?:show|give|open|send|share)\s+(?:me\s+)?(?:the\s+)?(?:pptx?|ppt|presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|artifact|file|website|webpage|site|page|preview|app)\b)",
     re.IGNORECASE,
 )
 _TASK_STATE_METADATA_KEYS = frozenset({"task_type", "stage", "review_status"})
@@ -689,24 +691,75 @@ def looks_like_worker_envelope(text: str | None) -> bool:
     )
 
 
+_SLIDE_CODE_DUMP_TOKENS = frozenset(
+    {
+        "def kicker",
+        "python-pptx",
+        "from pptx",
+        "import pptx",
+        "add_textbox",
+        "add_shape",
+        "slide.shapes",
+        "slide.placeholders",
+        "slide_layouts",
+    }
+)
+
+_DIMENSION_RE = re.compile(r"\d+(?:\.\d+)?\s*in\b")
+_DEF_WITH_SLIDE_RE = re.compile(r"^\s*def\s+\w+\s*\(.*slide", re.IGNORECASE | re.MULTILINE)
+
+
+def looks_like_slide_code_dump(text: str | None) -> bool:
+    """Return True when *text* is leaked slide-layout code, not an answer.
+
+    The planner sometimes emits python-pptx internals (``def kicker(slide,
+    ...)``, inch coordinates, ``slide.shapes``) as chat text instead of
+    calling ``generate_pptx_report``. That shape must never be promoted to
+    a user-facing final answer — it is reasoning about the deck, and the
+    skill explicitly forbids writing slides in code.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    low = raw.lower()
+    if any(token in low for token in _SLIDE_CODE_DUMP_TOKENS):
+        return True
+    return bool(_DEF_WITH_SLIDE_RE.search(raw) and _DIMENSION_RE.search(raw))
+
+
+def _requires_artifact(request: str | None, outstanding_task: str | None = "") -> bool:
+    """Return True when the turn owes the user a file/preview deliverable.
+
+    Short follow-ups (``"continue"``, ``"do it"``) never match
+    :data:`_ARTIFACT_REQUEST` by themselves, so also consult the expanded
+    outstanding task reconstructed from the conversation.
+    """
+    if _ARTIFACT_REQUEST.search(str(request or "")):
+        return True
+    outstanding = str(outstanding_task or "").strip()
+    if not outstanding:
+        return False
+    if outstanding.casefold() == str(request or "").strip().casefold():
+        return False
+    return bool(_ARTIFACT_REQUEST.search(outstanding))
+
+
 def verify_completion(
     *,
     request: str,
     final_response: str | None,
     ledger: ActionLedger,
+    outstanding_task: str = "",
 ) -> CompletionVerification:
-    """Verify task completion from observable runtime evidence."""
+    """Verify task completion from observable runtime evidence.
+
+    ``outstanding_task`` is the expanded prior goal for short follow-ups
+    (``"continue"``, ``"give ppt"``). A bare follow-up never matches
+    :data:`_ARTIFACT_REQUEST` on its own, so the artifact check consults
+    both strings — otherwise a ``"continue"`` turn with zero tool calls
+    verifies as success and ships reasoning text as the answer.
+    """
     response = str(final_response or "").strip()
-    # #region agent log
-    try:
-        import json as _dbg_json
-        from pathlib import Path as _DbgPath
-        _arts = ledger.artifacts()
-        _tools = [str(getattr(r.decision, "action", "") or "") for r in ledger.records[-16:]]
-        _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"control_loop.py:verify_completion:entry","message":"verify inputs","data":{"request":str(request or "")[:180],"artifact_regex":bool(_ARTIFACT_REQUEST.search(str(request or ""))),"n_artifacts":len(_arts),"artifact_kinds":[str((a or {}).get("kind") or (a or {}).get("title") or "")[:40] for a in _arts[:6]],"tools":_tools,"response_len":len(response),"htmlish":("<" in response and ("class=" in response or "<section" in response.lower())),"response_prefix":response[:120]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-    except Exception:
-        pass
-    # #endregion
     if not response or looks_like_worker_envelope(response):
         return CompletionVerification(
             verified=False,
@@ -728,14 +781,6 @@ def verify_completion(
         if failure.error_code not in SKIPPABLE_ERROR_CODES
     ]
     if failures:
-        # #region agent log
-        try:
-            import json as _dbg_json
-            from pathlib import Path as _DbgPath
-            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"A","location":"control_loop.py:verify_completion","message":"unresolved failures block completion","data":{"tools":[{"tool":f.tool,"status":f.status,"error_code":f.error_code,"retryable":f.retryable,"remaining":f.remaining_work[:2]} for f in failures[:6]]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-        except Exception:
-            pass
-        # #endregion
         blocked = next(
             (
                 failure
@@ -785,15 +830,41 @@ def verify_completion(
             retryable=True,
         )
 
-    if _ARTIFACT_REQUEST.search(request) and not ledger.artifacts():
-        # #region agent log
-        try:
-            import json as _dbg_json
-            from pathlib import Path as _DbgPath
-            _DbgPath(r"C:\Users\nanda\OneDrive\Desktop\co-computer\debug-2a93a8.log").open("a", encoding="utf-8").write(_dbg_json.dumps({"sessionId":"2a93a8","hypothesisId":"B","location":"control_loop.py:verify_completion:missing_artifact","message":"MISSING_ARTIFACT branch","data":{"request":str(request or "")[:180]},"timestamp":int(__import__("time").time()*1000)})+"\n")
-        except Exception:
-            pass
-        # #endregion
+    if looks_like_slide_code_dump(response):
+        # The planner leaked slide-layout internals (python-pptx coordinates,
+        # e.g. "def kicker(slide, ...)") instead of calling
+        # generate_pptx_report. That text must never be delivered as the
+        # answer — route to the deliverable nudge when an artifact is owed.
+        if _requires_artifact(request, outstanding_task) and not ledger.artifacts():
+            return CompletionVerification(
+                verified=False,
+                status="failed",
+                method="artifact_exists",
+                summary=(
+                    "The model emitted slide-layout code instead of building "
+                    "the requested deck, and no artifact was recorded."
+                ),
+                error_code="MISSING_ARTIFACT",
+                remaining_work=[
+                    "Call terminal_worker with generate_pptx_report to build "
+                    "the deck; do not write python-pptx code in chat."
+                ],
+                retryable=True,
+            )
+        return CompletionVerification(
+            verified=False,
+            status="failed",
+            method="final_response",
+            summary="The model returned slide-layout code instead of a final response.",
+            error_code="MISSING_FINAL_RESPONSE",
+            remaining_work=[
+                "Produce a final response grounded in tool evidence; "
+                "do not emit slide code or coordinates in chat."
+            ],
+            retryable=True,
+        )
+
+    if _requires_artifact(request, outstanding_task) and not ledger.artifacts():
         return CompletionVerification(
             verified=False,
             status="failed",
@@ -861,5 +932,7 @@ __all__ = [
     "ActionObservation",
     "CompletionVerification",
     "RetryPolicy",
+    "looks_like_slide_code_dump",
+    "looks_like_worker_envelope",
     "verify_completion",
 ]

@@ -91,18 +91,13 @@ type DurableReplayResponse = {
   has_more?: boolean;
 };
 
-function resolveWebSocketTarget(target: string): { url: string; protocols?: string[] } {
+function resolveWebSocketTarget(target: string): string {
   try {
     const parsed = new URL(target);
-    const ticket = parsed.searchParams.get("ticket");
-    if (!ticket) {
-      return { url: target };
-    }
     parsed.searchParams.delete("ticket");
-    const cleanUrl = parsed.toString();
-    return { url: cleanUrl, protocols: [ticket] };
+    return parsed.toString();
   } catch {
-    return { url: target };
+    return target;
   }
 }
 
@@ -144,6 +139,8 @@ export interface UseWebSocketOptions {
   ticket?: string | null;
   /** Durable task id for event replay/dedupe after reconnect. */
   durableTaskId?: string | null;
+  /** Optional callback to refresh the authentication ticket before reconnecting. */
+  onRefreshToken?: () => Promise<string | null>;
 }
 
 /** Max outbound frames buffered while the socket is not OPEN. */
@@ -156,7 +153,11 @@ export function useWebSocket(
   url: string | null,
   options: UseWebSocketOptions = {},
 ): UseWebSocketReturn {
-  const { ticket = null, durableTaskId = null } = options;
+  const { ticket = null, durableTaskId = null, onRefreshToken } = options;
+  const onRefreshTokenRef = useRef(onRefreshToken);
+  useEffect(() => {
+    onRefreshTokenRef.current = onRefreshToken;
+  }, [onRefreshToken]);
   const wsRef = useRef<WebSocket | null>(null);
   const [readyState, setReadyState] = useState<ReadyStateValue>(ReadyState.CLOSED);
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
@@ -330,13 +331,18 @@ export function useWebSocket(
       wsRef.current = null;
     }
 
-    // Read the latest ticket at connect time (subprotocol handshake). Strip any
-    // stale ?ticket= from the url so a rotated ticket can never be sent stale.
-    const { url: cleanUrl } = resolveWebSocketTarget(target);
+    // Auth belongs on ?ticket=. Offering the JWT as Sec-WebSocket-Protocol as
+    // well forces the server to echo that exact protocol on accept(); if auth
+    // succeeds via the query string and accept() omits it, the browser fails
+    // the handshake ("WebSocket connection ... failed").
+    const cleanUrl = resolveWebSocketTarget(target);
     const currentTicket = ticketRef.current;
-    const ws = currentTicket
-      ? new WebSocket(cleanUrl, [currentTicket])
-      : new WebSocket(cleanUrl);
+    let finalUrl = cleanUrl;
+    if (currentTicket) {
+      const sep = finalUrl.includes("?") ? "&" : "?";
+      finalUrl = `${finalUrl}${sep}ticket=${encodeURIComponent(currentTicket)}`;
+    }
+    const ws = new WebSocket(finalUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     setReadyState(ReadyState.CONNECTING);
@@ -423,8 +429,18 @@ export function useWebSocket(
       ) {
         const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
         reconnectAttempts.current += 1;
-        reconnectTimer.current = setTimeout(() => {
+        reconnectTimer.current = setTimeout(async () => {
           if (urlRef.current) {
+            if (onRefreshTokenRef.current) {
+              try {
+                const fresh = await onRefreshTokenRef.current();
+                if (fresh) {
+                  ticketRef.current = fresh;
+                }
+              } catch (err) {
+                console.warn("[useWebSocket] Failed to refresh ticket on auto-reconnect:", err);
+              }
+            }
             connectRef.current(urlRef.current);
           }
         }, delay);
@@ -541,13 +557,23 @@ export function useWebSocket(
     lastSeqRef.current = Math.max(lastSeqRef.current, seq);
   }, []);
 
-  const reconnect = useCallback(() => {
+  const reconnect = useCallback(async () => {
     if (!urlRef.current) {
       return;
     }
     clearReconnectTimer();
     reconnectAttempts.current = 0;
     setConnectionLost(false);
+    if (onRefreshTokenRef.current) {
+      try {
+        const fresh = await onRefreshTokenRef.current();
+        if (fresh) {
+          ticketRef.current = fresh;
+        }
+      } catch (err) {
+        console.warn("[useWebSocket] Failed to refresh ticket on user reconnect:", err);
+      }
+    }
     connectRef.current(urlRef.current);
   }, [clearReconnectTimer]);
 

@@ -11,36 +11,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nexus.policy import evaluate_tool_policy
 
 
-def test_policy_requires_approval_for_git_history_destruction() -> None:
+def test_policy_allows_git_history_reset_in_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "git reset --hard HEAD~1"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "require_approval"
+    assert decision.action == "allow"
     assert decision.risk == "high"
 
 
-def test_policy_requires_approval_for_recursive_powershell_deletion() -> None:
+def test_policy_allows_recursive_powershell_deletion_in_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "Remove-Item -Recurse -Force .next"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "require_approval"
+    assert decision.action == "allow"
     assert decision.risk == "high"
 
 
-def test_policy_requires_approval_for_production_deploy() -> None:
+def test_policy_allows_production_deploy_from_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "vercel --prod --yes"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "require_approval"
+    assert decision.action == "allow"
     assert decision.risk == "high"
 
 
@@ -80,14 +80,14 @@ def test_policy_requires_approval_for_github_push_and_create_repo() -> None:
     assert clone.action == "allow"
 
 
-def test_policy_requires_approval_for_shell_git_push() -> None:
+def test_policy_allows_shell_git_push_from_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "git push origin main"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "require_approval"
+    assert decision.action == "allow"
     assert decision.risk == "high"
 
 

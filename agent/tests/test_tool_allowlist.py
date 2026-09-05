@@ -30,7 +30,8 @@ def test_capability_expands_to_concrete_tools():
     assert allowlist is not None
     assert "run_command" in allowlist
     assert "terminal_worker" in allowlist
-    assert "ask_user" in allowlist  # always allowed
+    assert "ask_choice" in allowlist  # always allowed
+    assert "suggest_options" in allowlist  # always allowed
     assert "gmail_send" not in allowlist
 
 
@@ -80,7 +81,8 @@ def test_infrastructure_tools_always_allowed_under_restriction():
     allowlist = resolve_tool_allowlist(["memory"], [])
     assert allowlist is not None
     for name in (
-        "ask_user",
+        "ask_choice",
+        "suggest_options",
         "read_skill",
         "read_skill_file",
         "read_skill_file",
@@ -91,6 +93,9 @@ def test_infrastructure_tools_always_allowed_under_restriction():
         "propose_workflow_template",
         "update_workflow_template",
         "publish_workflow_template",
+        "schedules_create",
+        "schedules_list",
+        "schedules_pause",
     ):
         assert name in ALWAYS_ALLOWED
         assert is_tool_allowed(name, allowlist) is True
@@ -152,7 +157,8 @@ def test_check_tool_allowlist_helper_passthrough():
         assert blocked["error_code"] == "TOOL_NOT_SELECTED"
         assert _check_tool_allowlist("publish_html_artifact") is None
         assert _check_tool_allowlist("publish_app_preview") is None
-        assert _check_tool_allowlist("ask_user") is None
+        assert _check_tool_allowlist("ask_choice") is None
+        assert _check_tool_allowlist("suggest_options") is None
     finally:
         clear_tool_allowlist()
 
