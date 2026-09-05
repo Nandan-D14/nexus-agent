@@ -18,8 +18,12 @@ from nexus.config import AGENT_DIR, WORKSPACE_DIR, settings
 logger = logging.getLogger(__name__)
 
 _storage_client: Optional[storage.Client] = None
-_SIGNED_URL_EXPIRATION_SECONDS = 900
+# Manus-style durability: signed URLs are transient (refreshed on demand via
+# /content proxy + /download). Original bytes in GCS are immutable and permanent.
+_SIGNED_URL_EXPIRATION_SECONDS = 3600
+_DOWNLOAD_URL_EXPIRATION_SECONDS = 3600
 _CONTENT_MAX_BYTES = 25 * 1024 * 1024
+_DATA_URI_FALLBACK_MAX_BYTES = 1 * 1024 * 1024
 
 
 def _resolve_sa_credentials():
@@ -73,18 +77,116 @@ def get_artifact_bucket_name() -> str:
     env = settings.app_env.lower() if settings.app_env else "development"
     return f"nexus-artifacts-{env}"
 
-def artifact_blob_name(session_id: str, run_id: str, relative_path: str) -> str:
-    """Return the canonical object name for a run artifact."""
+def _clean_relative_path(relative_path: str) -> str:
     cleaned = (relative_path or "artifact.bin").strip().replace("\\", "/")
     cleaned = "/".join(part for part in cleaned.split("/") if part and part != ".")
-    return f"{session_id}/{run_id}/{cleaned or 'artifact.bin'}"
+    return cleaned or "artifact.bin"
 
-def artifact_storage_metadata(session_id: str, run_id: str, relative_path: str) -> dict[str, str]:
+
+def artifact_blob_name(session_id: str, run_id: str, relative_path: str) -> str:
+    """Legacy canonical object name (kept for backward-compatible reads).
+
+    New uploads must use :func:`artifact_blob_name_for` with an artifact_id so
+    regenerating the same filename never overwrites a prior original.
+    """
+    return f"{session_id}/{run_id}/{_clean_relative_path(relative_path)}"
+
+
+def artifact_blob_name_for(
+    session_id: str,
+    run_id: str,
+    relative_path: str,
+    artifact_id: str | None = None,
+) -> str:
+    """Immutable per-artifact object name.
+
+    Manus-style: every artifact_id gets its own object. Without an artifact_id
+    falls back to the legacy path for old readers.
+    """
+    cleaned = _clean_relative_path(relative_path)
+    if artifact_id and artifact_id.strip():
+        safe_id = "".join(ch for ch in artifact_id.strip() if ch.isalnum() or ch in {"-", "_"})[:64] or "artifact"
+        return f"{session_id}/{run_id}/{safe_id}/{cleaned}"
+    return f"{session_id}/{run_id}/{cleaned}"
+
+
+def new_artifact_id() -> str:
+    """Generate a 12-char artifact id (matches history_repository)."""
+    import uuid
+
+    return uuid.uuid4().hex[:12]
+
+
+def candidate_artifact_blobs(
+    session_id: str | None,
+    run_id: str | None,
+    relative_path: str | None,
+    artifact_id: str | None = None,
+    metadata: dict | None = None,
+) -> list[str]:
+    """Ordered GCS blob candidates: stored > immutable > legacy."""
+    candidates: list[str] = []
+    meta = metadata or {}
+    stored = meta.get("gcs_blob")
+    if isinstance(stored, str) and stored.strip():
+        candidates.append(stored.strip())
+    if session_id and run_id and relative_path:
+        immutable = artifact_blob_name_for(session_id, run_id, relative_path, artifact_id)
+        if immutable not in candidates:
+            candidates.append(immutable)
+        legacy = artifact_blob_name(session_id, run_id, relative_path)
+        if legacy not in candidates:
+            candidates.append(legacy)
+    return candidates
+
+
+def artifact_storage_metadata(
+    session_id: str,
+    run_id: str,
+    relative_path: str,
+    artifact_id: str | None = None,
+) -> dict[str, str]:
     """Metadata needed to regenerate signed URLs later."""
     return {
         "gcs_bucket": get_artifact_bucket_name(),
-        "gcs_blob": artifact_blob_name(session_id, run_id, relative_path),
+        "gcs_blob": artifact_blob_name_for(session_id, run_id, relative_path, artifact_id),
+        "relative_path": _clean_relative_path(relative_path),
     }
+
+
+def ensure_artifact_bucket_exists() -> str | None:
+    """Return bucket name, creating in non-prod. In prod, never auto-create.
+
+    Returns None when the bucket is missing/inaccessible in production so
+    callers fail loudly (ARTIFACT_PERSISTENCE_FAILED) instead of creating an
+    undurable Firestore-only artifact.
+    """
+    from nexus.config import settings as _settings
+
+    try:
+        client = get_storage_client()
+        bucket_name = get_artifact_bucket_name()
+    except Exception as exc:
+        logger.error("GCS client unavailable for artifact bucket: %s", exc)
+        return None
+    try:
+        client.get_bucket(bucket_name)
+        return bucket_name
+    except Exception as bucket_exc:
+        if _settings.is_production:
+            logger.error(
+                "ARTIFACT_BUCKET_MISSING bucket=%s provision before uploads: %s",
+                bucket_name,
+                bucket_exc,
+            )
+            return None
+        logger.info("Bucket %s not found, attempting to create it", bucket_name)
+        try:
+            client.create_bucket(bucket_name, location="US")
+            return bucket_name
+        except Exception as create_exc:
+            logger.error("Failed to create bucket %s: %s", bucket_name, create_exc)
+            return None
 
 
 def preview_artifact_gcs_location(
@@ -93,6 +195,7 @@ def preview_artifact_gcs_location(
     run_id: str | None,
     metadata: dict | None,
     preview_url: str | None = None,
+    artifact_id: str | None = None,
 ) -> Optional[tuple[str, str]]:
     """GCS location for an Office HTML/PDF preview sibling, not the source file."""
     meta = metadata or {}
@@ -101,8 +204,17 @@ def preview_artifact_gcs_location(
         parsed = parse_gcs_object_url(url)
         if parsed:
             return parsed
-    preview_path = meta.get("preview_path")
+    # Stored explicit preview blob wins (immutable per-artifact).
+    stored_preview = meta.get("preview_gcs_blob") or meta.get("gcs_preview_blob")
     bucket = meta.get("gcs_bucket")
+    if (
+        isinstance(stored_preview, str)
+        and stored_preview.strip()
+        and isinstance(bucket, str)
+        and bucket.strip()
+    ):
+        return bucket.strip(), stored_preview.strip()
+    preview_path = meta.get("preview_path")
     if (
         isinstance(preview_path, str)
         and preview_path.strip()
@@ -111,8 +223,23 @@ def preview_artifact_gcs_location(
         and session_id
         and run_id
     ):
-        return bucket.strip(), artifact_blob_name(session_id, run_id, preview_path)
+        preview_aid = artifact_id or (meta.get("preview_artifact_id") if isinstance(meta.get("preview_artifact_id"), str) else None)
+        return bucket.strip(), artifact_blob_name_for(session_id, run_id, preview_path, preview_aid)
     return None
+
+
+def preview_storage_metadata(
+    session_id: str,
+    run_id: str,
+    preview_path: str,
+    artifact_id: str | None = None,
+) -> dict[str, str]:
+    """Immutable metadata for an Office HTML/PDF preview sibling."""
+    return {
+        "gcs_bucket": get_artifact_bucket_name(),
+        "preview_gcs_blob": artifact_blob_name_for(session_id, run_id, preview_path, artifact_id),
+        "preview_path": _clean_relative_path(preview_path),
+    }
 
 
 def preview_media_type(preview_path: str | None, declared: str | None = None) -> str:
@@ -229,31 +356,28 @@ def download_artifact_as_data_uri(
     return f"data:{mime};base64,{encoded}"
 
 
-def upload_artifact(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:
-    """Uploads a file to GCS and returns a URL (signed if possible, public otherwise)."""
+def upload_artifact(
+    session_id: str,
+    run_id: str,
+    relative_path: str,
+    content: str | bytes,
+    artifact_id: str | None = None,
+) -> Optional[str]:
+    """Uploads a file to GCS and returns a URL (signed if possible, public otherwise).
+
+    When artifact_id is provided the object is immutable:
+    ``{session}/{run}/{artifact_id}/{relative}`` so regenerating the same
+    filename never overwrites a prior original. Live sandboxes are ephemeral;
+    GCS is the durable truth for all sessions.
+    """
     try:
+        bucket_name = ensure_artifact_bucket_exists()
+        if not bucket_name:
+            return None
         client = get_storage_client()
-        bucket_name = get_artifact_bucket_name()
+        bucket = client.get_bucket(bucket_name)
 
-        try:
-            bucket = client.get_bucket(bucket_name)
-        except Exception as bucket_exc:
-            if settings.is_production:
-                logger.error(
-                    "Artifact bucket %s was not found or is not accessible. "
-                    "Provision the bucket before running production uploads: %s",
-                    bucket_name,
-                    bucket_exc,
-                )
-                return None
-            logger.info("Bucket %s not found, attempting to create it", bucket_name)
-            try:
-                bucket = client.create_bucket(bucket_name, location="US")
-            except Exception as create_exc:
-                logger.error("Failed to create bucket %s: %s", bucket_name, create_exc)
-                return None
-
-        blob_name = artifact_blob_name(session_id, run_id, relative_path)
+        blob_name = artifact_blob_name_for(session_id, run_id, relative_path, artifact_id)
         blob = bucket.blob(blob_name)
 
         guessed_type = mimetypes.guess_type(relative_path)[0]
@@ -270,7 +394,7 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
         try:
             url = blob.generate_signed_url(
                 version="v4",
-                expiration=timedelta(seconds=_SIGNED_URL_EXPIRATION_SECONDS),
+                expiration=timedelta(seconds=_DOWNLOAD_URL_EXPIRATION_SECONDS),
                 method="GET",
             )
             return url
@@ -291,32 +415,65 @@ def upload_artifact(session_id: str, run_id: str, relative_path: str, content: s
                 return f"https://storage.googleapis.com/{bucket_name}/{blob_name}"
 
     except Exception as e:
-        logger.error("Failed to upload artifact %s to GCS: %s", relative_path, e)
-        
-        # Fallback: Save as a data URI directly in the database if GCS fails
+        logger.error("ARTIFACT_UPLOAD_FAILED path=%s: %s", relative_path, e)
+
+        # Fallback: only tiny text-like files may inline as data URIs.
+        # Binary deliverables (xlsx/docx/pptx/pdf/images) must stay in GCS so
+        # the exact original is always available; never inline them into
+        # Firestore (1MB doc limit + overwrite risk).
         try:
             import base64
             mime, _ = mimetypes.guess_type(relative_path)
             mime = mime or "application/octet-stream"
-            
+            if not (mime.startswith("text/") or mime in {"application/json"}):
+                return None
             content_bytes = content.encode("utf-8") if isinstance(content, str) else content
-            # Only inline if < 5MB to avoid blowing up Firestore document limits
-            if len(content_bytes) < 5 * 1024 * 1024:
+            if len(content_bytes) < _DATA_URI_FALLBACK_MAX_BYTES:
                 b64 = base64.b64encode(content_bytes).decode("ascii")
                 logger.info("Fell back to base64 data URI for %s", relative_path)
                 return f"data:{mime};base64,{b64}"
+            logger.error(
+                "ARTIFACT_TOO_LARGE_FOR_INLINE path=%s bytes=%d",
+                relative_path,
+                len(content_bytes),
+            )
         except Exception as b64_exc:
             logger.error("Failed to encode base64 fallback for %s: %s", relative_path, b64_exc)
-            
+
         return None
 
-async def upload_artifact_async(session_id: str, run_id: str, relative_path: str, content: str | bytes) -> Optional[str]:
+async def upload_artifact_async(
+    session_id: str,
+    run_id: str,
+    relative_path: str,
+    content: str | bytes,
+    artifact_id: str | None = None,
+) -> Optional[str]:
     """Async wrapper for upload_artifact."""
     import asyncio
-    return await asyncio.to_thread(upload_artifact, session_id, run_id, relative_path, content)
+    return await asyncio.to_thread(upload_artifact, session_id, run_id, relative_path, content, artifact_id)
+
+def download_first_available_bytes(
+    *,
+    bucket_name: str,
+    blob_candidates: list[str],
+    max_bytes: int = _CONTENT_MAX_BYTES,
+) -> Optional[tuple[bytes, str, str]]:
+    """Try blob candidates in order; return (bytes, mime, blob_name)."""
+    for blob_name in blob_candidates:
+        payload = download_artifact_bytes(bucket_name=bucket_name, blob_name=blob_name, max_bytes=max_bytes)
+        if payload is not None:
+            content, mime = payload
+            return content, mime, blob_name
+    return None
+
 
 async def delete_user_artifacts_async(user_id: str, session_ids: list[str]) -> None:
-    """Deletes all artifacts in GCS associated with the user's sessions."""
+    """Deletes all artifacts in GCS associated with the user's sessions.
+
+    NOTE: only call on explicit user-data deletion. Session pause/cleanup
+    must never delete blobs - sandboxes are ephemeral, GCS is permanent.
+    """
     import asyncio
 
     def _delete_sync():

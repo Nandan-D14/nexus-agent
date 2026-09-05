@@ -27,9 +27,61 @@ from nexus.tools._context import (
     get_workspace_path,
 )
 from nexus.tools.sandbox_events import emit_sandbox_event
-from nexus.storage import artifact_storage_metadata, upload_artifact_async
+from nexus.storage import artifact_storage_metadata, new_artifact_id, upload_artifact_async
 
 logger = logging.getLogger(__name__)
+
+
+async def _durable_upload_and_create(
+    *,
+    history_repo,
+    session_id: str,
+    run_id: str,
+    kind: str,
+    title: str,
+    preview: str,
+    output_path: str,
+    relative_path: str,
+    content: bytes | str,
+    extra_metadata: dict[str, Any] | None = None,
+    source_step_id: str | None = None,
+):
+    """Manus-style durable persist: immutable GCS object + Firestore doc.
+
+    Pre-generates artifact_id so blob ``{session}/{run}/{artifact_id}/{file}``
+    never overwrites a prior original with the same filename. Raises on
+    upload failure so callers return ARTIFACT_PERSISTENCE_FAILED instead of
+    an undurable sandbox-only file.
+    """
+    aid = new_artifact_id()
+    gcs_url = await upload_artifact_async(
+        session_id=session_id,
+        run_id=run_id,
+        relative_path=relative_path,
+        content=content,
+        artifact_id=aid,
+    )
+    if not gcs_url:
+        raise RuntimeError("GCS upload failed - bucket missing or inaccessible")
+    metadata = {
+        **artifact_storage_metadata(session_id, run_id, relative_path, aid),
+        "relative_path": relative_path,
+        "role": "deliverable",
+        **(extra_metadata or {}),
+    }
+    artifact = await history_repo.create_artifact(
+        session_id=session_id,
+        run_id=run_id,
+        kind=kind,
+        title=title,
+        preview=preview,
+        path=output_path,
+        url=gcs_url,
+        metadata=metadata,
+        artifact_id=aid,
+    )
+    await _notify_artifact_created(artifact)
+    return artifact, gcs_url
 
 _HTML_DATA_URI_LIMIT_BYTES = 500_000
 
@@ -582,36 +634,28 @@ sys.exit(1)
             "detail": res,
         }
 
-    # Upload to GCS
+    # Upload to durable GCS (immutable per-artifact) - sandbox is ephemeral.
     try:
         content = sandbox.read_binary_file(output_path)
-        gcs_url = await upload_artifact_async(
-            session_id=session_id,
-            run_id=run_id,
-            relative_path=output_relative_path,
-            content=content,
-        )
-
-        artifact = await history_repo.create_artifact(
+        artifact, gcs_url = await _durable_upload_and_create(
+            history_repo=history_repo,
             session_id=session_id,
             run_id=run_id,
             kind="pdf_report",
             title=title or filename,
             preview=f"Generated PDF report: {filename} ({payload.get('engine', 'unknown')} engine, {payload.get('size', 0)} bytes)",
-            path=output_path,
-            url=gcs_url,
-            metadata={
-                **artifact_storage_metadata(session_id, run_id, output_relative_path),
+            output_path=output_path,
+            relative_path=output_relative_path,
+            content=content,
+            extra_metadata={
                 "content_type": "application/pdf",
                 "size": payload.get("size", 0),
                 "engine": payload.get("engine", "unknown"),
-                "role": "deliverable",
             },
         )
         # Emit the durable artifact to the UI directly. The orchestrator excludes
         # self-persisting document tools from its reference-artifact path, so this
         # is the single canonical artifact for this file (one id everywhere).
-        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -672,11 +716,13 @@ async def publish_html_artifact(
     output_filename = _safe_html_filename(filename or clean_title)
     relative_path = f"outputs/{output_filename}"
     content_bytes = html_content.encode("utf-8")
+    _html_aid = new_artifact_id()
     gcs_url = await upload_artifact_async(
         session_id=session_id,
         run_id=run_id,
         relative_path=relative_path,
         content=html_content,
+        artifact_id=_html_aid,
     )
 
     url = gcs_url
@@ -692,7 +738,7 @@ async def publish_html_artifact(
         }
 
     metadata = {
-        **artifact_storage_metadata(session_id, run_id, relative_path),
+        **artifact_storage_metadata(session_id, run_id, relative_path, _html_aid if gcs_url else None),
         "relative_path": relative_path,
         "content_type": "text/html; charset=utf-8",
         "size": len(content_bytes),
@@ -710,6 +756,7 @@ async def publish_html_artifact(
         path=relative_path,
         url=url,
         metadata=metadata,
+        artifact_id=_html_aid if gcs_url else None,
     )
     await _notify_artifact_created(artifact)
 
@@ -865,15 +912,25 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
         
     try:
         content = sandbox.read_binary_file(path)
+        _promote_aid = new_artifact_id()
         gcs_url = await upload_artifact_async(
             session_id=session_id,
             run_id=run_id,
             relative_path=path,
-            content=content
+            content=content,
+            artifact_id=_promote_aid,
         )
-        
-        metadata = artifact_storage_metadata(session_id, run_id, path)
+        if not gcs_url:
+            return {
+                "status": "error",
+                "summary": f"Could not persist {path} to durable storage - bucket missing.",
+                "detail": None,
+                "error_code": "ARTIFACT_PERSISTENCE_FAILED",
+            }
+
+        metadata = artifact_storage_metadata(session_id, run_id, path, _promote_aid)
         metadata["role"] = "deliverable"
+        metadata["relative_path"] = path
         if kind == "html":
             metadata.update({
                 "content_type": "text/html; charset=utf-8",
@@ -889,6 +946,7 @@ async def save_as_artifact(path: str, title: str | None = None) -> dict[str, Any
             path=path,
             url=gcs_url,
             metadata=metadata,
+            artifact_id=_promote_aid,
         )
         await _notify_artifact_created(artifact)
 
@@ -1061,30 +1119,22 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
 
     try:
         content = sandbox.read_binary_file(output_path)
-        gcs_url = await upload_artifact_async(
-            session_id=session_id,
-            run_id=run_id,
-            relative_path=output_relative_path,
-            content=content,
-        )
-
-        artifact = await history_repo.create_artifact(
+        artifact, gcs_url = await _durable_upload_and_create(
+            history_repo=history_repo,
             session_id=session_id,
             run_id=run_id,
             kind="spreadsheet",
             title=title or filename,
             preview=f"Generated Excel report: {filename} ({len(rows)} rows)",
-            path=output_path,
-            url=gcs_url,
-            metadata={
-                **artifact_storage_metadata(session_id, run_id, output_relative_path),
+            output_path=output_path,
+            relative_path=output_relative_path,
+            content=content,
+            extra_metadata={
                 "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "size": payload.get("size", 0),
                 "row_count": len(rows),
-                "role": "deliverable",
             },
         )
-        await _notify_artifact_created(artifact)
 
         return {
             "status": "success",
@@ -1263,20 +1313,27 @@ print(json.dumps({{"status": "success", "path": out_path, "size": size}}))
         payload = {}
 
     try:
+        from nexus.storage import preview_storage_metadata
+
+        _docx_aid = new_artifact_id()
         content = sandbox.read_binary_file(output_path)
         gcs_url = await upload_artifact_async(
             session_id=session_id,
             run_id=run_id,
             relative_path=output_relative_path,
             content=content,
+            artifact_id=_docx_aid,
         )
+        if not gcs_url:
+            raise RuntimeError("GCS upload failed for DOCX")
 
-        # Generate the PDF sibling for preview
+        # Generate the PDF sibling for preview (same immutable artifact folder)
         pdf_filename = filename[:-5] + ".pdf" if filename.endswith(".docx") else filename + ".pdf"
         pdf_relative_path = f"outputs/{pdf_filename}"
         pdf_output_path = f"{get_workspace_path().rstrip('/')}/{pdf_relative_path}"
         pdf_gcs_url: str | None = None
         pdf_ready = False
+        _docx_preview_meta: dict[str, Any] = {}
         try:
             pdf_script = _SANDBOX_DEPS_BOOTSTRAP + textwrap.dedent(f"""\
 import json, os, sys, pathlib
@@ -1318,13 +1375,18 @@ except Exception as e:
             sandbox.run_command(f"rm -f {shlex.quote(pdf_script_path)}", timeout=10)
             if pdf_res.get("exit_code") == 0:
                 pdf_content = sandbox.read_binary_file(pdf_output_path)
-                pdf_ready = True
                 pdf_gcs_url = await upload_artifact_async(
                     session_id=session_id,
                     run_id=run_id,
                     relative_path=pdf_relative_path,
                     content=pdf_content,
+                    artifact_id=_docx_aid,
                 )
+                if pdf_gcs_url:
+                    pdf_ready = True
+                    _docx_preview_meta = preview_storage_metadata(
+                        session_id, run_id, pdf_relative_path, _docx_aid
+                    )
         except Exception:
             logger.warning("Failed to generate PDF sibling for DOCX preview", exc_info=True)
         sandbox.run_command(f"rm -f {shlex.quote(md_temp)}", timeout=10)
@@ -1338,14 +1400,17 @@ except Exception as e:
             path=output_path,
             url=gcs_url,
             metadata={
-                **artifact_storage_metadata(session_id, run_id, output_relative_path),
+                **artifact_storage_metadata(session_id, run_id, output_relative_path, _docx_aid),
+                "relative_path": output_relative_path,
                 "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "size": payload.get("size", 0),
                 "role": "deliverable",
+                **_docx_preview_meta,
                 **({"preview_url": pdf_gcs_url} if pdf_gcs_url else {}),
                 **({"preview_path": pdf_relative_path} if pdf_ready else {}),
                 **({"preview_content_type": "application/pdf"} if pdf_ready else {}),
             },
+            artifact_id=_docx_aid,
         )
         await _notify_artifact_created(artifact)
 
@@ -1533,25 +1598,35 @@ async def generate_pptx_report(
         payload = {}
 
     try:
+        from nexus.storage import preview_storage_metadata as _preview_meta
+
+        _pptx_aid = new_artifact_id()
         content = sandbox.read_binary_file(output_path)
         gcs_url = await upload_artifact_async(
             session_id=session_id,
             run_id=run_id,
             relative_path=output_relative_path,
             content=content,
+            artifact_id=_pptx_aid,
         )
+        if not gcs_url:
+            raise RuntimeError("GCS upload failed for PPTX")
 
         html_gcs_url: str | None = None
         html_ready = False
+        _pptx_preview_meta: dict[str, Any] = {}
         try:
             html_content = sandbox.read_binary_file(html_output_path)
-            html_ready = True
             html_gcs_url = await upload_artifact_async(
                 session_id=session_id,
                 run_id=run_id,
                 relative_path=html_relative_path,
                 content=html_content,
+                artifact_id=_pptx_aid,
             )
+            if html_gcs_url:
+                html_ready = True
+                _pptx_preview_meta = _preview_meta(session_id, run_id, html_relative_path, _pptx_aid)
         except Exception:
             logger.warning("Failed to upload HTML sibling for PPTX preview", exc_info=True)
 
@@ -1564,16 +1639,19 @@ async def generate_pptx_report(
             path=output_path,
             url=gcs_url,
             metadata={
-                **artifact_storage_metadata(session_id, run_id, output_relative_path),
+                **artifact_storage_metadata(session_id, run_id, output_relative_path, _pptx_aid),
+                "relative_path": output_relative_path,
                 "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 "size": payload.get("size", 0),
                 "slide_count": len(normalized),
                 "role": "deliverable",
+                **_pptx_preview_meta,
                 **({"preview_url": html_gcs_url} if html_gcs_url else {}),
                 **({"preview_path": html_relative_path} if html_ready else {}),
                 **({"preview_content_type": "text/html; charset=utf-8"} if html_ready else {}),
                 **({"render_mode": "iframe"} if html_ready else {}),
             },
+            artifact_id=_pptx_aid,
         )
         await _notify_artifact_created(artifact)
 

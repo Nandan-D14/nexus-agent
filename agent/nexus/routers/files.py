@@ -307,13 +307,22 @@ async def download_session_file(
     run_id: str | None = Query(default=None),
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    """Live sandbox file access (ephemeral execution only).
+
+    For permanent access to delivered files (xlsx/pdf/docx/pptx/html/...) use
+    GET /api/v1/artifacts/{artifact_id}/content which serves the exact original
+    from durable GCS for all sessions, even after the sandbox is paused.
+    """
     session_manager = get_session_manager()
     session = await session_manager.get_session(session_id)
     if not session or session.owner_id != user.uid:
-        raise HTTPException(status_code=404, detail="Live session not found")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LIVE_SESSION_NOT_FOUND", "message": "Live session not found. Use /api/v1/artifacts/{id}/content for durable files."},
+        )
     active_run_id = run_id or session.current_run_id
     if not active_run_id:
-        raise HTTPException(status_code=400, detail="Session does not have an active run")
+        raise HTTPException(status_code=400, detail={"code": "NO_ACTIVE_RUN", "message": "Session does not have an active run"})
 
     # Revive a paused/stale sandbox before declaring it gone. The previous
     # fail-fast 410 ran *before* ensure_session_ready, so a live session whose
@@ -324,7 +333,7 @@ async def download_session_file(
     if not session.sandbox or not session.sandbox.is_alive:
         raise HTTPException(
             status_code=410,
-            detail="Sandbox container is not active. File cannot be retrieved from the workspace sandbox."
+            detail={"code": "SANDBOX_EPHEMERAL", "message": "Sandbox is paused/expired. Open the file from Library or chat artifact (durable GCS copy)."},
         )
 
     filename = _safe_workspace_relative_path(

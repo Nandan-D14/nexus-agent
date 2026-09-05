@@ -7,9 +7,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
-import { Loader2 } from "lucide-react";
+import { Download, Loader2 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
-import { isCsvArtifact, resolveArtifactUrl } from "@/lib/artifact-url";
+import {
+  downloadArtifactFile,
+  getLastArtifactResolveError,
+  isCsvArtifact,
+  resolveArtifactUrl,
+} from "@/lib/artifact-url";
 import { authenticatedFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -40,15 +45,23 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
 
+  const [downloading, setDownloading] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setSelected(null);
-    resolveArtifactUrl(artifact, { forPreview: false })
+    // Durable-first: immutable GCS copy for all sessions. Never depend on the
+    // live sandbox (paused after ~5m) for delivered sheets.
+    resolveArtifactUrl(artifact, { forPreview: false, allowSandbox: false })
       .then(async (url) => {
         if (cancelled) return;
-        if (!url) throw new Error("missing url");
+        if (!url) {
+          const code = getLastArtifactResolveError();
+          if (code === "ARTIFACT_BLOB_MISSING") throw new Error("original-missing");
+          throw new Error("missing url");
+        }
         const res =
           url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("http")
             ? await fetch(url)
@@ -85,8 +98,13 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
         setActiveSheet(names[0] ?? (csv ? "CSV" : "Sheet1"));
         setTruncated(anyTruncated);
       })
-      .catch(() => {
-        if (!cancelled) setError("Could not load this spreadsheet.");
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof Error && err.message === "original-missing") {
+          setError("Original file is no longer available - please regenerate. New files are stored durably.");
+        } else {
+          setError("Could not load this spreadsheet. Check connection and retry, or download the original.");
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -124,8 +142,24 @@ export function SpreadsheetPreview({ artifact }: { artifact: RunArtifact }) {
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#1e1e20] px-6 text-center text-sm text-red-400">
-        {error}
+      <div className="flex h-full flex-col items-center justify-center gap-4 bg-[#1e1e20] px-6 text-center">
+        <p className="text-sm text-red-400">{error}</p>
+        <button
+          type="button"
+          disabled={downloading}
+          onClick={async () => {
+            setDownloading(true);
+            try {
+              await downloadArtifactFile(artifact, { allowSandbox: false });
+            } finally {
+              setDownloading(false);
+            }
+          }}
+          className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3.5 py-2 text-[13px] font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+        >
+          {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+          Download original
+        </button>
       </div>
     );
   }
