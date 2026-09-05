@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Base utilities for tools — normalization decorator and error helpers.
@@ -48,6 +48,61 @@ class NormalizedToolResult(TypedDict, total=False):
     suggested_alternatives: list[str]
     retry_after: int
     retryable: bool
+
+
+def iter_leaf_exceptions(exc: BaseException, *, limit: int = 8):
+    """Yield leaf exceptions out of (possibly nested) exception groups.
+
+    Parallel clients (anyio task groups, gather-style fan-outs) surface one
+    failed fetch as ``unhandled errors in a TaskGroup (1 sub-exception)``.
+    Stringifying that wrapper hides the real error and defeats retry
+    classification, so walk into ``BaseExceptionGroup.exceptions`` instead.
+    """
+    seen = 0
+    stack: list[BaseException] = [exc]
+    while stack and seen < limit:
+        current = stack.pop(0)
+        seen += 1
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+            continue
+        yield current
+
+
+def root_error_message(exc: BaseException, *, limit: int = 500) -> str:
+    """Return the first meaningful message inside *exc*, unwrapping groups."""
+    for leaf in iter_leaf_exceptions(exc):
+        message = str(leaf).strip()
+        if message:
+            return message[:limit]
+    fallback = f"{type(exc).__name__}: {exc}".strip(": ")
+    return fallback[:limit] or type(exc).__name__
+
+
+def classify_exception_message(message: str) -> tuple[str, bool]:
+    """Map an exception message to (error_code, retryable).
+
+    Mirrors the vocabulary used across the tool surface (``web.py`` etc.) so
+    unwrapped parallel-client failures route like their direct equivalents.
+    """
+    lowered = str(message or "").lower()
+    if any(token in lowered for token in ("timed out", "timeout", "deadline exceeded", "temporarily unavailable")):
+        return "TIMEOUT", True
+    if "rate limit" in lowered or "429" in lowered or "too many requests" in lowered:
+        return "RATE_LIMIT", True
+    if "401" in lowered or "unauthorized" in lowered or "authentication" in lowered:
+        return "AUTH_REQUIRED", False
+    if "404" in lowered or "not found" in lowered:
+        return "NOT_FOUND", False
+    if any(
+        token in lowered
+        for token in (
+            "500", "502", "503", "504", "connection", "reset by peer",
+            "broken pipe", "network", "eof occurred", "remote disconnected",
+        )
+    ):
+        return "HTTP_ERROR", True
+    return "TOOL_EXCEPTION", False
 
 
 def reraise_if_sandbox_dead(exc: BaseException) -> None:
@@ -169,16 +224,22 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
                     )
                 except Exception as e:
                     logger.exception("Tool %s failed", fn.__name__)
+                    message = root_error_message(e)
+                    error_code, retryable = classify_exception_message(message)
                     return tool_error(
-                        f"Tool {fn.__name__} failed: {e}",
-                        error_code="TOOL_EXCEPTION",
+                        f"Tool {fn.__name__} failed: {message}",
+                        error_code=error_code,
+                        retryable=retryable,
                         tool_name=fn.__name__,
                     )
             except Exception as e:
                 logger.exception("Tool %s failed", fn.__name__)
+                message = root_error_message(e)
+                error_code, retryable = classify_exception_message(message)
                 return tool_error(
-                    f"Tool {fn.__name__} failed: {e}",
-                    error_code="TOOL_EXCEPTION",
+                    f"Tool {fn.__name__} failed: {message}",
+                    error_code=error_code,
+                    retryable=retryable,
                     tool_name=fn.__name__,
                 )
 
@@ -189,9 +250,12 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
                 return _normalize(fn.__name__, result)
             except Exception as e:
                 logger.exception("Tool %s failed", fn.__name__)
+                message = root_error_message(e)
+                error_code, retryable = classify_exception_message(message)
                 return tool_error(
-                    f"Tool {fn.__name__} failed: {e}",
-                    error_code="TOOL_EXCEPTION",
+                    f"Tool {fn.__name__} failed: {message}",
+                    error_code=error_code,
+                    retryable=retryable,
                     tool_name=fn.__name__,
                 )
 

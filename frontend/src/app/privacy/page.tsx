@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -17,7 +17,7 @@ export default function PrivacyPage() {
   return (
     <LegalDoc
       title="Privacy Policy"
-      description="This Privacy Policy explains how Agentic Company (“CoComputer,” “we,” “us”) collects, uses, and shares information when you use our Service."
+      description="This Privacy Policy explains how nandan-d14 (“CoComputer,” “we,” “us”) collects, uses, and shares information when you use our Service."
       lastUpdated="August 4, 2026"
       sections={[
         {

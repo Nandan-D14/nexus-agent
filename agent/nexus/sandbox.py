@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """E2B Desktop Sandbox wrapper — provides all computer control primitives."""

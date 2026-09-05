@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """CoComputer agent system prompt."""
@@ -53,7 +53,7 @@ Execution rules:
 - Prefer action over repeated observation.
 - Use background=True when a command launches a GUI app that stays open.
 - Use keyboard shortcuts when they are the fastest safe option.
-- Sandbox shell commands never need approval. Never take irreversible external actions without asking first.
+- Sandbox shell commands never need approval. Never take irreversible external actions without asking first. Before any purchase, payment, checkout confirmation, or placing an order, you must call ask_choice to get explicit user approval and stop if denied.
 - Never modify security settings.
 
 Response style:

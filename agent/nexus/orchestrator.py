@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Orchestrator — wires voice → agent → sandbox → vision → response."""
@@ -194,6 +194,21 @@ _TASK_INQUIRY_RE = re.compile(
 def is_task_inquiry(text: str) -> bool:
     """Return True when the user is asking what their task was or inquiring about goals."""
     return bool(_TASK_INQUIRY_RE.search(str(text or "").strip()))
+
+
+_ERROR_INQUIRY_RE = re.compile(
+    r"what(?:'s| is| was)?\s+(the\s+)?error"
+    r"|what went wrong"
+    r"|why did\s+(it|that|this|the agent)\s+fail"
+    r"|why\s+(the\s+)?error"
+    r"|show\s+me\s+(the\s+)?error",
+    re.IGNORECASE,
+)
+
+
+def is_error_inquiry(text: str) -> bool:
+    """Return True when the user asks what the last turn's error was."""
+    return bool(_ERROR_INQUIRY_RE.search(str(text or "").strip()))
 
 
 def looks_like_create_or_build(text: str) -> bool:
@@ -501,6 +516,11 @@ class NexusOrchestrator:
         self._prior_context_fallback: str | None = None
         self._seed_context: str = session.seed_context.strip()
         self._last_user_message: str = ""
+        # Last turn-level failure, recorded on AGENT_ERROR paths so a
+        # follow-up "what was the error?" can be answered without a model
+        # turn (the detail is never in task state/history otherwise).
+        self._last_turn_error: str = ""
+        self._last_turn_error_code: str = ""
         self._outstanding_task: str = ""
         self._html_dump_buffer: str = ""
         self._turn_screenshot_count: int = 0
@@ -1024,6 +1044,31 @@ class NexusOrchestrator:
                 "message": "Voice connection failed. Text input still works.",
             })
 
+    def _record_turn_error(self, code: str, detail: str) -> None:
+        """Remember a turn-level failure for later error inquiries."""
+        self._last_turn_error_code = str(code or "").strip()
+        self._last_turn_error = str(detail or "").strip()[:1000]
+
+    async def _answer_error_inquiry(self, original_request: str) -> None:
+        """Reply to 'what was the error?' from the recorded turn failure."""
+        await self._persist_message(
+            role="user",
+            source="typed",
+            text=original_request,
+        )
+        code = self._last_turn_error_code or "AGENT_ERROR"
+        detail = self._last_turn_error or "No further detail was recorded."
+        reply = (
+            f"The last turn failed ({code}): {detail}\n\n"
+            "Send continue and I will retry the outstanding task."
+        )
+        await self._send_json({"type": "transcript", "role": "agent", "text": reply})
+        await self._persist_message(
+            role="agent",
+            source="error_inquiry",
+            text=reply,
+        )
+
     async def handle_text_input(
         self,
         text: str,
@@ -1043,6 +1088,15 @@ class NexusOrchestrator:
         original_request = text
         if emit_user_transcript:
             await self._send_json({"type": "transcript", "role": "user", "text": text})
+
+        if is_error_inquiry(original_request) and str(
+            getattr(self, "_last_turn_error", "") or ""
+        ).strip():
+            # Answer from the recorded turn error without running the agent:
+            # the exception detail is never in task state/history the model
+            # could read, so a model turn cannot answer this reliably.
+            await self._answer_error_inquiry(original_request)
+            return
 
         trimmed = text.strip()
         if trimmed.startswith("/"):
@@ -1689,19 +1743,32 @@ class NexusOrchestrator:
         msg = str(exc).lower()
         return any(p.lower() in msg for p in self._RATE_LIMIT_PATTERNS)
 
-    def _is_request_too_large_error(self, exc: BaseException) -> bool:
+    def _is_tpm_limit_error(self, exc: BaseException) -> bool:
+        """Transient per-minute quota exhaustion -- retryable with backoff."""
+        msg = str(exc).lower()
+        return ("tokens per minute" in msg or "tpm" in msg) and (
+            "limit" in msg or "requested" in msg or "exceeded" in msg or "quota" in msg
+        )
+
+    def _is_context_overflow_error(self, exc: BaseException) -> bool:
+        """Genuinely oversized payload -- retrying verbatim can never succeed."""
         msg = str(exc).lower()
         return (
             "request too large" in msg
             or "please reduce your message size" in msg
-            or ("tokens per minute" in msg and "requested" in msg)
-            or ("tpm" in msg and "requested" in msg and "limit" in msg)
+            or "maximum context" in msg
+            or "context length" in msg
+            or "exceeds the model context" in msg
+            or "input exceeds" in msg
         )
 
+    def _is_request_too_large_error(self, exc: BaseException) -> bool:
+        return self._is_context_overflow_error(exc) or self._is_tpm_limit_error(exc)
+
     def _should_fallback_task_model(self, exc: BaseException, task_model: str) -> bool:
-        if self._is_request_too_large_error(exc):
+        if self._is_context_overflow_error(exc):
             return False
-        return self._is_rate_limit_error(exc)
+        return self._is_rate_limit_error(exc) or self._is_tpm_limit_error(exc)
 
     def _task_model_candidates(self) -> tuple[str, ...]:
         from nexus.model_select import model_candidates
@@ -1768,8 +1835,9 @@ class NexusOrchestrator:
                 self._rebuild_agent_for_task_model(task_model)
                 turn_runner = self._runner
 
+            compact_retried = False
             for attempt in range(1, self._RATE_LIMIT_MAX_RETRIES + 1):
-                try:
+                async def _attempt_turn():
                     return await run_agent_turn(
                         runner=turn_runner,
                         session_service=self._session_service,
@@ -1781,12 +1849,50 @@ class NexusOrchestrator:
                         max_turns=turn_cap,
                         synthesis_instruction=self._final_synthesis_instruction(),
                     )
+
+                try:
+                    return await _attempt_turn()
                 except _AgentStopped:
                     raise
                 except Exception as exc:
                     if getattr(self, "_stop_requested", False):
                         raise _AgentStopped() from exc
-                    is_rl = self._is_rate_limit_error(exc)
+                    if self._is_context_overflow_error(exc) and not compact_retried:
+                        # Same model, one retry with a compacted input window.
+                        # Retrying verbatim could never succeed; failing
+                        # outright used to end long research turns at the
+                        # finish line with a generic AGENT_ERROR.
+                        compact_retried = True
+                        compact_tokens = max(
+                            1000, int(settings.context_compact_retry_tokens)
+                        )
+                        logger.warning(
+                            "Context overflow on %s for session %s -- "
+                            "retrying once with a compacted %d-token window: %s",
+                            task_model,
+                            self.session.id,
+                            compact_tokens,
+                            exc,
+                        )
+                        compact_content = (
+                            "The request was too large for the model's context "
+                            "window -- retrying with a compacted view of the "
+                            "earlier tool results. Continuing the same task."
+                        )
+                        await self._send_json({
+                            "type": "agent_thinking",
+                            "content": compact_content,
+                        })
+                        from nexus.context_window import compact_retry_scope
+
+                        with compact_retry_scope(compact_tokens):
+                            try:
+                                return await _attempt_turn()
+                            except _AgentStopped:
+                                raise
+                            except Exception as retry_exc:
+                                exc = retry_exc
+                    is_rl = self._is_rate_limit_error(exc) or self._is_tpm_limit_error(exc)
                     too_large = self._is_request_too_large_error(exc)
 
                     if not self._should_fallback_task_model(exc, task_model):
@@ -2456,6 +2562,10 @@ class NexusOrchestrator:
         self._action_ledger.advance_turn()
         self._resume_checkpoint = {}
         self.last_turn_result = None
+        # A new turn supersedes the previous failure; error inquiries asked
+        # after this point refer to the new turn (recorded if it fails).
+        self._last_turn_error = ""
+        self._last_turn_error_code = ""
         self._current_thinking = ""
         self._reasoning_status_emitted = False
         self._streaming_active = False
@@ -2923,6 +3033,7 @@ class NexusOrchestrator:
                         "status": "failed",
                         "summary": summary,
                     }
+                self._record_turn_error("AGENT_ERROR", result.error)
                 await self._mark_summary(
                     "Agent encountered an error processing your request.",
                     status="error",
@@ -3382,6 +3493,9 @@ class NexusOrchestrator:
                     "status": "failed",
                     "summary": summary,
                 }
+            self._record_turn_error(
+                "AGENT_ERROR", str(exc) or "Agent encountered an error processing your request."
+            )
             await self._mark_summary("Agent encountered an error processing your request.", status="error", error_code="AGENT_ERROR")
             await self._send_json({
                 "type": "error",
@@ -4476,6 +4590,16 @@ class NexusOrchestrator:
         stripped = text.strip()
         if not stripped and not attachments:
             return
+        if role == "agent":
+            try:
+                from nexus.safety import safety_check_final_response
+
+                blocked, reason, cleaned = safety_check_final_response(stripped)
+                if blocked:
+                    logger.warning("agent_output_redacted session=%s reason=%s", self.session.id, reason)
+                stripped = cleaned.strip() or stripped
+            except Exception:
+                pass
         try:
             await history_repository.append_message(
                 session_id=self.session.id,
@@ -4789,6 +4913,12 @@ class NexusOrchestrator:
     async def _save_final_response(self, text: str) -> None:
         if not text.strip() or not self._current_run_id:
             return
+        try:
+            from nexus.safety import scrub_output
+
+            text = scrub_output(text)
+        except Exception:
+            pass
         if not self._is_heavy_deliverable_report(text):
             logger.debug(
                 "Skipping outputs/final.md for conversational response (%d chars) in session %s",

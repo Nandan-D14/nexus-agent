@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -1309,7 +1309,14 @@ function StepRow({ item }: { item: GroupedEvent }) {
   if (item.kind === "screenshot") return <ScreenshotCard item={item} />;
   if (item.kind === "approval") return <ApprovalLogLine item={item} />;
   if (item.kind === "error") {
-    return <ErrorLine message={item.message} code={item.code} count={item.count} />;
+    return (
+      <ErrorLine
+        message={item.message}
+        code={item.code}
+        count={item.count}
+        detail={item.detail}
+      />
+    );
   }
   if (item.kind === "delegation") return <HandoffLogLine from={item.from} to={item.to} />;
   if (item.kind === "retry") {
@@ -1545,10 +1552,12 @@ function ErrorLine({
   message,
   code,
   count,
+  detail,
 }: {
   message: string;
   code?: string;
   count?: number;
+  detail?: string;
 }) {
   return (
     <ActivityBlockRow
@@ -1568,7 +1577,18 @@ function ErrorLine({
           ) : null}
         </>
       }
-    />
+    >
+      {detail ? (
+        <details className="group min-w-0">
+          <summary className="cursor-pointer list-none text-caption-2-regular text-text-tertiary hover:text-text-secondary">
+            Show error detail
+          </summary>
+          <pre className="mt-1 max-h-40 min-w-0 overflow-auto font-mono text-caption-2-regular break-words whitespace-pre-wrap text-text-secondary">
+            {detail}
+          </pre>
+        </details>
+      ) : null}
+    </ActivityBlockRow>
   );
 }
 

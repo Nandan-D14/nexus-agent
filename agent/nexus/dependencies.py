@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Shared dependencies and factories for FastAPI routers."""
@@ -81,6 +81,9 @@ sandbox_lifecycle_controller = SandboxLifecycleController(history_repository)
 session_create_limiter = RateLimiter(max_requests=5, window_seconds=60, name="session_create")
 ticket_refresh_limiter = RateLimiter(max_requests=30, window_seconds=60, name="ticket_refresh")
 ws_connect_limiter = RateLimiter(max_requests=30, window_seconds=60, name="ws_connect")
+task_create_limiter = RateLimiter(max_requests=20, window_seconds=60, name="task_create")
+schedule_create_limiter = RateLimiter(max_requests=10, window_seconds=60, name="schedule_create")
+oauth_url_limiter = RateLimiter(max_requests=30, window_seconds=60, name="oauth_url")
 
 def get_history_repository() -> FirestoreHistoryRepository:
     return history_repository
@@ -108,6 +111,15 @@ def get_ticket_refresh_limiter() -> RateLimiter:
 
 def get_ws_connect_limiter() -> RateLimiter:
     return ws_connect_limiter
+
+def get_task_create_limiter() -> RateLimiter:
+    return task_create_limiter
+
+def get_schedule_create_limiter() -> RateLimiter:
+    return schedule_create_limiter
+
+def get_oauth_url_limiter() -> RateLimiter:
+    return oauth_url_limiter
 
 def get_client_ip(request: Request) -> str:
     """Helper to extract IP from Request for rate limiting."""

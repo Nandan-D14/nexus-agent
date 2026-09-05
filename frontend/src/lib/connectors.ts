@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Agentic Company. All rights reserved.
+ * Copyright (c) 2026 nandan-d14. All rights reserved.
  * Proprietary and non-commercial use only.
  */
 
@@ -41,6 +41,71 @@ export type ConnectorSection = {
 };
 
 const GOOGLE_PROVIDERS = new Set(["google_drive", "gmail", "google_calendar", "google_tasks"]);
+
+/** Quick-connect tiles shown in the first-run "Connect your tools" onboarding modal. */
+export const QUICK_CONNECT_PROVIDERS = [
+  "google_drive",
+  "gmail",
+  "github",
+  "slack",
+  "google_calendar",
+] as const;
+
+export type QuickConnectProvider = (typeof QUICK_CONNECT_PROVIDERS)[number];
+
+export const QUICK_CONNECT_LABELS: Record<string, string> = {
+  google_drive: "Google Drive",
+  gmail: "Gmail",
+  github: "GitHub",
+  slack: "Slack",
+  google_calendar: "Calendar",
+};
+
+const QUICK_CONNECT_FALLBACKS: Record<string, CatalogItem> = {
+  google_drive: {
+    provider: "google_drive",
+    connector_type: "native",
+    name: "Google Drive",
+    description: "Search, read, and create files in Google Drive.",
+    status: "available",
+  },
+  gmail: {
+    provider: "gmail",
+    connector_type: "native",
+    name: "Gmail",
+    description: "Search, read, and send email from Gmail.",
+    status: "available",
+  },
+  github: {
+    provider: "github",
+    connector_type: "native",
+    name: "GitHub",
+    description: "Search repos, read files, and push with git.",
+    status: "available",
+  },
+  slack: {
+    provider: "slack",
+    connector_type: "mcp_remote_http",
+    name: "Slack",
+    description: "Search, read, and post in Slack.",
+    status: "available",
+  },
+  google_calendar: {
+    provider: "google_calendar",
+    connector_type: "native",
+    name: "Calendar",
+    description: "List, create, and manage calendar events.",
+    status: "available",
+  },
+};
+
+/** Resolve quick-connect tiles from the catalog, falling back to stubs if the backend omits one. */
+export function quickConnectItems(catalog: CatalogItem[]): CatalogItem[] {
+  const byProvider = new Map(catalog.map((item) => [item.provider, item]));
+  return QUICK_CONNECT_PROVIDERS.map(
+    (provider) => byProvider.get(provider) ?? QUICK_CONNECT_FALLBACKS[provider],
+  );
+}
 
 const FEATURED_PROVIDERS = [
   "google_drive",

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Durable production task endpoints."""
@@ -16,6 +16,7 @@ from nexus.config import settings
 from nexus.dependencies import (
     get_history_repository,
     get_production_task_repository,
+    get_task_create_limiter,
     get_task_queue,
 )
 from nexus.policy import evaluate_tool_policy, normalize_autonomy_mode
@@ -141,6 +142,8 @@ async def create_durable_task(
     payload: DurableTaskCreateRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    if not get_task_create_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many task creates; slow down.")
     repo = get_production_task_repository()
     queue = get_task_queue()
     task = await repo.create_task(

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 from __future__ import annotations
@@ -33,14 +33,14 @@ def test_policy_allows_recursive_powershell_deletion_in_sandbox() -> None:
     assert decision.risk == "high"
 
 
-def test_policy_allows_production_deploy_from_sandbox() -> None:
+def test_policy_requires_approval_for_production_deploy_from_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "vercel --prod --yes"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "allow"
+    assert decision.action == "require_approval"
     assert decision.risk == "high"
 
 
@@ -80,14 +80,14 @@ def test_policy_requires_approval_for_github_push_and_create_repo() -> None:
     assert clone.action == "allow"
 
 
-def test_policy_allows_shell_git_push_from_sandbox() -> None:
+def test_policy_requires_approval_for_shell_git_push_from_sandbox() -> None:
     decision = evaluate_tool_policy(
         "run_command",
         {"command": "git push origin main"},
         autonomy_mode="auto",
     )
 
-    assert decision.action == "allow"
+    assert decision.action == "require_approval"
     assert decision.risk == "high"
 
 

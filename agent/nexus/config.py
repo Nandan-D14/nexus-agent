@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Application configuration via environment variables."""
@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     model_context_limit: int = 1_000_000
     context_input_budget_ratio: float = 0.85
     enforce_context_budget: bool = True
+    # One-shot per-turn input budget (tokens) for the compaction retry after a
+    # context-overflow rejection. Model-specific caps (e.g. Groq) still apply
+    # on top via min(), so this is an upper bound, not a replacement.
+    context_compact_retry_tokens: int = 32_000
     # Max characters of a single gmail_read body fed into the prompt/history.
     gmail_read_max_chars: int = 16_000
 
@@ -396,6 +400,8 @@ def validate_startup_settings() -> None:
         issues.append("JWT_SECRET must be at least 32 bytes for HS256")
     if parsed_frontend.scheme not in {"http", "https"} or not parsed_frontend.netloc:
         issues.append("FRONTEND_URL must be a valid absolute http(s) URL")
+    if settings.is_production and parsed_frontend.scheme != "https":
+        issues.append("FRONTEND_URL must use https in production")
     if not settings.firebase_project_id and not settings.firebase_auth_emulator_host:
         issues.append("FIREBASE_PROJECT_ID or FIREBASE_AUTH_EMULATOR_HOST must be configured")
     if not settings.require_byok and not settings.e2b_api_key:
@@ -413,7 +419,7 @@ def validate_startup_settings() -> None:
             "SLACK_CLIENT_ID and SLACK_CLIENT_SECRET are not both set; Slack OAuth disabled"
         )
     if not settings.byok_encryption_key.strip():
-        logger.warning("BYOK_ENCRYPTION_KEY not set; using deterministic fallback key")
+        issues.append("BYOK_ENCRYPTION_KEY must be set in production/strict mode")
     if settings.is_production:
         if settings.task_worker_enabled and not settings.task_worker_auth_token:
             issues.append("TASK_WORKER_AUTH_TOKEN is required in production")
@@ -485,7 +491,8 @@ def apply_runtime_env_overrides() -> None:
             os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.google_cloud_region)
 
     # Allow oauthlib to use HTTP (non-HTTPS) redirect URIs during local development
-    if settings.frontend_url.startswith("http://"):
+    # only. Never enable insecure transport in production.
+    if settings.frontend_url.startswith("http://") and not settings.is_production:
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Agentic Company. All rights reserved.
+# Copyright (c) 2026 nandan-d14. All rights reserved.
 # Proprietary and non-commercial use only.
 
 """Schedule definitions, next-run math, and unattended-tool allowlists."""
@@ -44,7 +44,12 @@ NEVER_UNATTENDED_TOOLS: frozenset[str] = frozenset(
 )
 
 MAX_ACTIVE_SCHEDULES = 20
-_SLACK_MCP_REMOTE_RE = ("post", "send", "chat")
+import re as _re
+
+_SLACK_MCP_REMOTE_RE = _re.compile(
+    r"(?:^|_)(post|send|chat)(?:_|$)",
+    _re.IGNORECASE,
+)
 
 
 def sanitize_unattended_tools(values: list[str] | None) -> list[str]:
@@ -230,8 +235,16 @@ def slack_mcp_unattended_allowed(tool_name: str, allowed: set[str]) -> bool:
         return False
     if not str(tool_name).startswith("mcp__"):
         return False
-    remote = str(tool_name).rsplit("__", 1)[-1].lower()
-    return any(token in remote for token in _SLACK_MCP_REMOTE_RE)
+    # Connection must look like a Slack integration, not any compromised MCP
+    # server with "post" as a substring (e.g. exfiltrate_via_postscript).
+    parts = str(tool_name).split("__")
+    if len(parts) < 3:
+        return False
+    connection = parts[1].lower()
+    if "slack" not in connection:
+        return False
+    remote = str(tool_name).rsplit("__", 1)[-1]
+    return bool(_SLACK_MCP_REMOTE_RE.search(remote))
 
 
 @dataclass
