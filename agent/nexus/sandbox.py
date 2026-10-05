@@ -14,6 +14,7 @@ import shlex
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpcore
@@ -90,9 +91,16 @@ class SandboxDeadError(RuntimeError):
 class SandboxSweeper:
     """Background worker that kills orphaned E2B sandboxes."""
 
-    def __init__(self, history_repo, e2b_api_key: str = ""):
+    # Sandboxes younger than this are never killed: ``create()`` only persists
+    # the sandbox id after provisioning (which can take several minutes).
+    MIN_ORPHAN_AGE_SECONDS = 30 * 60
+
+    def __init__(self, history_repo, e2b_api_key: str = "", min_orphan_age_seconds: int | None = None):
         self.history_repo = history_repo
         self.e2b_api_key = e2b_api_key or settings.e2b_api_key
+        self.min_orphan_age_seconds = (
+            self.MIN_ORPHAN_AGE_SECONDS if min_orphan_age_seconds is None else min_orphan_age_seconds
+        )
         self._running = False
         self._task = None
 
@@ -126,31 +134,44 @@ class SandboxSweeper:
     async def sweep(self):
         """Find and kill sandboxes that are not associated with any active session."""
         logger.info("Starting sandbox sweep...")
-        
-        # 1. Get all active sandbox IDs from Firestore
-        active_ids = set(await self.history_repo.list_all_active_sandbox_ids())
-        
+
+        # 1. Get all active sandbox IDs from Firestore. Any error aborts the
+        #    sweep: an incomplete set would make live sandboxes look orphaned.
+        try:
+            active_ids = set(await self.history_repo.list_all_active_sandbox_ids())
+        except Exception:
+            logger.warning("Sandbox sweep skipped: could not load active sandbox ids", exc_info=True)
+            return 0
+
         # 2. List all running sandboxes from E2B
-        running_ids = await list_running_e2b_sandbox_ids(self.e2b_api_key)
-        if running_ids is None:
-            return
+        running = await list_running_e2b_sandboxes(self.e2b_api_key)
+        if running is None:
+            return 0
 
         killed_count = 0
         from e2b_desktop import Sandbox
 
-        for sid in running_ids:
-            if sid not in active_ids:
-                logger.info("Killing orphaned sandbox: %s", sid)
-                try:
-                    await asyncio.to_thread(lambda: Sandbox.connect(sid, api_key=self.e2b_api_key or None).kill())
-                    killed_count += 1
-                except Exception:
-                    logger.warning("Failed to kill orphaned sandbox %s", sid, exc_info=True)
-        
+        now = datetime.now(timezone.utc)
+        for sid, started_at in running.items():
+            if sid in active_ids:
+                continue
+            # Unknown age is treated as young: never kill what we cannot date.
+            if started_at is None or (now - started_at).total_seconds() < self.min_orphan_age_seconds:
+                continue
+            logger.info("Killing orphaned sandbox: %s", sid)
+            try:
+                await asyncio.to_thread(
+                    lambda sid=sid: Sandbox.connect(sid, api_key=self.e2b_api_key or None).kill()
+                )
+                killed_count += 1
+            except Exception:
+                logger.warning("Failed to kill orphaned sandbox %s", sid, exc_info=True)
+
         if killed_count > 0:
             logger.info("Sandbox sweep complete. Killed %d orphaned sandboxes.", killed_count)
         else:
             logger.info("Sandbox sweep complete. No orphans found.")
+        return killed_count
 
 
 _INVALID_SANDBOX_IDS = frozenset({"true", "false", "none", "null"})
@@ -182,8 +203,15 @@ def _paginator_items(paginator: object) -> list[object]:
     return items
 
 
-async def list_running_e2b_sandbox_ids(e2b_api_key: str = "") -> set[str] | None:
-    """Return running E2B sandbox ids, or None if verification is unavailable."""
+def _sandbox_info_started_at(info: object) -> datetime | None:
+    value = getattr(info, "started_at", None)
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+async def list_running_e2b_sandboxes(e2b_api_key: str = "") -> dict[str, datetime | None] | None:
+    """Return ``{sandbox_id: started_at}`` for running sandboxes, or None if unavailable."""
     try:
         from e2b_desktop import Sandbox
 
@@ -192,14 +220,21 @@ async def list_running_e2b_sandbox_ids(e2b_api_key: str = "") -> set[str] | None
             api_key=e2b_api_key or None,
         )
         running_sandboxes = await asyncio.to_thread(_paginator_items, paginator)
-        return {
-            sandbox_id
-            for sandbox_id in (_sandbox_info_id(info) for info in running_sandboxes)
-            if sandbox_id
-        }
+        result: dict[str, datetime | None] = {}
+        for info in running_sandboxes:
+            sandbox_id = _sandbox_info_id(info)
+            if sandbox_id:
+                result[sandbox_id] = _sandbox_info_started_at(info)
+        return result
     except Exception:
         logger.warning("Failed to list running E2B sandboxes", exc_info=True)
         return None
+
+
+async def list_running_e2b_sandbox_ids(e2b_api_key: str = "") -> set[str] | None:
+    """Return running E2B sandbox ids, or None if verification is unavailable."""
+    running = await list_running_e2b_sandboxes(e2b_api_key)
+    return None if running is None else set(running)
 
 
 class SandboxLifecycleController:
@@ -588,17 +623,25 @@ class SandboxManager:
             api_key=self._e2b_api_key or None,
             timeout=settings.sandbox_timeout_seconds,
         )
-        if not hasattr(self._sandbox, "_Sandbox__vnc_server"):
-            try:
-                from e2b_desktop.main import _VNCServer
-                self._sandbox._Sandbox__vnc_server = _VNCServer(self._sandbox)
-                if not hasattr(self._sandbox, "_display"):
-                    self._sandbox._display = ":0"
-            except Exception as exc:
-                logger.warning("Could not initialize _VNCServer on resumed sandbox: %s", exc)
-        self._sandbox.stream.start(require_auth=False)
-        self._stream_url = self._sandbox.stream.get_url()
-        self.ensure_chromium_cdp()
+        try:
+            if not hasattr(self._sandbox, "_Sandbox__vnc_server"):
+                try:
+                    from e2b_desktop.main import _VNCServer
+                    self._sandbox._Sandbox__vnc_server = _VNCServer(self._sandbox)
+                    if not hasattr(self._sandbox, "_display"):
+                        self._sandbox._display = ":0"
+                except Exception as exc:
+                    logger.warning("Could not initialize _VNCServer on resumed sandbox: %s", exc)
+            self._sandbox.stream.start(require_auth=False)
+            self._stream_url = self._sandbox.stream.get_url()
+            self.ensure_chromium_cdp()
+        except Exception:
+            # Sandbox.connect already resumed (and started billing) the VM. The
+            # caller falls back to create(), which would overwrite this
+            # reference and leak a running VM, so kill it here.
+            logger.warning("Resumed sandbox %s failed to initialise; killing it", sandbox_id, exc_info=True)
+            self.destroy()
+            raise
         logger.info("Sandbox connected -- stream URL: %s", self._stream_url)
         return {
             "sandbox_id": self._sandbox.sandbox_id,
@@ -635,8 +678,10 @@ class SandboxManager:
             if cwd and str(cwd).strip() and cwd != "~":
                 kwargs["cwd"] = cwd
             if background:
-                # Launch in background using nohup so it doesn't block
-                bg_cmd = f"nohup {command} > /dev/null 2>&1 & echo $!"
+                # Launch in background so it doesn't block. Wrap in `sh -c` so
+                # compound commands (`cd app && npm start`) run as a whole;
+                # bare `nohup` cannot exec shell builtins like `cd`.
+                bg_cmd = f"nohup sh -c {shlex.quote(command)} > /dev/null 2>&1 & echo $!"
                 result = self._sandbox.commands.run(bg_cmd, **kwargs)
                 pid = (result.stdout or "").strip()
                 return {

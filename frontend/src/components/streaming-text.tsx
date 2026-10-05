@@ -26,6 +26,8 @@ type Props = {
   isStreaming: boolean;
   className?: string;
   extraSources?: SearchCiteRef[];
+  /** Enables the Retry action (rerun this turn's prompt). */
+  onRetry?: () => void;
 };
 
 function mergeCitationRefs(
@@ -65,6 +67,7 @@ export function StreamingText({
   isStreaming,
   className,
   extraSources,
+  onRetry,
 }: Props) {
   const refs = useMemo(() => mergeCitationRefs(text, extraSources), [text, extraSources]);
   const [copied, setCopied] = useState(false);
@@ -103,7 +106,12 @@ export function StreamingText({
         <ActionIconButton label={copied ? "Copied" : "Copy response"} onClick={handleCopy}>
           {copied ? <Check className="size-[15px] text-emerald-500" aria-hidden /> : <Clipboard className="size-[15px]" aria-hidden />}
         </ActionIconButton>
-        <ActionIconButton label="Retry" title="Coming soon" disabled>
+        <ActionIconButton
+          label="Retry"
+          title={onRetry ? "Retry" : "Retry is unavailable while a run is active"}
+          disabled={!onRetry}
+          onClick={onRetry}
+        >
           <RotateCcw className="size-[15px]" aria-hidden />
         </ActionIconButton>
         <ActionIconButton label="Thumbs up" title="Coming soon" disabled>

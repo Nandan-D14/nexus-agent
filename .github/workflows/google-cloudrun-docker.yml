@@ -42,6 +42,16 @@ jobs:
         working-directory: "./frontend"
         run: npm run lint
 
+      - name: "Typecheck frontend"
+        working-directory: "./frontend"
+        run: npx tsc --noEmit -p .
+
+      - name: "Audit frontend dependencies"
+        working-directory: "./frontend"
+        # Report-only until the existing advisories are triaged.
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
       - name: "Build frontend"
         working-directory: "./frontend"
         env:
@@ -63,25 +73,35 @@ jobs:
           cd agent
           uv sync --locked --extra dev
 
-      - name: "Assert Google ADK 2.4.0"
+      - name: "Assert Google ADK 2.11.0"
         run: |
           cd agent
-          uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.4.0'"
+          uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.11.0'"
 
       - name: "Compile backend"
         run: |
           cd agent
           uv run python -m compileall nexus
 
-      - name: "Backend production tests"
+      - name: "Backend tests"
         env:
           FIREBASE_PROJECT_ID: "ci-project"
+        # Full suite. The deselected tests are known pre-existing failures
+        # (test/behaviour drift) awaiting a decision on the intended behaviour;
+        # remove each entry once it is fixed.
         run: |
           cd agent
-          uv run pytest tests/test_adk_compatibility.py tests/test_production_eval.py tests/test_durable_execution_hardening.py tests/test_agent_routing.py -q
+          uv run pytest tests -q \
+            --deselect "tests/test_document_design.py::SlideNormalizationTests::test_bootstrap_must_not_be_prepended_to_pptx_generator" \
+            --deselect "tests/test_old_session_resilience.py::OldSessionResilienceTests::test_tpm_is_rate_limit_but_overflow_is_not" \
+            --deselect "tests/test_old_session_resilience.py::ErrorInquiryDirectReplyTests::test_error_inquiry_answered_without_agent_turn" \
+            --deselect "tests/test_production_foundation.py::test_upload_artifact_uses_short_lived_signed_url" \
+            --deselect "tests/test_task_model_fallback.py::TaskModelFallbackTests::test_request_too_large_does_not_retry"
 
   deploy:
     needs: validate
+    # Other branches are validated only; production deploys come from main.
+    if: github.ref == 'refs/heads/main'
     runs-on: 'ubuntu-latest'
 
     permissions:
@@ -139,16 +159,28 @@ jobs:
             --max-backoff=300s \
             --max-concurrent-dispatches=10 2>/dev/null || true
 
+      - name: 'Verify required Secret Manager secrets'
+        # Secrets live in Secret Manager and are mounted with --set-secrets so
+        # their values never appear in the Cloud Run revision config. Never
+        # generate them here: a new BYOK key makes every stored user key
+        # undecryptable and a new JWT secret signs everyone out.
+        run: |-
+          missing=()
+          for secret in jwt-secret byok-encryption-key task-worker-auth-token e2b-api-key google-oauth-client-secret slack-client-secret; do
+            if ! gcloud secrets versions describe latest --secret="${secret}" \
+                --project="${{ env.PROJECT_ID }}" --format='value(state)' 2>/dev/null | grep -q ENABLED; then
+              missing+=("${secret}")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing Secret Manager secrets: ${missing[*]}. Create them with deploy/gcp/setup-secrets.sh."
+            exit 1
+          fi
+
       - name: 'Deploy Agent to Cloud Run'
         run: |-
-          JWT_VAL="${{ secrets.JWT_SECRET }}"
-          [[ -z "$JWT_VAL" ]] && JWT_VAL="$(openssl rand -hex 32)"
-
-          TOKEN_VAL="${{ secrets.TASK_WORKER_AUTH_TOKEN }}"
-          [[ -z "$TOKEN_VAL" ]] && TOKEN_VAL="$(openssl rand -hex 32)"
-
-          BYOK_KEY="${{ secrets.BYOK_ENCRYPTION_KEY }}"
-          [[ -z "$BYOK_KEY" ]] && BYOK_KEY="$(openssl rand -base64 32)"
+          TOKEN_VAL="$(gcloud secrets versions access latest --secret=task-worker-auth-token --project="${{ env.PROJECT_ID }}")"
+          echo "::add-mask::${TOKEN_VAL}"
 
           # Wire CORS origin when known. First deploy has no frontend yet —
           # the agent boots with the default and the CORS step below patches
@@ -161,15 +193,19 @@ jobs:
               --format='value(status.url)' 2>/dev/null || true)"
           fi
 
+          AGENT_SECRETS=(
+            "JWT_SECRET=jwt-secret:latest"
+            "TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
+            "BYOK_ENCRYPTION_KEY=byok-encryption-key:latest"
+            "E2B_API_KEY=e2b-api-key:latest"
+            "GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+            "SLACK_CLIENT_SECRET=slack-client-secret:latest"
+          )
+          AGENT_SECRETS_CSV="$(IFS=,; printf '%s' "${AGENT_SECRETS[*]}")"
+
           AGENT_ENV_VARS=(
             "APP_ENV=production"
             "MODEL_PROVIDER=bynara"
-            "JWT_SECRET=${JWT_VAL}"
-            "TASK_WORKER_AUTH_TOKEN=${TOKEN_VAL}"
-            "BYOK_ENCRYPTION_KEY=${BYOK_KEY}"
-            "E2B_API_KEY=${{ secrets.E2B_API_KEY }}"
-            "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
-            "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}"
             "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
             "GOOGLE_PROJECT_ID=${{ env.PROJECT_ID }}"
             "GOOGLE_CLOUD_REGION=${{ env.GEMINI_REGION }}"
@@ -198,9 +234,13 @@ jobs:
           fi
           AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
-          # Deploy agent container. If previous revisions have incompatible secret bindings,
-          # recreate the service cleanly to clear all legacy schema conflicts.
-          if ! gcloud run deploy nexus-agent \
+          # --set-env-vars replaces every literal env var, so keys that moved to
+          # Secret Manager are dropped as literals in the same revision.
+          # --no-cpu-throttling: durable runs, sweepers and the local task-queue
+          # fallback keep working after the HTTP response returns.
+          # --session-affinity: reconnecting WebSockets land on the instance
+          # that holds the live session.
+          gcloud run deploy nexus-agent \
             --project="${{ env.PROJECT_ID }}" \
             --region="${{ env.REGION }}" \
             --image="${{ env.AGENT_IMAGE }}" \
@@ -209,25 +249,11 @@ jobs:
             --cpu=1 \
             --timeout=3600 \
             --concurrency=10 \
+            --no-cpu-throttling \
+            --session-affinity \
             --allow-unauthenticated \
-            --set-env-vars="${AGENT_ENV_VARS_CSV}"; then
-            echo "Deployment failed due to existing revision schema conflict; deleting stale service and recreating fresh..."
-            gcloud run services delete nexus-agent \
-              --project="${{ env.PROJECT_ID }}" \
-              --region="${{ env.REGION }}" \
-              --quiet || true
-            gcloud run deploy nexus-agent \
-              --project="${{ env.PROJECT_ID }}" \
-              --region="${{ env.REGION }}" \
-              --image="${{ env.AGENT_IMAGE }}" \
-              --port=8000 \
-              --memory=1Gi \
-              --cpu=1 \
-              --timeout=3600 \
-              --concurrency=10 \
-              --allow-unauthenticated \
-              --set-env-vars="${AGENT_ENV_VARS_CSV}"
-          fi
+            --set-env-vars="${AGENT_ENV_VARS_CSV}" \
+            --set-secrets="${AGENT_SECRETS_CSV}"
 
           AGENT_URL="$(gcloud run services describe nexus-agent \
             --project="${{ env.PROJECT_ID }}" \

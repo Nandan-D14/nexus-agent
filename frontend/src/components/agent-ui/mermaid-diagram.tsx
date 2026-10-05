@@ -7,25 +7,33 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, Clipboard, Code2, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
-import mermaid from "mermaid";
+import type { Mermaid } from "mermaid";
 
 type Props = {
   chart: string;
 };
 
-// Initialize mermaid once on the client
-let isMermaidInitialized = false;
-function initMermaid() {
-  if (typeof window !== "undefined" && !isMermaidInitialized) {
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: "dark",
-      securityLevel: "loose",
-      fontFamily: "var(--font-sans, system-ui, sans-serif)",
+// Chart text is model output. "strict" makes mermaid HTML-encode labels,
+// disable click handlers, and DOMPurify the generated SVG before we inject it.
+// mermaid (~1 MB) is loaded on first use instead of shipping with the chat.
+let mermaidPromise: Promise<Mermaid> | null = null;
+function loadMermaid(): Promise<Mermaid> {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then(({ default: mermaid }) => {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        securityLevel: "strict",
+        fontFamily: "var(--font-sans, system-ui, sans-serif)",
+      });
+      return mermaid;
     });
-    isMermaidInitialized = true;
   }
+  return mermaidPromise;
 }
+
+// Streaming re-renders the fence on every token; wait for the text to settle.
+const RENDER_DEBOUNCE_MS = 250;
 
 export function MermaidDiagram({ chart }: Props) {
   const [svg, setSvg] = useState<string>("");
@@ -38,7 +46,6 @@ export function MermaidDiagram({ chart }: Props) {
 
   useEffect(() => {
     let active = true;
-    initMermaid();
 
     const renderChart = async () => {
       if (!chart.trim()) {
@@ -47,14 +54,17 @@ export function MermaidDiagram({ chart }: Props) {
         return;
       }
 
+      const id = `mermaid_${uniqueId}_${Date.now()}`;
       try {
-        const id = `mermaid_${uniqueId}_${Date.now()}`;
+        const mermaid = await loadMermaid();
         const { svg: renderedSvg } = await mermaid.render(id, chart.trim());
         if (active) {
           setSvg(renderedSvg);
           setError(null);
         }
       } catch (err: unknown) {
+        // A failed render can leave mermaid's scratch node in <body>.
+        document.getElementById(`d${id}`)?.remove();
         if (active) {
           setError(err instanceof Error ? err.message : "Failed to render diagram");
           setSvg("");
@@ -62,10 +72,11 @@ export function MermaidDiagram({ chart }: Props) {
       }
     };
 
-    void renderChart();
+    const timer = window.setTimeout(() => void renderChart(), RENDER_DEBOUNCE_MS);
 
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
   }, [chart, uniqueId]);
 

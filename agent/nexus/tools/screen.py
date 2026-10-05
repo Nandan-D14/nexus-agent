@@ -10,23 +10,24 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import logging
-import threading
 import time
 
 from PIL import Image
 
 from nexus.resilience import call_with_deadline
+from nexus.session_local import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-# Thread-local storage for the last screenshot image (base64 PNG).
-# The orchestrator reads this after a take_screenshot tool call
-# to forward the image to the frontend without bloating the LLM context.
-_last_screenshot = threading.local()
-_last_analysis = threading.local()
-_last_screen_action = threading.local()
+# Session-scoped storage for the last screenshot image (base64 PNG).
+# The orchestrator reads this on the event loop after take_screenshot ran in a
+# pool thread, to forward the image to the frontend without bloating the LLM
+# context — so it must not be thread-local.
+_last_screenshot = SessionLocal()
+_last_analysis = SessionLocal()
+_last_screen_action = SessionLocal()
 
-_last_call_time = threading.local()
+_last_call_time = SessionLocal()
 _PROMPT_VERSION = "compact-v2"
 _MAX_DESCRIPTION_CHARS = 1200
 _MINOR_DELTA_WINDOW_SECONDS = 4.0

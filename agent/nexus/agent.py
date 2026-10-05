@@ -20,9 +20,9 @@ from nexus.control_loop import (
     looks_like_slide_code_dump,
     looks_like_worker_envelope,
 )
-from nexus.output_normalization import is_reasoning_part
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.session_service import FirestoreSessionService
+from nexus.turn_output import TurnOutput, finalization_pass, select_answer
 from nexus.usage import (
     TokenUsageRecord,
     extract_token_usage_records,
@@ -33,40 +33,30 @@ logger = logging.getLogger(__name__)
 
 
 def extract_answer_from_reasoning(text: str) -> str:
-    """Extract a usable user response from reasoning tokens when no explicit answer part was emitted."""
+    """Return text outside ``<think>`` blocks, or "" when there is none.
+
+    Guessing an answer from free-form reasoning paragraphs promoted the
+    model's private planning to the user, so only explicit tags are honored.
+    """
     if not text or not text.strip():
         return ""
-    # Strip any <think>...</think> tags if present
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
     if cleaned and cleaned != text.strip():
         return cleaned
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return text.strip()
-    for p in reversed(paragraphs):
-        lower = p.lower()
-        if len(p) > 20 and not lower.startswith(("let's", "i need to", "wait,", "first,", "thinking", "the user")):
-            return p
-    return paragraphs[-1]
+    return ""
 
 
-# Instruction used when the model finished a turn with no user-visible answer
-# (tool-only, or reasoning-only thinking parts). Keep working if the user asked
-# to create/build something; otherwise write the reply now.
+# Instruction for the single tool-free finalization pass, used when the model
+# finished a run with no user-visible answer (tool-only or reasoning-only).
 _FINAL_SYNTHESIS_INSTRUCTION = (
-    "The previous turn produced no user-visible reply (reasoning-only or empty). "
-    "Continue the user's last request now. If the latest user text is a short "
-    "confirmation like 'continue', 'create it', or 'do it', finish the previous "
-    "substantial request in this conversation — do not treat the confirmation "
-    "as the whole task. If they asked to create, build, or publish something "
-    "that is not done, use tools to do the work "
-    "(write_workspace_file, terminal_worker, publish_app_preview, github_push). "
-    "Then write a direct plain text status to the user. Never finish with empty text or "
-    "internal reasoning only. Do not enclose your answer in thought or reasoning tags."
+    "The previous run produced no user-visible reply. Write the reply to the "
+    "user's latest request now, using the tool results already in this "
+    "conversation. Tools are off for this reply. If the requested deliverable "
+    "is not finished, state plainly what exists (with links/paths), what is "
+    "left, and why. Never answer with empty text or internal reasoning only."
 )
-# Bound the forced continuation so a stray loop cannot run forever. 20 tool
-# rounds is enough to resume a create/build after a reasoning-only stall.
-_SYNTHESIS_TURN_CAP = 20
+# Bound the finalization pass; blocked tool calls count as rounds.
+_SYNTHESIS_TURN_CAP = 2
 
 
 @dataclass
@@ -74,6 +64,9 @@ class AgentTurnResult:
     response: str | None
     usage_records: list[TokenUsageRecord]
     error: str | None = None
+    # True when the one tool-free finalization pass already ran this turn;
+    # callers must not run another reply-only retry on top of it.
+    finalization_pass_used: bool = False
 
 
 def _runtime_for_task_model(
@@ -151,32 +144,36 @@ async def run_agent_turn(
             session_id=session_id,
         )
 
-    final_response = None
     usage_records: list[TokenUsageRecord] = []
     usage_seen: set[tuple[str, str, int, int, int]] = set()
     max_turns = max_turns or settings.max_agent_turns
     usage_source, usage_model = get_agent_usage_source(runtime_config)
+    unavailable_tool_note = ""
 
-    async def _consume(new_message, turn_cap: int):
-        """Drive the runner for one message.
-
-        Returns (final_text, last_text, rounds, response_count, hit_cap) where
-        final_text is the strict ``is_final_response`` text and last_text is the
-        last non-empty text part seen (used as a fallback when the model does
-        not flag a final response).
-        """
-        final_text: str | None = None
-        last_text: str | None = None
-        last_reasoning_text: str | None = None
+    async def _consume(new_message, turn_cap: int) -> tuple[TurnOutput, int]:
+        """Drive the runner for one message; return its sorted output and rounds."""
+        nonlocal unavailable_tool_note
+        output = TurnOutput()
         rounds = 0
-        response_count = 0
-        hit_cap = False
+        run_kwargs: dict = {}
+        if settings.stream_answer_deltas:
+            from google.adk.agents.run_config import RunConfig, StreamingMode
+
+            run_kwargs["run_config"] = RunConfig(streaming_mode=StreamingMode.SSE)
         try:
             async for event in runner.run_async(
                 user_id=user_id,
                 session_id=session_id,
                 new_message=new_message,
+                **run_kwargs,
             ):
+                if getattr(event, "partial", False) is True:
+                    # Streamed chunk: display only. The aggregated event that
+                    # follows carries the full text, tool calls, and usage, so
+                    # partials never touch selection, rounds, or accounting.
+                    if event_callback:
+                        await event_callback(event)
+                    continue
                 for record in extract_token_usage_records(
                     event,
                     default_source=usage_source,
@@ -197,92 +194,41 @@ async def run_agent_turn(
                 if event_callback:
                     await event_callback(event)
 
-                if event.content and event.content.parts:
-                    function_responses = [
-                        part
-                        for part in event.content.parts
-                        if getattr(part, "function_response", None)
-                    ]
-                    if function_responses:
-                        # A call event is persisted before its tool runs. Stop
-                        # only after the matching response arrives; breaking on
-                        # the call leaves a permanent orphan in session history.
-                        rounds += 1
-                        response_count += len(function_responses)
-                    for part in event.content.parts:
-                        # Only genuine answer text may become the response.
-                        # Skip parts EXPLICITLY marked as reasoning (thought=True
-                        # or reasoning fields). Do NOT apply the reasoning_is_text
-                        # blanket here: that heuristic is for routing the live
-                        # think-log stream; final/last answer text is the answer.
-                        if getattr(part, "text", None):
-                            if is_reasoning_part(part):
-                                last_reasoning_text = part.text
-                            else:
-                                last_text = part.text
-
-                if (
-                    event.is_final_response()
-                    and event.content
-                    and event.content.parts
-                ):
-                    for part in event.content.parts:
-                        if part.text:
-                            if is_reasoning_part(part):
-                                last_reasoning_text = part.text
-                            else:
-                                final_text = part.text
-                                break
+                output.observe(event)
+                parts = getattr(getattr(event, "content", None), "parts", None) or []
+                if any(getattr(part, "function_response", None) for part in parts):
+                    # A call event is persisted before its tool runs. Stop
+                    # only after the matching response arrives; breaking on
+                    # the call leaves a permanent orphan in session history.
+                    rounds += 1
 
                 if rounds >= turn_cap:
                     logger.warning(
                         "Max completed tool rounds (%d) reached, stopping agent loop",
                         turn_cap,
                     )
-                    hit_cap = True
                     break
         except ValueError as exc:
             # A hallucinated / unregistered tool name makes ADK's _get_tool raise
-            # a bare ValueError. Do not let one bad tool call crash the whole turn:
-            # log it, surface a recovery note, and let the caller fall back to
-            # last_text / forced synthesis instead of propagating the exception.
-            message = str(exc)
-            lowered = message.lower()
+            # a bare ValueError. Do not let one bad tool call crash the whole turn.
+            message_text = str(exc)
+            lowered = message_text.lower()
             if "tool" in lowered and "not found" in lowered:
                 logger.warning(
                     "Model requested an unavailable tool (%s); recovering gracefully for session %s",
-                    message,
+                    message_text,
                     session_id,
                 )
-                if not (last_text and last_text.strip()):
-                    last_text = (
-                        "A requested tool was unavailable, so that action was skipped. "
-                        "Continue using only the available tools."
-                    )
+                unavailable_tool_note = (
+                    "A requested tool was unavailable, so that action was skipped. "
+                    "Continue using only the available tools."
+                )
             else:
                 raise
-        return final_text, last_text, last_reasoning_text, rounds, response_count, hit_cap
+        return output, rounds
 
-    content = types.Content(
-        role="user",
-        parts=[types.Part(text=message)],
-    )
-    (
-        final_response,
-        last_text,
-        last_reasoning_text,
-        turn_count,
-        function_response_count,
-        hit_turn_cap,
-    ) = await _consume(content, max_turns)
-
-    # Robust capture: if the model never flagged a strict final response, fall
-    # back to the last text it emitted so a summary is not silently dropped.
-    # Never promote a raw worker/tool result envelope — that must trigger
-    # forced synthesis instead of leaking JSON into the user bubble.
-    # Same for leaked slide-layout code (python-pptx internals) and empty
-    # lead-in stubs ("here is my comprehensive final response" + nothing):
-    # promoting them ships a void as the answer.
+    # Never promote a raw worker/tool envelope, leaked slide-layout code, or an
+    # empty lead-in stub: shipping them would deliver a void as the answer.
     def _promotable(text: str | None) -> bool:
         return bool(
             text
@@ -292,19 +238,24 @@ async def run_agent_turn(
             and not looks_like_empty_summary(text)
         )
 
-    if not _promotable(final_response):
-        final_response = None
-    if not (final_response and final_response.strip()) and _promotable(last_text):
-        final_response = last_text
+    runtime_context = str(getattr(message, "runtime_context", "") or "")
+    user_text = str(getattr(message, "user_text", message) or "")
+    # Runtime facts and the user's words are separate parts: the model sees
+    # which is which, and the user's text is never rewritten.
+    parts = [types.Part(text=runtime_context)] if runtime_context else []
+    if user_text or not parts:
+        parts.append(types.Part(text=user_text))
+    content = types.Content(role="user", parts=parts)
+    output, turn_count = await _consume(content, max_turns)
+    final_response = select_answer(output, promotable=_promotable)
 
-    # Forced final synthesis: empty answer after tools OR after a reasoning-only
-    # turn with no user-visible text (thinking models often emit thought parts
-    # and then stop, which used to skip this pass and fail the turn).
-    forced_synthesis_used = False
-    if settings.force_final_synthesis and not (final_response and final_response.strip()):
-        forced_synthesis_used = True
+    # One tool-free finalization pass when the run ended without an answer
+    # (tool-only, reasoning-only, or a stub). Completed tools are not re-run.
+    finalization_used = False
+    if settings.force_final_synthesis and not final_response:
+        finalization_used = True
         logger.warning(
-            "No final text after %d tool round(s); forcing synthesis turn for session %s",
+            "No final text after %d tool round(s); running finalization pass for session %s",
             turn_count,
             session_id,
         )
@@ -313,29 +264,24 @@ async def run_agent_turn(
             role="user",
             parts=[types.Part(text=instruction)],
         )
-        synth_final, synth_last, synth_reasoning, _, _, _ = await _consume(
-            synthesis_message,
-            _SYNTHESIS_TURN_CAP,
-        )
-        if _promotable(synth_final):
-            final_response = synth_final
-        elif _promotable(synth_last):
-            final_response = synth_last
-        elif not (final_response and final_response.strip()):
-            reasoning_candidate = synth_reasoning or last_reasoning_text
-            if reasoning_candidate and reasoning_candidate.strip():
-                extracted = extract_answer_from_reasoning(reasoning_candidate)
-                if _promotable(extracted):
-                    logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
-                    final_response = extracted
+        with finalization_pass():
+            synth_output, _ = await _consume(synthesis_message, _SYNTHESIS_TURN_CAP)
+        final_response = select_answer(synth_output, promotable=_promotable)
+        if not final_response:
+            reasoning = synth_output.last_reasoning or output.last_reasoning
+            extracted = extract_answer_from_reasoning(reasoning)
+            if _promotable(extracted):
+                final_response = extracted
 
-    if not (final_response and final_response.strip()) and last_reasoning_text:
-        extracted = extract_answer_from_reasoning(last_reasoning_text)
+    if not final_response:
+        extracted = extract_answer_from_reasoning(output.last_reasoning)
         if _promotable(extracted):
-            logger.info("Using extracted conclusion from model reasoning for session %s", session_id)
             final_response = extracted
+    if not final_response and unavailable_tool_note:
+        final_response = unavailable_tool_note
 
     return AgentTurnResult(
         response=final_response,
         usage_records=usage_records,
+        finalization_pass_used=finalization_used,
     )

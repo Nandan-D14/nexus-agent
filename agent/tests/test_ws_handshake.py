@@ -46,7 +46,8 @@ def test_ticket_candidates_supports_both_query_and_subprotocol():
     ws.headers = Headers({"sec-websocket-protocol": "proto-tok"})
 
     candidates = _ticket_candidates(ws)
-    assert candidates == [("query-tok", None), ("proto-tok", "proto-tok")]
+    # Subprotocol tickets are preferred; the query string is a legacy fallback.
+    assert candidates == [("proto-tok", "proto-tok"), ("query-tok", None)]
 
 
 def test_offered_subprotocols_parses_header():

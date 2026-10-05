@@ -226,8 +226,6 @@ def _next_models_url(payload: Any, current_url: str, api_base: str) -> str:
 
 async def list_user_llm_models(*, api_key: str, api_base: str) -> list[str]:
     """Return every model id from GET {api_base}/models (OpenAI-compatible)."""
-    import httpx
-
     key = (api_key or "").strip()
     base = (api_base or "").strip().rstrip("/")
     if not key or not base:
@@ -241,7 +239,11 @@ async def list_user_llm_models(*, api_key: str, api_base: str) -> list[str]:
     last_error: Exception | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+        # Every hop (pagination links, redirects) is re-checked against
+        # internal/metadata addresses; the base is user-supplied.
+        from nexus.net_safety import guarded_async_client
+
+        async with guarded_async_client(timeout=40.0, follow_redirects=True) as client:
             for _ in range(_MAX_MODEL_PAGES):
                 if url in seen_urls:
                     break
@@ -263,6 +265,11 @@ async def list_user_llm_models(*, api_key: str, api_base: str) -> list[str]:
                     break
                 url = next_url
     except Exception as exc:
+        from nexus.net_safety import UnsafeUrlError
+
+        if isinstance(exc, UnsafeUrlError):
+            # Never retry a blocked target through the SDK's own HTTP client.
+            raise
         last_error = exc
         try:
             ids = await _list_models_via_openai_sdk(api_key=key, api_base=base)

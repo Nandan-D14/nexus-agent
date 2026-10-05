@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -22,6 +24,12 @@ if TYPE_CHECKING:
     from nexus.history_repository import FirestoreHistoryRepository
 
 logger = logging.getLogger(__name__)
+
+# Parallel GCS->sandbox file restores when a fresh sandbox is rehydrated.
+_REHYDRATE_CONCURRENCY = 8
+
+# Run statuses where an agent may still be driving the sandbox.
+_SANDBOX_BUSY_RUN_STATUSES = frozenset({"queued", "running", "cancelling"})
 
 
 async def _rehydrate_workspace_from_gcs(
@@ -39,15 +47,18 @@ async def _rehydrate_workspace_from_gcs(
 
         run_ids: list[str] = []
         try:
-            runs_ref = (
-                repo._db.collection("sessions")
-                .document(session.id)
-                .collection("runs")
-                .order_by("createdAt")
-                .limit(50)
-                .stream()
-            )
-            run_ids = [doc.id for doc in runs_ref]
+            def _list_run_ids() -> list[str]:
+                runs_ref = (
+                    repo._db.collection("sessions")
+                    .document(session.id)
+                    .collection("runs")
+                    .order_by("createdAt")
+                    .limit(50)
+                    .stream()
+                )
+                return [doc.id for doc in runs_ref]
+
+            run_ids = await asyncio.to_thread(_list_run_ids)
         except Exception as exc:
             logger.warning("Rehydration: could not list runs for session %s: %s", session.id, exc)
             return
@@ -55,13 +66,16 @@ async def _rehydrate_workspace_from_gcs(
         if not run_ids:
             return
 
+        batches = await asyncio.gather(
+            *(repo.list_run_artifacts(session.id, run_id, limit=200) for run_id in run_ids),
+            return_exceptions=True,
+        )
         artifacts = []
-        for run_id in run_ids:
-            try:
-                batch = await repo.list_run_artifacts(session.id, run_id, limit=200)
-                artifacts.extend(batch)
-            except Exception as exc:
-                logger.warning("Rehydration: could not list artifacts for run %s: %s", run_id, exc)
+        for run_id, batch in zip(run_ids, batches):
+            if isinstance(batch, Exception):
+                logger.warning("Rehydration: could not list artifacts for run %s: %s", run_id, batch)
+                continue
+            artifacts.extend(batch)
 
         if not artifacts:
             logger.info("Rehydration: no artifacts for session %s — nothing to restore", session.id)
@@ -69,8 +83,11 @@ async def _rehydrate_workspace_from_gcs(
 
         SKIP_KINDS = {"screenshot", "image", "thumbnail"}
         gcs_client = get_storage_client()
-        restored = 0
         skipped = 0
+        jobs: list[tuple[str, str, str]] = []
+
+        from pathlib import PurePosixPath
+        from nexus.tools.workspace import derive_session_workspace_path, derive_workspace_path
 
         for artifact in artifacts:
             if artifact.kind in SKIP_KINDS:
@@ -89,31 +106,37 @@ async def _rehydrate_workspace_from_gcs(
             if path.startswith("/"):
                 target_path = path
             else:
-                from pathlib import PurePosixPath
-                from nexus.tools.workspace import derive_session_workspace_path, derive_workspace_path
                 run_id = getattr(artifact, "run_id", None)
                 if run_id:
                     target_path = f"{derive_workspace_path(session.id, run_id)}/{path}"
                 else:
                     target_path = f"{derive_session_workspace_path(session.id)}/{path}"
+            jobs.append((bucket_name, blob_name, target_path))
 
-            try:
-                from pathlib import PurePosixPath
-                parent_dir = str(PurePosixPath(target_path).parent)
-                session.sandbox.ensure_directory(parent_dir)
+        def _restore_one(bucket_name: str, blob_name: str, target_path: str) -> int:
+            # All blocking I/O (GCS download, E2B writes) runs in a worker
+            # thread. bucket() builds a reference without a metadata round-trip.
+            session.sandbox.ensure_directory(str(PurePosixPath(target_path).parent))
+            content_bytes = gcs_client.bucket(bucket_name).blob(blob_name).download_as_bytes()
+            session.sandbox.write_binary_file(target_path, content_bytes)
+            return len(content_bytes)
 
-                content_bytes = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda b=bucket_name, n=blob_name: (
-                        gcs_client.get_bucket(b).blob(n).download_as_bytes()
-                    ),
-                )
-                session.sandbox.write_binary_file(target_path, content_bytes)
-                restored += 1
-                logger.debug("Rehydration: restored %s (%d bytes)", target_path, len(content_bytes))
-            except Exception as exc:
-                logger.warning("Rehydration: could not restore %s: %s", target_path, exc)
-                skipped += 1
+        semaphore = asyncio.Semaphore(_REHYDRATE_CONCURRENCY)
+
+        async def _restore(job: tuple[str, str, str]) -> bool:
+            bucket_name, blob_name, target_path = job
+            async with semaphore:
+                try:
+                    size = await asyncio.to_thread(_restore_one, bucket_name, blob_name, target_path)
+                    logger.debug("Rehydration: restored %s (%d bytes)", target_path, size)
+                    return True
+                except Exception as exc:
+                    logger.warning("Rehydration: could not restore %s: %s", target_path, exc)
+                    return False
+
+        outcomes = await asyncio.gather(*(_restore(job) for job in jobs))
+        restored = sum(1 for ok in outcomes if ok)
+        skipped += len(outcomes) - restored
 
         logger.info(
             "Workspace rehydration complete for session %s — restored %d files, skipped %d",
@@ -136,17 +159,22 @@ async def _maybe_mount_gdrive(
     if not token:
         return
 
-    # rclone config block — token JSON expected by Drive backend
-    token_json = (
-        '{"access_token":"","token_type":"Bearer",'
-        f'"refresh_token":"{token}",'
-        '"expiry":"0001-01-01T00:00:00Z"}'
+    # rclone config block — token JSON expected by Drive backend. json.dumps
+    # and shlex.quote keep the token from breaking out of the JSON or shell.
+    token_json = json.dumps(
+        {
+            "access_token": "",
+            "token_type": "Bearer",
+            "refresh_token": token,
+            "expiry": "0001-01-01T00:00:00Z",
+        },
+        separators=(",", ":"),
     )
     rclone_conf = f"[gdrive]\ntype = drive\ntoken = {token_json}\n"
     cmds = [
         # Install rclone if needed
         "command -v rclone >/dev/null 2>&1 || (curl -fsSL https://rclone.org/install.sh | bash -s -- --no-sudo 2>/dev/null)",
-        f"mkdir -p ~/.config/rclone && printf '%s' {repr(rclone_conf)} > ~/.config/rclone/rclone.conf",
+        f"mkdir -p ~/.config/rclone && printf '%s' {shlex.quote(rclone_conf)} > ~/.config/rclone/rclone.conf",
         "mkdir -p ~/gdrive",
         "rclone mount gdrive: ~/gdrive --daemon --vfs-cache-mode writes --allow-non-empty 2>/dev/null; true",
     ]
@@ -228,13 +256,11 @@ class Session:
 
 
 import redis
-import json
 
 class SessionManager:
     """Creates, tracks, and cleans up CoComputer sessions."""
 
     def __init__(self, history_repository: Optional["FirestoreHistoryRepository"] = None) -> None:
-        self._in_memory_locks: dict[str, asyncio.Lock] = {}
         self._local_sessions: dict[str, Session] = {}
         self._redis: Optional[redis.Redis] = None
         if settings.redis_url:
@@ -307,8 +333,12 @@ class SessionManager:
                     "created_at": session.created_at.isoformat(),
                     "task_id": session.task_id,
                 }
-                self._redis.hset("nexus:sessions", session_id, json.dumps(metadata))
-                self._redis.expire("nexus:sessions", 7200)
+                def _publish() -> None:
+                    self._redis.hset("nexus:sessions", session_id, json.dumps(metadata))
+                    self._redis.expire("nexus:sessions", 7200)
+
+                # Sync redis client: keep its network I/O off the event loop.
+                await asyncio.to_thread(_publish)
             except Exception:
                 logger.warning("Failed to sync session %s to Redis", session_id, exc_info=True)
 
@@ -379,7 +409,7 @@ class SessionManager:
         async with session.activation_lock:
             stale_client = False
             if session.sandbox.is_alive and session.stream_url:
-                if session.sandbox.extend_timeout():
+                if await asyncio.to_thread(session.sandbox.extend_timeout):
                     if session.status not in {"ready", "active"}:
                         session.status = "ready"
                         session.touch()
@@ -428,6 +458,13 @@ class SessionManager:
                     except Exception as exc:
                         logger.warning("Sandbox resume failed for session %s: %s. Creating new sandbox.", session_id, exc)
                         info = None
+                        # The paused id is unusable now; leaving it stored keeps
+                        # the sweeper from ever reclaiming that VM.
+                        if self.history_repository:
+                            try:
+                                await self.history_repository.save_paused_sandbox(session.owner_id, None, None)
+                            except Exception:
+                                logger.debug("Failed to clear paused sandbox id", exc_info=True)
 
                 if info is None:
                     info = await loop.run_in_executor(None, session.sandbox.create)
@@ -528,26 +565,25 @@ class SessionManager:
         session = self._local_sessions.pop(session_id, None)
         if self._redis:
             try:
-                self._redis.hdel("nexus:sessions", session_id)
+                await asyncio.to_thread(self._redis.hdel, "nexus:sessions", session_id)
             except Exception:
                 pass
 
         paused_id: str | None = None
-        if session and session.sandbox.is_alive:
-            loop = asyncio.get_event_loop()
-            if status in {"ended"} and self.history_repository:
-                # Graceful end — pause so user can resume later
-                paused_id = await loop.run_in_executor(None, session.sandbox.pause)
-                if paused_id:
-                    try:
-                        await self.history_repository.save_paused_sandbox(session.owner_id, paused_id, session.id)
-                    except Exception:
-                        pass
-            else:
-                # Error/force-destroy — kill sandbox outright
-                await loop.run_in_executor(None, session.sandbox.destroy)
-            session.status = "ended" if status == "ended" else "destroyed"
-            logger.info("Session %s %s", session_id, session.status)
+        if session:
+            # Serialise with ensure_session_ready(): destroying mid-activation
+            # would leave a freshly created VM attached to a dropped session.
+            async with session.activation_lock:
+                if session.sandbox.is_alive:
+                    loop = asyncio.get_running_loop()
+                    if status in {"ended"} and self.history_repository:
+                        # Graceful end — pause so user can resume later
+                        paused_id = await asyncio.shield(self._pause_and_persist(session))
+                    else:
+                        # Error/force-destroy — kill sandbox outright
+                        await loop.run_in_executor(None, session.sandbox.destroy)
+                    session.status = "ended" if status == "ended" else "destroyed"
+                    logger.info("Session %s %s", session_id, session.status)
         
         if session:
             await self._sync_session(session, status=status, ended_at=datetime.now(timezone.utc), error_code=error_code)
@@ -563,6 +599,23 @@ class SessionManager:
                 except Exception:
                     logger.warning("Failed to refresh handoff summary for session %s", session_id, exc_info=True)
 
+    async def _pause_and_persist(self, session: Session) -> str | None:
+        """Pause the VM and record its id so the user can resume it later."""
+        loop = asyncio.get_running_loop()
+        paused_id = await loop.run_in_executor(None, session.sandbox.pause)
+        if paused_id and self.history_repository:
+            try:
+                await self.history_repository.save_paused_sandbox(
+                    session.owner_id, paused_id, session.id
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist paused sandbox for session %s",
+                    session.id,
+                    exc_info=True,
+                )
+        return paused_id
+
     async def pause_idle_sandbox(self, session_id: str) -> None:
         """Pause or kill the VM but keep the Session so the same chat can resume."""
         scheduled_pause = self._idle_pause_tasks.pop(session_id, None)
@@ -575,29 +628,21 @@ class SessionManager:
             return
 
         paused_id: str | None = None
-        if session.sandbox.is_alive:
-            loop = asyncio.get_event_loop()
-            if self.history_repository:
-                paused_id = await loop.run_in_executor(None, session.sandbox.pause)
-                if paused_id:
-                    try:
-                        await self.history_repository.save_paused_sandbox(
-                            session.owner_id, paused_id, session.id
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to persist paused sandbox for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
-            if not paused_id:
-                await loop.run_in_executor(None, session.sandbox.destroy)
+        async with session.activation_lock:
+            if session.sandbox.is_alive:
+                loop = asyncio.get_running_loop()
+                if self.history_repository:
+                    # Shielded: if this idle-pause task is cancelled while the
+                    # executor is pausing, the paused id must still be saved.
+                    paused_id = await asyncio.shield(self._pause_and_persist(session))
+                if not paused_id:
+                    await loop.run_in_executor(None, session.sandbox.destroy)
 
-        session.status = "paused"
-        session.stream_url = ""
-        if paused_id:
-            session.sandbox_id = paused_id
-        session.touch()
+            session.status = "paused"
+            session.stream_url = ""
+            if paused_id:
+                session.sandbox_id = paused_id
+            session.touch()
         await self._sync_session(session, status="paused")
         if self.history_repository:
             try:
@@ -642,6 +687,21 @@ class SessionManager:
         try:
             await asyncio.sleep(delay_seconds)
             session = self._local_sessions.get(session_id)
+            # A background (durable) run keeps using the sandbox after the
+            # browser leaves, but it does not touch ``last_active``. Wait for it
+            # to settle instead of pausing the VM out from under it -- bounded by
+            # the turn timeout so a crashed run's stale status cannot pin it.
+            waited = 0.0
+            max_wait = float(settings.agent_turn_timeout_seconds or 1800) + 300.0
+            while (
+                session is not None
+                and session.run_status in _SANDBOX_BUSY_RUN_STATUSES
+                and waited < max_wait
+            ):
+                step = float(max(delay_seconds, 30))
+                await asyncio.sleep(step)
+                waited += step
+                session = self._local_sessions.get(session_id)
             if not session or session.status in {"destroyed", "ended", "error", "paused"}:
                 return
             if not session.sandbox.is_alive:
@@ -718,10 +778,27 @@ class SessionManager:
                 logger.info("Cleaning up idle session %s", sid)
                 await self.destroy_session(sid, status="ended")
 
-    async def destroy_all(self) -> None:
-        """Destroy every active session (used on shutdown)."""
-        for sid in list(self._local_sessions.keys()):
-            await self.destroy_session(sid, status="ended")
+    async def destroy_all(self, *, timeout_seconds: float = 8.0) -> None:
+        """Pause/destroy every local session on shutdown.
+
+        Runs concurrently under one deadline: Cloud Run sends SIGKILL ~10s
+        after SIGTERM, and pausing sessions one by one would not finish.
+        """
+        session_ids = list(self._local_sessions.keys())
+        if not session_ids:
+            return
+        results = asyncio.gather(
+            *(self.destroy_session(sid, status="ended") for sid in session_ids),
+            return_exceptions=True,
+        )
+        try:
+            outcomes = await asyncio.wait_for(results, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out pausing %d sessions during shutdown", len(session_ids))
+            return
+        for sid, outcome in zip(session_ids, outcomes):
+            if isinstance(outcome, Exception):
+                logger.warning("Failed to end session %s during shutdown: %s", sid, outcome)
 
     async def _sync_session(
         self,

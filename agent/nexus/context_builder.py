@@ -64,6 +64,24 @@ class TurnContextBuilder:
         never sees a mid-sentence cut.
         """
         user = (user_text or "").strip()
+        context = self.build_context(user)
+        if context.text:
+            text = f"{context.text}\n\nUser: {user}" if user else context.text
+        else:
+            text = user
+        return BuiltTurnInput(
+            text=text,
+            included_labels=context.included_labels,
+            dropped_labels=context.dropped_labels,
+        )
+
+    def build_context(self, user_text: str = "") -> BuiltTurnInput:
+        """Return only the context blocks that fit next to *user_text*.
+
+        Used when the runtime context is sent as its own message part and the
+        user's text travels separately (and verbatim).
+        """
+        user = (user_text or "").strip()
         budget = self._max_chars - len(user) - len("\n\nUser: ")
         if budget < 0:
             budget = 0
@@ -100,9 +118,8 @@ class TurnContextBuilder:
                 ", ".join(dropped),
             )
 
-        if parts:
-            joined = "\n\n".join(parts)
-            text = f"{joined}\n\nUser: {user}" if user else joined
-        else:
-            text = user
-        return BuiltTurnInput(text=text, included_labels=included, dropped_labels=dropped)
+        return BuiltTurnInput(
+            text="\n\n".join(parts),
+            included_labels=included,
+            dropped_labels=dropped,
+        )

@@ -33,6 +33,31 @@ const nextConfig: NextConfig = {
     }
     return config;
   },
+  async headers() {
+    // A script-src CSP needs per-request nonces for Next's inline scripts and
+    // the chunk-recovery script in app/layout.tsx; until that exists, lock
+    // down the directives that do not affect scripts. frame-ancestors is
+    // 'self' (not 'none') because artifact previews frame /api/... content.
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: "frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'",
+          },
+          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)",
+          },
+          { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
+        ],
+      },
+    ];
+  },
   async redirects() {
     return [
       { source: "/session/new", destination: "/app", permanent: true },

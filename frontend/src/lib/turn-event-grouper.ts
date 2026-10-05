@@ -60,7 +60,8 @@ export type ToolInvocation = {
     resultSummary?: Record<string, unknown>;
   };
   callTs: number;
-  status: "running" | "completed" | "failed";
+  /** "stopped" = the turn ended (stop/error/crash) before this call returned. */
+  status: "running" | "completed" | "failed" | "stopped";
 };
 
 export type GroupedEvent =
@@ -96,12 +97,13 @@ export type GroupedEvent =
       message: string;
       complete?: boolean;
       success?: boolean;
+      stopped?: boolean;
       ts: number;
     }
   | {
       kind: "subagent_status";
       role?: string;
-      status: "started" | "progress" | "completed" | "failed";
+      status: "started" | "progress" | "completed" | "failed" | "stopped";
       detail: string;
       ts: number;
     }
@@ -185,7 +187,62 @@ const FILTERED_TYPES = new Set([
   "sandbox_editor",
   "vnc_url",
   "transcript",
+  "agent_message_final",
+  "turn_lifecycle",
+  "turn_metrics",
+  "agent_config",
+  "verification_caveat",
+  "aborted",
 ]);
+
+/**
+ * A finished turn can still hold steps that never got their result event
+ * (user stop, error, worker crash). Mark them stopped so they stop shimmering
+ * and spinning. Background progress/subagent rows are only settled when the
+ * turn was interrupted: after a normal finish they may still be running.
+ * Returns the same segment objects when nothing changed.
+ */
+export function settleTurnSegments(
+  segments: TurnEventSegment[],
+  { interrupted }: { interrupted: boolean },
+): TurnEventSegment[] {
+  let changedAny = false;
+  const out = segments.map((seg) => {
+    if (seg.kind !== "task_group") return seg;
+    let changed = false;
+    const steps = seg.data.steps.map((step): GroupedEvent => {
+      if (step.kind === "tool_invocation" && step.status === "running") {
+        changed = true;
+        return { ...step, status: "stopped" };
+      }
+      if (interrupted && step.kind === "bg_progress" && !step.complete) {
+        changed = true;
+        return { ...step, stopped: true };
+      }
+      if (
+        interrupted &&
+        step.kind === "subagent_status" &&
+        (step.status === "started" || step.status === "progress")
+      ) {
+        changed = true;
+        return { ...step, status: "stopped" };
+      }
+      return step;
+    });
+    const running = seg.data.status === "running";
+    if (!changed && !running) return seg;
+    changedAny = true;
+    return {
+      ...seg,
+      data: {
+        ...seg.data,
+        steps,
+        status: running ? "completed" : seg.data.status,
+      },
+    };
+  });
+  return changedAny ? out : segments;
+}
 
 export function groupTurnEvents(events: ChatEvent[]): TurnEventSegment[] {
   const segments: TurnEventSegment[] = [];

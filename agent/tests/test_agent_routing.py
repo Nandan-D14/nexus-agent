@@ -88,5 +88,6 @@ class SinglePlannerRoutingTests(TestCase):
             sub_agents.create_browser_agent(_runtime_config())
         with self.assertRaisesRegex(RuntimeError, "create_deepresearcher_agent was removed"):
             sub_agents.create_deepresearcher_agent(_runtime_config())
-        self.assertNotIn("Firefox", sub_agents.BROWSER_AGENT_PROMPT)
-        self.assertIn("Chromium", sub_agents.BROWSER_AGENT_PROMPT)
+        # Legacy prompt bodies are gone; only the live worker prompts remain.
+        self.assertFalse(hasattr(sub_agents, "BROWSER_AGENT_PROMPT"))
+        self.assertIn("Playwright", sub_agents.DESKTOP_WORKER_PROMPT)

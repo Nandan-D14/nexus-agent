@@ -50,15 +50,13 @@ class OldSessionResilienceTests(unittest.TestCase):
         thought_with_tags = "<think>The user wants to know about Tembo. I should summarize.</think>Tembo AI is an AI engineering platform."
         self.assertEqual(extract_answer_from_reasoning(thought_with_tags), "Tembo AI is an AI engineering platform.")
 
+        # Free-form reasoning is private planning, never promoted to an answer.
         thought_paragraphs = (
             "Let's think about this.\n\n"
             "I need to check the dependencies.\n\n"
             "The landing page for Tembo AI has been scaffolded and the preview is live on port 5173."
         )
-        self.assertEqual(
-            extract_answer_from_reasoning(thought_paragraphs),
-            "The landing page for Tembo AI has been scaffolded and the preview is live on port 5173.",
-        )
+        self.assertEqual(extract_answer_from_reasoning(thought_paragraphs), "")
 
     def test_artifact_request_matches_websites(self) -> None:
         from nexus.control_loop import _ARTIFACT_REQUEST

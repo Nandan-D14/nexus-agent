@@ -7,15 +7,30 @@ The perception-action loop is critical for reliable desktop control:
 after every GUI action (click, type, scroll), the agent MUST take a
 screenshot to verify the result before acting again. This module tracks
 whether the screen has changed since the last screenshot.
+
+State is keyed by the current session id (see :mod:`nexus.session_local`),
+not the thread: sync GUI tools run in pool threads while the gateway checks
+on the event loop thread.
 """
 
 from __future__ import annotations
 
-import threading
 import time
 
+from nexus.session_local import SessionLocal, clear_session_state
 
-_screen_state = threading.local()
+__all__ = [
+    "SessionLocal",
+    "clear_dirty",
+    "clear_session_state",
+    "get_last_action",
+    "is_dirty",
+    "mark_dirty",
+    "time_since_change",
+]
+
+
+_screen_state = SessionLocal()
 
 
 def mark_dirty(action: str) -> None:

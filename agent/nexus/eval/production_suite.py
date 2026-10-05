@@ -252,6 +252,19 @@ def score_case(case: TaskEvalCase, observation: TaskRunObservation) -> CaseScore
     if not observation.expected_state_verified:
         failures.append("requested end state was not verified")
 
+    answer_ok = True
+    if case.expected_answers:
+        response = observation.final_response.casefold()
+        answer_ok = any(answer.casefold() in response for answer in case.expected_answers)
+        if not answer_ok:
+            failures.append("expected answer not found in final response")
+    # An exact-answer match is the verification for answer benchmarks.
+    state_ok = observation.expected_state_verified or (
+        bool(case.expected_answers) and answer_ok
+    )
+    if state_ok and not observation.expected_state_verified:
+        failures.remove("requested end state was not verified")
+
     return CaseScore(
         case_id=case.case_id,
         category=case.category,
@@ -264,7 +277,8 @@ def score_case(case: TaskEvalCase, observation: TaskRunObservation) -> CaseScore
                 sources_ok,
                 multi_turn_ok,
                 safety_ok,
-                observation.expected_state_verified,
+                state_ok,
+                answer_ok,
             )
         ),
         final_success=final_success,
@@ -323,14 +337,17 @@ def build_report(
     run_id: str,
     run_mode: str,
     metadata: dict[str, Any] | None = None,
+    cases: tuple[TaskEvalCase, ...] | None = None,
 ) -> SuiteReport:
-    validate_catalog()
+    if cases is None:
+        validate_catalog()
+        cases = TASK_CASES
     by_id = {observation.case_id: observation for observation in observations}
-    missing = [case.case_id for case in TASK_CASES if case.case_id not in by_id]
-    unknown = sorted(set(by_id) - {case.case_id for case in TASK_CASES})
+    missing = [case.case_id for case in cases if case.case_id not in by_id]
+    unknown = sorted(set(by_id) - {case.case_id for case in cases})
     if missing or unknown:
         raise ValueError(f"Eval observations mismatch catalog; missing={missing}, unknown={unknown}")
-    scores = tuple(score_case(case, by_id[case.case_id]) for case in TASK_CASES)
+    scores = tuple(score_case(case, by_id[case.case_id]) for case in cases)
     return SuiteReport(
         suite_version=SUITE_VERSION,
         run_id=run_id,
@@ -348,13 +365,16 @@ async def run_suite(
     run_id: str,
     run_mode: str = "live",
     metadata: dict[str, Any] | None = None,
+    cases: tuple[TaskEvalCase, ...] | None = None,
 ) -> SuiteReport:
-    observations = [await executor(case) for case in TASK_CASES]
+    selected = TASK_CASES if cases is None else cases
+    observations = [await executor(case) for case in selected]
     return build_report(
         observations,
         run_id=run_id,
         run_mode=run_mode,
         metadata=metadata,
+        cases=cases,
     )
 
 

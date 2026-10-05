@@ -28,7 +28,7 @@ from nexus.tools._context import reset_worker_call_count
 from nexus.ws_handler import _event_to_ws_frame
 
 
-EXPECTED_ADK_VERSION = "2.4.0"
+EXPECTED_ADK_VERSION = "2.11.0"
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +103,7 @@ async def test_agent_tool_skip_summarization_returns_worker_text() -> None:
         async def run_async(self, **kwargs):
             yield SimpleNamespace(
                 actions=SimpleNamespace(state_delta={}),
+                error_message=None,
                 content=types.Content(
                     role="model",
                            parts=[
@@ -129,6 +130,10 @@ async def test_agent_tool_skip_summarization_returns_worker_text() -> None:
             user_id="user-1",
             credential_service=None,
             plugin_manager=SimpleNamespace(plugins=[]),
+            # ADK >= 2.10: the nested run inherits the caller's run settings
+            # and abort signal.
+            run_config=None,
+            _abort_signal=None,
         ),
     )
 

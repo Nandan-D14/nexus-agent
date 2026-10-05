@@ -18,12 +18,29 @@ from google.adk.agents import Agent
 
 from nexus.runtime_config import SessionRuntimeConfig
 from nexus.config import settings
-from nexus.subagent_store import TERMINAL_SUBAGENT_STATUSES
+from nexus.subagent_store import TERMINAL_SUBAGENT_STATUSES, SubagentLimitError
 from nexus.subagent_resources import ToolResourceLocks
 from nexus.tool_gateway import gate_tools
 from nexus.usage import TokenUsageRecord
 
 logger = logging.getLogger(__name__)
+
+# Strong references for fire-and-forget work; the event loop only keeps weak
+# ones, so an unreferenced task can be garbage-collected mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _done(finished: asyncio.Task) -> None:
+        _background_tasks.discard(finished)
+        if not finished.cancelled() and finished.exception() is not None:
+            logger.warning("Subagent background task failed", exc_info=finished.exception())
+
+    task.add_done_callback(_done)
+    return task
 
 UsageCallback = Callable[[TokenUsageRecord], Awaitable[None]]
 SendJsonCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -120,25 +137,71 @@ class SubagentSupervisor:
 
         self._codec = SubagentStoreCodec()
         self._emitter = SubagentEventEmitter(self)
-        self._delegates = (self._codec, self._emitter)
 
-    def __getattr__(self, name: str):
-        # Only invoked for methods moved to the codec/emitter collaborators.
-        # Class-level lookup avoids triggering the emitter's own __getattr__.
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(name)
-        for delegate in self.__dict__.get("_delegates", ()):
-            if getattr(type(delegate), name, None) is not None:
-                return getattr(delegate, name)
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
+    # Explicit delegation to the storage codec and lifecycle emitter (was a
+    # __getattr__ forwarder, which hid where these methods live).
+    def _storage_payload(self, record: SubagentRecord) -> dict[str, Any]:
+        return self._codec._storage_payload(record)
+
+    def _record_from_storage(self, stored: dict[str, Any]) -> SubagentRecord:
+        return self._codec._record_from_storage(stored)
+
+    def _apply_storage_record(self, record: SubagentRecord, stored: dict[str, Any]) -> None:
+        self._codec._apply_storage_record(record, stored)
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> datetime | None:
+        from nexus.subagent_components import SubagentStoreCodec
+
+        return SubagentStoreCodec._coerce_datetime(value)
+
+    @staticmethod
+    def _canonical_type(type_name: str) -> str:
+        from nexus.subagent_components import SubagentStoreCodec
+
+        return SubagentStoreCodec._canonical_type(type_name)
+
+    async def _mark_started(self, record: SubagentRecord) -> None:
+        await self._emitter._mark_started(record)
+
+    async def _record_progress(self, record: SubagentRecord, detail: str) -> None:
+        await self._emitter._record_progress(record, detail)
+
+    async def _mark_completed(self, record: SubagentRecord) -> None:
+        await self._emitter._mark_completed(record)
+
+    async def _mark_failed(self, record: SubagentRecord, *, status: str = "failed") -> None:
+        await self._emitter._mark_failed(record, status=status)
+
+    async def _emit(self, payload: dict[str, Any]) -> None:
+        await self._emitter._emit(payload)
+
+    def _metadata(self, record: SubagentRecord) -> dict[str, Any]:
+        return self._emitter._metadata(record)
+
+    def _step_payload(self, step: Any) -> dict[str, Any]:
+        return self._emitter._step_payload(step)
 
     @property
     def durable(self) -> bool:
         return self.subagent_repository is not None
 
+    def active_count(self) -> int:
+        """Live (non-terminal) subagents owned by this supervisor."""
+        return sum(
+            1 for record in self._records.values()
+            if record.status not in TERMINAL_SUBAGENT_STATUSES
+        )
+
     async def spawn(self, *, prompt: str, role: str, type_name: str) -> SubagentRecord:
+        limit = max(1, int(settings.subagent_max_concurrent))
+        if self.active_count() >= limit:
+            # Unbounded fan-out multiplies model cost and contends on the single
+            # desktop/workspace locks; make the planner collect results first.
+            raise SubagentLimitError(
+                f"{limit} subagents are already running; await or consume their "
+                "results before spawning more."
+            )
         subagent_id = f"sub_{uuid.uuid4().hex[:10]}"
         record = SubagentRecord(
             subagent_id=subagent_id,
@@ -189,7 +252,7 @@ class SubagentSupervisor:
                     return
                 if self.subagent_repository is None and record.mailbox.empty():
                     return
-                asyncio.create_task(self._start_task(record, None))
+                _spawn(self._start_task(record, None))
 
             task.add_done_callback(_restart_if_mailbox_pending)
         await self._record_progress(record, f"Queued message for {record.role}.")
@@ -270,7 +333,7 @@ class SubagentSupervisor:
             record.parent_run_id = run_id
             record.updated_at = datetime.now(timezone.utc)
             if self.subagent_repository is not None:
-                asyncio.create_task(
+                _spawn(
                     self.subagent_repository.update_record(
                         subagent_id=record.subagent_id,
                         owner_id=record.owner_id,
@@ -283,7 +346,7 @@ class SubagentSupervisor:
         for record in self._records.values():
             record.parent_task_id = task_id
             if self.subagent_repository is not None:
-                asyncio.create_task(
+                _spawn(
                     self.subagent_repository.update_record(
                         subagent_id=record.subagent_id,
                         owner_id=record.owner_id,
@@ -319,6 +382,7 @@ class SubagentSupervisor:
 
     async def _run_loop(self, record: SubagentRecord, initial_message: str | None) -> None:
         heartbeat: asyncio.Task | None = None
+        turn_task: asyncio.Task | None = None
         if self.subagent_repository is not None:
             heartbeat = asyncio.create_task(
                 self._lease_heartbeat(record),
@@ -411,6 +475,7 @@ class SubagentSupervisor:
             record.updated_at = datetime.now(timezone.utc)
             await self._persist_terminal(record, terminal_recorded=False)
             await self._mark_failed(record, status="cancelled")
+            raise
         except Exception as exc:
             logger.exception("Subagent %s failed", record.subagent_id)
             record.status = "failed"
@@ -419,6 +484,11 @@ class SubagentSupervisor:
             await self._persist_terminal(record, terminal_recorded=False)
             await self._mark_failed(record)
         finally:
+            # asyncio.wait() does not forward cancellation to its children, so
+            # an in-flight turn would otherwise outlive a cancelled subagent.
+            if turn_task is not None and not turn_task.done():
+                turn_task.cancel()
+                await asyncio.gather(turn_task, return_exceptions=True)
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)

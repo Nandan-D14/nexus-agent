@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from nexus.config import settings
@@ -69,9 +70,12 @@ def main():
 if __name__ == "__main__":
     main()
 """
-    sandbox._sandbox.write_text_file("/tmp/nexus_playwright_runner.py", full_script)
+    # Unique per call: parallel tools / subagents share one sandbox and must
+    # not overwrite each other's runner script.
+    runner_path = f"/tmp/nexus_playwright_runner_{uuid.uuid4().hex[:12]}.py"
+    sandbox._sandbox.write_text_file(runner_path, full_script)
     result = sandbox._sandbox.commands.run(
-        "python3 /tmp/nexus_playwright_runner.py",
+        f"python3 {runner_path}; status=$?; rm -f {runner_path}; exit $status",
         timeout=45,
     )
     exit_code = int(getattr(result, "exit_code", -1) or 0)

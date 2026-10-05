@@ -26,29 +26,27 @@ FB_MESSAGING_SENDER_ID="${FIREBASE_MESSAGING_SENDER_ID:?Set FIREBASE_MESSAGING_S
 FB_APP_ID="${FIREBASE_APP_ID:?Set FIREBASE_APP_ID}"
 
 GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
-GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
 REQUIRE_BYOK="${REQUIRE_BYOK:-false}"
 BETA_ENFORCE_BYOK="${BETA_ENFORCE_BYOK:-true}"
-BYOK_ENCRYPTION_KEY_SECRET="${BYOK_ENCRYPTION_KEY_SECRET:-}"
 SHARED_ACCESS_CODE="${SHARED_ACCESS_CODE:-}"
 BETA_ADMIN_EMAILS="${BETA_ADMIN_EMAILS:?Set BETA_ADMIN_EMAILS}"
 BETA_GOOGLE_SHEET_ID="${BETA_GOOGLE_SHEET_ID:?Set BETA_GOOGLE_SHEET_ID}"
 BETA_GOOGLE_SHEET_NAME="${BETA_GOOGLE_SHEET_NAME:-beta_applications}"
-JWT_SECRET="${JWT_SECRET:?Set JWT_SECRET}"
+# Service account Cloud Tasks uses to mint OIDC tokens for the worker. When set,
+# the worker is deployed private (IAM-invoker only) instead of public+token.
+TASKS_OIDC_SA="${GCP_TASKS_OIDC_SERVICE_ACCOUNT:-}"
 
+# All secrets come from Secret Manager (see setup-secrets.sh); never env vars.
+# Keep this list in sync with .github/workflows/google-cloudrun-docker.yml.
 AGENT_SECRET_FLAGS=(
   "--set-secrets=E2B_API_KEY=e2b-api-key:latest"
   "--set-secrets=QWEN_API_KEY=qwen-api-key:latest"
   "--set-secrets=JWT_SECRET=jwt-secret:latest"
+  "--set-secrets=BYOK_ENCRYPTION_KEY=byok-encryption-key:latest"
   "--set-secrets=GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+  "--set-secrets=SLACK_CLIENT_SECRET=slack-client-secret:latest"
   "--set-secrets=TASK_WORKER_AUTH_TOKEN=task-worker-auth-token:latest"
 )
-
-if [[ -n "${BYOK_ENCRYPTION_KEY_SECRET}" ]]; then
-  AGENT_SECRET_FLAGS+=(
-    "--set-secrets=BYOK_ENCRYPTION_KEY=${BYOK_ENCRYPTION_KEY_SECRET}:latest"
-  )
-fi
 
 AGENT_ENV_VARS=(
   "APP_ENV=production"
@@ -77,6 +75,9 @@ AGENT_ENV_VARS=(
   "GCP_TASKS_LOCATION=${TASKS_LOCATION}"
   "GCP_TASKS_QUEUE=${TASKS_QUEUE}"
 )
+if [[ -n "${TASKS_OIDC_SA}" ]]; then
+  AGENT_ENV_VARS+=("GCP_TASKS_OIDC_SERVICE_ACCOUNT=${TASKS_OIDC_SA}")
+fi
 AGENT_ENV_VARS_CSV="$(IFS=,; printf '%s' "${AGENT_ENV_VARS[*]}")"
 
 echo "=== Co-Computer Deploy to Cloud Run ==="
@@ -112,6 +113,7 @@ gcloud run deploy nexus-agent \
   --cpu=1 \
   --timeout=3600 \
   --concurrency=10 \
+  --no-cpu-throttling \
   --allow-unauthenticated \
   --session-affinity \
   "${AGENT_SECRET_FLAGS[@]}" \
@@ -130,6 +132,13 @@ echo "  gcloud run revisions list --service=nexus-agent --region=${REGION}"
 AGENT_WS_URL="${AGENT_URL/https:/wss:}"
 
 echo "Deploying worker service..."
+if [[ -n "${TASKS_OIDC_SA}" ]]; then
+  # Only Cloud Tasks (via its OIDC service account) may invoke the worker.
+  WORKER_AUTH_FLAG="--no-allow-unauthenticated"
+else
+  echo "WARNING: GCP_TASKS_OIDC_SERVICE_ACCOUNT not set; worker stays public and relies on X-Worker-Token."
+  WORKER_AUTH_FLAG="--allow-unauthenticated"
+fi
 gcloud run deploy cocomputer-worker \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
@@ -139,9 +148,17 @@ gcloud run deploy cocomputer-worker \
   --cpu=2 \
   --timeout=3600 \
   --concurrency=1 \
-  --allow-unauthenticated \
+  --no-cpu-throttling \
+  "${WORKER_AUTH_FLAG}" \
   "${AGENT_SECRET_FLAGS[@]}" \
   --set-env-vars="${AGENT_ENV_VARS_CSV}"
+if [[ -n "${TASKS_OIDC_SA}" ]]; then
+  gcloud run services add-iam-policy-binding cocomputer-worker \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --member="serviceAccount:${TASKS_OIDC_SA}" \
+    --role="roles/run.invoker" >/dev/null
+fi
 
 WORKER_URL="$(gcloud run services describe cocomputer-worker \
   --project="${PROJECT_ID}" \

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import wraps
+import json
 import logging
 from typing import Any, Callable, TypedDict
 
@@ -271,6 +272,89 @@ def normalized_tool(func: Callable = None, *, needs_sandbox: bool = False) -> Ca
 
 def _normalize(func_name: str, result: Any) -> NormalizedToolResult:
     """Convert any tool return value into a ``NormalizedToolResult``."""
+    return _cap_observation(_normalize_shape(func_name, result))
+
+
+_MIN_CLIPPED_STRING = 1_000
+
+
+def _string_leaves(value: Any, path: tuple, out: list[tuple[int, tuple]], depth: int = 0) -> None:
+    if depth > 8:
+        return
+    if isinstance(value, str):
+        if len(value) > _MIN_CLIPPED_STRING:
+            out.append((len(value), path))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _string_leaves(item, (*path, key), out, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _string_leaves(item, (*path, index), out, depth + 1)
+
+
+def _clip_string(text: str, limit: int) -> str:
+    head = int(limit * 0.75)
+    tail = max(0, limit - head)
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n…[{omitted} chars truncated]…\n{text[-tail:] if tail else ''}"
+
+
+def _rebuild(value: Any, plan: dict[tuple, int], path: tuple = ()) -> Any:
+    if path in plan and isinstance(value, str):
+        return _clip_string(value, plan[path])
+    if isinstance(value, dict):
+        return {key: _rebuild(item, plan, (*path, key)) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_rebuild(item, plan, (*path, index)) for index, item in enumerate(value)]
+    return value
+
+
+def _cap_observation(result: NormalizedToolResult) -> NormalizedToolResult:
+    """Bound one tool observation to ``tool_observation_max_chars`` serialized.
+
+    Per-tool caps vary and some tools had none, so a single huge result could
+    flood the context. Only oversized results change: the longest strings are
+    clipped (head + tail) just enough to fit, so short fields such as ids,
+    paths, and status codes survive intact.
+    """
+    try:
+        from nexus.config import settings
+
+        cap = int(settings.tool_observation_max_chars)
+    except Exception:
+        return result
+    if cap <= 0:
+        return result
+    try:
+        size = len(json.dumps(result, default=str))
+    except Exception:
+        return result
+    if size <= cap:
+        return result
+
+    leaves: list[tuple[int, tuple]] = []
+    _string_leaves(result, (), leaves)
+    leaves.sort(reverse=True)
+    excess = size - cap
+    plan: dict[tuple, int] = {}
+    for length, path in leaves:
+        if excess <= 0:
+            break
+        new_length = max(_MIN_CLIPPED_STRING, length - excess)
+        plan[path] = new_length
+        excess -= length - new_length
+    if not plan:
+        return result
+    capped = _rebuild(result, plan)
+    metadata = capped.get("metadata")
+    if isinstance(metadata, dict):
+        metadata["observation_truncated"] = True
+    logger.info("Capped oversized tool observation (%d chars > %d)", size, cap)
+    return capped
+
+
+def _normalize_shape(func_name: str, result: Any) -> NormalizedToolResult:
+    """Coerce a raw tool return value into the normalized dict shape."""
     if isinstance(result, dict):
         # Already a NormalizedToolResult — fill in missing keys
         if "status" in result and "summary" in result:

@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 
 _CANCEL_POLL_SECONDS = 5.0
 
+# Model-only runtime block for scheduled runs (kind="unattended").
+UNATTENDED_DIRECTIVE = (
+    "This task is running on an automated schedule; the user is not available.\n"
+    "- Do not ask questions or call ask_choice / suggest_options.\n"
+    "- Do not wait for confirmation. Actions that require approval and are not on this "
+    "schedule's unattended allowlist will be denied; skip them and report what was not done.\n"
+    "- Make reasonable assumptions and proceed autonomously with everything else."
+)
+
 
 @dataclass(frozen=True)
 class AgentTurnRequest:
@@ -149,6 +158,7 @@ class AgentTurnRunner:
         cancel_watcher = asyncio.create_task(
             self._watch_for_cancel(orchestrator, request.task_id, request.owner_id)
         )
+        turn_task: asyncio.Task | None = None
         try:
             await orchestrator.initialize(lazy_sandbox=True)
             orchestrator.restore_durable_checkpoint(request.checkpoint)
@@ -161,17 +171,14 @@ class AgentTurnRunner:
             )
             input_text = request.input_text
             if skip_confirm:
-                directive = (
-                    "[UNATTENDED SCHEDULED TASK - AUTO-APPROVAL ACTIVE]\n"
-                    "This task is running on an automated schedule with skip confirmations enabled.\n"
-                    "- DO NOT ask questions or call ask_choice / suggest_options. The user is not available to answer.\n"
-                    "- DO NOT ask for confirmation or approval. All permissions and approvals are automatically granted.\n"
-                    "- Make reasonable assumptions and proceed autonomously to complete the work.\n\n"
+                from nexus.prompt_assembly import runtime_block
+
+                directive = runtime_block("unattended", UNATTENDED_DIRECTIVE)
+                # Model-only: never part of the visible/persisted user message
+                # or the tracked goal.
+                resume_context = (
+                    f"{directive}\n\n{resume_context}" if resume_context else directive
                 )
-                if not resume_context:
-                    input_text = directive + request.input_text
-                else:
-                    resume_context = directive + resume_context
 
             turn_task = asyncio.create_task(
                 orchestrator.handle_text_input(
@@ -284,6 +291,13 @@ class AgentTurnRunner:
                 checkpoint=checkpoint,
             )
         finally:
+            # If run() itself is cancelled (worker lease lost, shutdown) the
+            # turn must stop too; otherwise it keeps running tools while
+            # another worker reclaims the run. Cancelling turn_task propagates
+            # into the orchestrator's agent task.
+            if turn_task is not None and not turn_task.done():
+                turn_task.cancel()
+                await asyncio.gather(turn_task, return_exceptions=True)
             clear_unattended_tools()
             set_task_budget_guard(None)
             cancel_watcher.cancel()

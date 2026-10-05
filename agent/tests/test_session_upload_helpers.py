@@ -117,6 +117,7 @@ class TurnContextFormattingTests(TestCase):
         )
 
         self.assertIn("Connectors: google_drive, system", result)
-        self.assertIn("[UPLOADED FILES]", result)
+        self.assertIn('<runtime kind="uploads">', result)
+        self.assertIn('<runtime kind="date">', result)
         self.assertIn("report.pdf", result)
         self.assertIn("/workspace/session/run/sources/uploads/report.pdf", result)

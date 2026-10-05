@@ -25,11 +25,16 @@ def _offered_subprotocols(ws: WebSocket) -> list[str]:
 
 
 def _ticket_candidates(ws: WebSocket) -> list[tuple[str, str | None]]:
-    candidates: list[tuple[str, str | None]] = []
+    # Preferred: the ticket is the offered Sec-WebSocket-Protocol value (kept
+    # out of URLs and access logs). ``?ticket=`` is a legacy fallback for
+    # clients built before that change; remove once they have aged out.
+    candidates: list[tuple[str, str | None]] = [
+        (candidate, candidate) for candidate in _offered_subprotocols(ws)
+    ]
     query_ticket = str(ws.query_params.get("ticket") or "").strip()
     if query_ticket:
+        logger.info("WS ticket received via deprecated query string")
         candidates.append((query_ticket, None))
-    candidates.extend((candidate, candidate) for candidate in _offered_subprotocols(ws))
     return candidates
 
 

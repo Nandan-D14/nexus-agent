@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated, Any
 from urllib.parse import urlparse
@@ -23,7 +24,7 @@ from nexus.composio_mcp import (
     mcp_error_is_unauthorized,
 )
 from nexus.config import settings
-from nexus.dependencies import get_history_repository
+from nexus.dependencies import get_history_repository, get_integration_test_limiter
 from nexus.google_drive import get_google_drive_access_token_for_user
 from nexus.google_services import CalendarClient, GoogleApiError, slim_calendar_event
 from nexus.models import (
@@ -41,6 +42,7 @@ from nexus.models import (
     UpsertVyoraConnectionRequest,
 )
 from nexus.mcp_client import McpRemoteClient, discovered_tools_payload, slugify_tool_part
+from nexus.net_safety import UnsafeUrlError, check_url_syntax
 from nexus.slack_oauth import SLACK_MCP_URL, persist_slack_bearer_token, slack_oauth_configured
 
 router = APIRouter()
@@ -88,7 +90,19 @@ def _validate_remote_mcp_url(url: str) -> str:
     local_hosts = {"localhost", "127.0.0.1", "::1"}
     if parsed.scheme != "https" and (settings.is_production or parsed.hostname not in local_hosts):
         raise HTTPException(status_code=400, detail="Remote MCP servers must use HTTPS.")
+    # Literal private/metadata IPs are rejected here; hostnames are resolved and
+    # re-checked on every request (incl. redirects) by McpRemoteClient.
+    try:
+        check_url_syntax(cleaned, allow_http=True)
+    except UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return cleaned
+
+
+def _check_integration_probe_rate(uid: str) -> None:
+    # Each call makes outbound requests from the server; cap per user.
+    if not get_integration_test_limiter().check(uid):
+        raise HTTPException(status_code=429, detail="Too many connection tests; slow down.")
 
 def _catalog_status(connection) -> str:
     if connection and connection.enabled and connection.status == "connected":
@@ -110,47 +124,35 @@ def _slack_auth_mode() -> str:
 
 @router.get("/api/v1/integrations/catalog")
 async def get_integrations_catalog(user: AuthenticatedUser = Depends(require_current_user)):
-    user_settings = await history_repository.get_user_settings(user.uid)
-    google_drive_connection = await history_repository.get_integration_connection(user.uid, "google_drive")
+    # Independent lookups: fetch concurrently instead of 12 sequential
+    # round-trips (each is two Firestore reads in a worker thread).
+    catalog_ids = (
+        "google_drive", "github", "exa", "treg", "linear", "vercel",
+        "cloudflare", "apify", "slack", "vyora", "openai", COMPOSIO_CONNECTION_ID,
+    )
+    user_settings, *connections = await asyncio.gather(
+        history_repository.get_user_settings(user.uid),
+        *(history_repository.get_integration_connection(user.uid, cid) for cid in catalog_ids),
+    )
+    by_id = dict(zip(catalog_ids, connections))
+    google_drive_connection = by_id["google_drive"]
     google_connected = bool((user_settings or {}).get("googleDriveRefreshToken")) or (
         bool(google_drive_connection)
         and google_drive_connection.status == "connected"
         and google_drive_connection.enabled
     )
     status = "connected" if google_connected else "needs_setup"
-    github_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "github")
-    )
-    exa_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "exa")
-    )
-    treg_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "treg")
-    )
-    linear_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "linear")
-    )
-    vercel_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "vercel")
-    )
-    cloudflare_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "cloudflare")
-    )
-    apify_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "apify")
-    )
-    slack_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "slack")
-    )
-    vyora_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "vyora")
-    )
-    openai_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, "openai")
-    )
-    composio_status = _catalog_status(
-        await history_repository.get_integration_connection(user.uid, COMPOSIO_CONNECTION_ID)
-    )
+    github_status = _catalog_status(by_id["github"])
+    exa_status = _catalog_status(by_id["exa"])
+    treg_status = _catalog_status(by_id["treg"])
+    linear_status = _catalog_status(by_id["linear"])
+    vercel_status = _catalog_status(by_id["vercel"])
+    cloudflare_status = _catalog_status(by_id["cloudflare"])
+    apify_status = _catalog_status(by_id["apify"])
+    slack_status = _catalog_status(by_id["slack"])
+    vyora_status = _catalog_status(by_id["vyora"])
+    openai_status = _catalog_status(by_id["openai"])
+    composio_status = _catalog_status(by_id[COMPOSIO_CONNECTION_ID])
     
     return {
         "catalog": [
@@ -342,6 +344,7 @@ async def create_mcp_connection(
     payload: CreateMcpConnectionRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    _check_integration_probe_rate(user.uid)
     url = _validate_remote_mcp_url(payload.url)
     connection_id = f"mcp_{slugify_tool_part(payload.name, fallback='server')}_{uuid.uuid4().hex[:6]}"
     token = (payload.bearer_token or "").strip()
@@ -368,6 +371,7 @@ async def upsert_composio_connection(
     payload: UpsertComposioConnectionRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    _check_integration_probe_rate(user.uid)
     extra_headers = composio_extra_headers(payload.consumer_api_key)
     test = await McpRemoteClient(url=COMPOSIO_MCP_URL, headers=extra_headers).discover()
     error = test.error or None
@@ -399,6 +403,7 @@ async def test_mcp_connection(
     connection_id: str,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    _check_integration_probe_rate(user.uid)
     connection = await history_repository.get_integration_connection(user.uid, connection_id)
     if not connection or connection.provider not in {"mcp", "composio"}:
         raise HTTPException(status_code=404, detail="MCP connection not found")

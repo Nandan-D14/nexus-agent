@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 
 from nexus.config import settings
+from nexus.net_safety import DEFAULT_MAX_REDIRECTS, UnsafeUrlError, guard_event_hooks
 from nexus.resilience import is_remote_deadline_error, retry_async
 from nexus.tools.workspace import get_active_workspace_path, save_source_artifact
 from nexus.tools.base import normalized_tool, tool_error, tool_success
@@ -30,6 +31,8 @@ _USER_AGENT = "CoComputer/1.0 (+https://cocomputer.local)"
 # 4xx is deterministic. HTTP 504 is usually a blocked/overloaded origin — retrying
 # it burns the turn budget and then surfaces as a Google "504 Stream removed".
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503}
+# Observation cap for scraped pages; the full text is saved to sources/.
+_MAX_SCRAPE_CONTENT_CHARS = 15_000
 
 
 class _NonRetryableHttpStatus(Exception):
@@ -49,8 +52,12 @@ async def _fetch_html(
     """GET a page with bounded retries, then give up so the turn can continue."""
 
     async def _once() -> str:
+        # SSRF guard runs on every redirect hop: a public URL must not bounce
+        # the backend to metadata (169.254.169.254) or internal addresses.
         async with httpx.AsyncClient(
             follow_redirects=True,
+            max_redirects=DEFAULT_MAX_REDIRECTS,
+            event_hooks=guard_event_hooks(allow_http=True),
             headers={"User-Agent": _USER_AGENT},
             timeout=20.0,
         ) as client:
@@ -68,7 +75,7 @@ async def _fetch_html(
             _once,
             attempts=settings.web_search_attempts,
             base_delay=settings.web_search_retry_base_seconds,
-            give_up_on=(_NonRetryableHttpStatus,),
+            give_up_on=(_NonRetryableHttpStatus, UnsafeUrlError),
             label=label,
         )
     except _NonRetryableHttpStatus as exc:
@@ -377,12 +384,29 @@ async def scrape_web_page(url: str, output_basename: str | None = None) -> dict[
                 )
             return tool_error(f"Failed to save scraped page: {exc}", url=cleaned_url)
 
+        saved_path = save_result.get("saved_path", f"{get_active_workspace_path()}/{relative_path}")
+        truncated = len(markdown) > _MAX_SCRAPE_CONTENT_CHARS
+        content = markdown
+        if truncated:
+            # Full text is on disk; keep the observation bounded for the context.
+            content = (
+                markdown[:_MAX_SCRAPE_CONTENT_CHARS].rstrip()
+                + f"\n\n[truncated {len(markdown) - _MAX_SCRAPE_CONTENT_CHARS} chars; "
+                f"full text saved at {saved_path}]"
+            )
         return tool_success(
             f"Scraped {title} from {cleaned_url}",
             url=cleaned_url,
             title=title,
-            content=markdown,
-            saved_path=save_result.get("saved_path", f"{get_active_workspace_path()}/{relative_path}"),
+            content=content,
+            truncated=truncated,
+            saved_path=saved_path,
+        )
+    except UnsafeUrlError as exc:
+        return tool_error(
+            f"Refused to fetch {(url or '').strip()}: {exc}",
+            error_code="UNSAFE_URL",
+            url=(url or "").strip(),
         )
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else None

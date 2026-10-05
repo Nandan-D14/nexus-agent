@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { authenticatedFetch, parseApiError } from "@/lib/api-client";
 
@@ -28,6 +28,7 @@ export function OauthCallbackPage({ name, exchangePath, messageType }: Props) {
   const [exchangeStatus, setExchangeStatus] = useState<"pending" | "success" | "error">("pending");
   const connectingLabel = `Connecting ${name}...`;
   const [exchangeMessage, setExchangeMessage] = useState(connectingLabel);
+  const exchangedCodeRef = useRef<string | null>(null);
 
   const { code, state, oauthError } = useMemo(() => {
     if (!hydrated) {
@@ -85,6 +86,12 @@ export function OauthCallbackPage({ name, exchangePath, messageType }: Props) {
     if (!preflight.canExchange || !code || !state) {
       return;
     }
+    // Authorization codes are single-use: a second exchange (StrictMode
+    // double effect, auth state re-emitting) fails and would overwrite success.
+    if (exchangedCodeRef.current === code) {
+      return;
+    }
+    exchangedCodeRef.current = code;
 
     authenticatedFetch(exchangePath, {
       method: "POST",

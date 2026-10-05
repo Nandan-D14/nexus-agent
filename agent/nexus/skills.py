@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from nexus.bundled_skill_files import BUNDLED_SKILL_FILES
+from nexus.prompt_safety import clean_inline
 from nexus.skill_format import ParsedSkill, normalize_skill_files, skill_sandbox_path
 
 
@@ -473,24 +474,27 @@ def build_enabled_skills_prompt(
         "If no skill matches, continue with the normal routing policy.",
     ]
     for skill in enabled[:limit]:
-        trigger = skill.get("trigger") or skill.get("description") or ""
-        description = skill.get("description") or ""
-        scope = ", ".join(skill.get("agent_scope") or [])
-        resources = ", ".join((skill.get("resources") or [])[:8])
+        trigger = clean_inline(skill.get("trigger") or skill.get("description") or "", cap=300)
+        description = clean_inline(skill.get("description") or "", cap=400)
+        scope = clean_inline(", ".join(skill.get("agent_scope") or []), cap=120)
+        resources = clean_inline(", ".join((skill.get("resources") or [])[:8]), cap=400)
         extra = f" Resources: {resources}." if resources else ""
         lines.append(
-            f"- {skill['skill_id']}: {skill['name']} ({skill['category']}): "
+            f"- {clean_inline(skill['skill_id'], cap=64)}: {clean_inline(skill['name'], cap=80)} "
+            f"({clean_inline(skill['category'], cap=40)}): "
             f"{trigger} Description: {description} Scope: {scope}.{extra}"
         )
 
     if mcp_tools:
+        # Names and parameter hints come from external MCP servers: render
+        # them as flat, bounded data so they cannot smuggle instructions.
         lines.append("")
         lines.append("Available MCP tools (external connectors):")
         for tool in mcp_tools[:50]:
-            name = tool.get("name", "")
-            params = tool.get("parameters", "")
+            name = clean_inline(tool.get("name", ""), cap=80)
+            params = clean_inline(tool.get("parameters", ""), cap=200)
             lines.append(f"- {name}({params})")
-        lines.append("Use MCP tools when they match the task. Request permission for risky MCP actions.")
+        lines.append("Use MCP tools when they match the task. Risky MCP actions pause for approval automatically.")
 
     return "\n".join(lines)
 

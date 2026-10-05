@@ -20,7 +20,9 @@ import {
 import { ArtifactIconTile, artifactBadge } from "./artifact-icon";
 import { ArtifactPreview } from "./artifact-preview";
 import { CodePreview } from "./code-preview";
+import { HtmlFrame } from "./html-frame";
 import { MarkdownPreview } from "./markdown-preview";
+import { looksLikeHtml } from "@/lib/session-canvas";
 
 type Props = {
   /** The artifact to display; `null` closes the viewer unless markdown is set. */
@@ -74,7 +76,18 @@ function ViewerPanel({
   const title =
     artifact?.title || titleOverride || artifact?.kind.replace(/_/g, " ") || "Document";
   const codeOnly = !artifact && isCodePath(titleOverride || title || "");
-  const kind = artifact ? previewKind(artifact) : codeOnly ? "code" : "markdown";
+  // Raw HTML (e.g. a written index.html that is not a stored artifact) must
+  // render as a page, not fall through to the markdown renderer.
+  const htmlOnly =
+    !artifact &&
+    (/\.html?$/i.test(titleOverride || title || "") || looksLikeHtml(markdown || ""));
+  const kind = artifact
+    ? previewKind(artifact)
+    : htmlOnly
+      ? "html"
+      : codeOnly
+        ? "code"
+        : "markdown";
   const wide = kind === "sheet" || kind === "html" || kind === "pdf" || kind === "code";
 
   useEffect(() => {
@@ -132,15 +145,15 @@ function ViewerPanel({
       return;
     }
     if (markdown) {
-      const name = titleOverride || title || (codeOnly ? "file.txt" : "document.md");
-      const mime = codeOnly
-        ? "text/plain;charset=utf-8"
-        : /\.html?$/i.test(name)
-          ? "text/html;charset=utf-8"
+      const name = titleOverride || title || (codeOnly ? "file.txt" : htmlOnly ? "index.html" : "document.md");
+      const mime = htmlOnly || /\.html?$/i.test(name)
+        ? "text/html;charset=utf-8"
+        : codeOnly
+          ? "text/plain;charset=utf-8"
           : "text/markdown;charset=utf-8";
       downloadTextFile(name, markdown, mime);
     }
-  }, [artifact, codeOnly, markdown, title, titleOverride]);
+  }, [artifact, codeOnly, htmlOnly, markdown, title, titleOverride]);
 
   return (
     <motion.div
@@ -193,7 +206,14 @@ function ViewerPanel({
               {title}
             </div>
             <div className="mt-0.5 truncate text-[12px] text-text-secondary">
-              {artifact ? artifactBadge(artifact) : codeOnly ? (title.split(".").pop() || "CODE").toUpperCase() : "Markdown"} · Last modified{" "}
+              {artifact
+                ? artifactBadge(artifact)
+                : htmlOnly
+                  ? "HTML"
+                  : codeOnly
+                    ? (title.split(".").pop() || "CODE").toUpperCase()
+                    : "Markdown"}{" "}
+              · Last modified{" "}
               {formatModified(artifact?.created_at)}
             </div>
           </div>
@@ -249,6 +269,10 @@ function ViewerPanel({
             onUrlChange={setUrl}
             className="relative min-h-0 flex-1 bg-background-full"
           />
+        ) : htmlOnly ? (
+          <div className="relative min-h-0 flex-1">
+            <HtmlFrame html={markdown || ""} title={title} />
+          </div>
         ) : codeOnly ? (
           <CodePreview
             content={markdown || ""}

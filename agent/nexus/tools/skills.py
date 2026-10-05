@@ -12,6 +12,9 @@ from nexus.skills import get_agent_skill
 from nexus.tools._context import get_history_repository, get_owner_id
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 
+# Per-skill instruction cap (OpenClaw-style bootstrap limit).
+SKILL_INSTRUCTIONS_MAX_CHARS = 20_000
+
 
 async def _load_user_settings() -> dict[str, Any] | None:
     repository = get_history_repository()
@@ -55,14 +58,22 @@ async def read_skill(skill_id: str) -> dict[str, Any]:
         )
     resources = list(skill.get("resources") or sorted(skill.get("files") or {}))
     sandbox_path = skill.get("sandbox_path") or ""
+    instructions = str(skill.get("instructions") or "")
+    if len(instructions) > SKILL_INSTRUCTIONS_MAX_CHARS:
+        where = f" Full text: {sandbox_path}/{SKILL_MD_FILENAME}." if sandbox_path else ""
+        instructions = (
+            instructions[:SKILL_INSTRUCTIONS_MAX_CHARS].rstrip()
+            + f"\n[truncated at {SKILL_INSTRUCTIONS_MAX_CHARS} characters.{where}]"
+        )
     return tool_success(
-        f"Loaded skill {skill.get('name') or target}. Instructions are loaded. Now proceed immediately to create the requested files/deliverables using workspace or artifact tools. Do not stop with just a text summary.",
+        f"Loaded skill {skill.get('name') or target}. Apply these instructions to the user's request now; "
+        "if it asks for a deliverable, build it with workspace or artifact tools.",
         skill_id=target,
         name=skill.get("name"),
         category=skill.get("category"),
         description=skill.get("description"),
         trigger=skill.get("trigger"),
-        instructions=skill.get("instructions") or "",
+        instructions=instructions,
         source=skill.get("source"),
         format=skill.get("format") or "legacy",
         agent_scope=skill.get("agent_scope") or [],

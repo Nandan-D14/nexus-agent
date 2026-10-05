@@ -26,8 +26,6 @@ export interface UseWebSocketReturn {
   sendBinary: (data: ArrayBuffer) => void;
   /** Send a typed JSON command (serialised automatically). */
   sendJson: (cmd: WsCommand) => void;
-  /** The most recent parsed server message (text frame). */
-  lastMessage: WsMessage | null;
   /** Whether the socket is currently in the OPEN state. */
   isConnected: boolean;
   /** Raw WebSocket readyState value. */
@@ -160,7 +158,6 @@ export function useWebSocket(
   }, [onRefreshToken]);
   const wsRef = useRef<WebSocket | null>(null);
   const [readyState, setReadyState] = useState<ReadyStateValue>(ReadyState.CLOSED);
-  const [lastMessage, setLastMessage] = useState<WsMessage | null>(null);
   const [connectionLost, setConnectionLost] = useState(false);
 
   /** Mutable ref so consumers can swap the binary handler without re-renders. */
@@ -187,6 +184,8 @@ export function useWebSocket(
   const replayInFlightRef = useRef(false);
   const replayBufferRef = useRef<WsMessage[]>([]);
   const hasOpenedRef = useRef(false);
+  /** Bumped whenever the connection owner changes (url change / unmount). */
+  const connectionGenerationRef = useRef(0);
 
   useEffect(() => {
     urlRef.current = url;
@@ -254,8 +253,9 @@ export function useWebSocket(
       lastSeqRef.current = Math.max(lastSeqRef.current, seq);
     }
 
+    // Delivered via the ref only: holding every frame in React state re-rendered
+    // the whole workspace once per streamed token.
     onJsonMessageRef.current?.(message);
-    setLastMessage(message);
   }, []);
 
   const flushReplayBuffer = useCallback(() => {
@@ -316,7 +316,6 @@ export function useWebSocket(
   const surfaceError = useCallback((code: string, message: string) => {
     const errorMsg = { type: "error", code, message } as WsMessage;
     onJsonMessageRef.current?.(errorMsg);
-    setLastMessage(errorMsg);
   }, []);
 
   const connect = useCallback((target: string) => {
@@ -331,18 +330,12 @@ export function useWebSocket(
       wsRef.current = null;
     }
 
-    // Auth belongs on ?ticket=. Offering the JWT as Sec-WebSocket-Protocol as
-    // well forces the server to echo that exact protocol on accept(); if auth
-    // succeeds via the query string and accept() omits it, the browser fails
-    // the handshake ("WebSocket connection ... failed").
+    // Auth travels as the Sec-WebSocket-Protocol value, not ?ticket=: query
+    // strings end up in proxy/load-balancer access logs and browser history.
+    // The server echoes the accepted ticket protocol on accept().
     const cleanUrl = resolveWebSocketTarget(target);
     const currentTicket = ticketRef.current;
-    let finalUrl = cleanUrl;
-    if (currentTicket) {
-      const sep = finalUrl.includes("?") ? "&" : "?";
-      finalUrl = `${finalUrl}${sep}ticket=${encodeURIComponent(currentTicket)}`;
-    }
-    const ws = new WebSocket(finalUrl);
+    const ws = currentTicket ? new WebSocket(cleanUrl, [currentTicket]) : new WebSocket(cleanUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     setReadyState(ReadyState.CONNECTING);
@@ -412,11 +405,8 @@ export function useWebSocket(
       };
 
       if (NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
-        setLastMessage({
-          type: "error",
-          code: `WS_CLOSED_${event.code}`,
-          message: event.reason || "WebSocket connection was closed.",
-        });
+        // The server sends its own error frame before these closes; the
+        // connection-lost banner below covers the UI.
         reconnectAttempts.current = MAX_RECONNECT_ATTEMPTS;
         setConnectionLost(true);
         failBufferedSends();
@@ -429,6 +419,7 @@ export function useWebSocket(
       ) {
         const delay = BASE_DELAY_MS * Math.pow(2, reconnectAttempts.current);
         reconnectAttempts.current += 1;
+        const generation = connectionGenerationRef.current;
         reconnectTimer.current = setTimeout(async () => {
           if (urlRef.current) {
             if (onRefreshTokenRef.current) {
@@ -441,6 +432,9 @@ export function useWebSocket(
                 console.warn("[useWebSocket] Failed to refresh ticket on auto-reconnect:", err);
               }
             }
+            // The hook may have unmounted or switched URL while the ticket
+            // refresh was in flight; reconnecting then leaks a zombie socket.
+            if (generation !== connectionGenerationRef.current || !urlRef.current) return;
             connectRef.current(urlRef.current);
           }
         }, delay);
@@ -503,6 +497,7 @@ export function useWebSocket(
     }
 
     return () => {
+      connectionGenerationRef.current += 1;
       clearReconnectTimer();
       clearStableTimer();
       if (wsRef.current) {
@@ -564,6 +559,7 @@ export function useWebSocket(
     clearReconnectTimer();
     reconnectAttempts.current = 0;
     setConnectionLost(false);
+    const generation = connectionGenerationRef.current;
     if (onRefreshTokenRef.current) {
       try {
         const fresh = await onRefreshTokenRef.current();
@@ -574,6 +570,7 @@ export function useWebSocket(
         console.warn("[useWebSocket] Failed to refresh ticket on user reconnect:", err);
       }
     }
+    if (generation !== connectionGenerationRef.current || !urlRef.current) return;
     connectRef.current(urlRef.current);
   }, [clearReconnectTimer]);
 
@@ -620,7 +617,6 @@ export function useWebSocket(
     send,
     sendBinary,
     sendJson,
-    lastMessage,
     isConnected,
     readyState,
     onBinaryMessageRef,

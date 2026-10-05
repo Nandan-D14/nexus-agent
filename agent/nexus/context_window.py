@@ -36,6 +36,10 @@ _TRIM_NOTE = (
 _CHARS_PER_TOKEN = 4
 # Per-message structural overhead (role markers, delimiters).
 _MESSAGE_OVERHEAD_TOKENS = 8
+# Inline images / files (screenshots) carry no text but cost real tokens:
+# ~258 on Gemini, ~765-1100 on OpenAI-style vision models. Over-estimate so
+# screenshot-heavy histories are trimmed before they overflow the model.
+_MEDIA_PART_TOKENS = 1_000
 
 
 def _estimate_tokens_from_text(text: str) -> int:
@@ -44,10 +48,13 @@ def _estimate_tokens_from_text(text: str) -> int:
 
 def _estimate_tokens_for_content(content) -> int:
     chars = 0
+    media_tokens = 0
     for part in getattr(content, "parts", None) or []:
         text = getattr(part, "text", None)
         if text:
             chars += len(text)
+        if getattr(part, "inline_data", None) is not None or getattr(part, "file_data", None) is not None:
+            media_tokens += _MEDIA_PART_TOKENS
         fc = getattr(part, "function_call", None)
         if fc is not None:
             chars += len(str(getattr(fc, "args", "") or ""))
@@ -55,7 +62,7 @@ def _estimate_tokens_for_content(content) -> int:
         fr = getattr(part, "function_response", None)
         if fr is not None:
             chars += len(str(getattr(fr, "response", "") or ""))
-    return chars // _CHARS_PER_TOKEN + _MESSAGE_OVERHEAD_TOKENS
+    return chars // _CHARS_PER_TOKEN + media_tokens + _MESSAGE_OVERHEAD_TOKENS
 
 
 def _estimate_system_tokens(llm_request) -> int:
@@ -257,6 +264,8 @@ def compact_retry_scope(tokens: int) -> Iterator[None]:
 
 # Groq on-demand TPM for small SKUs is ~8k; stay under that including tokenizer slack.
 _GROQ_INPUT_TOKEN_CAP = 5500
+# Max share of the input budget tool schemas may occupy before pruning.
+_TOOL_SCHEMA_BUDGET_SHARE = 0.5
 _NEVER_DROP_TOOLS = frozenset({
     "terminal_worker",
     "desktop_worker",
@@ -300,6 +309,9 @@ def _is_groq_runtime(runtime_config: Any | None) -> bool:
 def _input_token_budget(runtime_config: Any | None) -> tuple[int, int]:
     limit = max(1000, int(settings.model_context_limit))
     budget = int(limit * float(settings.context_input_budget_ratio))
+    working = int(settings.context_working_budget_tokens or 0)
+    if working > 0:
+        budget = min(budget, max(1000, working))
     if _is_groq_runtime(runtime_config):
         budget = min(budget, _GROQ_INPUT_TOKEN_CAP)
     override = _compact_retry_tokens.get()
@@ -452,7 +464,10 @@ def make_context_trimmer(runtime_config: Any | None = None):
 
         dropped_tools: list[str] = []
         if cfg is not None and tool_list:
-            tool_budget = max(800, budget - sys_tok - content_tok)
+            # Tools get a fixed share of the budget instead of whatever history
+            # leaves over: growing history must be condensed/trimmed, not evict
+            # tool schemas mid-task (which also invalidates the prompt cache).
+            tool_budget = max(800, int(budget * _TOOL_SCHEMA_BUDGET_SHARE) - sys_tok)
             pruned, dropped_tools = _prune_tools_to_budget(tool_list, tool_budget)
             if dropped_tools:
                 cfg.tools = pruned
@@ -468,7 +483,9 @@ def make_context_trimmer(runtime_config: Any | None = None):
             getattr(cfg, "tools", None) if cfg else None
         )
         if available <= 0:
-            available = budget
+            # System prompt + tools already fill the budget: keep only the
+            # latest turn (the loop below always keeps at least one).
+            available = 0
 
         kept: list = []
         total = 0

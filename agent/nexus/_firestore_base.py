@@ -19,6 +19,7 @@ from typing import Any
 from firebase_admin import firestore
 
 from nexus.firebase import get_firestore_client
+from nexus.secret_fields import open_private
 from nexus.history_models import (
     StoredArtifact,
     StoredIntegrationConnection,
@@ -457,7 +458,7 @@ class FirestoreRepoBase:
         public_data: dict[str, Any],
         private_data: dict[str, Any] | None = None,
     ) -> StoredIntegrationConnection:
-        private_data = private_data or {}
+        private_data = open_private(private_data)
         merged = {**public_data, **private_data}
         return StoredIntegrationConnection(
             connection_id=connection_id,

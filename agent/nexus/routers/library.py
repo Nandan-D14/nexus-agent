@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.dependencies import get_history_repository
 from nexus.library_artifacts import LIBRARY_CATEGORIES
-from nexus.routers.files import _serialize_artifact
+from nexus.routers.files import serialize_artifacts
 
 router = APIRouter()
 
@@ -61,15 +61,16 @@ async def list_library_artifacts(
         search=q,
         category=category,
     )
+    serialized = await serialize_artifacts([row.artifact for row in rows])
     return {
         "items": [
             {
-                "artifact": _serialize_artifact(row.artifact).model_dump(mode="json"),
+                "artifact": artifact.model_dump(mode="json"),
                 "session_id": row.artifact.session_id,
                 "session_title": row.session_title,
                 "category": row.category,
             }
-            for row in rows
+            for row, artifact in zip(rows, serialized)
         ],
         "next_cursor": _serialize_cursor(next_cursor),
     }
