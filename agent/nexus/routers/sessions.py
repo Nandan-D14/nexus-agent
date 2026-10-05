@@ -14,10 +14,12 @@ from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings
 from nexus.dependencies import (
     get_history_repository,
+    get_llm_probe_limiter,
     get_production_task_repository,
     get_sandbox_lifecycle_controller,
     get_session_create_limiter,
     get_session_manager,
+    get_settings_update_limiter,
     get_ticket_refresh_limiter,
 )
 from nexus.models import (
@@ -36,6 +38,7 @@ from nexus.models import (
     UserSettingsResponse,
     UserSettingsUpdateRequest,
 )
+from nexus.net_safety import assert_public_url
 from nexus.runtime_config import (
     build_byok_storage_update,
     build_public_user_settings,
@@ -500,6 +503,8 @@ async def get_active_sessions(user: AuthenticatedUser = Depends(require_current_
         user.uid,
         e2b_api_key=runtime_config.e2b_api_key,
     )
+    return {"sessions": sessions}
+
 
 def _serialize_durable_task_as_task_info(task) -> TaskInfo:
     status = map_durable_status_to_history(task.status)
@@ -517,7 +522,6 @@ def _serialize_durable_task_as_task_info(task) -> TaskInfo:
         step_count=0,
         artifact_count=0,
     )
-    return {"sessions": sessions}
 
 @router.get("/api/v1/history")
 async def list_history(
@@ -609,12 +613,12 @@ async def get_session_artifacts(session_id: str, user: AuthenticatedUser = Depen
     if not session and (not stored_session or stored_session.owner_id != user.uid):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from nexus.routers.files import _serialize_artifact
+    from nexus.routers.files import serialize_artifacts
     artifacts = await history_repository.list_session_artifacts(session_id)
     return {
         "artifacts": [
-            _serialize_artifact(artifact).model_dump(mode="json")
-            for artifact in artifacts
+            artifact.model_dump(mode="json")
+            for artifact in await serialize_artifacts(artifacts)
         ]
     }
 
@@ -659,9 +663,14 @@ async def update_user_settings(
     updates: UserSettingsUpdateRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    # Also throttles brute-forcing the shared access code via byok.accessCode.
+    if not get_settings_update_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many settings updates; slow down.")
     history_repository = get_history_repository()
     current_settings = await history_repository.get_user_settings(user.uid)
-    update_payload = dict(updates.model_extra or {})
+    update_payload: dict[str, Any] = {}
+    if updates.settings is not None:
+        update_payload["settings"] = updates.settings
 
     byok_updates = (
         updates.byok.model_dump(exclude_unset=True)
@@ -687,9 +696,6 @@ async def update_user_settings(
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
 
-    for raw_key in ("e2bApiKey", "geminiApiKey", "llmApiKey"):
-        update_payload.pop(raw_key, None)
-
     if update_payload:
         try:
             await history_repository.update_user_settings(user.uid, update_payload)
@@ -705,6 +711,8 @@ async def test_user_llm(
     payload: TestLlmRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    if not get_llm_probe_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many LLM tests; slow down.")
     history_repository = get_history_repository()
     current_settings = await history_repository.get_user_settings(user.uid)
     updates = payload.model_dump(exclude_unset=True)
@@ -713,6 +721,8 @@ async def test_user_llm(
         if updates:
             candidate["byok"] = build_byok_storage_update(current_settings, updates)
         runtime = resolve_session_runtime_config(candidate)
+        if runtime.llm_api_base:
+            await assert_public_url(runtime.llm_api_base, allow_http=True)
         from nexus.user_llm_router import probe_user_llm
 
         model = await probe_user_llm(runtime)
@@ -735,6 +745,8 @@ async def list_llm_models(
     payload: TestLlmRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    if not get_llm_probe_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many model listings; slow down.")
     history_repository = get_history_repository()
     current_settings = await history_repository.get_user_settings(user.uid)
     updates = payload.model_dump(exclude_unset=True)

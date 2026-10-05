@@ -123,6 +123,44 @@ def increment_worker_call_count() -> int:
     return counter[0]
 
 
+# Inner tool actions taken by one AgentTool worker call. Workers run in their
+# own ADK runner, so the planner's event stream (and its ActionLedger) never
+# sees their clicks/screenshots; the gateway appends here and the worker
+# wrapper attaches the log to its result.
+_worker_action_log: contextvars.ContextVar[Optional[list[dict[str, Any]]]] = (
+    contextvars.ContextVar("_worker_action_log", default=None)
+)
+_MAX_WORKER_ACTIONS = 60
+
+
+def begin_worker_action_log() -> contextvars.Token:
+    return _worker_action_log.set([])
+
+
+def end_worker_action_log(token: contextvars.Token) -> list[dict[str, Any]]:
+    actions = _worker_action_log.get() or []
+    _worker_action_log.reset(token)
+    return list(actions)
+
+
+def record_worker_action(tool_name: str, result: Any) -> None:
+    """Append a compact record of a gated tool call inside a worker, if any."""
+    log = _worker_action_log.get()
+    if log is None or len(log) >= _MAX_WORKER_ACTIONS:
+        return
+    entry: dict[str, Any] = {"tool": tool_name, "status": "success", "error_code": ""}
+    if isinstance(result, dict):
+        entry["status"] = str(result.get("status") or "success").strip().lower()
+        entry["error_code"] = str(result.get("error_code") or "")
+        metadata = result.get("metadata")
+        verified = result.get("verified")
+        if verified is None and isinstance(metadata, dict):
+            verified = metadata.get("verified")
+        if verified is not None:
+            entry["verified"] = bool(verified)
+    log.append(entry)
+
+
 def set_ensure_sandbox_callback(callback: Callable[[], Awaitable[None]] | None) -> contextvars.Token:
     """Set the async callback that boots the sandbox if it isn't already alive."""
     return _ensure_sandbox_callback.set(callback)
@@ -386,24 +424,30 @@ def tool_approval_timed_out(tool_name: str) -> bool:
     return bool(current and tool_name in current)
 
 
-_current_untrusted_content: contextvars.ContextVar[bool] = contextvars.ContextVar(
+# Mutable per-turn holder, like ``_worker_call_counter``: a tool that marks
+# untrusted content may run in a child task whose ContextVar writes never reach
+# the parent, so mutate the shared list instead of re-setting the var.
+_current_untrusted_content: contextvars.ContextVar[Optional[list[bool]]] = contextvars.ContextVar(
     "_current_untrusted_content",
-    default=False,
+    default=None,
 )
 
 
 def mark_untrusted_content_seen() -> None:
     """Mark that untrusted web/MCP/desktop content is in scope this turn."""
-    _current_untrusted_content.set(True)
+    holder = _current_untrusted_content.get()
+    if holder is None:
+        _current_untrusted_content.set([True])
+    else:
+        holder[0] = True
 
 
 def untrusted_content_in_scope() -> bool:
     """Return True when untrusted external content has been observed."""
-    try:
-        return bool(_current_untrusted_content.get())
-    except LookupError:
-        return False
+    holder = _current_untrusted_content.get()
+    return bool(holder and holder[0])
 
 
 def clear_untrusted_content() -> None:
-    _current_untrusted_content.set(False)
+    """Start a fresh per-turn scope (call at the start of every turn)."""
+    _current_untrusted_content.set([False])

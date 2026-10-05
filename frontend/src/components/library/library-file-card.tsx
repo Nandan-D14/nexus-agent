@@ -179,11 +179,12 @@ export function LibraryFileCard({ item, view, onPreview, onOpenSession }: Props)
             sandbox="allow-scripts allow-forms allow-modals"
           />
         ) : kind === "pdf" && previewUrl ? (
-          <object
-            data={`${previewUrl}${PDF_THUMBNAIL_PARAMS}`}
-            type="application/pdf"
+          // iframe, not <object>: CSP `object-src 'none'` blocks plugin content.
+          <iframe
+            src={`${previewUrl}${PDF_THUMBNAIL_PARAMS}`}
+            title={`${title} thumbnail`}
+            tabIndex={-1}
             className="pointer-events-none h-[200%] w-[200%] origin-top-left scale-50 bg-white opacity-80"
-            aria-label={`${title} thumbnail`}
           />
         ) : (
           <div className="flex h-full flex-col gap-2 p-4">

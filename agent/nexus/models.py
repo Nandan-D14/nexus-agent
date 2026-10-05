@@ -435,6 +435,9 @@ class LlmModelsResponse(BaseModel):
 
 
 class UserSettingsUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    # Only user-editable fields are accepted. Billing/quota/integration fields
+    # on the user doc are written server-side and must never be client-settable.
+    model_config = ConfigDict(extra="forbid")
 
     byok: ByokUpdateRequest | None = None
+    settings: dict[str, Any] | None = Field(default=None, max_length=64)

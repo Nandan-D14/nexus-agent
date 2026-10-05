@@ -19,8 +19,10 @@ from nexus.auth import AuthenticatedUser
 from nexus.billing import build_quota_payload
 from nexus.config import settings
 from nexus.history_models import utcnow
+from nexus.secret_fields import open_value, seal_value
 
 _SETTINGS_CACHE_TTL_SECONDS = 30.0
+_SETTINGS_CACHE_MAX_ENTRIES = 5_000
 _settings_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _settings_cache_lock = threading.Lock()
 
@@ -46,7 +48,15 @@ class UserRepository(FirestoreRepoBase):
                 return copy.deepcopy(cached[1])
         data = await asyncio.to_thread(self._get_user_settings_sync, uid)
         with _settings_cache_lock:
-            _settings_cache[uid] = (time.monotonic(), data)
+            stamp = time.monotonic()
+            # Drop expired entries so the cache cannot grow with every user
+            # that has ever been seen by this process.
+            if len(_settings_cache) >= _SETTINGS_CACHE_MAX_ENTRIES:
+                for key in [k for k, (at, _) in _settings_cache.items() if stamp - at >= _SETTINGS_CACHE_TTL_SECONDS]:
+                    _settings_cache.pop(key, None)
+                if len(_settings_cache) >= _SETTINGS_CACHE_MAX_ENTRIES:
+                    _settings_cache.clear()
+            _settings_cache[uid] = (stamp, data)
         return copy.deepcopy(data)
 
     async def update_user_settings(self, uid: str, updates: dict[str, Any]) -> None:
@@ -156,7 +166,7 @@ class UserRepository(FirestoreRepoBase):
 
         if "googleDriveRefreshToken" in public_data:
             if "googleDriveRefreshToken" not in private_data:
-                private_updates["googleDriveRefreshToken"] = public_data.get("googleDriveRefreshToken")
+                private_updates["googleDriveRefreshToken"] = seal_value(public_data.get("googleDriveRefreshToken"))
             delete_google_drive_refresh_token = True
 
         if "googleDriveTokens" in public_data:
@@ -180,6 +190,8 @@ class UserRepository(FirestoreRepoBase):
 
         merged = dict(public_data)
         merged.update(private_data)
+        if "googleDriveRefreshToken" in merged:
+            merged["googleDriveRefreshToken"] = open_value(merged["googleDriveRefreshToken"])
         return merged
 
     def _update_user_settings_sync(self, uid: str, updates: dict[str, Any]) -> None:
@@ -195,6 +207,10 @@ class UserRepository(FirestoreRepoBase):
         if private_updates:
             private_updates.setdefault("updatedAt", now)
             private_updates = self._flatten_byok_updates(private_updates)
+            if "googleDriveRefreshToken" in private_updates:
+                private_updates["googleDriveRefreshToken"] = seal_value(
+                    private_updates["googleDriveRefreshToken"]
+                )
             self._apply_document_updates_sync(self._user_private_ref(uid), private_updates)
             self._cleanup_public_user_sensitive_fields_sync(
                 uid,

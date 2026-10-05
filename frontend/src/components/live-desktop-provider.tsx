@@ -19,6 +19,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ArrowUpRight, MonitorSmartphone, X } from "lucide-react";
 import { useToast } from "@/components/toast-provider";
 import { APP_DASHBOARD, sessionPath } from "@/lib/app-paths";
+import { previewSandboxFlags } from "@/lib/sandbox-session";
 import { useAuth } from "@/lib/auth-context";
 import { useSession } from "@/lib/use-session";
 
@@ -220,6 +221,8 @@ function LiveDesktopPiP({
                   src={session.streamUrl}
                   className="h-full w-full border-0 pointer-events-none"
                   allow="clipboard-read; clipboard-write"
+                  sandbox={previewSandboxFlags(session.streamUrl, ["allow-pointer-lock"])}
+                  referrerPolicy="no-referrer"
                   title={`Desktop preview for ${session.sessionId}`}
                 />
               ) : (

@@ -43,7 +43,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
             "playwright_verify",
         }
     ),
-    "artifacts": frozenset({"publish_html_artifact", "publish_app_preview", "render_ui"}),
+    "artifacts": frozenset({"publish_html_artifact", "publish_app_preview", "render_ui", "scaffold_web_project"}),
     "memory": frozenset({"remember_fact", "recall_facts"}),
 }
 
@@ -110,6 +110,7 @@ CONNECTOR_TOOLS: dict[str, frozenset[str]] = {
             "search_sources",
             "publish_html_artifact",
             "publish_app_preview",
+            "scaffold_web_project",
             "render_ui",
         }
     ),
@@ -131,8 +132,7 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "list_workspace_files",
         "read_skill",
         "read_skill_file",
-        "read_skill",
-        "read_skill_file",
+        "report_completion",
         "invoke_subagent",
         "send_message",
         "get_subagent_result",

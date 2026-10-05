@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import ipaddress
 import io
-import socket
 import zipfile
 from typing import Any
 from urllib.parse import urlparse
@@ -18,7 +16,9 @@ from fastapi.responses import StreamingResponse
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.dependencies import get_history_repository
+from nexus.http_headers import content_disposition
 from nexus.models import AgentSkillImportRequest, AgentSkillUpsertRequest, StatusMessage
+from nexus.net_safety import UnsafeUrlError, assert_public_url, fetch_limited, guarded_async_client
 from nexus.skill_catalog import CatalogFetchError, CatalogSourceError, load_catalog
 from nexus.skill_format import SkillFormatError, parse_skill_md, render_skill_md, normalize_skill_files
 from nexus.skill_import import (
@@ -43,6 +43,8 @@ router = APIRouter()
 history_repository = get_history_repository()
 
 _MAX_REMOTE_SKILL_BYTES = 200_000
+# GitHub tree/contents listings for large repos exceed the SKILL.md cap.
+_MAX_REMOTE_JSON_BYTES = 5_000_000
 
 
 def _public(skill: dict) -> dict:
@@ -176,7 +178,7 @@ async def export_skill(
         return StreamingResponse(
             io.BytesIO(encoded),
             media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename_base}-SKILL.md"'},
+            headers={"Content-Disposition": content_disposition("attachment", f"{filename_base}-SKILL.md")},
         )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -187,7 +189,7 @@ async def export_skill(
     return StreamingResponse(
         buffer,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename_base}.zip"'},
+        headers={"Content-Disposition": content_disposition("attachment", f"{filename_base}.zip")},
     )
 
 
@@ -295,37 +297,39 @@ def _normalize_skill_source_url(url: str) -> str:
     return url.strip()
 
 
-def _is_public_https_url(url: str) -> bool:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        return False
-    host = parsed.hostname.lower()
-    if host in {"localhost", "127.0.0.1", "::1"}:
+async def _is_public_https_url(url: str) -> bool:
+    if urlparse(url).scheme != "https":
         return False
     try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
+        await assert_public_url(url)
+    except UnsafeUrlError:
         return False
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or not ip.is_global:
-            return False
     return True
+
+
+async def _get_limited(
+    url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    max_bytes: int = _MAX_REMOTE_SKILL_BYTES,
+) -> httpx.Response:
+    async with guarded_async_client(timeout=20.0, follow_redirects=True) as client:
+        response = await fetch_limited(client, "GET", url, max_bytes=max_bytes, headers=headers)
+    response.raise_for_status()
+    return response
 
 
 async def _fetch_remote_skill_md(url: str) -> str:
     normalized = _normalize_skill_source_url(url)
-    if not _is_public_https_url(normalized):
+    if not await _is_public_https_url(normalized):
         raise HTTPException(status_code=400, detail="source_url must be a public https URL.")
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(normalized)
-            response.raise_for_status()
+        response = await _get_limited(normalized)
+    except UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail="Remote SKILL.md is too large or not public.") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=400, detail="Could not fetch SKILL.md from source_url.") from exc
     content = response.content or b""
-    if len(content) > _MAX_REMOTE_SKILL_BYTES:
-        raise HTTPException(status_code=400, detail="Remote SKILL.md is too large.")
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -333,20 +337,16 @@ async def _fetch_remote_skill_md(url: str) -> str:
 
 
 async def _fetch_remote_text(url: str) -> str | None:
-    if not _is_public_https_url(url):
+    if not await _is_public_https_url(url):
         return None
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(
-                url,
-                headers={"User-Agent": "CoComputer", "Accept": "application/vnd.github+json"},
-            )
-            response.raise_for_status()
-    except httpx.HTTPError:
+        response = await _get_limited(
+            url,
+            headers={"User-Agent": "CoComputer", "Accept": "application/vnd.github+json"},
+        )
+    except (httpx.HTTPError, UnsafeUrlError):
         return None
     content = response.content or b""
-    if len(content) > _MAX_REMOTE_SKILL_BYTES:
-        return None
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError:
@@ -361,17 +361,16 @@ async def _catalog_fetch_json(url: str) -> Any:
 
 
 async def _fetch_github_json(url: str) -> Any:
-    if not _is_public_https_url(url):
+    if not await _is_public_https_url(url):
         return None
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(
-                url,
-                headers={"User-Agent": "CoComputer", "Accept": "application/vnd.github+json"},
-            )
-            response.raise_for_status()
-            return response.json()
-    except (httpx.HTTPError, ValueError):
+        response = await _get_limited(
+            url,
+            headers={"User-Agent": "CoComputer", "Accept": "application/vnd.github+json"},
+            max_bytes=_MAX_REMOTE_JSON_BYTES,
+        )
+        return response.json()
+    except (httpx.HTTPError, UnsafeUrlError, ValueError):
         return None
 
 

@@ -84,6 +84,7 @@ import {
   uploadedFilesForTransport,
   upsertRunStep,
   upsertArtifact,
+  applyAgentMessageFinal,
   mapStoredMessagesToChatItems,
   foldDurableWorkingLogEvents,
   isInflightRunStatus,
@@ -290,10 +291,14 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${process.env.NEXT_PUBLIC_AGENT_WS_URL?.replace(/^wss?:\/\//, "") || "localhost:8000"}/ws/${sessionId}`
       : null;
 
+  // The ticket must belong to *this* route's session: after client-side
+  // navigation sessionData can still hold the previous session's ticket for a
+  // render, which would open a socket that is rejected (4001) and not retried.
   const shouldConnectWs =
     !isNewSession &&
     viewMode === "live" &&
-    Boolean(sessionData?.ws_ticket);
+    Boolean(sessionData?.ws_ticket) &&
+    sessionData?.session_id === sessionId;
   const durableTaskId =
     sessionData?.task_id && sessionData.task_id.startsWith("task_")
       ? sessionData.task_id
@@ -322,13 +327,21 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
   }, [error, toast]);
 
   useEffect(() => {
-    if (isLoading && !lastToastedLoadingRef.current) {
-      lastToastedLoadingRef.current = true;
-      toast("Loading session...", "info");
-    } else if (!isLoading) {
+    // Only surface slow loads, and always dismiss the toast once loading ends
+    // (it previously lingered after the session had already rendered).
+    const id = "session-loading";
+    if (!isLoading) {
       lastToastedLoadingRef.current = false;
+      removeToast(id);
+      return;
     }
-  }, [isLoading, toast]);
+    if (lastToastedLoadingRef.current) return;
+    const timer = window.setTimeout(() => {
+      lastToastedLoadingRef.current = true;
+      toast("Loading session...", "info", { id });
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [isLoading, toast, removeToast]);
 
   const handleRefreshToken = useCallback(async () => {
     if (!sessionData?.session_id) return null;
@@ -471,9 +484,51 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }
   }, [sessionId]);
 
+  // handleLastMessage is created once (stable identity for the socket ref), so it
+  // reads changing callbacks/ids through this ref instead of a stale closure.
+  const latestRef = useRef({ toast, registerDesktop, sessionId });
+  useEffect(() => {
+    latestRef.current = { toast, registerDesktop, sessionId };
+  }, [toast, registerDesktop, sessionId]);
+
+  // Streamed tokens are coalesced into one chat update per animation frame;
+  // a state update per token re-rendered the whole transcript dozens of times
+  // a second. Any other message flushes first so ordering is preserved.
+  const pendingDeltaRef = useRef<{ text: string; ts: number } | null>(null);
+  // Set by verification_caveat / a caveated final so agent_complete does not
+  // toast "completed successfully" for an unverified answer.
+  const caveatPendingRef = useRef(false);
+  const deltaFrameRef = useRef<number | null>(null);
+  const flushPendingDelta = useCallback(() => {
+    if (deltaFrameRef.current !== null) {
+      cancelAnimationFrame(deltaFrameRef.current);
+      deltaFrameRef.current = null;
+    }
+    const pending = pendingDeltaRef.current;
+    if (!pending) return;
+    pendingDeltaRef.current = null;
+    setChatItems((prev) => {
+      const lastIdx = prev.length - 1;
+      const last = prev[lastIdx];
+      if (last && last.kind === "message" && last.role === "agent") {
+        const updated = [...prev];
+        updated[lastIdx] = { ...last, text: last.text + pending.text };
+        return updated;
+      }
+      return [...prev, { kind: "message", role: "agent", text: pending.text, ts: pending.ts }];
+    });
+  }, []);
+  useEffect(() => () => {
+    if (deltaFrameRef.current !== null) cancelAnimationFrame(deltaFrameRef.current);
+  }, []);
+
   /* ---- WS message handler ---- */
   const handleLastMessage = useCallback((msg: WsMessage) => {
     const ts = Date.now();
+
+    if (msg.type !== "agent_delta" && msg.type !== "agent_stream_chunk") {
+      flushPendingDelta();
+    }
 
     // "pong" is a keepalive the client itself triggers, so it must not count as
     // agent progress — otherwise the stall watchdog would never fire.
@@ -572,11 +627,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         break;
 
       case "generative_ui": {
-        const genMsg = msg as unknown as {
-          component_type?: string;
-          title?: string;
-          component?: unknown;
-        };
+        const genMsg = msg;
         const nowIso = new Date().toISOString();
         const genStep: WorkflowStepData = {
           step_id: `genui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -688,25 +739,26 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
 
       case "vnc_url":
         setStreamUrl(msg.url);
-        registerDesktop({ sessionId, streamUrl: msg.url });
+        latestRef.current.registerDesktop({ sessionId: latestRef.current.sessionId, streamUrl: msg.url });
         break;
 
       case "agent_delta":
       case "agent_stream_chunk": {
-        const chunk = (msg as unknown as { delta?: string; chunk?: string }).delta ?? (msg as unknown as { chunk?: string }).chunk ?? "";
+        const chunk = msg.type === "agent_delta" ? msg.delta ?? "" : msg.chunk ?? "";
         if (!chunk) break;
         beginTurn();
         setPhase("thinking");
-        setChatItems((prev) => {
-          const lastIdx = prev.length - 1;
-          const last = prev[lastIdx];
-          if (last && last.kind === "message" && last.role === "agent") {
-            const updated = [...prev];
-            updated[lastIdx] = { ...last, text: last.text + chunk };
-            return updated;
-          }
-          return [...prev, { kind: "message", role: "agent", text: chunk, ts }];
-        });
+        if (pendingDeltaRef.current) {
+          pendingDeltaRef.current.text += chunk;
+        } else {
+          pendingDeltaRef.current = { text: chunk, ts };
+        }
+        if (deltaFrameRef.current === null) {
+          deltaFrameRef.current = requestAnimationFrame(() => {
+            deltaFrameRef.current = null;
+            flushPendingDelta();
+          });
+        }
         break;
       }
 
@@ -727,16 +779,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           break;
         }
         if (msg.role === "agent") {
-          setChatItems((prev) => {
-            const lastIdx = prev.length - 1;
-            const last = prev[lastIdx];
-            if (last && last.kind === "message" && last.role === "agent") {
-              const updated = [...prev];
-              updated[lastIdx] = { ...last, text: msg.text };
-              return updated;
-            }
-            return [...prev, { kind: "message", role: msg.role, text: msg.text, ts }];
-          });
+          setChatItems((prev) => applyAgentMessageFinal(prev, { text: msg.text, ts }));
           setPhase("done");
           setAgentAction(null);
           endTurn();
@@ -746,6 +789,40 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
           ...prev,
           { kind: "message", role: msg.role, text: msg.text, ts },
         ]);
+        break;
+
+      case "agent_message_final":
+        if (msg.caveat) caveatPendingRef.current = true;
+        setChatItems((prev) =>
+          applyAgentMessageFinal(prev, {
+            runId: msg.run_id,
+            text: msg.text,
+            caveat: msg.caveat,
+            ts,
+          }),
+        );
+        setPhase("done");
+        setAgentAction(null);
+        endTurn();
+        break;
+
+      case "verification_caveat":
+        caveatPendingRef.current = true;
+        break;
+
+      case "aborted":
+        endTurn();
+        setPhase("done");
+        setAgentStatus("");
+        setAgentAction(null);
+        // Marker only (filtered from the activity log) so the turn offers Retry.
+        setChatItems((prev) => [...prev, { kind: "event", type: "aborted", ts }]);
+        break;
+
+      // Metadata only; the run status and terminal events drive the UI.
+      case "turn_lifecycle":
+      case "turn_metrics":
+      case "agent_config":
         break;
 
       case "agent_thinking":
@@ -866,7 +943,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         setAgentStatus("");
         setAgentAction(null);
         applyWorkingLogChat();
-        toast("Task completed successfully!", "success");
+        if (caveatPendingRef.current) {
+          caveatPendingRef.current = false;
+        } else {
+          latestRef.current.toast("Task completed successfully!", "success");
+        }
         break;
 
       case "agent_delegation":
@@ -1010,7 +1091,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         const workerErrDetail =
           msg.error || msg.reason || "The agent run stopped unexpectedly.";
         setPageError(workerErrDetail);
-        toast(workerErrDetail, "error");
+        latestRef.current.toast(workerErrDetail, "error");
+        setChatItems((prev) => [
+          ...prev,
+          { kind: "event", type: "error", code: "WORKER_FAILED", message: workerErrDetail, ts },
+        ]);
         endTurn();
         setPhase("done");
         setAgentStatus("");
@@ -1021,7 +1106,11 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         const rejectDetail =
           msg.reason || "The request could not be queued. Please try again.";
         setPageError(rejectDetail);
-        toast(rejectDetail, "error");
+        latestRef.current.toast(rejectDetail, "error");
+        setChatItems((prev) => [
+          ...prev,
+          { kind: "event", type: "error", code: "ENQUEUE_REJECTED", message: rejectDetail, ts },
+        ]);
         endTurn();
         setPhase("done");
         setAgentStatus("");
@@ -1065,7 +1154,7 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         beginTurn({ force: true });
         setPhase("acting");
         setAgentStatus(msg.message || "Still working on the previous request...");
-        toast(
+        latestRef.current.toast(
           msg.message ||
             "Still working on the previous request — live progress is shown in the chat.",
           "info",
@@ -1182,7 +1271,6 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
         break;
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ---- Wire up JSON message handler via ref (avoids React batching loss) ---- */
@@ -1194,7 +1282,13 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
    * The thinking indicator is set optimistically on send and cleared by a
    * terminal event. If that event never arrives (dropped frame, backend that
    * bailed out silently, worker that died) the composer would stay locked
-   * forever. After a long quiet period, unlock the UI and say so plainly.
+   * forever. After a long quiet period, ask the server whether the run is
+   * still going.
+   *
+   * Never send stop_agent from here: quiet periods are normal (a long tool
+   * call, a tab that slept or was closed and reopened), and stopping would
+   * kill a healthy background run. The server owns stall detection and lease
+   * recovery for runs that really died.
    */
   useEffect(() => {
     if (viewMode !== "live") {
@@ -1205,28 +1299,43 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     }
 
     lastServerActivityRef.current = Date.now();
+    let checking = false;
+    let cancelled = false;
     const interval = setInterval(() => {
       const idleMs = Date.now() - lastServerActivityRef.current;
-      if (idleMs < AGENT_STALL_TIMEOUT_MS) {
+      if (idleMs < AGENT_STALL_TIMEOUT_MS || checking) {
         return;
       }
-
-      // Unlocking locally is not enough: the durable run is still non-terminal
-      // server-side, so the next prompt would come straight back as run_busy.
-      // Asking the server to stop settles it, which is what actually frees the
-      // session.
-      sendJson({ type: "stop_agent" });
-      markTurnInFlight(false);
-      setPhase("done");
-      setAgentStatus("");
-      setAgentAction(null);
-      setPageError(
-        "The agent stopped sending updates. Your message may not have been processed — please send it again.",
-      );
+      checking = true;
+      void getSessionRun(sessionId)
+        .then((run) => {
+          if (cancelled) return;
+          if (run && isInflightRunStatus(run.status)) {
+            // Still running server-side: keep the working UI and wait again.
+            lastServerActivityRef.current = Date.now();
+            setAgentStatus((prev) => prev || "Still working...");
+            return;
+          }
+          markTurnInFlight(false);
+          setPhase("done");
+          setAgentStatus("");
+          setAgentAction(null);
+          if (!run || run.status === "failed") {
+            setPageError(
+              "The agent stopped sending updates. Your message may not have been processed — please send it again.",
+            );
+          }
+        })
+        .finally(() => {
+          checking = false;
+        });
     }, AGENT_STALL_POLL_MS);
 
-    return () => clearInterval(interval);
-  }, [phase, viewMode, sendJson, markTurnInFlight]);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [phase, viewMode, getSessionRun, sessionId, markTurnInFlight]);
 
   useEffect(() => {
     if (isNewSession || viewMode !== "live" || !streamUrl) {
@@ -1536,16 +1645,23 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
       );
       const artifactChatItems = artifacts
         .filter((a) => isDeliverableArtifact(a) && !existingArtifactIds.has(a.artifact_id))
-        .map((a, index) => ({
-          kind: "event" as const,
-          type: "artifact_created",
-          artifact: a,
-          // Stagger slightly after messages so cards sort at end of the last turn
-          ts: Date.now() - (artifacts.length - index) * 10,
-        }));
+        .map((a, index) => {
+          // Anchor the card to when the artifact was made so it stays in the
+          // turn that produced it. "Now" would move it into whichever turn is
+          // latest on every reload/reconnect.
+          const createdTs = a.created_at ? new Date(a.created_at).getTime() : NaN;
+          return {
+            kind: "event" as const,
+            type: "artifact_created",
+            artifact: a,
+            ts: Number.isFinite(createdTs)
+              ? createdTs
+              : Date.now() - (artifacts.length - index) * 10,
+          };
+        });
       setChatItems((prev) => {
         if (nextChatItems.length > 0 || artifactChatItems.length > 0) {
-          return [...nextChatItems, ...artifactChatItems];
+          return mergeChatItemsByTimestamp(nextChatItems, artifactChatItems);
         }
         return prev.length > 0 ? prev : [];
       });
@@ -2300,6 +2416,31 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
     [availableConnectors, continueCurrentThread, createThreadFromAction, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, toast, viewMode],
   );
 
+  const handleRetryPrompt = useCallback(
+    async (text: string, attachments?: UploadedInputFile[]) => {
+      if (turnInFlightRef.current || isNewSession) return;
+      const files = (attachments ?? []).filter((file) => !file.uploading);
+      if (!text.trim() && files.length === 0) return;
+      const byok = await ensureByokReady();
+      if (!byok.ok) {
+        toast(byok.message, "info");
+        return;
+      }
+      sendTextOrQueue({
+        text,
+        connectorIds: withSchedulingConnectors(text, selectedConnectorIds, selectedToolIds, availableConnectors),
+        toolIds: selectedToolIds,
+        uploadedFiles: files,
+      });
+    },
+    [availableConnectors, ensureByokReady, isNewSession, selectedConnectorIds, selectedToolIds, sendTextOrQueue, toast],
+  );
+
+  const handleEditPrompt = useCallback((text: string) => {
+    setTextInput(text);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
   const handlePermissionRespond = useCallback(
     (
       taskId: string,
@@ -2705,6 +2846,8 @@ export function SessionWorkspace({ sessionId }: { sessionId: string }) {
                       onElicitationRespond={handleElicitationRespond}
                       onTemplateDraftChange={handleTemplateDraftChange}
                       onAppPreviewOpen={handleOpenAppPreview}
+                      onRetryPrompt={handleRetryPrompt}
+                      onEditPrompt={handleEditPrompt}
                       footer={
                         canShowComposer ? (
                           <div className="w-full">

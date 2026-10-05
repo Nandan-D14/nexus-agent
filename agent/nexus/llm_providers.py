@@ -291,6 +291,11 @@ def normalize_api_base(value: Any) -> str:
     parsed = urlparse(text)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("API base URL must be an absolute http(s) URL.")
+    from nexus.net_safety import check_url_syntax
+
+    # Rejects literal localhost/private/metadata targets in production
+    # (UnsafeUrlError is a ValueError). Hostnames are resolved at request time.
+    check_url_syntax(text, allow_http=True)
     return text
 
 

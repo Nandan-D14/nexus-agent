@@ -18,6 +18,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from nexus.config import settings
+from nexus.net_safety import guard_event_hooks
 from nexus.tracing import (
     monotonic_ms,
     safe_origin,
@@ -27,11 +28,6 @@ from nexus.tracing import (
 )
 
 logger = logging.getLogger(__name__)
-
-SECRET_KEY_RE = re.compile(
-    r"(authorization|cookie|credential|token|secret|password|api[_-]?key|private[_-]?key)",
-    re.I,
-)
 
 if TYPE_CHECKING:
     from nexus.history_repository import StoredIntegrationConnection
@@ -65,14 +61,18 @@ def slugify_tool_part(value: str, *, fallback: str = "tool") -> str:
 def redact_sensitive(value: Any) -> Any:
     from nexus.redact import redact_sensitive as _unified_redact
 
-    unified = _unified_redact(value)
-    if isinstance(unified, dict):
-        # Preserve legacy "[redacted]" marker for secret keys.
-        return {
-            str(key): ("[redacted]" if raw == "***" else raw)
-            for key, raw in unified.items()
-        }
-    return unified
+    def _legacy_marker(item: Any) -> Any:
+        # Preserve the legacy "[redacted]" marker for secret keys at any depth.
+        if isinstance(item, dict):
+            return {
+                str(key): ("[redacted]" if raw == "***" else _legacy_marker(raw))
+                for key, raw in item.items()
+            }
+        if isinstance(item, list):
+            return [_legacy_marker(entry) for entry in item]
+        return item
+
+    return _legacy_marker(_unified_redact(value))
 
 
 async def _emit_mcp_trace(event_type: str, **payload: Any) -> None:
@@ -237,7 +237,7 @@ class McpRemoteClient:
                 latency_ms=max(0, monotonic_ms() - started),
             )
 
-        return {"request": [on_request], "response": [on_response]}
+        return guard_event_hooks({"request": [on_request], "response": [on_response]})
 
     async def discover(self) -> McpTestResult:
         started = time.monotonic()

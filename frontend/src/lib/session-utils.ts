@@ -47,6 +47,10 @@ export type ChatItem =
       text: string;
       ts: number;
       attachments?: UploadedInputFile[];
+      /** Run that produced this agent message (agent_message_final). */
+      run_id?: string;
+      /** Advisory verification note shown under the answer. */
+      caveat?: string;
     }
   | { kind: "event"; type: string; ts: number; [key: string]: unknown }
   | {
@@ -384,6 +388,55 @@ export function upsertArtifact(prev: RunArtifact[], artifact: RunArtifact): RunA
   return updated;
 }
 
+/**
+ * Apply a run's terminal answer without creating a second bubble.
+ *
+ * Replaces the agent message tagged with the same run_id; otherwise the last
+ * agent message after the most recent user message (the streamed or
+ * transcript copy of this run); otherwise appends a new message.
+ */
+export function applyAgentMessageFinal(
+  prev: ChatItem[],
+  final: { runId?: string; text: string; caveat?: string; ts: number },
+): ChatItem[] {
+  const isAgentMessage = (
+    item: ChatItem,
+  ): item is Extract<ChatItem, { kind: "message" }> => item.kind === "message" && item.role === "agent";
+  let target = -1;
+  if (final.runId) {
+    for (let i = prev.length - 1; i >= 0; i -= 1) {
+      const item = prev[i];
+      if (isAgentMessage(item) && item.run_id === final.runId) {
+        target = i;
+        break;
+      }
+    }
+  }
+  if (target === -1) {
+    for (let i = prev.length - 1; i >= 0; i -= 1) {
+      const item = prev[i];
+      if (item.kind === "message" && item.role === "user") break;
+      if (isAgentMessage(item)) {
+        target = i;
+        break;
+      }
+    }
+  }
+  const nextItem: ChatItem = {
+    kind: "message",
+    role: "agent",
+    text: final.text,
+    ts: final.ts,
+    run_id: final.runId || undefined,
+    caveat: final.caveat || undefined,
+  };
+  if (target === -1) return [...prev, nextItem];
+  const existing = prev[target] as Extract<ChatItem, { kind: "message" }>;
+  const updated = [...prev];
+  updated[target] = { ...existing, text: final.text, run_id: nextItem.run_id, caveat: nextItem.caveat ?? existing.caveat };
+  return updated;
+}
+
 export function mapStoredMessagesToChatItems(
   messages: ArchivedMessage[],
   options?: { mode?: HistoryMapMode },
@@ -683,6 +736,29 @@ export type ReduceWorkingLogResult = {
 };
 
 /**
+ * Screenshots arrive as base64 (hundreds of KB each) and long computer-use
+ * runs produce many; keep image data only on the newest few so memory stays
+ * bounded. Older events keep their analysis text.
+ */
+const MAX_SCREENSHOT_IMAGES = 8;
+
+function dropOldScreenshotImages(items: ChatItem[]): ChatItem[] {
+  let kept = 0;
+  let changed = false;
+  const out = items.slice();
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    const item = out[i] as ChatItem & { type?: string; image_b64?: string };
+    if (item.kind !== "event" || item.type !== "agent_screenshot" || !item.image_b64) continue;
+    kept += 1;
+    if (kept > MAX_SCREENSHOT_IMAGES) {
+      out[i] = { ...item, image_b64: undefined } as ChatItem;
+      changed = true;
+    }
+  }
+  return changed ? out : items;
+}
+
+/**
  * Apply one working-log WS message onto chat/todo state using the same shapes
  * as live session handling. Returns null when the message is not a working-log
  * chat/todo mutation (transcript, generative_ui, run APIs, ephemeral, etc.).
@@ -786,19 +862,19 @@ export function reduceWorkingLogMessage(
     case "verification_result":
       return { chatItems: [...prevChatItems, { kind: "event", ...msg, ts }] };
 
-    case "agent_screenshot":
-      return {
-        chatItems: [
-          ...prevChatItems,
-          {
-            kind: "event",
-            type: msg.type,
-            image_b64: msg.image_b64,
-            analysis: msg.analysis,
-            ts,
-          },
-        ],
-      };
+    case "agent_screenshot": {
+      const next: ChatItem[] = [
+        ...prevChatItems,
+        {
+          kind: "event",
+          type: msg.type,
+          image_b64: msg.image_b64,
+          analysis: msg.analysis,
+          ts,
+        } as ChatItem,
+      ];
+      return { chatItems: dropOldScreenshotImages(next) };
+    }
 
     case "agent_complete":
       return {

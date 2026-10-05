@@ -38,6 +38,8 @@ GUI_MUTATIONS = frozenset(
         "playwright_type",
     }
 )
+# Pointer moves change hover state but are not ledger mutations.
+GUI_POINTER_MOVES = frozenset({"move_mouse"})
 VISUAL_VERIFIERS = frozenset(
     {
         "take_screenshot",
@@ -101,6 +103,36 @@ def _same_capability_group(candidate: str, failed: str) -> bool:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+WORKER_TOOLS = frozenset({"terminal_worker", "desktop_worker"})
+_MAX_WORKER_ACTIONS = 60
+
+
+def _worker_action_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    actions: list[dict[str, Any]] = []
+    for item in value[:_MAX_WORKER_ACTIONS]:
+        if not isinstance(item, Mapping) or not str(item.get("tool") or "").strip():
+            continue
+        action: dict[str, Any] = {
+            "tool": str(item["tool"]).strip()[:120],
+            "status": str(item.get("status") or "success").strip().lower()[:40],
+            "error_code": str(item.get("error_code") or "")[:80],
+        }
+        if item.get("verified") is not None:
+            action["verified"] = bool(item["verified"])
+        actions.append(action)
+    return actions
+
+
+def _observation_dict(observation: "ActionObservation") -> dict[str, Any]:
+    # Worker actions are persisted as their own inner records; do not store
+    # them twice in every checkpoint.
+    payload = asdict(observation)
+    payload.pop("worker_actions", None)
+    return payload
 
 
 def _text_list(value: Any) -> list[str]:
@@ -282,6 +314,10 @@ class ActionObservation:
     verified: bool = False
     task_state: dict[str, str] = field(default_factory=dict)
     observed_at: str = field(default_factory=_utcnow)
+    # Inner tool calls reported by an AgentTool worker (tool/status/verified).
+    worker_actions: list[dict[str, Any]] = field(default_factory=list)
+    # Structured outcome declared via report_completion.
+    completion_contract: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_tool_result(
@@ -391,6 +427,16 @@ class ActionObservation:
             error_code=error_code,
             verified=verified,
             task_state=task_state,
+            worker_actions=_worker_action_list(
+                payload.get("actions") if tool_name in WORKER_TOOLS else None
+            ),
+            completion_contract=(
+                dict(metadata_map.get("completion_contract") or {})
+                if tool_name == "report_completion"
+                and status in SUCCESS_STATUSES
+                and isinstance(metadata_map.get("completion_contract"), Mapping)
+                else {}
+            ),
         )
 
 
@@ -399,6 +445,10 @@ class ActionRecord:
     decision: ActionDecision
     observation: ActionObservation | None = None
     turn_index: int = 0
+    # Expanded from a worker's inner action log. Counts for GUI freshness but
+    # not as an unresolved failure: the worker's own status is authoritative
+    # for whether it recovered.
+    inner: bool = False
 
 
 @dataclass
@@ -490,14 +540,43 @@ class ActionLedger:
                         observed_at=str(
                             observation_data.get("observed_at") or _utcnow()
                         ),
+                        completion_contract=(
+                            dict(observation_data.get("completion_contract") or {})
+                            if isinstance(observation_data.get("completion_contract"), Mapping)
+                            else {}
+                        ),
                     )
                 except (TypeError, ValueError):
                     observation = None
             turn_idx = int(raw.get("turn_index") or 0)
             ledger.records.append(
-                ActionRecord(decision=decision, observation=observation, turn_index=turn_idx)
+                ActionRecord(
+                    decision=decision,
+                    observation=observation,
+                    turn_index=turn_idx,
+                    inner=bool(raw.get("inner")),
+                )
             )
         return ledger
+
+    def _expand_worker_actions(self, observation: ActionObservation) -> None:
+        for index, action in enumerate(observation.worker_actions):
+            inner_id = f"{observation.action_id}:{index}"
+            tool = action["tool"]
+            self.records.append(
+                ActionRecord(
+                    decision=ActionDecision.from_tool_call(
+                        action_id=inner_id, tool_name=tool, arguments={}
+                    ),
+                    observation=ActionObservation.from_tool_result(
+                        action_id=inner_id,
+                        tool_name=tool,
+                        result=action,
+                    ),
+                    turn_index=self.current_turn_index,
+                    inner=True,
+                )
+            )
 
     def finish(self, observation: ActionObservation) -> None:
         for record in reversed(self.records):
@@ -507,6 +586,7 @@ class ActionLedger:
             ):
                 record.observation = observation
                 record.turn_index = self.current_turn_index
+                self._expand_worker_actions(observation)
                 return
         self.records.append(
             ActionRecord(
@@ -519,6 +599,7 @@ class ActionLedger:
                 turn_index=self.current_turn_index,
             )
         )
+        self._expand_worker_actions(observation)
 
     def latest_unresolved_failures(self, current_turn_only: bool = True) -> list[ActionObservation]:
         unresolved: list[ActionObservation] = []
@@ -532,7 +613,7 @@ class ActionLedger:
         )
         for index, record in enumerate(target_records):
             observation = record.observation
-            if observation is None:
+            if observation is None or getattr(record, "inner", False):
                 continue
             if observation.status not in FAILURE_STATUSES:
                 continue
@@ -553,6 +634,20 @@ class ActionLedger:
             if not recovered:
                 unresolved.append(observation)
         return unresolved
+
+    def latest_completion_contract(self) -> dict[str, Any]:
+        """The newest report_completion contract from the current turn, if any."""
+        for record in reversed(self.records):
+            if record.turn_index != self.current_turn_index:
+                continue
+            observation = record.observation
+            if (
+                record.decision.action == "report_completion"
+                and observation is not None
+                and observation.completion_contract
+            ):
+                return observation.completion_contract
+        return {}
 
     def has_fresh_gui_verification(self) -> bool:
         last_mutation = -1
@@ -626,20 +721,34 @@ class ActionLedger:
             for record in self.records
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, max_records: int | None = None) -> dict[str, Any]:
+        """Serialize the ledger, optionally keeping only the newest records.
+
+        Long turns accumulate hundreds of records; persisting all of them in
+        every step/checkpoint risks Firestore's 1 MiB document limit.
+        """
+        records = self.records
+        dropped = 0
+        if max_records is not None and len(records) > max_records:
+            dropped = len(records) - max_records
+            records = records[-max_records:]
+        payload: dict[str, Any] = {
             "current_turn_index": self.current_turn_index,
             "records": [
                 {
                     "turn_index": getattr(record, "turn_index", 0),
+                    "inner": bool(getattr(record, "inner", False)),
                     "decision": asdict(record.decision),
                     "observation": (
-                        asdict(record.observation) if record.observation else None
+                        _observation_dict(record.observation) if record.observation else None
                     ),
                 }
-                for record in self.records
+                for record in records
             ],
         }
+        if dropped:
+            payload["truncated_records"] = dropped
+        return payload
 
 
 @dataclass(frozen=True)
@@ -657,12 +766,25 @@ class CompletionVerification:
         return asdict(self)
 
 
+# A user demanding a deliverable that should already exist ("where is my
+# deck", "give ppt"). Shared with the orchestrator's follow-up expansion so
+# both layers agree on what counts as a demand.
+_DELIVERABLE_NOUNS = (
+    r"pptx?|presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|"
+    r"artifact|file|website|webpage|site|page|preview|app"
+)
+DELIVERABLE_DEMAND_RE = re.compile(
+    # "where is/are/'s/did ... my deck" asks for a deliverable; a generic
+    # "where can I read about X page" research question must not.
+    rf"\bwhere(?:'s|\s+(?:is|are|did|does)\b|\s+the\b).{{0,60}}\b(?:{_DELIVERABLE_NOUNS})\b"
+    rf"|\b(?:show|give|open|send|share)\s+(?:me\s+)?(?:the\s+)?(?:ppt|{_DELIVERABLE_NOUNS})\b",
+    re.IGNORECASE,
+)
 _ARTIFACT_REQUEST = re.compile(
     r"(?:\b(?:create|generate|build|make|export|produce|code|develop|design)\b.{0,50}"
     r"\b(?:pdf|xlsx|spreadsheet|docx|document|pptx?|presentation|slides?|deck|html|report|artifact|file|website|webpage|site|landing|landing\s+page|prototype|app|application|dashboard|component)\b"
     r"|\.pdf\b|\.xlsx\b|\.docx\b|\.pptx?\b|\.html?\b|\blanding\s+page\b|\bweb\s+app\b|\breact\b|\bvite\b"
-    r"|\bwhere\b.{0,80}\b(?:pptx?|presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|artifact|file|website|webpage|site|page|preview|app)\b"
-    r"|\b(?:show|give|open|send|share)\s+(?:me\s+)?(?:the\s+)?(?:pptx?|ppt|presentation|slides?|deck|pdf|xlsx|spreadsheet|docx|document|report|artifact|file|website|webpage|site|page|preview|app)\b)",
+    rf"|{DELIVERABLE_DEMAND_RE.pattern})",
     re.IGNORECASE,
 )
 _TASK_STATE_METADATA_KEYS = frozenset({"task_type", "stage", "review_status"})
@@ -707,6 +829,20 @@ _SLIDE_CODE_DUMP_TOKENS = frozenset(
 
 _DIMENSION_RE = re.compile(r"\d+(?:\.\d+)?\s*in\b")
 _DEF_WITH_SLIDE_RE = re.compile(r"^\s*def\s+\w+\s*\(.*slide", re.IGNORECASE | re.MULTILINE)
+_FENCED_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+
+
+def is_fenced_help_answer(text: str | None) -> bool:
+    """True when code sits in fenced blocks next to real prose.
+
+    That shape is a deliberate help answer ("here is the CSS ..."), not a
+    leaked dump; dumps arrive as bare markup or code with no explanation.
+    """
+    raw = str(text or "")
+    if "```" not in raw:
+        return False
+    prose = _FENCED_BLOCK_RE.sub(" ", raw)
+    return len(re.sub(r"\s+", " ", prose).strip()) >= 40
 
 
 def looks_like_slide_code_dump(text: str | None) -> bool:
@@ -720,6 +856,8 @@ def looks_like_slide_code_dump(text: str | None) -> bool:
     """
     raw = str(text or "")
     if not raw.strip():
+        return False
+    if is_fenced_help_answer(raw):
         return False
     low = raw.lower()
     if any(token in low for token in _SLIDE_CODE_DUMP_TOKENS):
@@ -818,6 +956,77 @@ def _requires_artifact(request: str | None, outstanding_task: str | None = "") -
     return bool(_ARTIFACT_REQUEST.search(outstanding))
 
 
+def _ledger_reference_corpus(ledger: ActionLedger) -> list[str]:
+    """Lower-cased artifact values and successful-evidence text from the ledger."""
+    corpus: list[str] = []
+    for record in ledger.records:
+        observation = record.observation
+        if observation is None or observation.status not in SUCCESS_STATUSES:
+            continue
+        for artifact in observation.artifacts:
+            corpus.extend(
+                str(value).lower()
+                for value in artifact.values()
+                if isinstance(value, (str, int)) and str(value).strip()
+            )
+        corpus.extend(item.lower() for item in observation.evidence if item.strip())
+    return corpus
+
+
+def _claim_is_backed(claim: str, corpus: list[str]) -> bool:
+    text = claim.strip().lower()
+    if not text:
+        return True
+    base = text.rstrip("/").rsplit("/", 1)[-1]
+    needles = {text, base} if len(base) >= 4 else {text}
+    return any(needle in ref for ref in corpus for needle in needles)
+
+
+def _verify_completion_contract(
+    contract: Mapping[str, Any],
+    ledger: ActionLedger,
+) -> CompletionVerification | None:
+    """Check a report_completion contract against ledger evidence.
+
+    Returns a failed verification, or ``None`` when the contract holds and
+    the remaining generic checks should run.
+    """
+    status = str(contract.get("status") or "").lower()
+    summary = str(contract.get("summary") or "").strip()
+    remaining = _text_list(contract.get("remaining"))
+    if status in {"partial", "blocked"}:
+        # An honest partial/blocked report is advisory: the answer explaining
+        # what is missing is still delivered, with the remaining work attached.
+        return CompletionVerification(
+            verified=False,
+            status="partial",
+            method="completion_contract",
+            summary=summary or "The agent reported unfinished work.",
+            error_code="REPORTED_BLOCKED" if status == "blocked" else "REPORTED_PARTIAL",
+            remaining_work=remaining or ["Finish the outstanding work."],
+            retryable=False,
+        )
+    claims = _text_list(contract.get("claimed_artifacts"))
+    if claims:
+        corpus = _ledger_reference_corpus(ledger)
+        unbacked = [claim for claim in claims if not _claim_is_backed(claim, corpus)]
+        if unbacked:
+            return CompletionVerification(
+                verified=False,
+                status="failed",
+                method="completion_contract",
+                summary=(
+                    "Reported artifacts were not produced by any recorded tool: "
+                    + ", ".join(unbacked[:4])
+                ),
+                error_code="UNVERIFIED_ARTIFACT_CLAIM",
+                evidence=unbacked[:4],
+                remaining_work=["Create the claimed artifacts or correct the report."],
+                retryable=True,
+            )
+    return None
+
+
 def verify_completion(
     *,
     request: str,
@@ -904,6 +1113,12 @@ def verify_completion(
             retryable=True,
         )
 
+    contract = ledger.latest_completion_contract()
+    if contract:
+        contract_check = _verify_completion_contract(contract, ledger)
+        if contract_check is not None:
+            return contract_check
+
     if looks_like_slide_code_dump(response):
         # The planner leaked slide-layout internals (python-pptx coordinates,
         # e.g. "def kicker(slide, ...)") instead of calling
@@ -938,7 +1153,11 @@ def verify_completion(
             retryable=True,
         )
 
-    if looks_like_unverified_success_claim(response, has_artifacts=bool(ledger.artifacts())):
+    if not contract and looks_like_unverified_success_claim(
+        response, has_artifacts=bool(ledger.artifacts())
+    ):
+        # Regex fallback only when the planner did not file a structured
+        # report_completion contract (whose claims are checked above).
         # The model declares the deliverable done (often parroting stale task
         # state or todo checkmarks) without any recorded artifact or link.
         # Never deliver the claim as success -- force the actual build.

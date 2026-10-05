@@ -90,6 +90,32 @@ def _configured_bynara_models() -> list[str]:
     return ordered
 
 
+def _configured_bynara_fallbacks() -> list[dict[str, list[str]]]:
+    """LiteLLM ``fallbacks`` mapping each role's primary to its distinct fallbacks.
+
+    Router-level fallback covers AgentTool workers too, which never reach the
+    orchestrator's planner-only model-candidate loop.
+    """
+    def _parse(value: str) -> list[str]:
+        return [m.strip() for m in value.split(",") if m.strip()]
+
+    pairs = (
+        (settings.planner_model, settings.planner_fallback_models),
+        (settings.worker_model, settings.worker_fallback_models),
+        (settings.worker_visual_model, settings.worker_visual_fallback_models),
+        (settings.micro_model, settings.micro_fallback_models),
+    )
+    merged: dict[str, list[str]] = {}
+    for primary, fallbacks in pairs:
+        if not primary:
+            continue
+        chain = merged.setdefault(primary, [])
+        for model in _parse(fallbacks):
+            if model != primary and model not in chain:
+                chain.append(model)
+    return [{primary: chain} for primary, chain in merged.items() if chain]
+
+
 def get_bynara_router():
     global _bynara_router
     if _bynara_router is not None:
@@ -117,7 +143,11 @@ def get_bynara_router():
         for model in configured
     ]
 
-    _bynara_router = Router(model_list=model_list)
+    _bynara_router = Router(
+        model_list=model_list,
+        fallbacks=_configured_bynara_fallbacks(),
+        num_retries=settings.bynara_router_num_retries,
+    )
     return _bynara_router
 
 

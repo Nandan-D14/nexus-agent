@@ -11,6 +11,7 @@ import { TodoList } from "@/components/todo-list";
 import { ArtifactPreview } from "@/components/artifacts/artifact-preview";
 import { ArtifactIconTile, artifactBadge } from "@/components/artifacts/artifact-icon";
 import { DocumentViewerModal } from "@/components/artifacts/document-viewer-modal";
+import { HtmlFrame } from "@/components/artifacts/html-frame";
 import { CodePreview } from "@/components/artifacts/code-preview";
 import { MarkdownPreview } from "@/components/artifacts/markdown-preview";
 import {
@@ -62,26 +63,6 @@ function isCodeDocument(doc: SessionCanvasDocument): boolean {
   const markdown = isMarkdownPath(path) || isMarkdownPath(title);
   const html = /\.html?$/i.test(path) || /\.html?$/i.test(title);
   return code && !markdown && !html;
-}
-
-function HtmlFrame({ html, title }: { html: string; title: string }) {
-  const url = useMemo(() => {
-    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-    return URL.createObjectURL(blob);
-  }, [html]);
-
-  useEffect(() => {
-    return () => URL.revokeObjectURL(url);
-  }, [url]);
-
-  return (
-    <iframe
-      src={url}
-      title={title}
-      className="h-full w-full bg-white"
-      sandbox="allow-scripts allow-forms allow-modals"
-    />
-  );
 }
 
 function TextCanvasBody({ doc }: { doc: SessionCanvasDocument }) {

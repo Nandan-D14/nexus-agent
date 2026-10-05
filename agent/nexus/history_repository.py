@@ -128,13 +128,49 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             f"{type(self).__name__!r} object has no attribute {name!r}"
         )
 
-    def _list_owner_sessions_sync(self, owner_id: str) -> list[tuple[str, dict[str, Any]]]:
-        sessions = (
+    def _list_owner_sessions_sync(
+        self,
+        owner_id: str,
+        fields: list[str] | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Every session for an owner. Pass ``fields`` to project only what
+        aggregate views need instead of downloading whole session docs."""
+        query = self._db.collection("sessions").where(filter=FieldFilter("ownerId", "==", owner_id))
+        if fields:
+            query = query.select(fields)
+        return [(doc.id, doc.to_dict() or {}) for doc in query.stream()]
+
+    # Bounds one history listing request (pages of _SESSION_PAGE_SIZE).
+    _SESSION_PAGE_SIZE = 100
+    _SESSION_SCAN_MAX_DOCS = 2_000
+
+    def _iter_owner_sessions_by_recency_sync(self, owner_id: str):
+        """Yield ``(id, data)`` newest-first using the (ownerId, updatedAt DESC) index.
+
+        Falls back to an unordered scan when that index is unavailable.
+        """
+        base = (
             self._db.collection("sessions")
             .where(filter=FieldFilter("ownerId", "==", owner_id))
-            .stream()
+            .order_by("updatedAt", direction=firestore.Query.DESCENDING)
         )
-        return [(doc.id, doc.to_dict() or {}) for doc in sessions]
+        last_snapshot = None
+        scanned = 0
+        try:
+            while scanned < self._SESSION_SCAN_MAX_DOCS:
+                query = base if last_snapshot is None else base.start_after(last_snapshot)
+                docs = list(query.limit(self._SESSION_PAGE_SIZE).stream())
+                for doc in docs:
+                    yield doc.id, doc.to_dict() or {}
+                scanned += len(docs)
+                if len(docs) < self._SESSION_PAGE_SIZE:
+                    return
+                last_snapshot = docs[-1]
+        except GoogleAPICallError as exc:
+            if scanned or not self._is_missing_firestore_index_error(exc):
+                raise
+            logger.warning("sessions(ownerId, updatedAt) index unavailable; scanning all sessions")
+            yield from self._list_owner_sessions_sync(owner_id)
 
     @staticmethod
     def _clip_text(value: Any, limit: int = 220) -> str:
@@ -738,6 +774,11 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         ref = self._db.collection("sessions").document(session.id)
         snapshot = ref.get()
         existing = snapshot.to_dict() if snapshot.exists else {}
+        existing_owner = existing.get("ownerId")
+        if existing_owner and existing_owner != session.owner_id:
+            # A session id must never be re-owned: merge=True below would hand
+            # the victim's session (and its history) to the caller.
+            raise PermissionError(f"Session {session.id} belongs to another user")
         now = utcnow()
         task_id = getattr(session, "task_id", "") or existing.get("taskId") or session.id
         payload: dict[str, Any] = {
@@ -1440,10 +1481,13 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
 
     def _list_session_steps_sync(self, session_id: str, limit: int) -> list[StoredRunStep]:
         """List steps across all runs for a session, ordered by creation time."""
+        # Each step can also exist as a task mirror (filtered out below), so
+        # 2x the limit bounds the read without changing the result.
         stream = (
             self._db.collection_group("steps")
             .where(filter=FieldFilter("sessionId", "==", session_id))
             .order_by("createdAt", direction=firestore.Query.ASCENDING)
+            .limit(max(1, limit) * 2)
             .stream()
         )
         return [
@@ -1588,13 +1632,24 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         return self._build_stored_artifact(session_id, run_id, artifact_id, payload)
 
     def _check_artifact_owner(self, data: dict[str, Any], owner_id: str) -> bool:
-        # Manus-style: artifact doc is source of truth. Trust its ownerId;
-        # legacy docs without ownerId are accepted (caller already authed).
-        # Never gate on parent session doc - sessions are ephemeral, GCS is not.
+        # Manus-style: artifact doc is source of truth when it carries ownerId.
         doc_owner = data.get("ownerId")
-        if not doc_owner:
-            return True
-        return doc_owner == owner_id
+        if doc_owner:
+            return doc_owner == owner_id
+        # Legacy docs without ownerId: the caller-supplied session/run ids are
+        # not proof of ownership, so fall back to the parent session's owner
+        # and deny when that cannot be established.
+        session_id = data.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return False
+        try:
+            snapshot = self._db.collection("sessions").document(session_id.strip()).get()
+        except Exception:
+            logger.warning("ARTIFACT_LEGACY_OWNER_LOOKUP_FAILED session=%s", session_id, exc_info=True)
+            return False
+        if not getattr(snapshot, "exists", False):
+            return False
+        return (snapshot.to_dict() or {}).get("ownerId") == owner_id
 
     def _get_artifact_for_owner_sync(
         self,
@@ -1618,7 +1673,8 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             if not getattr(doc, "exists", False):
                 return None
             data = doc.to_dict() or {}
-            if not self._check_artifact_owner(data, owner_id):
+            owner_probe = data if data.get("sessionId") else {**data, "sessionId": sid}
+            if not self._check_artifact_owner(owner_probe, owner_id):
                 logger.warning("ARTIFACT_OWNER_MISMATCH artifact=%s", artifact_id)
                 return None
             found_sid = str(data.get("sessionId") or sid or "")
@@ -1723,6 +1779,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             self._db.collection_group("artifacts")
             .where(filter=FieldFilter("sessionId", "==", session_id))
             .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(max(1, limit) * 2)
             .stream()
         )
         return [
@@ -1751,11 +1808,25 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
     ) -> tuple[list[Any], datetime | None]:
         """List deliverable artifacts for a user, excluding scrapes/sources.
 
-        Uses per-session listing because the collection-group index
-        artifacts(ownerId ASC, createdAt DESC) is not deployed in all
-        environments yet. A FailedPrecondition on that query was being
-        mapped to HTTP 503 by the global Google API handler.
+        Fast path: one collection-group query on artifacts(ownerId, createdAt
+        DESC), declared in firestore.indexes.json. Environments where that
+        index is not deployed (or still building) fall back to the per-session
+        scan instead of surfacing FailedPrecondition as HTTP 503.
         """
+        try:
+            return self._list_owner_library_artifacts_collection_group_sync(
+                owner_id,
+                limit,
+                cursor,
+                search,
+                category,
+            )
+        except GoogleAPICallError as exc:
+            if not self._is_missing_firestore_index_error(exc):
+                raise
+            logger.warning(
+                "artifacts(ownerId, createdAt) index unavailable; using per-session library scan"
+            )
         return self._list_owner_library_artifacts_via_sessions_sync(
             owner_id,
             limit,
@@ -1796,7 +1867,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
                 .order_by("createdAt", direction=firestore.Query.DESCENDING)
             )
             if page_cursor is not None:
-                query = query.start_after(page_cursor)
+                # Cursor values must be keyed by the order_by field; a bare
+                # datetime is rejected by the client.
+                query = query.start_after({"createdAt": page_cursor})
             query = query.limit(self._LIBRARY_FETCH_CAP)
             batch: list[StoredArtifact] = []
             for doc_id, data in self._deduplicated_collection_group_docs(
@@ -2438,7 +2511,10 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         token_totals = self._empty_token_totals()
         tracked_sources: set[str] = set()
 
-        owner_sessions = self._list_owner_sessions_sync(owner_id)
+        owner_sessions = self._list_owner_sessions_sync(
+            owner_id,
+            fields=["status", "messageCount", "sandboxId", "createdAt", "endedAt", "tokenTotals"],
+        )
 
         for _, data in owner_sessions:
             if data.get("status") == "deleted":
@@ -2504,7 +2580,10 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             for day in chart_days
         }
 
-        owner_sessions = self._list_owner_sessions_sync(owner_id)
+        owner_sessions = self._list_owner_sessions_sync(
+            owner_id,
+            fields=["status", "messageCount", "createdAt", "lastActiveAt"],
+        )
 
         for _, data in owner_sessions:
             if data.get("status") == "deleted":
@@ -2528,10 +2607,13 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             if created_at and created_at < start_date and (not last_active_at or last_active_at < start_date):
                 continue
 
+            # Only the chart window is needed; createdAt is auto-indexed, so
+            # this avoids streaming a session's entire usage history.
             usage_events = (
                 self._db.collection("sessions")
                 .document(session_id)
                 .collection("usage_events")
+                .where(filter=FieldFilter("createdAt", ">=", start_date))
                 .stream()
             )
             for doc in usage_events:
@@ -2556,7 +2638,7 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         search_text = search.strip().lower() if search else None
         sessions: list[tuple[datetime, StoredSession]] = []
 
-        for session_id, data in self._list_owner_sessions_sync(owner_id):
+        for session_id, data in self._iter_owner_sessions_by_recency_sync(owner_id):
             session_status = data.get("status", "ended")
             if session_status == "deleted":
                 continue
@@ -2586,6 +2668,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
             created_at = self._coerce_datetime(data.get("createdAt"))
             sort_key = updated_at or created_at or datetime.min.replace(tzinfo=timezone.utc)
             sessions.append((sort_key, self._build_stored_session(session_id, data)))
+            if len(sessions) >= limit:
+                # Source is already newest-first; no need to read further.
+                break
 
         sessions.sort(key=lambda item: item[0], reverse=True)
         return [session for _, session in sessions[:limit]]
@@ -2691,25 +2776,35 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
         return results
 
     def _list_all_active_sandbox_ids_sync(self) -> list[str]:
-        """Return a list of all sandbox IDs associated with active sessions across all users."""
-        sandbox_ids = set()
-        try:
-            from google.cloud import firestore
-            # Check active sessions
-            docs = self._db.collection("sessions").where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active"])).get()
-            for doc in docs:
-                sid = doc.to_dict().get("sandboxId")
-                if sid:
-                    sandbox_ids.add(sid)
+        """Return all sandbox IDs still owned by a live or paused session.
 
-            # Check users with paused sandboxes
-            users = self._db.collection("userPublic").where(filter=firestore.FieldFilter("pausedSandboxId", "!=", None)).get()
-            for user in users:
-                sid = user.to_dict().get("pausedSandboxId")
-                if sid:
-                    sandbox_ids.add(sid)
-        except Exception:
-            pass
+        Errors propagate on purpose: the sandbox sweeper kills every running
+        sandbox missing from this list, so a partial result must never be
+        returned.
+        """
+        from google.cloud import firestore
+
+        sandbox_ids: set[str] = set()
+        docs = (
+            self._db.collection("sessions")
+            .where(filter=firestore.FieldFilter("status", "in", ["creating", "ready", "active", "paused"]))
+            .get()
+        )
+        for doc in docs:
+            sid = (doc.to_dict() or {}).get("sandboxId")
+            if sid:
+                sandbox_ids.add(sid)
+
+        # Paused sandboxes are tracked on the public user doc (see _user_public_ref).
+        users = (
+            self._db.collection("users")
+            .where(filter=firestore.FieldFilter("pausedSandboxId", "!=", None))
+            .get()
+        )
+        for user in users:
+            sid = (user.to_dict() or {}).get("pausedSandboxId")
+            if sid:
+                sandbox_ids.add(sid)
         return list(sandbox_ids)
 
     def _get_session_messages_sync(self, session_id: str) -> list[dict[str, Any]]:
@@ -2791,7 +2886,9 @@ class FirestoreHistoryRepository(FirestoreRepoBase):
                 "contextPacket": context_packet,
                 "contextPacketInputsDigest": context_packet.get("inputsDigest", ""),
                 "hasArtifacts": bool(artifacts),
-                "artifactCount": len(artifacts) if artifacts else int(data.get("artifactCount", 0) or 0),
+                # `artifacts` is a capped preview (25); never let it shrink
+                # the stored total.
+                "artifactCount": max(len(artifacts or []), int(data.get("artifactCount", 0) or 0)),
                 "canContinueWorkspace": current_can_continue,
                 "canContinueConversation": True,
                 "exactWorkspaceResumeAvailable": current_can_continue,

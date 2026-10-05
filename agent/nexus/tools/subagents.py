@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from nexus.config import settings
+from nexus.subagent_store import SubagentLimitError
 from nexus.tools._context import get_subagent_supervisor, get_task_id
 from nexus.tools.base import normalized_tool, tool_error, tool_success
 
@@ -46,6 +47,13 @@ async def invoke_subagent(prompt: str, role: str = "worker", type_name: str = "g
         return tool_success(
             f"Spawned subagent {record.subagent_id}.",
             **record.payload(),
+        )
+    except SubagentLimitError as exc:
+        return tool_error(
+            str(exc),
+            error_code="SUBAGENT_LIMIT",
+            retryable=True,
+            suggested_alternatives=["await_subagents", "get_subagent_result"],
         )
     except Exception as exc:
         return tool_error(str(exc), error_code="SUBAGENT_SPAWN_FAILED")

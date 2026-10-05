@@ -197,11 +197,12 @@ export function OutputsPanel({
                         sandbox="allow-scripts allow-forms allow-modals"
                       />
                     ) : kind === "pdf" && currentUrl ? (
-                      <object
-                        data={`${currentUrl}${PDF_THUMBNAIL_PARAMS}`}
-                        type="application/pdf"
+                      // iframe, not <object>: CSP `object-src 'none'` blocks plugin content.
+                      <iframe
+                        src={`${currentUrl}${PDF_THUMBNAIL_PARAMS}`}
+                        title={`${artifact.title} thumbnail`}
+                        tabIndex={-1}
                         className="w-[200%] h-[200%] scale-50 origin-top-left bg-white pointer-events-none opacity-80 group-hover:opacity-100 transition-opacity"
-                        aria-label={`${artifact.title} thumbnail`}
                       />
                     ) : (
                       <div className="flex w-full flex-col items-center gap-2 opacity-50 group-hover:opacity-70 transition-opacity">

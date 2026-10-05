@@ -208,13 +208,11 @@ def evaluate_tool_policy(
         or slack_mcp_unattended_allowed(normalized_tool, allowed)
     ) and normalized_tool not in NEVER_UNATTENDED_TOOLS
     if explicit_unattended:
-        # NEVER tools already excluded above; double-guard here.
-        if normalized_tool not in NEVER_UNATTENDED_TOOLS:
-            return ToolPolicyDecision(
-                "allow",
-                "Allowed by scheduled unattended-tool auto-approval.",
-                "low",
-            )
+        return ToolPolicyDecision(
+            "allow",
+            "Allowed by scheduled unattended-tool auto-approval.",
+            "low",
+        )
 
     if normalized_tool in NEVER_UNATTENDED_TOOLS:
         # Never auto-approve these, even on unattended runs. External ones
@@ -227,13 +225,7 @@ def evaluate_tool_policy(
             )
 
     if normalized_tool.startswith("mcp__"):
-        remote_name = normalized_tool.rsplit("__", 1)[-1]
-        if _MCP_SIDE_EFFECT_RE.search(remote_name):
-            return ToolPolicyDecision(
-                "require_approval",
-                "Remote MCP side effects require user confirmation.",
-                "high",
-            )
+        # Side-effecting MCP verbs already returned above.
         if mode == "manual":
             return ToolPolicyDecision(
                 "require_approval",

@@ -10,28 +10,12 @@ import contextlib
 import threading
 from collections.abc import Iterator
 
+from nexus.control_loop import GUI_MUTATIONS, GUI_POINTER_MOVES, VISUAL_VERIFIERS
 
-GUI_TOOLS: frozenset[str] = frozenset(
-    {
-        "take_screenshot",
-        "open_browser",
-        "move_mouse",
-        "left_click",
-        "right_click",
-        "double_click",
-        "type_text",
-        "press_key",
-        "scroll_screen",
-        "drag",
-        "playwright_navigate",
-        "playwright_click",
-        "playwright_type",
-        "playwright_get_text",
-        "playwright_wait_for",
-        "playwright_snapshot",
-        "playwright_verify",
-    }
-)
+
+# Every tool that touches the shared desktop/browser, derived from the single
+# GUI registry in control_loop so the lists cannot drift.
+GUI_TOOLS: frozenset[str] = GUI_MUTATIONS | GUI_POINTER_MOVES | VISUAL_VERIFIERS
 
 WORKSPACE_MUTATION_TOOLS: frozenset[str] = frozenset(
     {

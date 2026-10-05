@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
+import hmac
 import logging
 from typing import Any, Literal, Mapping
 
@@ -674,7 +675,7 @@ def _hash_or_clear_access_code(value: Any) -> str | None:
     configured_code = settings.shared_access_code.strip()
     if not configured_code:
         raise PermissionError("Shared access codes are not enabled on this server.")
-    if text != configured_code:
+    if not hmac.compare_digest(text.encode("utf-8"), configured_code.encode("utf-8")):
         raise PermissionError("Invalid access code.")
     return _hash_access_code(configured_code)
 

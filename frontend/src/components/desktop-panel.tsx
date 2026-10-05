@@ -9,6 +9,7 @@ import { useRef, useState, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Monitor } from "lucide-react";
 import { authenticatedFetch } from "@/lib/api-client";
+import { previewSandboxFlags } from "@/lib/sandbox-session";
 import { VisionOverlay } from "@/components/vision-overlay";
 
 export type AgentVisualAction = {
@@ -261,6 +262,8 @@ export function DesktopPanel({ streamUrl, analysis, action, sessionId, isAgentId
         src={streamUrl}
         className="w-full h-full border-0 grayscale-[0.15] contrast-[1.1] brightness-[1.05]"
         allow="clipboard-read; clipboard-write"
+        sandbox={previewSandboxFlags(streamUrl, ["allow-pointer-lock"])}
+        referrerPolicy="no-referrer"
         title="CoComputer Desktop"
       />
       <AgentActionOverlay action={action} />

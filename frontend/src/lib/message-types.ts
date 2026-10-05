@@ -339,6 +339,14 @@ export type WsMessage = WsEventMeta & (
   | { type: "agent_delta"; delta: string; seq?: number; run_id?: string }
   | { type: "agent_stream_chunk"; chunk: string; seq?: number; run_id?: string }
   | { type: "agent_stream_end"; run_id?: string }
+  /** Terminal answer for a run; replaces any streamed/transcript text. */
+  | { type: "agent_message_final"; run_id?: string; message_id?: string; text: string; caveat?: string }
+  /** Terminal event for a run the user (or a disconnect) stopped. */
+  | { type: "aborted"; run_id?: string; reason?: string }
+  | { type: "turn_lifecycle"; phase: "start" | "finishing" | "end" | "error"; run_id?: string; status?: string }
+  | { type: "verification_caveat"; code?: string; message?: string; detail?: string }
+  | { type: "turn_metrics"; [key: string]: unknown }
+  | { type: "agent_config"; reasoning_visibility?: "off" | "collapsed" | "stream" }
 );
 
 // ── Client -> Server (Text frames) ─────────────────────────────────
@@ -652,7 +660,7 @@ export type SessionPhase = "idle" | "listening" | "thinking" | "acting" | "done"
 // ── Unified chat item (used by the unified chat panel) ─────────────
 
 export type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[] }
+  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[]; run_id?: string; caveat?: string }
   | { kind: "event"; event: { type: string; timestamp: number; [key: string]: unknown } }
   | { kind: "permission"; request: PermissionRequestMessage; ts: number }
   | { kind: "delegation"; from: string; to: string; ts: number }

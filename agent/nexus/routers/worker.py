@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -21,9 +23,10 @@ class WorkerRunRequest(BaseModel):
 
 
 def _validate_worker_token(token: str | None) -> None:
-    if not settings.task_worker_auth_token:
+    expected = settings.task_worker_auth_token
+    if not expected:
         raise HTTPException(status_code=503, detail="Worker token is not configured")
-    if token != settings.task_worker_auth_token:
+    if not token or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Invalid worker token")
 
 

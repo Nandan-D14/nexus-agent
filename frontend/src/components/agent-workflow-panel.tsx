@@ -34,6 +34,7 @@ import {
   providerLabel,
 } from "@/lib/agent-tool-classification";
 import { authenticatedFetch } from "@/lib/api-client";
+import { previewSandboxFlags } from "@/lib/sandbox-session";
 import { normalizeSearchResults } from "@/lib/search-result-utils";
 import { Download, Eye, LayoutGrid } from "lucide-react";
 
@@ -747,7 +748,8 @@ function HtmlArtifactOutput({
             title={title}
             src={previewUrl}
             className="h-[min(70vh,560px)] w-full rounded-lg border border-zinc-800 bg-white"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            sandbox={previewSandboxFlags(previewUrl)}
+            referrerPolicy="no-referrer"
           />
         </div>
       )}
