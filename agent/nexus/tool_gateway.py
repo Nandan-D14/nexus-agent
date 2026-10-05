@@ -330,8 +330,11 @@ async def _await_background_task_approval(tool_name: str, decision: ToolPolicyDe
     try:
         from nexus.tools._context import get_bg_task_manager, get_skip_confirmations
 
+        # Unattended runs have no human to ask. Tools on the explicit
+        # unattended allowlist were already allowed by policy, so anything
+        # still needing approval here is denied rather than auto-approved.
         if get_skip_confirmations():
-            return True
+            return False
         manager = get_bg_task_manager()
     except Exception:
         manager = None
@@ -361,7 +364,7 @@ async def _await_durable_approval(
         )
 
         if get_skip_confirmations():
-            return True
+            return False
 
         repository = get_production_task_repository()
         task_id = get_task_id()
@@ -405,19 +408,24 @@ async def _await_durable_approval(
             exc_info=True,
         )
 
-    approval = await repository.create_approval(
-        task_id=task_id,
-        owner_id=owner_id,
-        description=_approval_description(tool_name, decision),
-        risk=decision.risk,
-        metadata={
-            "tool": tool_name,
-            "args_preview": _preview_args(args_view),
-            "canonical_args": _canonical_approval_args(args_view),
-            "run_id": run_id,
-            "action_hash": action_hash,
-        },
-    )
+    try:
+        approval = await repository.create_approval(
+            task_id=task_id,
+            owner_id=owner_id,
+            description=_approval_description(tool_name, decision),
+            risk=decision.risk,
+            metadata={
+                "tool": tool_name,
+                "args_preview": _preview_args(args_view),
+                "canonical_args": _canonical_approval_args(args_view),
+                "run_id": run_id,
+                "action_hash": action_hash,
+            },
+        )
+    except Exception:
+        # Fail closed without killing the turn: the tool is simply not run.
+        logger.warning("Failed to create approval for %s; denying", tool_name, exc_info=True)
+        return False
     if send_json is not None:
         logger.info(
             "approval_requested tool=%s task=%s approval=%s risk=%s hash=%s",
@@ -444,11 +452,15 @@ async def _await_durable_approval(
 
     deadline = time.monotonic() + APPROVAL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        current = await repository.get_approval(
-            task_id=task_id,
-            approval_id=approval.approval_id,
-            owner_id=owner_id,
-        )
+        try:
+            current = await repository.get_approval(
+                task_id=task_id,
+                approval_id=approval.approval_id,
+                owner_id=owner_id,
+            )
+        except Exception:
+            logger.warning("Transient error polling approval %s", approval.approval_id, exc_info=True)
+            current = None
         if current and current.status in {"approved", "denied"}:
             logger.info(
                 "approval_resolved tool=%s task=%s approval=%s approved=%s hash=%s",
@@ -557,7 +569,6 @@ _UNTRUSTED_PRODUCER_TOOLS = frozenset(
         "web_search",
         "tavily_search",
         "search_sources",
-        "desktop_worker",
         "take_screenshot",
         "playwright_get_text",
         "playwright_snapshot",
@@ -654,52 +665,26 @@ def gated_tool(func: Callable) -> Callable:
         finally:
             run_progress.tool_finished(run_id)
 
-    async def _invoke_guarded(*args: Any, **kwargs: Any) -> Any:
-        """Invoke the tool, converting an escaping raise into a tool error.
-
-        Native tools are already protected by ``normalized_tool``'s catch-all,
-        but approved MCP/ADK tools are not: any raise here used to propagate
-        through the runner and kill the entire turn with a generic
-        AGENT_ERROR. A failed tool call must be a ledger observation the
-        planner can retry or route around — never a turn-ending exception.
-        ``CancelledError`` still propagates so stall-watchdog cancellation
-        keeps working.
-        """
-        try:
-            return await _invoke_underlying(*args, **kwargs)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            from nexus.tools.base import (
-                classify_exception_message,
-                root_error_message,
-            )
-
-            message = root_error_message(exc)
-            error_code, retryable = classify_exception_message(message)
-            logger.exception(
-                "Approved tool %s raised; converting to tool error", tool_name
-            )
-            return {
-                "status": "error",
-                "summary": f"{tool_name} failed during execution: {message}",
-                "detail": {
-                    "tool": tool_name,
-                    "exception": type(exc).__name__,
-                    "message": message,
-                    "retryable": retryable,
-                    "remaining_work": [
-                        f"Retry {tool_name} with narrower inputs, "
-                        "or use an alternative tool."
-                    ],
-                },
-                "metadata": {"tool": tool_name},
-                "error_code": error_code,
-                "suggested_alternatives": [],
-            }
-
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        result = await _gated_call(*args, **kwargs)
+        try:
+            from nexus.tools._context import record_worker_action
+
+            record_worker_action(tool_name, result)
+        except Exception:
+            logger.debug("Could not record worker action for %s", tool_name, exc_info=True)
+        return result
+
+    async def _gated_call(*args: Any, **kwargs: Any) -> Any:
+        from nexus.turn_output import (
+            FINALIZATION_ALLOWED_TOOLS,
+            finalization_blocked_result,
+            finalization_pass_active,
+        )
+
+        if finalization_pass_active() and tool_name not in FINALIZATION_ALLOWED_TOOLS:
+            return finalization_blocked_result(tool_name)
         blocked = _check_tool_allowlist(tool_name, func)
         if blocked is not None:
             return blocked

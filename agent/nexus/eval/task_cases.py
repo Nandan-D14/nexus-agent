@@ -28,6 +28,9 @@ class TaskEvalCase:
     follow_up: str = ""
     expected_state: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
+    # Exact-answer benchmarks: any one of these must appear (case-insensitive)
+    # in the final response. A matching answer also satisfies expected_state.
+    expected_answers: tuple[str, ...] = ()
 
 
 TASK_CASES: tuple[TaskEvalCase, ...] = (

@@ -6,6 +6,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { Download, Loader2 } from "lucide-react";
 import type { RunArtifact } from "@/lib/message-types";
 import {
@@ -19,7 +20,19 @@ import { ArtifactIcon, artifactBadge } from "./artifact-icon";
 import { CodePreview } from "./code-preview";
 import { MarkdownPreview } from "./markdown-preview";
 import { SlidePreview } from "./slide-preview";
-import { SpreadsheetPreview } from "./spreadsheet-preview";
+
+// SheetJS is ~1 MB; load it only when a spreadsheet is actually previewed.
+const SpreadsheetPreview = dynamic(
+  () => import("./spreadsheet-preview").then((mod) => mod.SpreadsheetPreview),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-zinc-500">
+        <Loader2 className="h-4 w-4 animate-spin" />
+      </div>
+    ),
+  },
+);
 
 type Props = {
   artifact: RunArtifact;
@@ -66,10 +79,20 @@ export function ArtifactPreview({
       return;
     }
     let cancelled = false;
+    // Object URLs pin the whole file in memory until revoked; release the one
+    // this effect created when the artifact changes or the preview unmounts.
+    let createdObjectUrl: string | null = null;
     setLoading(true);
     setError(null);
     resolveArtifactUrl(artifact, true)
       .then((resolved) => {
+        if (resolved?.startsWith("blob:")) {
+          if (cancelled) {
+            URL.revokeObjectURL(resolved);
+            return;
+          }
+          createdObjectUrl = resolved;
+        }
         if (cancelled) return;
         setUrl(resolved);
         onUrlChangeRef.current?.(resolved);
@@ -86,6 +109,7 @@ export function ArtifactPreview({
       });
     return () => {
       cancelled = true;
+      if (createdObjectUrl) URL.revokeObjectURL(createdObjectUrl);
     };
   }, [artifact, initialUrl, kind]);
 
@@ -158,14 +182,14 @@ export function ArtifactPreview({
           </button>
         </div>
       ) : !url ? null : kind === "pdf" ? (
-        <object
-          data={url}
-          type="application/pdf"
+        // An iframe, not <object>/<embed>: the app CSP sets `object-src 'none'`,
+        // which blocks plugin content and left PDFs as a blank grey box. The
+        // browser's built-in PDF viewer renders blob: PDFs fine in a frame.
+        <iframe
+          src={url}
+          title={title}
           className="h-full w-full bg-zinc-200"
-          aria-label={title}
-        >
-          <embed src={url} type="application/pdf" className="h-full w-full" />
-        </object>
+        />
       ) : kind === "image" ? (
         <div className="flex h-full items-center justify-center bg-[#111113] p-6">
           <img

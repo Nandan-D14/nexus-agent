@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings
@@ -19,8 +19,10 @@ from nexus.dependencies import (
     get_task_create_limiter,
     get_task_queue,
 )
+from nexus.http_headers import content_disposition
 from nexus.policy import evaluate_tool_policy, normalize_autonomy_mode
 from nexus.production_tasks import DurableApproval, DurableTask, DurableTaskEvent, DurableTaskRun
+from nexus.repositories.approval_store import ApprovalAlreadyResolved
 from nexus.storage import (
     _DOWNLOAD_URL_EXPIRATION_SECONDS,
     candidate_artifact_blobs,
@@ -35,30 +37,86 @@ from nexus.storage import (
 
 router = APIRouter()
 
+# Execution flags only the server (schedules, websocket hand-off) may set.
+# A client sending them could self-grant unattended auto-approval.
+_RESERVED_METADATA_KEYS = frozenset({
+    "skip_confirmations",
+    "allowed_unattended_tools",
+    "user_transcript_recorded",
+    "source",
+    "schedule_id",
+})
+_MAX_JSON_FIELD_BYTES = 64 * 1024
+
+
+def _bounded_json(value: Any, field_name: str) -> Any:
+    import json
+
+    try:
+        size = len(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be JSON-serializable")
+    if size > _MAX_JSON_FIELD_BYTES:
+        raise ValueError(f"{field_name} exceeds {_MAX_JSON_FIELD_BYTES} bytes")
+    return value
+
+
+def _client_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if key not in _RESERVED_METADATA_KEYS}
+
+
+async def _require_session_access(session_id: str | None, uid: str) -> None:
+    """Reject attaching a task to a session owned by someone else."""
+    if not session_id:
+        return
+    session = await get_history_repository().get_session(session_id)
+    if session is not None and session.owner_id != uid:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _queue_payload(enqueue: Any) -> dict[str, Any] | None:
+    # Never expose queue resource names or raw provider errors to clients.
+    if enqueue is None:
+        return None
+    return {
+        "queued": bool(getattr(enqueue, "queued", False)),
+        "provider": str(getattr(enqueue, "provider", "") or ""),
+    }
+
 
 class DurableTaskCreateRequest(BaseModel):
     title: str = Field(default="New task", max_length=240)
     message: str = Field(default="", max_length=20000)
-    session_id: str | None = None
-    connector_ids: list[str] = Field(default_factory=list)
-    tool_ids: list[str] = Field(default_factory=list)
-    uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
+    session_id: str | None = Field(default=None, max_length=128)
+    connector_ids: list[str] = Field(default_factory=list, max_length=50)
+    tool_ids: list[str] = Field(default_factory=list, max_length=100)
+    uploaded_files: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     autonomy_mode: str | None = None
     budget: dict[str, Any] | None = None
     runtime_config_snapshot: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("uploaded_files", "budget", "runtime_config_snapshot", "metadata")
+    @classmethod
+    def _cap_json_size(cls, value: Any, info: ValidationInfo) -> Any:
+        return _bounded_json(value, info.field_name)
+
 
 class DurableTaskMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
-    connector_ids: list[str] = Field(default_factory=list)
-    tool_ids: list[str] = Field(default_factory=list)
-    uploaded_files: list[dict[str, Any]] = Field(default_factory=list)
+    connector_ids: list[str] = Field(default_factory=list, max_length=50)
+    tool_ids: list[str] = Field(default_factory=list, max_length=100)
+    uploaded_files: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     runtime_config_snapshot: dict[str, Any] = Field(default_factory=dict)
     autonomy_mode: str | None = None
     budget: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     run: bool = True
+
+    @field_validator("uploaded_files", "budget", "runtime_config_snapshot", "metadata")
+    @classmethod
+    def _cap_json_size(cls, value: Any, info: ValidationInfo) -> Any:
+        return _bounded_json(value, info.field_name)
 
 
 class ApprovalResolveRequest(BaseModel):
@@ -147,6 +205,8 @@ async def create_durable_task(
 ):
     if not get_task_create_limiter().check(user.uid):
         raise HTTPException(status_code=429, detail="Too many task creates; slow down.")
+    await _require_session_access(payload.session_id, user.uid)
+    metadata = _client_metadata(payload.metadata)
     repo = get_production_task_repository()
     queue = get_task_queue()
     task = await repo.create_task(
@@ -156,7 +216,7 @@ async def create_durable_task(
         autonomy_mode=normalize_autonomy_mode(payload.autonomy_mode),
         session_id=payload.session_id,
         budget=payload.budget,
-        metadata=payload.metadata,
+        metadata=metadata,
     )
     run = await repo.create_run(
         task_id=task.task_id,
@@ -169,7 +229,7 @@ async def create_durable_task(
         runtime_config_snapshot=payload.runtime_config_snapshot,
         autonomy_mode=payload.autonomy_mode,
         budget=payload.budget,
-        metadata=payload.metadata,
+        metadata=metadata,
     )
     await repo.append_event(
         task_id=task.task_id,
@@ -189,7 +249,7 @@ async def create_durable_task(
     return {
         "task": _task_payload(task),
         "run": _run_payload(run),
-        "queue": enqueue.__dict__,
+        "queue": _queue_payload(enqueue),
     }
 
 
@@ -245,6 +305,8 @@ async def append_durable_task_message(
     payload: DurableTaskMessageRequest,
     user: AuthenticatedUser = Depends(require_current_user),
 ):
+    if not get_task_create_limiter().check(user.uid):
+        raise HTTPException(status_code=429, detail="Too many task messages; slow down.")
     repo = get_production_task_repository()
     queue = get_task_queue()
     task = await repo.get_task(task_id)
@@ -261,7 +323,7 @@ async def append_durable_task_message(
         runtime_config_snapshot=payload.runtime_config_snapshot,
         autonomy_mode=payload.autonomy_mode,
         budget=payload.budget,
-        metadata=payload.metadata,
+        metadata=_client_metadata(payload.metadata),
     )
     event = await repo.append_event(
         task_id=task_id,
@@ -288,7 +350,7 @@ async def append_durable_task_message(
     return {
         "event": _event_payload(event),
         "run": _run_payload(run),
-        "queue": enqueue.__dict__ if enqueue else None,
+        "queue": _queue_payload(enqueue),
     }
 
 
@@ -309,12 +371,18 @@ async def resolve_durable_task_approval(
     user: AuthenticatedUser = Depends(require_current_user),
 ):
     repo = get_production_task_repository()
-    approval = await repo.resolve_approval(
-        task_id=task_id,
-        approval_id=approval_id,
-        owner_id=user.uid,
-        approved=payload.approved,
-    )
+    try:
+        approval = await repo.resolve_approval(
+            task_id=task_id,
+            approval_id=approval_id,
+            owner_id=user.uid,
+            approved=payload.approved,
+        )
+    except ApprovalAlreadyResolved as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Approval already {exc.approval.status}.",
+        ) from exc
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     enqueue_payload = None
@@ -330,7 +398,7 @@ async def resolve_durable_task_approval(
             checkpoint = dict(run.checkpoint or {})
             checkpoint["approval_resolution"] = {
                 "approval_id": approval.approval_id,
-                "approved": payload.approved,
+                "approved": bool(approval.approved),
                 "action_hash": metadata.get("action_hash"),
                 "tool": metadata.get("tool"),
                 "canonical_args": metadata.get("canonical_args") or {},
@@ -354,7 +422,7 @@ async def resolve_durable_task_approval(
                     run_id=run_id,
                     claim_token=requeued.claim_token,
                 )
-                enqueue_payload = enqueue.__dict__
+                enqueue_payload = _queue_payload(enqueue)
     return {
         "approval": _approval_payload(approval),
         "queue": enqueue_payload,
@@ -591,7 +659,7 @@ async def download_artifact_content(
                     content=content,
                     media_type=mime,
                     headers={
-                        "Content-Disposition": f'inline; filename="{filename}"',
+                        "Content-Disposition": content_disposition("inline", filename),
                         "Cache-Control": "private, max-age=60",
                         "ETag": f'"{artifact.artifact_id}-preview"',
                     },
@@ -612,7 +680,7 @@ async def download_artifact_content(
             content=content,
             media_type=mime,
             headers={
-                "Content-Disposition": f'inline; filename="{filename}"',
+                "Content-Disposition": content_disposition("inline", filename),
                 "Cache-Control": "private, max-age=60",
                 "ETag": f'"{artifact.artifact_id}"',
             },

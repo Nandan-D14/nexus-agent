@@ -51,6 +51,7 @@ import {
   Layers,
   LayoutGrid,
   MessageSquare,
+  Pencil,
   RotateCw,
   Terminal as TerminalIcon,
   Wrench,
@@ -64,6 +65,7 @@ import {
 } from "@/lib/agent-tool-classification";
 import {
   groupTurnEvents,
+  settleTurnSegments,
   type GenerativeUiSegment,
   type ArtifactCreatedSegment,
   type AppPreviewSegment,
@@ -92,7 +94,7 @@ import { cx } from "@/utils/cx";
 /* ------------------------------------------------------------------ */
 
 type ChatItem =
-  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[] }
+  | { kind: "message"; role: "user" | "agent"; text: string; ts: number; attachments?: UploadedInputFile[]; run_id?: string; caveat?: string }
   | { kind: "event"; type: string; ts: number; [key: string]: unknown }
   | {
       kind: "permission";
@@ -162,6 +164,10 @@ type Props = {
     port?: number;
     workspace_path?: string;
   }) => void;
+  /** Resend a past prompt (same text + files) as a new turn. */
+  onRetryPrompt?: (text: string, attachments?: UploadedInputFile[]) => void;
+  /** Load a past prompt into the composer for editing. */
+  onEditPrompt?: (text: string) => void;
   /** Sticky dock rendered inside the chat scroll column (e.g. todos + composer). */
   footer?: ReactNode;
 };
@@ -178,6 +184,42 @@ type Turn = {
     | Extract<ChatItem, { kind: "elicitation" }>
   )[];
 };
+
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
+}
+
+/**
+ * Turns are regrouped from `items` on every update, but their arrays hold the
+ * original (immutably updated) chat items. Comparing by item identity lets
+ * finished turns skip re-rendering while only the streaming turn updates.
+ */
+function turnBlockPropsEqual(
+  prev: TurnBlockProps,
+  next: TurnBlockProps,
+): boolean {
+  const a = prev.turn;
+  const b = next.turn;
+  return (
+    prev.isWorking === next.isWorking &&
+    prev.isLastTurn === next.isLastTurn &&
+    prev.canRetry === next.canRetry &&
+    prev.onRetryPrompt === next.onRetryPrompt &&
+    prev.onEditPrompt === next.onEditPrompt &&
+    prev.onPermissionRespond === next.onPermissionRespond &&
+    prev.onQuestionRespond === next.onQuestionRespond &&
+    prev.onElicitationRespond === next.onElicitationRespond &&
+    prev.onTemplateDraftChange === next.onTemplateDraftChange &&
+    prev.onAppPreviewOpen === next.onAppPreviewOpen &&
+    a.id === b.id &&
+    a.userMessage === b.userMessage &&
+    sameItems(a.events, b.events) &&
+    sameItems(a.agentMessages, b.agentMessages) &&
+    sameItems(a.permissions, b.permissions) &&
+    sameItems(a.delegations, b.delegations) &&
+    sameItems(a.questions, b.questions)
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  Inline summary extraction                                          */
@@ -248,7 +290,7 @@ type TimelineItem =
   | { kind: "app_preview"; data: AppPreviewSegment; ts: number }
   | { kind: "canvas_document"; data: CanvasDocumentSegment; ts: number }
   | { kind: "template_draft"; data: TemplateDraftSegment; ts: number }
-  | { kind: "agentMessage"; text: string; ts: number }
+  | { kind: "agentMessage"; text: string; ts: number; caveat?: string }
   | { kind: "permission"; data: Extract<ChatItem, { kind: "permission" }>; ts: number }
   | { kind: "elicitation"; data: Extract<ChatItem, { kind: "elicitation" }>; ts: number }
   | { kind: "user_question"; data: Extract<ChatItem, { kind: "user_question" }>; ts: number };
@@ -267,6 +309,8 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
   onElicitationRespond,
   onTemplateDraftChange,
   onAppPreviewOpen,
+  onRetryPrompt,
+  onEditPrompt,
   footer,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -381,6 +425,9 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
                   turn={turn}
                   isWorking={isWorking}
                   isLastTurn={isLastTurn}
+                  canRetry={!isBusy}
+                  onRetryPrompt={onRetryPrompt}
+                  onEditPrompt={onEditPrompt}
                   onPermissionRespond={onPermissionRespond}
                   onQuestionRespond={onQuestionRespond}
                   onElicitationRespond={onElicitationRespond}
@@ -457,25 +504,68 @@ export const UnifiedChatPanel = memo(function UnifiedChatPanel({
 /*  Turn Block                                                         */
 /* ------------------------------------------------------------------ */
 
-function TurnBlock({
-  turn,
-  isWorking,
-  isLastTurn,
-  onPermissionRespond,
-  onQuestionRespond,
-  onElicitationRespond,
-  onTemplateDraftChange,
-  onAppPreviewOpen,
-}: {
+type TurnBlockProps = {
   turn: Turn;
   isWorking: boolean;
   isLastTurn: boolean;
+  canRetry: boolean;
+  onRetryPrompt?: Props["onRetryPrompt"];
+  onEditPrompt?: Props["onEditPrompt"];
   onPermissionRespond: Props["onPermissionRespond"];
   onQuestionRespond?: Props["onQuestionRespond"];
   onElicitationRespond?: Props["onElicitationRespond"];
   onTemplateDraftChange?: Props["onTemplateDraftChange"];
   onAppPreviewOpen?: Props["onAppPreviewOpen"];
-}) {
+};
+
+const TurnBlock = memo(function TurnBlock({
+  turn,
+  isWorking,
+  isLastTurn,
+  canRetry,
+  onRetryPrompt,
+  onEditPrompt,
+  onPermissionRespond,
+  onQuestionRespond,
+  onElicitationRespond,
+  onTemplateDraftChange,
+  onAppPreviewOpen,
+}: TurnBlockProps) {
+  const userMessage = turn.userMessage;
+  const retryTurn =
+    onRetryPrompt && userMessage && canRetry
+      ? () => onRetryPrompt(userMessage.text, userMessage.attachments)
+      : undefined;
+  const editTurn =
+    onEditPrompt && userMessage && canRetry
+      ? () => onEditPrompt(userVisibleCaption(userMessage.text))
+      : undefined;
+
+  // A turn that ended on an error/stop with no answer after it gets its own
+  // Copy/Retry bar, so failed runs are as easy to rerun as successful ones.
+  const failure = useMemo(() => {
+    if (isWorking) return null;
+    const lastAnswerTs = turn.agentMessages.reduce(
+      (max, m) => (m.text.trim() ? Math.max(max, m.ts) : max),
+      -Infinity,
+    );
+    for (let i = turn.events.length - 1; i >= 0; i -= 1) {
+      const ev = turn.events[i];
+      if (ev.ts <= lastAnswerTs) break;
+      if (ev.type === "aborted") {
+        return { stopped: true, message: "Stopped.", detail: "" };
+      }
+      if (ev.type === "error") {
+        return {
+          stopped: false,
+          message: String(ev.message || "Something went wrong."),
+          detail: typeof ev.detail === "string" ? ev.detail : "",
+        };
+      }
+    }
+    return null;
+  }, [isWorking, turn.agentMessages, turn.events]);
+
   // Build an interleaved timeline from event segments + messages + cards.
   // Permissions are folded into the log grouper as synthetic approval events
   // so the activity timeline shows them alongside tool calls (not just as a
@@ -508,8 +598,13 @@ function TurnBlock({
       }
     }
     const combined = [...turn.events, ...approvalEvents].sort((a, b) => a.ts - b.ts);
-    return groupTurnEvents(combined);
-  }, [turn.events, turn.permissions]);
+    const segments = groupTurnEvents(combined);
+    if (isWorking) return segments;
+    const interrupted = turn.events.some(
+      (ev) => ev.type === "aborted" || ev.type === "error",
+    );
+    return settleTurnSegments(segments, { interrupted });
+  }, [isWorking, turn.events, turn.permissions]);
 
   const turnSearchRefs = useMemo(
     () => collectSearchRefsFromEventSegments(eventSegments),
@@ -535,7 +630,7 @@ function TurnBlock({
       }
     }
     for (const msg of turn.agentMessages) {
-      items.push({ kind: "agentMessage", text: msg.text, ts: msg.ts });
+      items.push({ kind: "agentMessage", text: msg.text, ts: msg.ts, caveat: msg.caveat });
     }
     for (const perm of turn.permissions) {
       items.push({ kind: "permission", data: perm, ts: perm.ts });
@@ -558,6 +653,8 @@ function TurnBlock({
         <UserMessageCard
           text={turn.userMessage.text}
           attachments={turn.userMessage.attachments}
+          onRetry={retryTurn}
+          onEdit={editTurn}
         />
       )}
 
@@ -668,7 +765,8 @@ function TurnBlock({
 
         if (item.kind === "agentMessage") {
           const msgIdx = turn.agentMessages.findIndex(m => m.ts === item.ts);
-          const isLastMsg = isLastTurn && msgIdx === turn.agentMessages.length - 1;
+          const isFinalMsgOfTurn = msgIdx === turn.agentMessages.length - 1;
+          const isLastMsg = isLastTurn && isFinalMsgOfTurn;
           const shouldStream = isLastMsg && isWorking;
           return (
             <AgentMessageCard
@@ -676,6 +774,8 @@ function TurnBlock({
               text={item.text}
               stream={shouldStream}
               extraSources={turnSearchRefs}
+              caveat={item.caveat}
+              onRetry={isFinalMsgOfTurn ? retryTurn : undefined}
             />
           );
         }
@@ -746,9 +846,17 @@ function TurnBlock({
 
         return null;
       })}
+
+      {failure ? (
+        <TurnEndedActions
+          stopped={failure.stopped}
+          copyText={[failure.message, failure.detail].filter(Boolean).join("\n\n")}
+          onRetry={retryTurn}
+        />
+      ) : null}
     </div>
   );
-}
+}, turnBlockPropsEqual);
 
 /* ------------------------------------------------------------------ */
 /*  Artifact coercion                                                  */
@@ -814,60 +922,98 @@ function CanvasDocumentHandleCard({ document }: { document: SessionCanvasDocumen
 /*  User Message                                                       */
 /* ------------------------------------------------------------------ */
 
-function UserMessageCard({
-  text,
-  attachments = [],
-}: {
-  text: string;
-  attachments?: UploadedInputFile[];
-}) {
-  const caption = userVisibleCaption(text);
+function useCopyToClipboard() {
   const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
-    const copyText = caption || attachments.map((file) => file.name).filter(Boolean).join(", ");
-    if (!copyText) return;
+  const copy = async (value: string) => {
+    if (!value) return;
     try {
-      await navigator.clipboard.writeText(copyText);
+      await navigator.clipboard.writeText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
       // clipboard error
     }
   };
+  return { copied, copy };
+}
+
+function MessageActionButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="flex size-7 shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors duration-150 hover:bg-background-secondary-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-button-hover"
+    >
+      {children}
+    </button>
+  );
+}
+
+function UserMessageCard({
+  text,
+  attachments = [],
+  onRetry,
+  onEdit,
+}: {
+  text: string;
+  attachments?: UploadedInputFile[];
+  onRetry?: () => void;
+  onEdit?: () => void;
+}) {
+  const caption = userVisibleCaption(text);
+  const { copied, copy } = useCopyToClipboard();
 
   if (!caption && attachments.length === 0) {
     return null;
   }
 
+  const copyText = caption || attachments.map((file) => file.name).filter(Boolean).join(", ");
+
   return (
     <div className="group/user-msg relative flex w-full justify-end py-1">
-      <div className="flex max-w-[85%] flex-col items-end gap-2">
+      <div className="flex max-w-[85%] flex-col items-end gap-1">
         {attachments.length > 0 ? (
           <UploadedFilePreviewList files={attachments} align="end" />
         ) : null}
 
         {caption ? (
-          <div className="relative flex items-center gap-2">
-            <button
-              type="button"
-              aria-label={copied ? "Copied" : "Copy prompt"}
-              title={copied ? "Copied" : "Copy prompt"}
-              onClick={() => void handleCopy()}
-              className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background-primary-default text-text-tertiary opacity-0 shadow-sm transition-all duration-150 group-hover/user-msg:opacity-100 hover:border-border-button-hover hover:bg-background-secondary-hover hover:text-text-primary focus-visible:opacity-100"
-            >
-              {copied ? (
-                <Check className="size-3.5 text-emerald-500" aria-hidden />
-              ) : (
-                <Clipboard className="size-3.5" aria-hidden />
-              )}
-            </button>
-
-            <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
-              {caption}
-            </div>
+          <div className="rounded-2xl border border-card-border bg-background-secondary-default px-5 py-3 text-[15px] leading-relaxed text-text-primary shadow-sm">
+            {caption}
           </div>
         ) : null}
+
+        <div className="flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/user-msg:opacity-100 focus-within:opacity-100">
+          {onRetry ? (
+            <MessageActionButton label="Retry prompt" onClick={onRetry}>
+              <RotateCw className="size-3.5" aria-hidden />
+            </MessageActionButton>
+          ) : null}
+          {onEdit && caption ? (
+            <MessageActionButton label="Edit prompt" onClick={onEdit}>
+              <Pencil className="size-3.5" aria-hidden />
+            </MessageActionButton>
+          ) : null}
+          <MessageActionButton
+            label={copied ? "Copied" : "Copy prompt"}
+            onClick={() => void copy(copyText)}
+          >
+            {copied ? (
+              <Check className="size-3.5 text-emerald-500" aria-hidden />
+            ) : (
+              <Clipboard className="size-3.5" aria-hidden />
+            )}
+          </MessageActionButton>
+        </div>
       </div>
     </div>
   );
@@ -881,16 +1027,65 @@ function AgentMessageCard({
   text,
   stream = false,
   extraSources,
+  caveat,
+  onRetry,
 }: {
   text: string;
   stream?: boolean;
   extraSources?: SearchCiteRef[];
+  caveat?: string;
+  onRetry?: () => void;
 }) {
   return (
     <div className="flex flex-col items-start w-full">
       <div className="w-full text-[15px] leading-[1.75] font-medium text-text-primary">
-        <StreamingText text={text} isStreaming={stream} extraSources={extraSources} />
+        <StreamingText text={text} isStreaming={stream} extraSources={extraSources} onRetry={onRetry} />
       </div>
+      {caveat ? (
+        <p className="mt-1 text-xs text-text-tertiary" role="note">
+          Not fully verified: {caveat}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Turn ended (error / stopped)                                       */
+/* ------------------------------------------------------------------ */
+
+function TurnEndedActions({
+  stopped,
+  copyText,
+  onRetry,
+}: {
+  stopped: boolean;
+  copyText: string;
+  onRetry?: () => void;
+}) {
+  const { copied, copy } = useCopyToClipboard();
+  return (
+    <div className="-ml-1.5 flex items-center gap-0.5">
+      <span className="px-1.5 text-xs text-text-tertiary">
+        {stopped ? "Stopped" : "Run failed"}
+      </span>
+      {!stopped && copyText ? (
+        <MessageActionButton
+          label={copied ? "Copied" : "Copy error"}
+          onClick={() => void copy(copyText)}
+        >
+          {copied ? (
+            <Check className="size-3.5 text-emerald-500" aria-hidden />
+          ) : (
+            <Clipboard className="size-3.5" aria-hidden />
+          )}
+        </MessageActionButton>
+      ) : null}
+      {onRetry ? (
+        <MessageActionButton label="Retry" onClick={onRetry}>
+          <RotateCw className="size-3.5" aria-hidden />
+        </MessageActionButton>
+      ) : null}
     </div>
   );
 }
@@ -915,6 +1110,7 @@ function invocationDurationMs(invocation: ToolInvocationStep): number | undefine
 function invocationStatus(invocation: ToolInvocationStep): ActivityStatus {
   if (invocation.status === "running") return "running";
   if (invocation.status === "failed") return "failed";
+  if (invocation.status === "stopped") return "pending";
   return "ok";
 }
 
@@ -1344,6 +1540,7 @@ function StepRow({ item }: { item: GroupedEvent }) {
         message={`${item.message}${suffix}`}
         failed={item.complete && item.success === false}
         complete={item.complete}
+        stopped={item.stopped}
       />
     );
   }
@@ -1354,6 +1551,7 @@ function StepRow({ item }: { item: GroupedEvent }) {
         message={label}
         failed={item.status === "failed"}
         complete={item.status === "completed"}
+        stopped={item.status === "stopped"}
       />
     );
   }
@@ -1371,6 +1569,7 @@ function ToolGroupLine({
   const provider = classifyAgentTool(tool);
   const isRunning = items.some((item) => item.status === "running");
   const isFailed = items.some((item) => item.status === "failed");
+  const isStopped = items.some((item) => item.status === "stopped");
   const label = formatGroupedToolLabel(tool, items.length);
   const durationMs = items.reduce((sum, item) => sum + (invocationDurationMs(item) ?? 0), 0);
   const icon = tool.startsWith("schedules_")
@@ -1380,7 +1579,7 @@ function ToolGroupLine({
   return (
     <>
       <ActivityRow
-        status={isRunning ? "running" : isFailed ? "failed" : "ok"}
+        status={isRunning ? "running" : isFailed ? "failed" : isStopped ? "pending" : "ok"}
         icon={icon}
         label={label}
         count={items.length}
@@ -1596,12 +1795,20 @@ function ProgressStatusLine({
   message,
   failed = false,
   complete = false,
+  stopped = false,
 }: {
   message: string;
   failed?: boolean;
   complete?: boolean;
+  stopped?: boolean;
 }) {
-  const status: ActivityStatus = failed ? "failed" : complete ? "ok" : "running";
+  const status: ActivityStatus = failed
+    ? "failed"
+    : complete
+      ? "ok"
+      : stopped
+        ? "pending"
+        : "running";
   return (
     <ActivityRow
       status={status}

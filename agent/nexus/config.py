@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     # Bynara OpenAI-compatible gateway
     bynara_api_key: str = ""
     bynara_api_base: str = "https://router.bynara.id/v1"
+    # Router-level retries per model before LiteLLM moves to the role fallback.
+    bynara_router_num_retries: int = 1
 
     # Active model context window (default 1,000,000 tokens; configurable via MODEL_CONTEXT_LIMIT).
     # The trimmer keeps the per-turn prompt under context_input_budget_ratio * this limit.
@@ -78,18 +80,43 @@ class Settings(BaseSettings):
     # context-overflow rejection. Model-specific caps (e.g. Groq) still apply
     # on top via min(), so this is an upper bound, not a replacement.
     context_compact_retry_tokens: int = 32_000
+    # Working budget: the prompt is kept under min(limit * ratio, this) even on
+    # 1M-context models — long prompts cost more, run slower, and recall worse.
+    # 0 disables the cap.
+    context_working_budget_tokens: int = 160_000
+    # LLM condenser: summarize the oldest history instead of silently dropping
+    # it once the prompt passes trigger_ratio of the budget; keep keep_ratio raw.
+    context_condenser_enabled: bool = True
+    context_condense_trigger_ratio: float = 0.8
+    context_condense_keep_ratio: float = 0.45
+    context_condenser_timeout_seconds: float = 45.0
+    context_condenser_max_input_chars: int = 60_000
+    # Re-state the live todo list at the end of the planner prompt each step.
+    todo_recitation_enabled: bool = True
+    # Hard cap on a single tool observation (serialized chars) fed to the model.
+    # Above the 64k file-read cap so normal reads are untouched.
+    tool_observation_max_chars: int = 80_000
+    # Final verification probes publish_app_preview URLs (advisory on failure).
+    verify_preview_urls: bool = True
+    preview_check_timeout_seconds: float = 6.0
+    # Micro-model intent check for short, ambiguous follow-ups (regex first).
+    intent_classifier_enabled: bool = True
+    intent_classifier_timeout_seconds: float = 4.0
+    intent_classifier_max_chars: int = 160
     # Max characters of a single gmail_read body fed into the prompt/history.
     gmail_read_max_chars: int = 16_000
 
-    # Model roles (shared across providers)
+    # Model roles (shared across providers). Fallbacks must differ from the
+    # primary or a provider outage/rate limit has nowhere to go; startup warns
+    # when a role ends up with no effective fallback.
     planner_model: str = "tencent-hy3"
-    planner_fallback_models: str = "tencent-hy3"
+    planner_fallback_models: str = "deepseek-ai/DeepSeek-V4-Flash,moonshotai/Kimi-K2.6"
     worker_model: str = "tencent-hy3"
-    worker_fallback_models: str = "tencent-hy3"
+    worker_fallback_models: str = "deepseek-ai/DeepSeek-V4-Flash,moonshotai/Kimi-K2.6"
     worker_visual_model: str = "tencent-hy3"
-    worker_visual_fallback_models: str = "tencent-hy3"
+    worker_visual_fallback_models: str = "moonshotai/Kimi-K2.6,deepseek-ai/DeepSeek-V4-Flash"
     micro_model: str = "tencent-hy3"
-    micro_fallback_models: str = "tencent-hy3"
+    micro_fallback_models: str = "deepseek-ai/DeepSeek-V4-Flash,moonshotai/Kimi-K2.6"
 
     @property
     def use_kilo(self) -> bool:
@@ -158,6 +185,8 @@ class Settings(BaseSettings):
     subagent_heartbeat_interval_seconds: int = 120
     subagent_max_mailbox_messages: int = 32
     subagent_parent_wait_seconds: int = 1200
+    # Max live background subagents per parent session.
+    subagent_max_concurrent: int = 4
     deep_research_workflow_enabled: bool = False
     deep_research_workflow_max_sources: int = 6
     task_event_replay_limit: int = 200
@@ -241,6 +270,10 @@ class Settings(BaseSettings):
     # How long a queued turn waits for the previous turn on the same session
     # before it is rejected with a clear error instead of hanging.
     turn_queue_wait_seconds: float = 900.0
+    # A message sent while a turn is running: "followup" queues it as the next
+    # turn; "steer" hands it to the running turn at its next model call.
+    # "stop"/"cancel" always interrupts.
+    mid_run_message_mode: str = "followup"
 
     # --- Firestore write resilience (Phase 1) ---
     # Serialize concurrent writes that touch the same shared session/task docs
@@ -254,11 +287,11 @@ class Settings(BaseSettings):
     firestore_write_backoff_max_ms: int = 2000
 
     # --- Final-response guarantees (Phase 2) ---
-    # When an agent turn ends with tool calls but no final text, issue one
-    # additional tools-off model call so the model always produces a summary.
+    # When an agent turn ends with no answer, run one tool-free finalization
+    # pass (tools are blocked by the gateway) so the model writes the reply.
     force_final_synthesis: bool = True
-    # Bounded re-invoke when completion verification returns a retryable
-    # MISSING_FINAL_RESPONSE. 0 disables the orchestrator-level retry.
+    # Orchestrator-level tooled retry, used only while a deliverable is still
+    # owed. Reply-only gaps never get a second pass. 0 disables it.
     max_final_synthesis_retries: int = 1
     # Last-resort: synthesize a partial summary from the ActionLedger evidence
     # instead of surfacing "the model ended without a final response".
@@ -277,14 +310,21 @@ class Settings(BaseSettings):
     #   "full"    = the sanitized reasoning text (real thinking, artifacts removed)
     # Default "full": users should see the actual (cleaned) reasoning, not a stub.
     reasoning_visibility: str = "full"
+    # How the client shows thinking it receives: "collapsed" (default, one
+    # click to expand) or "stream" (expanded live). Hidden visibility -> "off".
+    reasoning_display: str = "collapsed"
+    # Live token streaming of the answer (ADK SSE mode). Off until tested
+    # against the gateway models; agent_message_final always replaces the
+    # streamed text, and partial events never touch ledger/tools/usage.
+    stream_answer_deltas: bool = False
     # Persist raw reasoning as role="thinking" for UI history. On by default so
     # thinking survives refresh/archive; model context still excludes thinking.
     persist_reasoning: bool = True
-    # True when the active provider/model folds reasoning_content into plain
-    # message text (reasoning models via OpenAI-compatible / normalize gateways,
-    # e.g. Vultr -normalize + Kimi). Then non-final text is treated as reasoning.
-    # Set False for providers that stream genuine partial answers as non-final.
-    reasoning_is_text: bool = True
+    # Opt-in for gateways that fold reasoning into plain text with no thought
+    # flag. Applies only to non-final text; final answers are never thinking.
+    # Off by default: ADK's LiteLlm adapter already maps reasoning_content /
+    # thinking_blocks to Part(thought=True).
+    reasoning_is_text: bool = False
 
     # --- Turn idempotency ---
     # Drop a duplicate text_input with identical content for the same session
@@ -366,13 +406,6 @@ class Settings(BaseSettings):
         # and let startup validation warn about it.
         return v.strip() or "http://localhost:3000"
 
-    @field_validator("jwt_secret")
-    @classmethod
-    def pad_jwt_secret(cls, v: str) -> str:
-        if len(v) < 32:
-            v = v.ljust(32, "x")
-        return v
-
     @field_validator("model_provider")
     @classmethod
     def validate_model_provider(cls, value: str) -> str:
@@ -387,6 +420,22 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def model_roles_without_fallback() -> list[tuple[str, str, str]]:
+    """Return ``(role, primary, fallbacks)`` for roles with no distinct fallback."""
+    roles = (
+        ("planner", settings.planner_model, settings.planner_fallback_models),
+        ("worker", settings.worker_model, settings.worker_fallback_models),
+        ("worker_visual", settings.worker_visual_model, settings.worker_visual_fallback_models),
+        ("micro", settings.micro_model, settings.micro_fallback_models),
+    )
+    missing: list[tuple[str, str, str]] = []
+    for role, primary, fallbacks in roles:
+        distinct = [m.strip() for m in fallbacks.split(",") if m.strip() and m.strip() != primary]
+        if not distinct:
+            missing.append((role, primary, fallbacks))
+    return missing
 
 
 def validate_startup_settings() -> None:
@@ -436,6 +485,14 @@ def validate_startup_settings() -> None:
         )
     if not settings.byok_encryption_key.strip():
         issues.append("BYOK_ENCRYPTION_KEY must be set in production/strict mode")
+    for role, primary, fallbacks in model_roles_without_fallback():
+        logger.warning(
+            "Model role %s has no fallback distinct from primary %r (got %r); "
+            "a provider outage or rate limit will fail the turn",
+            role,
+            primary,
+            fallbacks,
+        )
     if settings.is_production:
         if settings.task_worker_enabled and not settings.task_worker_auth_token:
             issues.append("TASK_WORKER_AUTH_TOKEN is required in production")

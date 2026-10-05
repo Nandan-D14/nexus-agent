@@ -170,12 +170,9 @@ export function GenerativeUICard({ title: _title, component }: GenerativeUICardP
   const renderError =
     renderFailure?.dsl === dslString ? renderFailure.message : null;
   const reportRenderError = useCallback((message: string) => {
-    console.error("C1 component render error:", message, "with dslString:", dslString);
-    fetch("/api/v1/health/log", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dslString, error: message }),
-    }).catch((e) => console.error("Failed to send debug log:", e));
+    // Console only: there is no backend log endpoint, and the DSL can contain
+    // user data, so it must not be shipped anywhere implicitly.
+    console.error("C1 component render error:", message, "with dslString:", dslString.slice(0, 2000));
 
     window.setTimeout(() => {
       setRenderFailure((current) =>

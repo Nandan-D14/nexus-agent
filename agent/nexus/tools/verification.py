@@ -5,14 +5,10 @@
 
 from __future__ import annotations
 
+from nexus.control_loop import GUI_MUTATIONS, GUI_POINTER_MOVES
 from nexus.tools.screen_state import get_last_action, is_dirty, time_since_change
 
-_GUI_ACTIONS = frozenset({
-    "move_mouse", "left_click", "right_click", "double_click", "triple_click",
-    "type_text", "press_key", "scroll_screen", "drag",
-    "open_browser",
-    "playwright_navigate", "playwright_click", "playwright_type",
-})
+_GUI_ACTIONS = GUI_MUTATIONS | GUI_POINTER_MOVES
 
 
 def should_verify_before_action(action_name: str) -> str | None:

@@ -19,6 +19,11 @@ def _non_negative_int(value: Any, default: int) -> int:
         return max(0, int(default))
 
 
+def _capped_int(value: Any, ceiling: int) -> int:
+    """Budgets come from client input: they may lower, never raise, the server limit."""
+    return min(_non_negative_int(value, ceiling), max(0, int(ceiling)))
+
+
 @dataclass
 class TaskBudgetGuard:
     max_runtime_seconds: int
@@ -42,17 +47,17 @@ class TaskBudgetGuard:
     ) -> "TaskBudgetGuard":
         values = dict(budget or {})
         saved = dict(checkpoint or {})
-        minutes = _non_negative_int(
+        minutes = _capped_int(
             values.get("maxRuntimeMinutes"),
             settings.default_task_max_runtime_minutes,
         )
         return cls(
             max_runtime_seconds=minutes * 60,
-            max_tool_calls=_non_negative_int(
+            max_tool_calls=_capped_int(
                 values.get("maxToolCalls"),
                 settings.default_task_max_tool_calls,
             ),
-            max_credits=_non_negative_int(
+            max_credits=_capped_int(
                 values.get("credits"),
                 settings.default_task_budget_credits,
             ),

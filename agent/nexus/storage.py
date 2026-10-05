@@ -284,7 +284,9 @@ def generate_artifact_signed_url(
     """Generate a fresh signed URL for an existing artifact object."""
     try:
         client = get_storage_client()
-        bucket = client.get_bucket(bucket_name)
+        # bucket() builds a local reference; get_bucket() would add a metadata
+        # round-trip per artifact on every list view.
+        bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         if not blob.exists():
             return None

@@ -17,6 +17,7 @@ from nexus.config import settings
 from nexus.dependencies import get_production_task_repository, get_session_manager
 from nexus import run_progress
 from nexus.production_tasks import TERMINAL_TASK_STATUSES, lease_is_live
+from nexus.schedules import sanitize_unattended_tools
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class TaskWorker:
             ),
             name=f"lease-heartbeat-{task_id}-{run_id}",
         )
+        execution: asyncio.Task | None = None
         try:
             execution = asyncio.create_task(
                 self._execute_claimed_run(
@@ -102,10 +104,14 @@ class TaskWorker:
                 {execution, heartbeat},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if heartbeat in done:
+            # If both finished in the same tick, the finished execution wins:
+            # discarding its result would requeue and repeat its side effects.
+            if heartbeat in done and execution not in done:
                 execution.cancel()
                 await asyncio.gather(execution, return_exceptions=True)
-                heartbeat_error = heartbeat.exception()
+                heartbeat_error = (
+                    None if heartbeat.cancelled() else heartbeat.exception()
+                )
                 raise heartbeat_error or RuntimeError(
                     "Durable worker lease heartbeat stopped."
                 )
@@ -289,6 +295,11 @@ class TaskWorker:
                 "Worker lost its lease; stale-run recovery owns the next attempt.",
             )
         finally:
+            # run_once() itself may be cancelled (shutdown); never leave the
+            # agent executing without a lease heartbeat behind it.
+            if execution is not None and not execution.done():
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
@@ -489,12 +500,31 @@ class TaskWorker:
         )
         from nexus.task_queue import task_queue
 
-        enqueue = await task_queue.enqueue_task_run(
-            task_id=retried.task_id,
-            run_id=retried.run_id,
-            claim_token=retried.claim_token,
-            delay_seconds=delay,
-        )
+        try:
+            enqueue = await task_queue.enqueue_task_run(
+                task_id=retried.task_id,
+                run_id=retried.run_id,
+                claim_token=retried.claim_token,
+                delay_seconds=delay,
+            )
+            queued = bool(enqueue.queued)
+            provider = enqueue.provider
+        except Exception:
+            logger.warning(
+                "Failed to enqueue retry for %s/%s", retried.task_id, retried.run_id, exc_info=True
+            )
+            queued, provider = False, ""
+        if not queued:
+            # The run was already requeued (lease released). Without a queue
+            # entry nothing will ever pick it up, so close it out as failed
+            # rather than leaving it stranded in "queued".
+            await repo.finish_run(
+                task_id=retried.task_id,
+                run_id=retried.run_id,
+                status="failed",
+                summary=f"Retry could not be scheduled: {reason}"[:1000],
+                error="RETRY_ENQUEUE_FAILED",
+            )
         await repo.append_event(
             task_id=retried.task_id,
             owner_id=retried.owner_id,
@@ -504,11 +534,11 @@ class TaskWorker:
                 "attempt": retried.attempt,
                 "delay_seconds": delay,
                 "reason": reason[:1000],
-                "queued": enqueue.queued,
-                "provider": enqueue.provider,
+                "queued": queued,
+                "provider": provider,
             },
         )
-        return bool(enqueue.queued)
+        return queued
 
     @staticmethod
     async def _finish_failed(
@@ -617,11 +647,9 @@ class TaskWorker:
                 )
                 or {},
                 skip_confirmations=bool(metadata.get("skip_confirmations")),
-                allowed_unattended_tools=[
-                    str(item)
-                    for item in metadata.get("allowed_unattended_tools", [])
-                    if str(item).strip()
-                ]
+                allowed_unattended_tools=sanitize_unattended_tools(
+                    [str(item) for item in metadata.get("allowed_unattended_tools", []) or []]
+                )
                 if metadata.get("skip_confirmations")
                 else [],
             )

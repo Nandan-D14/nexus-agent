@@ -31,7 +31,15 @@ from nexus.eval.production_suite import (
     run_suite,
     write_report,
 )
-from nexus.eval.task_cases import TASK_CASES, validate_catalog
+from nexus.eval.benchmarks import BENCHMARK_SUITES, validate_benchmarks
+from nexus.eval.task_cases import TASK_CASES, TaskEvalCase, validate_catalog
+
+_SUITE_CHOICES = ("production", *BENCHMARK_SUITES)
+
+
+def _suite_cases(name: str) -> tuple[TaskEvalCase, ...] | None:
+    """``None`` selects the 25-case production catalog (with its own checks)."""
+    return None if name == "production" else BENCHMARK_SUITES[name]
 
 
 def _run_id(prefix: str) -> str:
@@ -73,7 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CoComputer production task eval")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("validate", help="validate the 25-case catalog")
+    subparsers.add_parser("validate", help="validate the 25-case catalog and benchmark suites")
 
     contract = subparsers.add_parser(
         "contract",
@@ -86,11 +94,13 @@ def _parser() -> argparse.ArgumentParser:
     score.add_argument("--output", required=True)
     score.add_argument("--run-id", default="")
     score.add_argument("--run-mode", default="live", choices=("live", "replay", "contract"))
+    score.add_argument("--suite", default="production", choices=_SUITE_CHOICES)
 
     live = subparsers.add_parser("live", help="run all tasks through an executor adapter")
     live.add_argument("executor", help="async callable using module.path:callable")
     live.add_argument("--output", required=True)
     live.add_argument("--run-id", default="")
+    live.add_argument("--suite", default="production", choices=_SUITE_CHOICES)
 
     gate = subparsers.add_parser("gate", help="compare candidate report to baseline")
     gate.add_argument("baseline")
@@ -108,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "validate":
         validate_catalog()
-        print(f"PASS: production eval catalog contains {len(TASK_CASES)} valid cases")
+        validate_benchmarks()
+        sizes = ", ".join(f"{name}={len(cases)}" for name, cases in BENCHMARK_SUITES.items())
+        print(f"PASS: production eval catalog contains {len(TASK_CASES)} valid cases; benchmarks: {sizes}")
         return 0
 
     if args.command == "contract":
@@ -127,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
             _load_observations(args.observations),
             run_id=args.run_id or _run_id("candidate"),
             run_mode=args.run_mode,
-            metadata={"observations": str(Path(args.observations))},
+            metadata={"observations": str(Path(args.observations)), "suite": args.suite},
+            cases=_suite_cases(args.suite),
         )
         write_report(report, args.output)
         _print_summary(report)
@@ -137,9 +150,10 @@ def main(argv: list[str] | None = None) -> int:
         report = asyncio.run(
             run_suite(
                 _load_executor(args.executor),
-                run_id=args.run_id or _run_id("live"),
+                run_id=args.run_id or _run_id(f"live-{args.suite}"),
                 run_mode="live",
-                metadata={"executor": args.executor},
+                metadata={"executor": args.executor, "suite": args.suite},
+                cases=_suite_cases(args.suite),
             )
         )
         write_report(report, args.output)

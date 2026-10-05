@@ -55,6 +55,9 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     apply_runtime_env_overrides()
     validate_startup_settings()
+    from nexus.telemetry import configure_tracing
+
+    configure_tracing()
     module_logger.info("CoComputer agent service starting...")
     session_manager = get_session_manager()
     history_repository = get_history_repository()
@@ -74,16 +77,25 @@ async def lifespan(app: FastAPI):
     schedule_ticker = ScheduleTicker()
     await schedule_ticker.start()
 
-    yield
-
-    # Stop the sandbox sweeper
-    await schedule_ticker.stop()
-    await stale_run_sweeper.stop()
-    await sweeper.stop()
-
-    module_logger.info("CoComputer agent service shutting down...")
-    session_manager.stop_cleanup()
-    await session_manager.destroy_all()
+    try:
+        yield
+    finally:
+        module_logger.info("CoComputer agent service shutting down...")
+        # Each step is isolated so one failure cannot skip pausing sandboxes.
+        for name, stop in (
+            ("schedule ticker", schedule_ticker.stop),
+            ("stale-run sweeper", stale_run_sweeper.stop),
+            ("sandbox sweeper", sweeper.stop),
+        ):
+            try:
+                await stop()
+            except Exception:
+                module_logger.warning("Failed to stop %s", name, exc_info=True)
+        session_manager.stop_cleanup()
+        try:
+            await session_manager.destroy_all()
+        except Exception:
+            module_logger.warning("Failed to end sessions during shutdown", exc_info=True)
 
 
 app = FastAPI(

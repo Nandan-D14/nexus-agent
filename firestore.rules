@@ -35,14 +35,24 @@ service cloud.firestore {
       ];
     }
 
+    // A client may only mirror its own verified token email, never claim
+    // another address (server code and admin checks read this field).
+    function emailMatchesToken() {
+      return !("email" in request.resource.data)
+        || request.resource.data.email == null
+        || request.resource.data.email == request.auth.token.email;
+    }
+
     function validUserBootstrapCreate(userId) {
       return request.resource.data.uid == userId
-        && request.resource.data.keys().hasOnly(userBootstrapKeys());
+        && request.resource.data.keys().hasOnly(userBootstrapKeys())
+        && emailMatchesToken();
     }
 
     function validUserBootstrapUpdate(userId) {
       return request.resource.data.uid == userId
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(userBootstrapKeys());
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(userBootstrapKeys())
+        && emailMatchesToken();
     }
 
     match /users/{userId} {

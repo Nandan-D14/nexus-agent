@@ -15,11 +15,14 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt as pyjwt
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
 
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.config import settings, get_oauth_client_secret
-from nexus.dependencies import get_history_repository
+from nexus.crypto import get_byok_fernet
+from nexus.dependencies import get_history_repository, get_oauth_url_limiter
+from nexus.net_safety import UnsafeUrlError, assert_public_url
 from nexus.exa_oauth import (
     EXA_CONNECTION_ID,
     EXA_MCP_URL,
@@ -94,9 +97,49 @@ def _pkce_challenge(code_verifier: str) -> str:
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
+
+_OAUTH_STATE_TTL_SECONDS = 15 * 60
+
+
+def _encode_oauth_state(payload: dict[str, Any]) -> str:
+    """Sign, then encrypt, the OAuth state.
+
+    The state travels through the provider's URL and browser history. It holds
+    the PKCE verifier and (for dynamic client registration) the client secret,
+    so a signature alone is not enough: Fernet makes it opaque as well.
+    """
+    signed = pyjwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+    return get_byok_fernet().encrypt(signed.encode("utf-8")).decode("ascii")
+
+
+def _decode_oauth_state(state: Any) -> dict[str, Any]:
+    if not isinstance(state, str) or not state:
+        raise ValueError("missing state")
+    try:
+        signed = get_byok_fernet().decrypt(state.encode("ascii"), ttl=_OAUTH_STATE_TTL_SECONDS)
+    except (InvalidToken, UnicodeEncodeError) as exc:
+        raise ValueError("invalid state") from exc
+    return pyjwt.decode(signed.decode("utf-8"), settings.jwt_secret, algorithms=["HS256"])
+
+
+def _check_oauth_url_rate(uid: str) -> None:
+    # Each /url call runs provider discovery and dynamic client registration.
+    if not get_oauth_url_limiter().check(uid):
+        raise HTTPException(status_code=429, detail="Too many OAuth attempts; slow down.")
+
+
+async def _checked_token_endpoint(token_endpoint: str) -> str:
+    # Token endpoints come from provider discovery; still never post an auth
+    # code + client secret to an internal address.
+    try:
+        return await assert_public_url(token_endpoint)
+    except UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail="Invalid OAuth token endpoint") from exc
+
 @router.get("/api/v1/auth/google/url")
 async def get_google_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a Google OAuth URL the frontend should open in a popup."""
+    _check_oauth_url_rate(user.uid)
     if not _google_oauth_configured():
         raise HTTPException(status_code=501, detail="Google OAuth not configured.")
 
@@ -108,7 +151,7 @@ async def get_google_auth_url(user: AuthenticatedUser = Depends(require_current_
         "cv": code_verifier,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
 
     auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(
         {
@@ -138,7 +181,7 @@ async def exchange_google_code(
         raise HTTPException(status_code=400, detail="Missing code")
 
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or (state_data.get("purpose") not in ["google_oauth", "gdrive_oauth"]):
             raise ValueError("state mismatch")
     except Exception:
@@ -208,6 +251,7 @@ async def disconnect_google(user: AuthenticatedUser = Depends(require_current_us
 @router.get("/api/v1/auth/exa/url")
 async def get_exa_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return an Exa MCP OAuth URL the frontend should open in a popup."""
+    _check_oauth_url_rate(user.uid)
     redirect_uri = exa_redirect_uri()
     code_verifier = secrets.token_urlsafe(72)[:96]
     try:
@@ -236,7 +280,7 @@ async def get_exa_auth_url(user: AuthenticatedUser = Depends(require_current_use
         "te": str(metadata.get("token_endpoint") or ""),
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
     auth_url = build_exa_authorization_url(
         metadata=metadata,
         client_id=client_id,
@@ -259,7 +303,7 @@ async def exchange_exa_code(
         raise HTTPException(status_code=400, detail="Missing code")
 
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or state_data.get("purpose") != EXA_OAUTH_PURPOSE:
             raise ValueError("state mismatch")
     except Exception:
@@ -274,6 +318,7 @@ async def exchange_exa_code(
         raise HTTPException(status_code=400, detail="Invalid OAuth client id")
     if not isinstance(token_endpoint, str) or not token_endpoint:
         raise HTTPException(status_code=400, detail="Invalid OAuth token endpoint")
+    token_endpoint = await _checked_token_endpoint(token_endpoint)
     client_secret = state_data.get("cs") if isinstance(state_data.get("cs"), str) else ""
 
     try:
@@ -326,6 +371,7 @@ async def disconnect_exa(user: AuthenticatedUser = Depends(require_current_user)
 @router.get("/api/v1/auth/treg/url")
 async def get_treg_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a Treg MCP OAuth URL the frontend should open in a popup."""
+    _check_oauth_url_rate(user.uid)
     redirect_uri = treg_redirect_uri()
     code_verifier = secrets.token_urlsafe(72)[:96]
     try:
@@ -354,7 +400,7 @@ async def get_treg_auth_url(user: AuthenticatedUser = Depends(require_current_us
         "te": str(metadata.get("token_endpoint") or ""),
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
     auth_url = build_treg_authorization_url(
         metadata=metadata,
         client_id=client_id,
@@ -377,7 +423,7 @@ async def exchange_treg_code(
         raise HTTPException(status_code=400, detail="Missing code")
 
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or state_data.get("purpose") != TREG_OAUTH_PURPOSE:
             raise ValueError("state mismatch")
     except Exception:
@@ -392,6 +438,7 @@ async def exchange_treg_code(
         raise HTTPException(status_code=400, detail="Invalid OAuth client id")
     if not isinstance(token_endpoint, str) or not token_endpoint:
         raise HTTPException(status_code=400, detail="Invalid OAuth token endpoint")
+    token_endpoint = await _checked_token_endpoint(token_endpoint)
     client_secret = state_data.get("cs") if isinstance(state_data.get("cs"), str) else ""
 
     try:
@@ -458,6 +505,7 @@ async def disconnect_treg(user: AuthenticatedUser = Depends(require_current_user
 @router.get("/api/v1/auth/github/url")
 async def get_github_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a GitHub OAuth URL the frontend should open in a popup."""
+    _check_oauth_url_rate(user.uid)
     if not _github_oauth_configured():
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured.")
     code_verifier = secrets.token_urlsafe(72)[:96]
@@ -469,7 +517,7 @@ async def get_github_auth_url(user: AuthenticatedUser = Depends(require_current_
         "cv": code_verifier,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
     params = {
         "client_id": settings.github_oauth_client_id,
         "redirect_uri": _github_redirect_uri(),
@@ -495,7 +543,7 @@ async def exchange_github_code(
     if not code:
         raise HTTPException(status_code=400, detail="Missing code")
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or state_data.get("purpose") != GITHUB_OAUTH_PURPOSE:
             raise ValueError("state mismatch")
     except Exception:
@@ -563,6 +611,7 @@ async def disconnect_github(user: AuthenticatedUser = Depends(require_current_us
 @router.get("/api/v1/auth/slack/url")
 async def get_slack_auth_url(user: AuthenticatedUser = Depends(require_current_user)):
     """Return a Slack OAuth URL the frontend should open in a popup."""
+    _check_oauth_url_rate(user.uid)
     if not slack_oauth_configured():
         raise HTTPException(status_code=501, detail="Slack OAuth not configured.")
     code_verifier = secrets.token_urlsafe(72)[:96]
@@ -574,7 +623,7 @@ async def get_slack_auth_url(user: AuthenticatedUser = Depends(require_current_u
         "cv": code_verifier,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
     return {"auth_url": build_slack_authorization_url(state=state, code_verifier=code_verifier)}
 
 
@@ -591,7 +640,7 @@ async def exchange_slack_code(
     if not code:
         raise HTTPException(status_code=400, detail="Missing code")
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or state_data.get("purpose") != SLACK_OAUTH_PURPOSE:
             raise ValueError("state mismatch")
     except Exception:
@@ -644,6 +693,7 @@ async def disconnect_slack(user: AuthenticatedUser = Depends(require_current_use
 @router.get("/api/v1/auth/{provider}/url")
 async def get_mcp_oauth_url(provider: str, user: AuthenticatedUser = Depends(require_current_user)):
     """Return a remote-MCP OAuth URL for a first-class DCR provider."""
+    _check_oauth_url_rate(user.uid)
     spec = mcp_spec(provider)
     if spec is None:
         raise HTTPException(status_code=404, detail="Unknown OAuth provider")
@@ -678,7 +728,7 @@ async def get_mcp_oauth_url(provider: str, user: AuthenticatedUser = Depends(req
         "te": str(metadata.get("token_endpoint") or ""),
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
     }
-    state = pyjwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+    state = _encode_oauth_state(state_payload)
     auth_url = build_mcp_authorization_url(
         spec,
         metadata=metadata,
@@ -706,7 +756,7 @@ async def exchange_mcp_oauth_code(
         raise HTTPException(status_code=400, detail="Missing code")
 
     try:
-        state_data = pyjwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        state_data = _decode_oauth_state(state)
         if state_data.get("uid") != user.uid or state_data.get("purpose") != spec.oauth_purpose:
             raise ValueError("state mismatch")
     except Exception:
@@ -721,6 +771,7 @@ async def exchange_mcp_oauth_code(
         raise HTTPException(status_code=400, detail="Invalid OAuth client id")
     if not isinstance(token_endpoint, str) or not token_endpoint:
         raise HTTPException(status_code=400, detail="Invalid OAuth token endpoint")
+    token_endpoint = await _checked_token_endpoint(token_endpoint)
     client_secret = state_data.get("cs") if isinstance(state_data.get("cs"), str) else ""
 
     try:

@@ -11,6 +11,7 @@ from firebase_admin import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
 from nexus.production_tasks import (
+    TERMINAL_TASK_STATUSES,
     DurableApproval,
     BoundProductionStore,
     _uuid,
@@ -19,6 +20,14 @@ from nexus.production_tasks import (
     run_with_write_retry,
     utcnow,
 )
+
+
+class ApprovalAlreadyResolved(Exception):
+    """Raised when a decision is submitted for an approval that is no longer pending."""
+
+    def __init__(self, approval: DurableApproval) -> None:
+        super().__init__(f"Approval {approval.approval_id} is already {approval.status}")
+        self.approval = approval
 
 
 class ApprovalStore(BoundProductionStore):
@@ -180,24 +189,46 @@ class ApprovalStore(BoundProductionStore):
         approved: bool,
     ) -> DurableApproval | None:
         approval_ref = self._approval_ref(task_id, approval_id)
-        doc = approval_ref.get()
-        if not doc.exists:
-            return None
-        data = doc.to_dict() or {}
-        if data.get("ownerId") != owner_id:
-            return None
+        task_ref = self._task_ref(task_id)
         now = utcnow()
         updates = {
             "status": "approved" if approved else "denied",
             "approved": approved,
             "resolvedAt": now,
         }
-        approval_ref.set(updates, merge=True)
-        self._task_ref(task_id).set(
-            {"status": canonicalize_task_status("running"), "updatedAt": now},
-            merge=True,
-        )
-        data.update(updates)
+
+        # Read-check-write in one transaction: a replayed or concurrent request
+        # (or a late click after the timeout auto-denied it) must not flip an
+        # already-made decision.
+        @firestore.transactional
+        def transactional_resolve(txn) -> tuple[str, dict[str, Any]] | None:
+            doc = approval_ref.get(transaction=txn)
+            if not doc.exists:
+                return None
+            data = doc.to_dict() or {}
+            if data.get("ownerId") != owner_id:
+                return None
+            if data.get("status") != "pending":
+                return "resolved", data
+            # Firestore transactions require every read before any write.
+            task_doc = task_ref.get(transaction=txn)
+            task_status = str((task_doc.to_dict() or {}).get("status") or "") if task_doc.exists else ""
+            txn.set(approval_ref, updates, merge=True)
+            # Never resurrect a finished or cancelled task.
+            if task_status not in TERMINAL_TASK_STATUSES:
+                txn.set(
+                    task_ref,
+                    {"status": canonicalize_task_status("running"), "updatedAt": now},
+                    merge=True,
+                )
+            return "updated", {**data, **updates}
+
+        outcome = transactional_resolve(self._db.transaction())
+        if outcome is None:
+            return None
+        state, data = outcome
+        if state == "resolved":
+            raise ApprovalAlreadyResolved(self._build_approval(approval_id, data))
         metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         run_id = str(metadata.get("run_id") or "").strip() or None
         self._append_event_sync(

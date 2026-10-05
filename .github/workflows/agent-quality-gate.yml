@@ -13,6 +13,9 @@ on:
       - "agent/**"
       - "frontend/src/components/agent-workflow-panel.tsx"
       - "frontend/src/lib/turn-event-grouper.ts"
+  schedule:
+    # Nightly mini-benchmarks against staging (skipped when not configured).
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       baseline_report:
@@ -59,8 +62,8 @@ jobs:
           python-version: "3.12"
       - name: Install exact locked environment
         run: uv sync --locked --extra dev
-      - name: Assert Google ADK 2.4.0
-        run: uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.4.0'"
+      - name: Assert Google ADK 2.11.0
+        run: uv run python -c "from importlib.metadata import version; assert version('google-adk') == '2.11.0'"
       - name: Run ADK compatibility, eval, and production hardening tests
         run: >-
           uv run pytest
@@ -73,9 +76,28 @@ jobs:
           tests/test_adk_workflow_pilot.py
           tests/test_tool_gateway.py
           tests/test_agent_routing.py
+          tests/test_reliability_phase1.py
+          tests/test_reliability_phase2.py
+          tests/test_reliability_phase3.py
+          tests/test_reliability_phase4.py
+          tests/test_reliability_phase6.py
+          tests/test_reliability_phase7.py
+          tests/test_response_pipeline_phase_a.py
+          tests/test_response_pipeline_terminal.py
+          tests/test_prompt_assembly_phase_b.py
+          tests/test_queue_modes.py
+          tests/test_worker_minimal_mode.py
+          tests/test_prompt_snapshots.py
+          tests/test_answer_streaming_phase_d.py
           -q
-      - name: Validate 25-task catalog
+      - name: Prompt snapshot drift check (prompt changes must update fixtures)
+        run: uv run python -m nexus.eval.prompt_snapshots --check
+      - name: Validate 25-task catalog and benchmark suites
         run: uv run python -m nexus.eval.run_task_eval validate
+      - name: Turn-intent eval (heuristics must decide every clear case)
+        run: uv run python -m nexus.eval.run_intent_eval
+      - name: Routing eval
+        run: uv run python -m nexus.eval.run_routing_eval
       - name: Generate candidate contract report
         run: uv run python -m nexus.eval.run_task_eval contract --output reports/contract-candidate.json
       - name: Gate scorer contract against stored contract
@@ -129,4 +151,70 @@ jobs:
         with:
           name: agent-live-release-gate-${{ github.sha }}
           path: agent/reports/live-release-gate.json
+          if-no-files-found: warn
+
+  nightly-benchmarks:
+    # GAIA-style and OSWorld-style mini suites against staging. Requires the
+    # EVAL_AGENT_BASE_URL / EVAL_AGENT_AUTH_TOKEN secrets; skipped otherwise.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: compatibility-and-eval-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ["gaia_mini", "osworld_mini"]
+    env:
+      FIREBASE_PROJECT_ID: "ci-project"
+      EVAL_AGENT_BASE_URL: ${{ secrets.EVAL_AGENT_BASE_URL }}
+      EVAL_AGENT_WS_URL: ${{ secrets.EVAL_AGENT_WS_URL }}
+      EVAL_AGENT_AUTH_TOKEN: ${{ secrets.EVAL_AGENT_AUTH_TOKEN }}
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when staging is not configured
+        id: configured
+        shell: bash
+        run: |
+          if [ -z "${EVAL_AGENT_BASE_URL}" ] || [ -z "${EVAL_AGENT_AUTH_TOKEN}" ]; then
+            echo "Staging eval secrets not set; skipping ${{ matrix.suite }}."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.configured.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v6
+      - if: steps.configured.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: steps.configured.outputs.run == 'true'
+        run: uv sync --locked --extra dev
+      - name: Run ${{ matrix.suite }}
+        if: steps.configured.outputs.run == 'true'
+        run: >-
+          uv run python -m nexus.eval.run_task_eval live
+          nexus.eval.live_executor:execute
+          --suite ${{ matrix.suite }}
+          --output reports/${{ matrix.suite }}.json
+      - name: Gate against stored baseline (when one exists)
+        if: steps.configured.outputs.run == 'true'
+        shell: bash
+        run: |
+          baseline="nexus/eval/baselines/${{ matrix.suite }}.json"
+          if [ -f "$baseline" ]; then
+            uv run python -m nexus.eval.run_task_eval gate "$baseline" \
+              "reports/${{ matrix.suite }}.json" \
+              --output "reports/${{ matrix.suite }}-gate.json"
+          else
+            echo "No baseline at $baseline yet; commit this run's report to start gating."
+          fi
+      - name: Upload benchmark report
+        if: always() && steps.configured.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-benchmark-${{ matrix.suite }}-${{ github.sha }}
+          path: agent/reports/${{ matrix.suite }}*.json
           if-no-files-found: warn

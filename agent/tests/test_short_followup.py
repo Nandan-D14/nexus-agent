@@ -62,7 +62,9 @@ class ShortFollowupHelpersTests(TestCase):
         brief = format_continue_task("build a Tembo landing page", "create it")
         self.assertIn("[CONTINUE TASK]", brief)
         self.assertIn("Tembo landing page", brief)
-        self.assertIn("create it", brief)
+        # The user is never quoted or paraphrased in the task state.
+        self.assertNotIn("create it", brief)
+        self.assertNotIn("The user said", brief)
 
     def test_recover_website_on_empty_or_missing_artifact(self) -> None:
         from nexus.orchestrator import should_recover_website
@@ -86,7 +88,14 @@ class ShortFollowupHelpersTests(TestCase):
         self.assertTrue(looks_like_unpublished_markup(
             '<section class="section features" id="features">'
         ))
-        self.assertTrue(looks_like_unpublished_markup("Invoice card details: LEDGERLINE"))
+        # Product words in prose are legitimate answer text, not a dump.
+        self.assertFalse(looks_like_unpublished_markup("Invoice card details: LEDGERLINE"))
+        self.assertFalse(looks_like_unpublished_markup("Use a bento grid for the features."))
+        self.assertTrue(
+            looks_like_unpublished_markup(
+                ".hero { display: grid; gap: 24px; padding: 48px; color: #111; }"
+            )
+        )
         self.assertTrue(
             looks_like_unpublished_markup(
                 "def kicker(slide, text, x=0.9, y=1.28):\n    box w=8 h=0.3; teal bar"
@@ -126,7 +135,7 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
             _seed_context="",
         )
         await NexusOrchestrator.handle_text_input(fake, "continue")
-        model_text = fake._build_turn_input.call_args.args[0]
+        model_text = "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"])
         self.assertIn("[CONTINUE TASK]", model_text)
         self.assertIn("Tembo AI landing page", model_text)
         self.assertEqual(fake._persist_message.call_args.kwargs["text"], "continue")
@@ -160,7 +169,7 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
             _seed_context="",
         )
         await NexusOrchestrator.handle_text_input(fake, "where the fuck is my website")
-        model_text = fake._build_turn_input.call_args.args[0]
+        model_text = "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"])
         self.assertIn("[CONTINUE TASK]", model_text)
         self.assertIn("modern marketing website", model_text)
         self.assertIn(
@@ -191,7 +200,7 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
 
         await NexusOrchestrator.handle_text_input(fake, "where is ppt or slide")
 
-        model_text = fake._build_turn_input.call_args.args[0]
+        model_text = "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"])
         self.assertIn("[CONTINUE TASK]", model_text)
         self.assertIn("8-slide startup presentation", model_text)
         self.assertIn("generate_*_report", model_text)
@@ -223,7 +232,7 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
 
         await NexusOrchestrator.handle_text_input(fake, "continue and give ppt")
 
-        model_text = fake._build_turn_input.call_args.args[0]
+        model_text = "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"])
         self.assertIn("[CONTINUE TASK]", model_text)
         self.assertIn("8-slide startup presentation", model_text)
         self.assertIn("generate_*_report", model_text)
@@ -257,8 +266,11 @@ class ShortFollowupHandleTextTests(IsolatedAsyncioTestCase):
             "Create a modern premium 8-slide startup presentation",
         )
         self.assertIn(
-            "[CONTINUE TASK]", fake._build_turn_input.call_args.args[0]
+            "[CONTINUE TASK]",
+            "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"]),
         )
+        # The user's own words reach the model verbatim.
+        self.assertEqual(fake._build_turn_input.call_args.args[0], "continue")
 
     async def test_full_prompt_is_unchanged(self) -> None:
         fake = SimpleNamespace(

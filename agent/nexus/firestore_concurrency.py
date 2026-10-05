@@ -37,17 +37,11 @@ _T = TypeVar("_T")
 # cross-transaction contention; ServiceUnavailable on transient RPC issues.
 _RETRYABLE_ERRORS = (Aborted, ServiceUnavailable)
 
-# Per-key asyncio locks. Accessed only from the event-loop thread, so plain
-# dict access is safe (no cross-thread mutation).
-_write_locks: dict[str, asyncio.Lock] = {}
-
-
-def _lock_for(key: str) -> asyncio.Lock:
-    lock = _write_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _write_locks[key] = lock
-    return lock
+# Per-key asyncio locks with a user count, so a key's lock is dropped once no
+# writer holds or awaits it (otherwise one lock per session/task id would live
+# for the lifetime of the process). Accessed only from the event-loop thread,
+# so plain dict access is safe (no cross-thread mutation).
+_write_locks: dict[str, list] = {}  # key -> [lock, users]
 
 
 @contextlib.asynccontextmanager
@@ -60,8 +54,18 @@ async def guarded_write(key: str | None):
     if not settings.serialize_session_writes or not key:
         yield
         return
-    async with _lock_for(key):
-        yield
+    entry = _write_locks.get(key)
+    if entry is None:
+        entry = [asyncio.Lock(), 0]
+        _write_locks[key] = entry
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] <= 0 and _write_locks.get(key) is entry:
+            del _write_locks[key]
 
 
 def run_with_write_retry(

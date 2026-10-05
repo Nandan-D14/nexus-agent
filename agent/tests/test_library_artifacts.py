@@ -205,8 +205,31 @@ class LibraryEndpointSmokeTests(TestCase):
 
 
 class LibraryIndexFallbackTests(TestCase):
+    def test_library_uses_collection_group_index_when_available(self) -> None:
+        from nexus.history_repository import FirestoreHistoryRepository
+
+        repo = FirestoreHistoryRepository()
+        with (
+            patch.object(
+                repo,
+                "_list_owner_library_artifacts_collection_group_sync",
+                return_value=(["row"], None),
+            ) as fast_path,
+            patch.object(
+                repo,
+                "_list_owner_sessions_sync",
+                side_effect=AssertionError("per-session scan must not run when the index exists"),
+            ),
+        ):
+            rows, cursor = repo._list_owner_library_artifacts_sync("user-123", 50, None, None, None)
+        fast_path.assert_called_once()
+        self.assertEqual(rows, ["row"])
+        self.assertIsNone(cursor)
+
     def test_library_lists_via_sessions_without_owner_collection_group(self) -> None:
         from datetime import datetime, timezone
+
+        from google.api_core.exceptions import FailedPrecondition
 
         from nexus.history_models import StoredArtifact
         from nexus.history_repository import FirestoreHistoryRepository
@@ -241,7 +264,7 @@ class LibraryIndexFallbackTests(TestCase):
             patch.object(
                 repo,
                 "_list_owner_library_artifacts_collection_group_sync",
-                side_effect=AssertionError("owner collection-group query must not run"),
+                side_effect=FailedPrecondition("The query requires an index."),
             ),
         ):
             rows, cursor = repo._list_owner_library_artifacts_sync(

@@ -23,6 +23,10 @@ TERMINAL_SUBAGENT_STATUSES = frozenset(
 )
 
 
+class SubagentLimitError(RuntimeError):
+    """Raised when a parent already has the maximum number of live subagents."""
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -623,5 +627,6 @@ class FirestoreSubagentRepository:
 
 __all__ = [
     "FirestoreSubagentRepository",
+    "SubagentLimitError",
     "TERMINAL_SUBAGENT_STATUSES",
 ]

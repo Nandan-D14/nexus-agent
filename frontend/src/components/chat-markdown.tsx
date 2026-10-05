@@ -5,7 +5,7 @@
 
 "use client";
 
-import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, isValidElement, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   Clipboard,
@@ -32,6 +32,13 @@ import type { CiteRef } from "@/components/agent-ui/inline-citations";
 import { CodeBlockViewer } from "@/components/agent-ui/code-block-viewer";
 import { MermaidDiagram } from "@/components/agent-ui/mermaid-diagram";
 import { normalizeStreamingMarkdown } from "@/lib/stream-markdown-fixer";
+
+// Stable references: inline arrays make react-markdown rebuild its processor.
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkMath];
+const REHYPE_PLUGINS: NonNullable<Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]> = [
+  rehypeKatex,
+  [rehypeHighlight, { detect: true, ignoreMissing: true }],
+];
 
 type Props = {
   content: string;
@@ -358,14 +365,15 @@ function buildComponents(
       return <input type={type} checked={checked} {...props} />;
     },
     img({ src, alt, ...props }) {
-      if (!src) return null;
-      // eslint-disable-next-line @next/next/no-img-element -- markdown content may use arbitrary remote URLs
+      if (!src || typeof src !== "string" || !isAllowedImageSrc(src)) return null;
       return (
         <img
           {...props}
           src={src}
           alt={alt ?? ""}
           loading="lazy"
+          // Model output can point at any host; never leak the app URL.
+          referrerPolicy="no-referrer"
           className="my-4 h-auto max-w-full rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-md"
         />
       );
@@ -373,7 +381,48 @@ function buildComponents(
   };
 }
 
-export function ChatMarkdown({ content, citationMap, sources }: Props) {
+/** https, same-origin, blob: and inline data:image only (no http/javascript/file). */
+function isAllowedImageSrc(src: string): boolean {
+  if (src.startsWith("data:")) return /^data:image\/(png|jpe?g|gif|webp|avif);/i.test(src);
+  try {
+    const base = typeof window === "undefined" ? "https://localhost" : window.location.href;
+    const url = new URL(src, base);
+    if (url.protocol === "https:" || url.protocol === "blob:") return true;
+    return typeof window !== "undefined" && url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One malformed message (bad math, a plugin edge case) must not unmount the
+ * whole chat: fall back to plain text, and retry when the content changes.
+ */
+class MarkdownErrorBoundary extends Component<
+  { resetKey: string; fallback: string; children: ReactNode },
+  { failedKey: string | null }
+> {
+  state = { failedKey: null as string | null };
+
+  static getDerivedStateFromError() {
+    return { failedKey: "__pending__" };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("[ChatMarkdown] render failed:", error);
+    this.setState({ failedKey: this.props.resetKey });
+  }
+
+  render() {
+    const { failedKey } = this.state;
+    if (failedKey !== null && (failedKey === "__pending__" || failedKey === this.props.resetKey)) {
+      return <p className="whitespace-pre-wrap break-words">{this.props.fallback}</p>;
+    }
+    return this.props.children;
+  }
+}
+
+function ChatMarkdownImpl({ content, citationMap, sources }: Props) {
   const normalizedContent = useMemo(
     () => normalizeStreamingMarkdown(content),
     [content],
@@ -386,13 +435,19 @@ export function ChatMarkdown({ content, citationMap, sources }: Props) {
 
   return (
     <div className="markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-        rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-        components={components}
-      >
-        {normalizedContent}
-      </ReactMarkdown>
+      <MarkdownErrorBoundary resetKey={normalizedContent} fallback={content}>
+        <ReactMarkdown
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
+          components={components}
+        >
+          {normalizedContent}
+        </ReactMarkdown>
+      </MarkdownErrorBoundary>
     </div>
   );
 }
+
+// Re-parsing markdown is the most expensive part of a chat render; skip it
+// when a parent re-renders with the same message.
+export const ChatMarkdown = memo(ChatMarkdownImpl);

@@ -27,11 +27,18 @@ from nexus.tools._context import (
     get_workspace_path,
     set_workspace_path,
 )
+from nexus.session_local import SessionLocal
 
 _STATUS_VALUES = {"pending", "in_progress", "done"}
 _TODO_LINE_RE = re.compile(
     r"^(?P<index>\d+)\. \[(?P<status>pending|in_progress|done)\] (?P<title>.*?)(?: - (?P<note>.*))?$"
 )
+_todo_cache = SessionLocal()
+
+
+def get_cached_todo_items() -> list[dict[str, str]]:
+    """Last todo list written in this session (``[]`` if none yet)."""
+    return list(getattr(_todo_cache, "items", None) or [])
 
 
 def _tool_error(message: str) -> dict[str, Any]:
@@ -55,6 +62,9 @@ def _sanitize_workspace_error(exc: BaseException, fallback: str) -> str:
 
 
 async def _emit_todo_update(items: list[dict[str, str]]) -> None:
+    # Every todo write funnels through here, so cache the parsed list for the
+    # planner's todo recitation without a sandbox read per model call.
+    _todo_cache.items = [dict(item) for item in items]
     send_json = get_send_json()
     if not send_json:
         return

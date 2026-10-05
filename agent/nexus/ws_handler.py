@@ -10,10 +10,9 @@ import hashlib
 import json
 import logging
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -49,52 +48,15 @@ class DurableTurnOutcome(str, Enum):
     ATTACHED = "attached"
 
 
-import redis
 from nexus.config import settings
+from nexus.rate_limit import RateLimiter
 
-class _ActionRateLimiter:
-    def __init__(self, max_requests: int, window_seconds: int, name: str = "ws_action") -> None:
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self.name = name
-        self._redis: Optional[redis.Redis] = None
-        if settings.redis_url:
-            try:
-                self._redis = redis.from_url(
-                    settings.redis_url,
-                    socket_timeout=2.0,
-                    socket_connect_timeout=2.0,
-                )
-            except Exception:
-                logger.warning("Failed to connect to Redis for _ActionRateLimiter '%s'; falling back to in-memory.", name)
-        
-        # Fallback
-        self._hits: dict[str, list[float]] = defaultdict(list)
-
-    def is_allowed(self, key: str) -> bool:
-        if self._redis:
-            try:
-                redis_key = f"{self.name}:{key}"
-                pipe = self._redis.pipeline()
-                pipe.incr(redis_key)
-                pipe.expire(redis_key, self.window_seconds)
-                results = pipe.execute()
-                current_count = results[0]
-                return current_count <= self.max_requests
-            except Exception:
-                logger.warning("Redis WS RateLimiter error; falling back to in-memory.", exc_info=True)
-
-        now = time.time()
-        recent = [hit for hit in self._hits[key] if now - hit < self.window_seconds]
-        if len(recent) >= self.max_requests:
-            self._hits[key] = recent
-            return False
-        recent.append(now)
-        self._hits[key] = recent
-        return True
+action_rate_limiter = RateLimiter(max_requests=25, window_seconds=60, name="ws_action")
 
 
-action_rate_limiter = _ActionRateLimiter(max_requests=25, window_seconds=60, name="ws_action")
+def _json_list(value: Any) -> list[Any]:
+    """Client JSON fields that should be arrays; anything else is treated as empty."""
+    return value if isinstance(value, list) else []
 
 
 def _event_to_ws_frame(event) -> dict[str, Any]:
@@ -850,7 +812,8 @@ async def _try_start_durable_text_run(
             "type": "run_queued",
             "task_id": task.task_id,
             "run_id": run.run_id,
-            "queue": enqueue.__dict__,
+            # Only non-sensitive fields; never queue resource names or raw errors.
+            "queue": {"queued": bool(enqueue.queued), "provider": str(enqueue.provider or "")},
         }
     )
 
@@ -958,7 +921,10 @@ async def handle_websocket(
                         exc_info=True,
                     )
 
-            asyncio.create_task(_notify())
+            notify_task = asyncio.create_task(_notify())
+            # Keep a strong reference until it finishes.
+            _bg_tasks.add(notify_task)
+            notify_task.add_done_callback(_bg_tasks.discard)
 
         def _track(t: asyncio.Task, *, label: str) -> None:
             _bg_tasks.add(t)
@@ -1058,8 +1024,15 @@ async def handle_websocket(
                     except json.JSONDecodeError:
                         logger.warning("Invalid JSON from client")
                         continue
+                    # Valid JSON that is not an object (e.g. `[]`, `"x"`, `1`)
+                    # must be ignored, not crash the socket loop.
+                    if not isinstance(data, dict):
+                        logger.warning("Ignoring non-object JSON frame from client")
+                        continue
 
                     msg_type = data.get("type", "")
+                    if not isinstance(msg_type, str):
+                        continue
                     if msg_type == "ping":
                         _touch_session()
                         await _safe_send_json({"type": "pong"})
@@ -1069,7 +1042,7 @@ async def handle_websocket(
                         # observing a durable run driven by another instance.
                         if orchestrator.has_active_agent_turn() or _has_active_bg_task():
                             try:
-                                session.sandbox.extend_timeout()
+                                await asyncio.to_thread(session.sandbox.extend_timeout)
                             except Exception:
                                 logger.debug("Ping sandbox keepalive failed", exc_info=True)
                         continue
@@ -1086,7 +1059,8 @@ async def handle_websocket(
                             continue
 
                     if msg_type == "text_input":
-                        text = data.get("text", "").strip()
+                        raw_text = data.get("text")
+                        text = raw_text.strip() if isinstance(raw_text, str) else ""
                         if text:
                             # Idempotency: drop an identical resubmission of the
                             # same turn (WS reconnect replay, durable+live overlap)
@@ -1111,17 +1085,17 @@ async def handle_websocket(
                             _touch_session()
                             connector_ids = [
                                 str(item).strip()
-                                for item in (data.get("connector_ids") or [])
+                                for item in _json_list(data.get("connector_ids"))
                                 if str(item).strip()
                             ]
                             tool_ids = [
                                 str(item).strip()
-                                for item in (data.get("tool_ids") or [])
+                                for item in _json_list(data.get("tool_ids"))
                                 if str(item).strip()
                             ]
                             uploaded_files = [
                                 item
-                                for item in (data.get("uploaded_files") or [])
+                                for item in _json_list(data.get("uploaded_files"))
                                 if isinstance(item, dict)
                             ]
                             durable = DurableTurnOutcome.DECLINED
@@ -1331,7 +1305,7 @@ async def handle_websocket(
             if _bg_tasks:
                 await asyncio.gather(*_bg_tasks, return_exceptions=True)
 
-    except Exception as exc:
+    except Exception:
         logger.exception("WebSocket handler error for session %s", session.id)
 
         try:

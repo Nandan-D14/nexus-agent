@@ -85,43 +85,6 @@ async def _durable_upload_and_create(
 
 _HTML_DATA_URI_LIMIT_BYTES = 500_000
 
-# #region agent log
-def _dbg_pptx_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    payload = {
-        "sessionId": "993e46",
-        "runId": "post-fix",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(__import__("time").time() * 1000),
-    }
-    line = json.dumps(payload)
-    try:
-        with open(
-            r"c:\Users\nanda\OneDrive\Desktop\co-computer\debug-993e46.log",
-            "a",
-            encoding="utf-8",
-        ) as handle:
-            handle.write(line + "\n")
-    except Exception:
-        pass
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            "http://127.0.0.1:7421/ingest/08b059be-2c03-45ae-97a1-bb3c6f862ec1",
-            data=line.encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-Debug-Session-Id": "993e46",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=1).read()
-    except Exception:
-        pass
-# #endregion
 
 
 # Prepended to sandbox generator scripts so missing packages self-heal
@@ -1521,34 +1484,6 @@ async def generate_pptx_report(
     sandbox.write_text_file(bootstrap_path, _SANDBOX_DEPS_BOOTSTRAP)
     sandbox.write_text_file(script_path, generator_source)
 
-    # #region agent log
-    _dbg_compile = "ok"
-    try:
-        compile(generator_source, script_path, "exec")
-    except SyntaxError as _dbg_exc:
-        _dbg_compile = f"{_dbg_exc.msg}: line {_dbg_exc.lineno}"
-    _dbg_pptx_log(
-        "H1",
-        "docs.py:generate_pptx_report:compose",
-        "sandbox pptx generator as standalone file",
-        {
-            "line_count": len(generator_source.splitlines()),
-            "future_import_line": next(
-                (
-                    i + 1
-                    for i, line in enumerate(generator_source.splitlines())
-                    if "from __future__ import" in line
-                ),
-                None,
-            ),
-            "compile": _dbg_compile,
-            "mode": "argv",
-            "slide_count": len(normalized),
-            "filename": filename,
-            "preview": generator_source.splitlines()[:14],
-        },
-    )
-    # #endregion
 
     sandbox.run_command(f"python3 {shlex.quote(bootstrap_path)}", timeout=240)
     res = sandbox.run_command(
@@ -1562,20 +1497,6 @@ async def generate_pptx_report(
         timeout=10,
     )
 
-    # #region agent log
-    _dbg_pptx_log(
-        "H1",
-        "docs.py:generate_pptx_report:sandbox",
-        "sandbox python3 gen_pptx result",
-        {
-            "exit_code": res.get("exit_code"),
-            "stderr": str(res.get("stderr") or "")[:800],
-            "stdout": str(res.get("stdout") or "")[:400],
-            "filename": filename,
-            "syntax_error": "from __future__" in str(res.get("stderr") or ""),
-        },
-    )
-    # #endregion
 
     if res.get("exit_code") != 0:
         stderr_text = str(res.get("stderr") or res.get("stdout") or "")

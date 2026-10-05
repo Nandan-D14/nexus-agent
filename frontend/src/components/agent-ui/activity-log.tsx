@@ -132,7 +132,7 @@ export function ActivityNode({ status }: { status: ActivityStatus }) {
       style={{ width: NODE_SIZE, height: NODE_SIZE }}
       aria-hidden
     >
-      {status === "running" ? <Loader2 className="size-3.5 animate-spin agent-loading-shine" /> : null}
+      {status === "running" ? <Loader2 className="size-3.5 agent-loading-shine" /> : null}
       {status === "ok" ? <Check className="size-3.5" strokeWidth={2.4} /> : null}
       {status === "failed" ? <X className="size-3.5" strokeWidth={2.4} /> : null}
       {status === "retry" ? <RotateCw className="size-3.5" /> : null}

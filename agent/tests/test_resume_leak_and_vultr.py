@@ -48,10 +48,13 @@ class ResumeContextTests(IsolatedAsyncioTestCase):
         )
         fake._persist_message.assert_not_awaited()
         fake._send_json.assert_not_awaited()
-        # The checkpoint context is fed to the model turn input only.
+        # The checkpoint travels as model-only runtime context; the user's
+        # text stays verbatim.
         model_text = fake._build_turn_input.call_args.args[0]
-        self.assertIn("summarize my emails", model_text)
-        self.assertIn("[DURABLE RESUME CHECKPOINT]", model_text)
+        self.assertEqual(model_text, "summarize my emails")
+        runtime = "\n".join(fake._build_turn_input.call_args.kwargs["runtime_blocks"])
+        self.assertIn('<runtime kind="resume">', runtime)
+        self.assertIn("[DURABLE RESUME CHECKPOINT]", runtime)
 
     async def test_normal_turn_persists_and_emits_original_text(self) -> None:
         fake = await self._call_handle_text_input(emit_user_transcript=True)

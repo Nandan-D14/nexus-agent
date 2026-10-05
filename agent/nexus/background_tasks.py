@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Coroutine
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,11 @@ class BackgroundTaskManager:
             })
 
         task.approved = approved
+        task._permission_future = None
+        if not approved:
+            # Denied/timed-out requests never run; drop them so the registry
+            # does not grow for the lifetime of the orchestrator.
+            self._tasks.pop(task_id, None)
         logger.info("approval_resolved task=%s approved=%s", task_id, approved)
         if self._on_permission_resolved:
             try:
@@ -141,61 +146,6 @@ class BackgroundTaskManager:
             "success": success,
             "result": result[:500] if result else "",
         })
-
-    async def run_task(
-        self,
-        task_id: str,
-        coro: Coroutine,
-    ) -> Any:
-        """Run a coroutine as a tracked background task.
-
-        Sends progress/complete events automatically. The coroutine should
-        be awaitable and return a result string or None.
-        """
-        task = self._tasks.get(task_id)
-        if not task:
-            logger.warning("run_task called with unknown task_id: %s", task_id)
-            return None
-
-        async def _wrapper() -> Any:
-            if self._on_task_started:
-                try:
-                    task.background_step_id = await self._on_task_started(task)
-                except Exception:
-                    logger.exception("Failed to create background task step for %s", task_id)
-            try:
-                result = await coro
-                result_text = str(result) if result else "Task completed."
-                await self.send_complete(task_id, success=True, result=result_text)
-                if self._on_task_finished:
-                    try:
-                        await self._on_task_finished(task, True, result_text)
-                    except Exception:
-                        logger.exception("Failed to finalize background task step for %s", task_id)
-                return result
-            except asyncio.CancelledError:
-                result_text = "Task was cancelled."
-                await self.send_complete(task_id, success=False, result=result_text)
-                if self._on_task_finished:
-                    try:
-                        await self._on_task_finished(task, False, result_text)
-                    except Exception:
-                        logger.exception("Failed to finalize background task step for %s", task_id)
-                return None
-            except Exception as exc:
-                logger.exception("Background task %s failed", task_id)
-                result_text = f"Task failed: {exc}"
-                await self.send_complete(task_id, success=False, result=result_text)
-                if self._on_task_finished:
-                    try:
-                        await self._on_task_finished(task, False, result_text)
-                    except Exception:
-                        logger.exception("Failed to finalize background task step for %s", task_id)
-                return None
-
-        asyncio_task = asyncio.create_task(_wrapper())
-        task._asyncio_task = asyncio_task
-        return await asyncio_task
 
     def get_task(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)

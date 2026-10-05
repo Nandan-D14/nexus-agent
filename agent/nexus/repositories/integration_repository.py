@@ -10,6 +10,7 @@ from typing import Any
 from firebase_admin import firestore
 from nexus._firestore_base import FirestoreRepoBase
 from nexus.history_models import StoredIntegrationConnection, utcnow
+from nexus.secret_fields import seal_private
 
 
 class IntegrationRepository(FirestoreRepoBase):
@@ -424,18 +425,26 @@ class IntegrationRepository(FirestoreRepoBase):
         )
 
     def _list_integration_connections_sync(self, uid: str) -> list[StoredIntegrationConnection]:
-        docs = self._user_public_ref(uid).collection("integrations").stream()
-        connections = []
-        for doc in docs:
-            private_doc = self._integration_private_ref(uid, doc.id).get()
-            connections.append(
-                self._build_stored_integration_connection(
-                    uid,
-                    doc.id,
-                    doc.to_dict() or {},
-                    private_doc.to_dict() if private_doc.exists else {},
-                )
+        public_docs = list(self._user_public_ref(uid).collection("integrations").stream())
+        if not public_docs:
+            return []
+        # One batched read for all private docs instead of a get() per
+        # connector; this runs on every agent turn via list_enabled.
+        private_by_id = {
+            snapshot.id: (snapshot.to_dict() or {}) if snapshot.exists else {}
+            for snapshot in self._db.get_all(
+                [self._integration_private_ref(uid, doc.id) for doc in public_docs]
             )
+        }
+        connections = [
+            self._build_stored_integration_connection(
+                uid,
+                doc.id,
+                doc.to_dict() or {},
+                private_by_id.get(doc.id, {}),
+            )
+            for doc in public_docs
+        ]
         connections.sort(key=lambda item: item.updated_at, reverse=True)
         return connections
 
@@ -503,7 +512,7 @@ class IntegrationRepository(FirestoreRepoBase):
 
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -572,7 +581,7 @@ class IntegrationRepository(FirestoreRepoBase):
 
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -621,7 +630,7 @@ class IntegrationRepository(FirestoreRepoBase):
         private_payload["createdAt"] = existing_data.get("createdAt") or now
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -663,7 +672,7 @@ class IntegrationRepository(FirestoreRepoBase):
         private_payload["createdAt"] = existing_data.get("createdAt") or now
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -705,7 +714,7 @@ class IntegrationRepository(FirestoreRepoBase):
         private_payload["createdAt"] = existing_data.get("createdAt") or now
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -748,7 +757,7 @@ class IntegrationRepository(FirestoreRepoBase):
         private_payload["createdAt"] = existing_data.get("createdAt") or now
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -790,7 +799,7 @@ class IntegrationRepository(FirestoreRepoBase):
         private_payload["createdAt"] = existing_data.get("createdAt") or now
         public_payload = self._public_integration_payload(private_payload)
         batch = self._db.batch()
-        batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+        batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
         batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)
@@ -873,7 +882,7 @@ class IntegrationRepository(FirestoreRepoBase):
             public_payload = self._public_integration_payload(private_payload)
             private_by_id[connection_id] = private_payload
             public_by_id[connection_id] = public_payload
-            batch.set(self._integration_private_ref(uid, connection_id), private_payload, merge=True)
+            batch.set(self._integration_private_ref(uid, connection_id), seal_private(private_payload), merge=True)
             batch.set(self._integration_public_ref(uid, connection_id), public_payload, merge=True)
         batch.commit()
         self._sync_integration_summary_sync(uid)

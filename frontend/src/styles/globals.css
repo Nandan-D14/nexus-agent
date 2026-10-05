@@ -75,14 +75,25 @@
   }
 }
 
+@keyframes ai-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* One `animation` declaration for both effects: a separate class setting
+ * `animation` (e.g. Tailwind's animate-spin) would be overridden, which left
+ * the loader pulsing but not spinning. */
 .agent-loading-shine {
-  animation: ai-loader-shine 3.4s ease-in-out infinite;
-  will-change: opacity;
+  animation:
+    ai-loader-spin 1s linear infinite,
+    ai-loader-shine 3.4s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .agent-loading-shine {
-    animation: none;
+    animation: ai-loader-spin 2s linear infinite;
     opacity: 1;
   }
 }

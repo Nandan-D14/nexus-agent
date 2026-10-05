@@ -72,17 +72,13 @@ type ComposerMode = "agent" | "ask";
 
 const PLACEHOLDER = "Ask me Anything.";
 
-const MOCK_ENHANCED =
-  "This is an example prompt — rewritten to be clear and specific: state the goal, add the relevant context and constraints, define the expected output format and tone, and note any assumptions. Ask a clarifying question first if key details are missing.";
-
-async function mockEnhance(prompt: string, signal?: AbortSignal): Promise<string> {
-  await new Promise((r) => setTimeout(r, 2500));
-  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-  return MOCK_ENHANCED;
-}
-
 const escapeHtml = (str: string) =>
-  str.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] ?? c));
+  str.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** Serialize editor DOM so skill pills emit `/{skill_id}` for the agent. */
 function editorPlainText(editor: HTMLElement): string {
@@ -135,7 +131,8 @@ export function ChatComposer({
   connectorsLoading = false,
   onRefreshTools,
   inputRef: externalInputRef,
-  onEnhance = mockEnhance,
+  // No default: the Enhance button is hidden until a real handler is wired.
+  onEnhance,
   agentRunning = false,
 }: Props) {
   const localEditorRef = useRef<HTMLDivElement>(null);
@@ -291,10 +288,35 @@ export function ChatComposer({
     );
     el.setAttribute("contenteditable", "false");
     el.dataset.skill = skillId;
-    el.innerHTML =
-      `<span class="truncate">/${escapeHtml(skillId)}</span>` +
-      `<button type="button" data-remove="1" aria-label="Remove ${escapeHtml(name)}" class="ml-0.5 inline-flex size-3.5 shrink-0 items-center justify-center rounded text-indigo-500/70 hover:text-indigo-600 dark:hover:text-indigo-300">` +
-      `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>`;
+    // Built with DOM APIs, never innerHTML: skill ids/names can come from
+    // imported (third-party) skills.
+    const label = document.createElement("span");
+    label.className = "truncate";
+    label.textContent = `/${skillId}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.remove = "1";
+    remove.setAttribute("aria-label", `Remove ${name}`);
+    remove.className =
+      "ml-0.5 inline-flex size-3.5 shrink-0 items-center justify-center rounded text-indigo-500/70 hover:text-indigo-600 dark:hover:text-indigo-300";
+    const icon = document.createElementNS(SVG_NS, "svg");
+    for (const [key, value] of Object.entries({
+      width: "11",
+      height: "11",
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    })) {
+      icon.setAttribute(key, value);
+    }
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", "M18 6 6 18M6 6l12 12");
+    icon.appendChild(path);
+    remove.appendChild(icon);
+    el.append(label, remove);
     return el;
   };
 
@@ -697,7 +719,7 @@ export function ChatComposer({
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const runEnhance = async () => {
-    if (!hasText || enhancing) return;
+    if (!onEnhance || !hasText || enhancing) return;
     preEnhanceHTML.current = editorRef.current?.innerHTML ?? "";
     setEnhancePhase("enhancing");
     const ac = new AbortController();
@@ -979,22 +1001,24 @@ export function ChatComposer({
                   <span className="flex-1 text-left">Auto</span>
                   <Check className="h-3.5 w-3.5 text-text-tertiary" />
                 </button>
-                <button
-                  type="button"
-                  className={cx(
-                    "flex w-full items-center rounded-lg px-2.5 py-2 text-[13px] text-left transition-colors",
-                    "text-text-primary hover:bg-dropdown-item-hover-background",
-                    (!hasText || enhancing) && "cursor-not-allowed opacity-40",
-                  )}
-                  disabled={!hasText || enhancing}
-                  onClick={() => {
-                    if (enhancePhase === "enhanced") revert();
-                    else void runEnhance();
-                    setAutoOpen(false);
-                  }}
-                >
-                  {enhancePhase === "enhanced" ? "Revert prompt" : "Enhance prompt"}
-                </button>
+                {onEnhance && (
+                  <button
+                    type="button"
+                    className={cx(
+                      "flex w-full items-center rounded-lg px-2.5 py-2 text-[13px] text-left transition-colors",
+                      "text-text-primary hover:bg-dropdown-item-hover-background",
+                      (!hasText || enhancing) && "cursor-not-allowed opacity-40",
+                    )}
+                    disabled={!hasText || enhancing}
+                    onClick={() => {
+                      if (enhancePhase === "enhanced") revert();
+                      else void runEnhance();
+                      setAutoOpen(false);
+                    }}
+                  >
+                    {enhancePhase === "enhanced" ? "Revert prompt" : "Enhance prompt"}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="flex w-full items-center rounded-lg px-2.5 py-2 text-[13px] text-text-primary hover:bg-dropdown-item-hover-background"

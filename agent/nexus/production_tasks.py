@@ -569,15 +569,12 @@ class ProductionRepoBase:
 
         # Prefer seq-based ordering when available.
         if after_seq is not None or self._task_has_seq_field(task_id):
-            # Single-field query only: Firestore auto-indexes ``seq``. Filtering
-            # by ``visible`` / ``runId`` here would require a composite index,
-            # so we do those checks in Python below.
-            query = self._task_ref(task_id).collection("events").order_by("seq")
-            if after_seq is not None and after_seq > 0:
-                query = query.where(filter=FieldFilter("seq", ">", int(after_seq)))
-            query = query.limit(fetch_cap)
-            events = self._filter_events_client_side(
-                query, run_id=run_id, cap=cap
+            events = self._list_seq_events(
+                task_id,
+                after_seq=int(after_seq or 0),
+                run_id=run_id,
+                cap=cap,
+                page_size=fetch_cap,
             )
             if events:
                 return events
@@ -596,6 +593,54 @@ class ProductionRepoBase:
                     query = query.where(filter=FieldFilter("createdAt", ">", after_created_at))
         query = query.limit(fetch_cap)
         return self._filter_events_client_side(query, run_id=run_id, cap=cap)
+
+    # Bounds the work a single replay request can do when most events are
+    # hidden or belong to other runs.
+    _MAX_REPLAY_PAGES = 20
+
+    def _list_seq_events(
+        self,
+        task_id: str,
+        *,
+        after_seq: int,
+        run_id: str | None,
+        cap: int,
+        page_size: int,
+    ) -> list[DurableTaskEvent]:
+        """Page through events by ``seq`` until ``cap`` matches are found.
+
+        Single-field query only (``seq`` is auto-indexed); ``visible``/``runId``
+        are filtered in Python. Paging on the scanned cursor — not on returned
+        events — means a long run of non-matching events cannot hide newer
+        matches behind the first page.
+        """
+        results: list[DurableTaskEvent] = []
+        cursor = max(0, after_seq)
+        for _ in range(self._MAX_REPLAY_PAGES):
+            query = self._task_ref(task_id).collection("events").order_by("seq")
+            if cursor > 0:
+                query = query.where(filter=FieldFilter("seq", ">", cursor))
+            try:
+                docs = list(query.limit(page_size).stream())
+            except Exception:
+                logger.warning("Firestore event query failed for task %s", task_id, exc_info=True)
+                break
+            for doc in docs:
+                data = doc.to_dict() or {}
+                try:
+                    cursor = max(cursor, int(data.get("seq") or 0))
+                except (TypeError, ValueError):
+                    pass
+                if data.get("visible") is False:
+                    continue
+                if run_id and data.get("runId") != run_id:
+                    continue
+                results.append(self._build_event(doc.id, data))
+                if len(results) >= cap:
+                    return results
+            if len(docs) < page_size:
+                break
+        return results
 
     def _filter_events_client_side(self, query, *, run_id: str | None, cap: int) -> list[DurableTaskEvent]:
         """Stream a Firestore query and apply ``visible`` / ``runId`` filters in memory.
@@ -631,6 +676,10 @@ class ProductionRepoBase:
             data = doc.to_dict() or {}
             has_seq = int(data.get("lastEventSeq", 0) or 0) > 0
             if has_seq:
+                # Bounded: one entry per task would otherwise accumulate for
+                # the process lifetime. A miss just costs one extra read.
+                if len(self._has_seq_cache) >= 10_000:
+                    self._has_seq_cache.clear()
                 self._has_seq_cache.add(task_id)
             return has_seq
         except Exception:

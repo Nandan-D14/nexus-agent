@@ -17,6 +17,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import type { AppPreviewState } from "@/lib/sandbox-session";
+import { previewSandboxFlags } from "@/lib/sandbox-session";
 
 type Props = {
   preview: AppPreviewState | null;
@@ -206,7 +207,8 @@ export function AppPreviewPane({
           title={preview.title || "App preview"}
           src={iframeSrc}
           className="h-full w-full border-0 bg-white"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+          sandbox={previewSandboxFlags(iframeSrc, ["allow-popups-to-escape-sandbox"])}
+          referrerPolicy="no-referrer"
           onLoad={() => setIframeReady(true)}
         />
       </div>

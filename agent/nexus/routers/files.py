@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import re
 from typing import Any
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from nexus.auth import AuthenticatedUser, require_current_user
 from nexus.dependencies import get_history_repository, get_session_manager
 from nexus.google_drive import get_google_drive_client_for_user
+from nexus.http_headers import content_disposition as _content_disposition
 from nexus.models import RunArtifact
 from nexus.storage import generate_artifact_signed_url
 from nexus.tools.workspace import derive_workspace_path
@@ -23,7 +25,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_UNSAFE_PATH_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+# Unicode letters/digits are allowed (\w is Unicode-aware for str patterns) so
+# agent-written files like "résumé.pdf" stay downloadable. Shell-significant
+# characters such as parentheses are still normalised to "_".
+_UNSAFE_PATH_SEGMENT_RE = re.compile(r"[^\w. -]+")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _validated_run_id(run_id: str | None) -> str | None:
+    # run_id is interpolated into a filesystem path; reject traversal.
+    if run_id is not None and not _RUN_ID_RE.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id")
+    return run_id
+
+
+async def _read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """Read an upload without buffering more than ``max_bytes`` + one chunk."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="File uploads are limited to 20 MB")
+        chunks.append(chunk)
 
 _OFFICE_MIME = {
     ".pdf": "application/pdf",
@@ -135,6 +164,21 @@ def _serialize_artifact(artifact) -> RunArtifact:
         metadata=metadata,
     )
 
+
+# Concurrent URL signing per list request (each sign may call GCS / IAM).
+_SERIALIZE_CONCURRENCY = 16
+
+
+async def serialize_artifacts(artifacts) -> list[RunArtifact]:
+    """Serialize many artifacts with URL refresh off the event loop, in parallel."""
+    semaphore = asyncio.Semaphore(_SERIALIZE_CONCURRENCY)
+
+    async def _one(artifact) -> RunArtifact:
+        async with semaphore:
+            return await asyncio.to_thread(_serialize_artifact, artifact)
+
+    return list(await asyncio.gather(*(_one(artifact) for artifact in artifacts)))
+
 async def _mirror_upload_to_google_drive(
     *,
     user_id: str,
@@ -217,11 +261,9 @@ async def upload_session_file(
     )
     workspace_path = derive_workspace_path(session.id, session.current_run_id)
     target_path = f"{workspace_path}/{filename}"
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File uploads are limited to 20 MB")
+    content = await _read_upload_capped(file, _MAX_UPLOAD_BYTES)
     try:
-        session.sandbox.write_binary_file(target_path, content)
+        await asyncio.to_thread(session.sandbox.write_binary_file, target_path, content)
     except Exception as exc:
         logger.exception(
             "Failed to write upload into sandbox for session %s (%d bytes, path=%s)",
@@ -272,7 +314,7 @@ async def upload_session_file(
             url=drive_result.get("web_view_link"),
             metadata=artifact_metadata,
         )
-        artifact_payload = _serialize_artifact(artifact).model_dump(mode="json")
+        artifact_payload = (await asyncio.to_thread(_serialize_artifact, artifact)).model_dump(mode="json")
     except Exception:
         logger.exception("Failed to record upload artifact for session %s", session.id)
         artifact_payload = {
@@ -320,7 +362,7 @@ async def download_session_file(
             status_code=404,
             detail={"code": "LIVE_SESSION_NOT_FOUND", "message": "Live session not found. Use /api/v1/artifacts/{id}/content for durable files."},
         )
-    active_run_id = run_id or session.current_run_id
+    active_run_id = _validated_run_id(run_id) or session.current_run_id
     if not active_run_id:
         raise HTTPException(status_code=400, detail={"code": "NO_ACTIVE_RUN", "message": "Session does not have an active run"})
 
@@ -342,14 +384,14 @@ async def download_session_file(
     workspace_path = derive_workspace_path(session.id, active_run_id)
     target_path = f"{workspace_path}/{filename}"
     try:
-        content = session.sandbox.read_binary_file(target_path)
+        content = await asyncio.to_thread(session.sandbox.read_binary_file, target_path)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"File not found or unreadable: {exc}")
     download_name = filename.rsplit("/", 1)[-1] or "download.bin"
     return Response(
         content=content,
         media_type=_mime_for_filename(download_name),
-        headers={"Content-Disposition": f'inline; filename="{download_name}"'},
+        headers={"Content-Disposition": _content_disposition("inline", download_name)},
     )
 
 
@@ -383,7 +425,7 @@ async def list_session_file_tree(
         )
     target_path = f"{workspace_path}/{sub_path}" if sub_path else workspace_path
     try:
-        entries = session.sandbox.list_tree(target_path)
+        entries = await asyncio.to_thread(session.sandbox.list_tree, target_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list workspace files: {exc}")
 
@@ -428,12 +470,12 @@ async def download_session_workspace_zip(
     await session_manager.ensure_session_ready(session_id)
     workspace_path = derive_workspace_path(session.id, session.current_run_id)
     try:
-        content = session.sandbox.archive_tree(workspace_path)
+        content = await asyncio.to_thread(session.sandbox.archive_tree, workspace_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to archive workspace: {exc}")
     download_name = f"workspace-{session.id[:12]}.tgz"
     return Response(
         content=content,
         media_type="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+        headers={"Content-Disposition": _content_disposition("attachment", download_name)},
     )

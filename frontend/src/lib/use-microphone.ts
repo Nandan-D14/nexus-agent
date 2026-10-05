@@ -89,85 +89,122 @@ export function useMicrophone(
     onSpeechStartRef.current = onSpeechStart;
   }, [sendBinary, onSpeechStart]);
 
+  /** In-flight start() promise, so concurrent calls do not open two streams. */
+  const startingRef = useRef<Promise<void> | null>(null);
+  /** Bumped by stop(); a start() that resolves afterwards must release its stream. */
+  const generationRef = useRef(0);
+
   const start = useCallback(async () => {
     if (streamRef.current) return; // already recording
+    if (startingRef.current) return startingRef.current;
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-
-      streamRef.current = stream;
-
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      audioCtxRef.current = ctx;
-
-      const source = ctx.createMediaStreamSource(stream);
-      sourceRef.current = source;
-
-      // ScriptProcessorNode: 1 input channel, 0 output channels.
-      const processor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
-      processorRef.current = processor;
-
-      // Reset accumulator.
-      accumulatorRef.current = new Float32Array(0);
-      isSpeakingRef.current = false;
-
-      processor.onaudioprocess = (e: AudioProcessingEvent) => {
-        const input = e.inputBuffer.getChannelData(0);
-
-        // Simple VAD: Calculate RMS volume
-        let sum = 0;
-        for (let i = 0; i < input.length; i++) {
-          sum += input[i] * input[i];
+    const generation = generationRef.current;
+    const run = async () => {
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: 16000,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        if (generation !== generationRef.current) {
+          // stop() (or unmount) happened while the permission prompt was open.
+          stream.getTracks().forEach((track) => track.stop());
+          return;
         }
-        const rms = Math.sqrt(sum / input.length);
-        
-        // Threshold for speech detection (tuned for typical mic input)
-        if (rms > 0.02) {
-          if (!isSpeakingRef.current) {
-            isSpeakingRef.current = true;
-            onSpeechStartRef.current?.();
+
+        streamRef.current = stream;
+
+        const ctx = new AudioContext({ sampleRate: 16000 });
+        audioCtxRef.current = ctx;
+
+        const source = ctx.createMediaStreamSource(stream);
+        sourceRef.current = source;
+
+        // ScriptProcessorNode: 1 input channel, 0 output channels.
+        const processor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
+        processorRef.current = processor;
+
+        // Reset accumulator.
+        accumulatorRef.current = new Float32Array(0);
+        isSpeakingRef.current = false;
+
+        processor.onaudioprocess = (e: AudioProcessingEvent) => {
+          const input = e.inputBuffer.getChannelData(0);
+
+          // Simple VAD: Calculate RMS volume
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            sum += input[i] * input[i];
           }
-          if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
-          speechTimeoutRef.current = setTimeout(() => {
-            isSpeakingRef.current = false;
-          }, 500); // 500ms silence to reset the speaking state
-        }
+          const rms = Math.sqrt(sum / input.length);
+          
+          // Threshold for speech detection (tuned for typical mic input)
+          if (rms > 0.02) {
+            if (!isSpeakingRef.current) {
+              isSpeakingRef.current = true;
+              onSpeechStartRef.current?.();
+            }
+            if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
+            speechTimeoutRef.current = setTimeout(() => {
+              isSpeakingRef.current = false;
+            }, 500); // 500ms silence to reset the speaking state
+          }
 
-        // Append incoming samples to the accumulator.
-        const prev = accumulatorRef.current;
-        const merged = new Float32Array(prev.length + input.length);
-        merged.set(prev);
-        merged.set(input, prev.length);
-        accumulatorRef.current = merged;
+          // Append incoming samples to the accumulator.
+          const prev = accumulatorRef.current;
+          const merged = new Float32Array(prev.length + input.length);
+          merged.set(prev);
+          merged.set(input, prev.length);
+          accumulatorRef.current = merged;
 
-        // Flush as many full 100 ms chunks as we have.
-        while (accumulatorRef.current.length >= SAMPLES_PER_CHUNK) {
-          const chunk = accumulatorRef.current.slice(0, SAMPLES_PER_CHUNK);
-          accumulatorRef.current = accumulatorRef.current.slice(SAMPLES_PER_CHUNK);
-          const pcm = float32ToInt16(chunk);
-          sendBinaryRef.current(pcm);
-        }
-      };
+          // Flush as many full 100 ms chunks as we have.
+          while (accumulatorRef.current.length >= SAMPLES_PER_CHUNK) {
+            const chunk = accumulatorRef.current.slice(0, SAMPLES_PER_CHUNK);
+            accumulatorRef.current = accumulatorRef.current.slice(SAMPLES_PER_CHUNK);
+            const pcm = float32ToInt16(chunk);
+            sendBinaryRef.current(pcm);
+          }
+        };
 
-      // We must connect through to destination for ScriptProcessorNode to fire.
-      source.connect(processor);
-      processor.connect(ctx.destination);
+        // We must connect through to destination for ScriptProcessorNode to fire.
+        source.connect(processor);
+        processor.connect(ctx.destination);
 
-      setIsRecording(true);
-    } catch (err) {
-      console.error("[useMicrophone] Failed to start recording:", err);
-    }
+        setIsRecording(true);
+      } catch (err) {
+        console.error("[useMicrophone] Failed to start recording:", err);
+        // Never leave the mic open after a partial start (e.g. AudioContext failed).
+        processorRef.current?.disconnect();
+        processorRef.current = null;
+        sourceRef.current?.disconnect();
+        sourceRef.current = null;
+        void audioCtxRef.current?.close();
+        audioCtxRef.current = null;
+        stream?.getTracks().forEach((track) => track.stop());
+        if (streamRef.current === stream) streamRef.current = null;
+      }
+    };
+
+    const pending = run().finally(() => {
+      startingRef.current = null;
+    });
+    startingRef.current = pending;
+    return pending;
   }, []);
 
   const stop = useCallback(() => {
+    generationRef.current += 1;
+    if (speechTimeoutRef.current) {
+      clearTimeout(speechTimeoutRef.current);
+      speechTimeoutRef.current = null;
+    }
+    isSpeakingRef.current = false;
+
     // Disconnect audio graph.
     processorRef.current?.disconnect();
     processorRef.current = null;
@@ -188,6 +225,9 @@ export function useMicrophone(
 
     setIsRecording(false);
   }, []);
+
+  // Release the mic if the component unmounts while recording.
+  useEffect(() => stop, [stop]);
 
   return { start, stop, isRecording };
 }
